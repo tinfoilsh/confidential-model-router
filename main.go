@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -40,16 +41,16 @@ var (
 	}
 )
 
-func reverseProxy(host, repo string) (*httputil.ReverseProxy, error) {
+func reverseProxy(host, repo string) (*httputil.ReverseProxy, *tinfoil.GroundTruth, error) {
 	client := tinfoil.NewSecureClient(host, repo)
-	_, err := client.Verify()
+	groundTruth, err := client.Verify()
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify client: %w", err)
+		return nil, nil, fmt.Errorf("failed to verify client: %w", err)
 	}
 
 	httpClient, err := client.HTTPClient()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get HTTP client: %w", err)
+		return nil, nil, fmt.Errorf("failed to get HTTP client: %w", err)
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
@@ -57,11 +58,11 @@ func reverseProxy(host, repo string) (*httputil.ReverseProxy, error) {
 		Host:   host,
 	})
 	if proxy == nil {
-		return nil, fmt.Errorf("failed to create reverse proxy")
+		return nil, nil, fmt.Errorf("failed to create reverse proxy")
 	}
 	proxy.Transport = httpClient.Transport
 
-	return proxy, nil
+	return proxy, groundTruth, nil
 }
 
 func main() {
@@ -69,17 +70,31 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
+	var status = map[string]map[string]*tinfoil.GroundTruth{}
+
 	for model, enclaves := range models {
 		for _, enclave := range enclaves {
 			log.Printf("[%s] Verifying %s\n", model, enclave.Host)
 
-			proxy, err := reverseProxy(enclave.Host, enclave.Repo)
+			proxy, groundTruth, err := reverseProxy(enclave.Host, enclave.Repo)
 			if err != nil {
 				log.Fatal(err)
 			}
 			enclave.proxy = proxy
+
+			if _, ok := status[model]; !ok {
+				status[model] = map[string]*tinfoil.GroundTruth{}
+			}
+			status[model][enclave.Host] = groundTruth
 		}
 	}
+
+	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"models": status,
+		})
+	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		enclaves := models["qwen2-5-72b"]
