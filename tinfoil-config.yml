@@ -1,0 +1,17 @@
+cvm-version: 0.0.36
+ovmf-version: 0.0.2
+cpus: 16
+memory: 16384
+
+shim:
+  domains:
+    - inference.model.tinfoil.sh
+  listen-port: 443
+  upstream-port: 8089
+  origins:
+    - https://tinfoil.sh
+    - https://chat.tinfoil.sh
+
+containers:
+  - name: "proxy"
+    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:latest"
