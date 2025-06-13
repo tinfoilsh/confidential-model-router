@@ -89,7 +89,7 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/.well-known/tinfoil-proxy-status", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok",
 			"models": status,
