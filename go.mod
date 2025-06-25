@@ -9,6 +9,7 @@ replace github.com/google/go-sev-guest => github.com/jraman567/go-sev-guest v0.0
 require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tinfoilsh/tinfoil-go v0.0.5
+	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (

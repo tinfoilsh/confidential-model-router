@@ -1,0 +1,6 @@
+models:
+  update-demo:
+    repo: tinfoilsh/confidential-update-demo
+    enclaves:
+      - demo-alpha-1.model.tinfoil.sh
+      - demo-alpha-2.model.tinfoil.sh

@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,28 +19,50 @@ var (
 	verbose = flag.Bool("v", false, "enable verbose logging")
 )
 
-type Enclave struct {
-	Repo string
-	Host string
+type enclave struct {
+	Host        string               `json:"host"`
+	GroundTruth *tinfoil.GroundTruth `json:"ground_truth,omitempty"`
+	Error       string               `json:"error,omitempty"`
 
-	proxy *httputil.ReverseProxy
+	proxy *httputil.ReverseProxy `json:"-"`
+}
+
+type model struct {
+	Repo             string     `json:"repo"`
+	Enclaves         []*enclave `json:"enclaves"` // all enclaves
+	VerifiedEnclaves []*enclave `json:"-"`        // only verified good enclaves
 }
 
 var (
 	counter uint64
-
-	models = map[string][]*Enclave{
-		"qwen2-5-72b": {
-			{
-				Repo: "tinfoilsh/confidential-qwen2-5-72b",
-				Host: "qwen2-5-72b.model.tinfoil.sh",
-			}, {
-				Repo: "tinfoilsh/confidential-qwen2-5-72b-2",
-				Host: "qwen2-5-72b-2.model.tinfoil.sh",
-			},
-		},
-	}
+	models  = make(map[string]*model)
 )
+
+func addEnclave(modelName, host, repo string) error {
+	if _, ok := models[modelName]; !ok {
+		models[modelName] = &model{
+			Repo: repo,
+		}
+	}
+
+	proxy, groundTruth, err := reverseProxy(host, repo)
+	e := &enclave{
+		Host:        host,
+		GroundTruth: groundTruth,
+		proxy:       proxy,
+	}
+	models[modelName].Enclaves = append(models[modelName].Enclaves, e)
+
+	if err != nil {
+		log.Errorf("failed to verify enclave %s: %v", host, err)
+		e.Error = err.Error()
+		return err
+	} else {
+		models[modelName].VerifiedEnclaves = append(models[modelName].VerifiedEnclaves, e)
+	}
+
+	return nil
+}
 
 func reverseProxy(host, repo string) (*httputil.ReverseProxy, *tinfoil.GroundTruth, error) {
 	client := tinfoil.NewSecureClient(host, repo)
@@ -70,43 +93,42 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	var status = map[string]map[string]*tinfoil.GroundTruth{}
-
-	for model, enclaves := range models {
-		for _, enclave := range enclaves {
-			log.Printf("[%s] Verifying %s\n", model, enclave.Host)
-
-			proxy, groundTruth, err := reverseProxy(enclave.Host, enclave.Repo)
-			if err != nil {
-				log.Fatal(err)
+	config, err := loadConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for modelName, modelConfig := range config.Models {
+		for _, host := range modelConfig.EnclaveHosts {
+			if err := addEnclave(modelName, host, modelConfig.Repo); err != nil {
+				log.Warn(err)
 			}
-			enclave.proxy = proxy
-
-			if _, ok := status[model]; !ok {
-				status[model] = map[string]*tinfoil.GroundTruth{}
-			}
-			status[model][enclave.Host] = groundTruth
 		}
 	}
 
 	http.HandleFunc("/.well-known/tinfoil-proxy-status", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok",
-			"models": status,
+			"models": models,
 		})
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		enclaves := models["qwen2-5-72b"]
+		modelName := "update-demo"
+		if _, ok := models[modelName]; !ok {
+			http.Error(w, "model not found", http.StatusNotFound)
+			return
+		}
+
 		count := atomic.AddUint64(&counter, 1)
-		index := (count - 1) % uint64(len(enclaves))
-		proxy := enclaves[index].proxy
+		enclave := models[modelName].VerifiedEnclaves[(count-1)%uint64(len(models[modelName].VerifiedEnclaves))]
+		if enclave == nil {
+			http.Error(w, "no enclaves available", http.StatusServiceUnavailable)
+			return
+		}
 
-		log.Debugf("[%s] Serving request %s\n", enclaves[index].Host, r.URL.Path)
-
-		w.Header().Set("X-Tinfoil-Enclave", enclaves[index].Host)
-
-		proxy.ServeHTTP(w, r)
+		log.Debugf("%s serving request\n", enclave.Host)
+		w.Header().Set("X-Tinfoil-Enclave", enclave.Host)
+		enclave.proxy.ServeHTTP(w, r)
 	})
 
 	log.Printf("Starting proxy server on port %s\n", *port)
