@@ -255,6 +255,9 @@ func init() {
 				os.Exit(1)
 			}
 
+			totalAdded := 0
+			totalRemoved := 0
+
 			// Get current state
 			url := proxyEndpoint + enclavesPath
 			resp, err := http.Get(url)
@@ -311,7 +314,7 @@ func init() {
 							continue
 						}
 					} else {
-						fmt.Printf("Enclave %s already exists for model %s\n", host, modelName)
+						log.Debugf("Enclave %s already exists for model %s\n", host, modelName)
 					}
 				}
 
@@ -346,9 +349,11 @@ func init() {
 				}
 
 				fmt.Printf("Added %d enclaves and removed %d enclaves for model %s\n", added, removed, modelName)
+				totalAdded += added
+				totalRemoved += removed
 			}
 
-			fmt.Println("Runtime configuration applied successfully")
+			fmt.Printf("Applied runtime configuration (+%d -%d)\n", totalAdded, totalRemoved)
 		},
 	}
 
