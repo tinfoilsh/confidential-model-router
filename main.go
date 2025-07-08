@@ -82,7 +82,10 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
-		if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
+			return
+		} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 			modelName = "audio-processing"
 		} else if r.URL.Path == "/v1alpha/convert/file" || r.URL.Path == "/v1alpha/convert/source" {
 			modelName = "doc-upload"
