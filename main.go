@@ -21,7 +21,7 @@ import (
 var configFile []byte
 
 var (
-	extConfigFile = flag.String("e", "/ramdisk/external-config.yml", "path to external config file")
+	extConfigFile = flag.String("e", "/tinfoil/external-config.yml", "path to external config file")
 	port          = flag.String("l", "8089", "port to listen on")
 	verbose       = flag.Bool("v", false, "enable verbose logging")
 )
