@@ -101,6 +101,7 @@ func main() {
 			}
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			modelName = body.Model
 		}
 
 		model, found := mng.GetModel(modelName)
