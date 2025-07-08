@@ -1,6 +1,12 @@
 models:
-  update-demo:
-    repo: tinfoilsh/confidential-update-demo
-    enclaves:
-      - demo-alpha-1.model.tinfoil.sh
-      - demo-alpha-2.model.tinfoil.sh
+  whisper-large-v3-turbo: tinfoilsh/confidential-audio-processing
+  deepseek-r1-70b: tinfoilsh/confidential-deepseek-r1-70b-prod
+  llama3-3-70b: tinfoilsh/confidential-llama3-3-70b
+  mistral-small-3-1-24b: tinfoilsh/confidential-mistral-small-3-1
+  nomic-embed-text: tinfoilsh/confidential-nomic-embed-text
+  qwen2-5-72b: tinfoilsh/confidential-qwen2-5-72b
+
+  # Unsupported:
+  # llama-prod: tinfoilsh/confidential-llama3-3-70b-prod
+  # kokoro: tinfoilsh/confidential-audio-processing
+  # qwen2-5-72b-2: tinfoilsh/confidential-qwen2-5-72b-2
