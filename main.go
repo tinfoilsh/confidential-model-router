@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -80,23 +81,29 @@ func main() {
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Model string `json:"model"`
+		var modelName string
+		if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
+			modelName = "audio-processing"
+		} else if r.URL.Path == "/v1alpha/convert/file" || r.URL.Path == "/v1alpha/convert/source" {
+			modelName = "doc-upload"
+		} else {
+			var body struct {
+				Model string `json:"model"`
+			}
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				jsonError(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				jsonError(w, fmt.Sprintf("failed to find model parameter in request body: %v", err), http.StatusBadRequest)
+				return
+			}
+			r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			jsonError(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
-			return
-		}
-		if err := json.Unmarshal(bodyBytes, &body); err != nil {
-			jsonError(w, fmt.Sprintf("failed to find model parameter in request body: %v", err), http.StatusBadRequest)
-			return
-		}
-		r.Body.Close()
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-		model, found := mng.GetModel(body.Model)
+		model, found := mng.GetModel(modelName)
 		if !found {
 			jsonError(w, "model not found", http.StatusNotFound)
 			return

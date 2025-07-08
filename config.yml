@@ -1,5 +1,6 @@
 models:
-  whisper-large-v3-turbo: tinfoilsh/confidential-audio-processing
+  audio-processing: tinfoilsh/confidential-audio-processing
+  doc-upload: tinfoilsh/confidential-doc-upload
   deepseek-r1-70b: tinfoilsh/confidential-deepseek-r1-70b-prod
   llama3-3-70b: tinfoilsh/confidential-llama3-3-70b
   mistral-small-3-1-24b: tinfoilsh/confidential-mistral-small-3-1
@@ -8,5 +9,4 @@ models:
 
   # Unsupported:
   # llama-prod: tinfoilsh/confidential-llama3-3-70b-prod
-  # kokoro: tinfoilsh/confidential-audio-processing
   # qwen2-5-72b-2: tinfoilsh/confidential-qwen2-5-72b-2
