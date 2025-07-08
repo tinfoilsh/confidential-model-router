@@ -113,7 +113,7 @@ func main() {
 		enclave.ServeHTTP(w, r)
 	})
 
-	http.HandleFunc("/.well-known/tinfoil-enclaves", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/.well-known/tinfoil-proxy", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			sendJSON(w, map[string]any{

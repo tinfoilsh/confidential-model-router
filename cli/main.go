@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	defaultProxyEndpoint = "http://localhost:8089"
-	enclavesPath         = "/.well-known/tinfoil-enclaves"
+	defaultProxyEndpoint = "https://inference.tinfoil.sh"
+	enclavesPath         = "/.well-known/tinfoil-proxy"
 	apiKey               = os.Getenv("TINFOIL_PROXY_API_KEY")
 )
 
