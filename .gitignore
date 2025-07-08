@@ -1,3 +1,5 @@
 .idea/
 proxy
+ext.yml
+runtime.yml
 tuf-repo-cdn.sigstore.dev.json
