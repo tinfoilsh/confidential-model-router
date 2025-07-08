@@ -1,4 +1,5 @@
 .idea/
+confidential-inference-proxy
 proxy
 ext.yml
 runtime.yml
