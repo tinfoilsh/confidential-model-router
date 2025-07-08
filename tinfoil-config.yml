@@ -12,6 +12,7 @@ shim:
   origins:
     - https://tinfoil.sh
     - https://chat.tinfoil.sh
+    - http://localhost:3000
 
 containers:
   - name: "proxy"
