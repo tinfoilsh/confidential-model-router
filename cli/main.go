@@ -6,16 +6,20 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tinfoilsh/confidential-inference-proxy/manager"
+	"gopkg.in/yaml.v2"
 )
 
 var (
 	defaultProxyEndpoint = "https://inference.tinfoil.sh"
 	enclavesPath         = "/.well-known/tinfoil-proxy"
 	apiKey               = os.Getenv("TINFOIL_PROXY_API_KEY")
+	verbose              bool
 )
 
 var (
@@ -28,6 +32,7 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "endpoint", defaultProxyEndpoint, "Proxy endpoint URL")
+	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Verbose output")
 
 	// Add command
 	addCmd := &cobra.Command{
@@ -214,7 +219,140 @@ func init() {
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, updateCmd, listCmd, deleteCmd)
+	// Apply command
+	applyCmd := &cobra.Command{
+		Use:   "apply [runtime.yml]",
+		Short: "Apply runtime configuration from YAML file",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if apiKey == "" {
+				fmt.Fprintf(os.Stderr, "TINFOIL_PROXY_API_KEY environment variable is not set\n")
+				os.Exit(1)
+			}
+
+			// Read and parse runtime.yml
+			configPath := args[0]
+			if !filepath.IsAbs(configPath) {
+				wd, err := os.Getwd()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to get working directory: %v\n", err)
+					os.Exit(1)
+				}
+				configPath = filepath.Join(wd, configPath)
+			}
+
+			configData, err := os.ReadFile(configPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to read config file: %v\n", err)
+				os.Exit(1)
+			}
+
+			var runtimeConfig struct {
+				Models map[string][]string `yaml:"models"` // model name -> list of enclave hosts
+			}
+			if err := yaml.Unmarshal(configData, &runtimeConfig); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to parse config file: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Get current state
+			url := proxyEndpoint + enclavesPath
+			resp, err := http.Get(url)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to get current state: %v\n", err)
+				os.Exit(1)
+			}
+			defer resp.Body.Close()
+
+			var currentState struct {
+				Models map[string]*manager.Model `json:"models"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&currentState); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to parse current state: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Process each model in the runtime config
+			for modelName, desiredHosts := range runtimeConfig.Models {
+				// Skip if model doesn't exist in current state
+				currentModel, exists := currentState.Models[modelName]
+				if !exists {
+					fmt.Printf("Skipping model %s: not found in current state\n", modelName)
+					continue
+				}
+
+				// Get current hosts
+				currentHosts := make(map[string]bool)
+				for _, enclave := range currentModel.Enclaves {
+					currentHosts[enclave.String()] = true
+				}
+
+				// Add missing hosts
+				added := 0
+				for _, host := range desiredHosts {
+					if !currentHosts[host] {
+						added++
+						log.Debugf("Adding enclave %s to model %s\n", host, modelName)
+						url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, modelName, host)
+						req, err := http.NewRequest(http.MethodPut, url, nil)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "failed to create request: %v\n", err)
+							continue
+						}
+						req.Header.Set("Authorization", "Bearer "+apiKey)
+						response, err := http.DefaultClient.Do(req)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %v\n", host, err)
+							continue
+						}
+						response.Body.Close()
+						if response.StatusCode != http.StatusOK {
+							fmt.Fprintf(os.Stderr, "failed to add enclave %s: server returned status %d\n", host, response.StatusCode)
+							continue
+						}
+					} else {
+						fmt.Printf("Enclave %s already exists for model %s\n", host, modelName)
+					}
+				}
+
+				// Remove extra hosts
+				desiredHostsMap := make(map[string]bool)
+				for _, host := range desiredHosts {
+					desiredHostsMap[host] = true
+				}
+				removed := 0
+				for _, enclave := range currentModel.Enclaves {
+					if !desiredHostsMap[enclave.String()] {
+						removed++
+						log.Debugf("Removing enclave %s from model %s\n", enclave, modelName)
+						url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, modelName, enclave)
+						req, err := http.NewRequest(http.MethodDelete, url, nil)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "failed to create request: %v\n", err)
+							continue
+						}
+						req.Header.Set("Authorization", "Bearer "+apiKey)
+						response, err := http.DefaultClient.Do(req)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "failed to remove enclave %s: %v\n", enclave, err)
+							continue
+						}
+						response.Body.Close()
+						if response.StatusCode != http.StatusOK {
+							fmt.Fprintf(os.Stderr, "failed to remove enclave %s: server returned status %d\n", enclave, response.StatusCode)
+							continue
+						}
+					}
+				}
+
+				fmt.Printf("Added %d enclaves and removed %d enclaves for model %s\n", added, removed, modelName)
+			}
+
+			fmt.Println("Runtime configuration applied successfully")
+		},
+	}
+
+	rootCmd.AddCommand(addCmd, updateCmd, listCmd, deleteCmd, applyCmd)
 }
 
 func main() {
