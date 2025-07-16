@@ -30,6 +30,63 @@ var (
 	}
 )
 
+func listModels() (map[string]*manager.Model, error) {
+	url := proxyEndpoint + enclavesPath
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to list models: server returned status %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Models map[string]*manager.Model `json:"models"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	return response.Models, nil
+}
+
+func update(model string) error {
+	url := fmt.Sprintf("%s%s?model=%s", proxyEndpoint, enclavesPath, model)
+	req, err := http.NewRequest(http.MethodPatch, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		var resp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&resp); err == nil {
+			return fmt.Errorf("failed to update %s: %s", model, resp.Error)
+		} else {
+			return fmt.Errorf("failed to update %s: server returned status %d", model, response.StatusCode)
+		}
+	}
+
+	return nil
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "endpoint", defaultProxyEndpoint, "Proxy endpoint URL")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Verbose output")
@@ -81,40 +138,34 @@ func init() {
 	updateCmd := &cobra.Command{
 		Use:   "update [model] [host]",
 		Short: "Update an existing model's host",
-		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if apiKey == "" {
 				fmt.Fprintf(os.Stderr, "TINFOIL_PROXY_API_KEY environment variable is not set\n")
 				os.Exit(1)
 			}
 
-			url := fmt.Sprintf("%s%s?model=%s", proxyEndpoint, enclavesPath, args[0])
-			req, err := http.NewRequest(http.MethodPatch, url, nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to create request: %v\n", err)
-				os.Exit(1)
-			}
-
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-
-			response, err := http.DefaultClient.Do(req)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to send request: %v\n", err)
-				os.Exit(1)
-			}
-			defer response.Body.Close()
-
-			if response.StatusCode != http.StatusOK {
-				body, err := io.ReadAll(response.Body)
-				if err == nil {
-					fmt.Fprintf(os.Stderr, "failed to update model: server returned status %d: %s\n", response.StatusCode, string(body))
-				} else {
-					fmt.Fprintf(os.Stderr, "failed to update model: server returned status %d\n", response.StatusCode)
+			if len(args) == 0 {
+				models, err := listModels()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to list models: %v\n", err)
+					os.Exit(1)
 				}
+				for modelName := range models {
+					if err := update(modelName); err != nil {
+						fmt.Fprintf(os.Stderr, "failed to update %s: %v\n", modelName, err)
+					} else {
+						fmt.Printf("Successfully updated model %s", modelName)
+					}
+				}
+			} else if len(args) == 1 {
+				if err := update(args[0]); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to update %s: %v\n", args[0], err)
+					os.Exit(1)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Usage: proxyctl update [model] [host]\n")
 				os.Exit(1)
 			}
-
-			fmt.Printf("Successfully updated model\n")
 		},
 	}
 
@@ -124,31 +175,9 @@ func init() {
 		Short: "List all registered models",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			url := proxyEndpoint + enclavesPath
-			resp, err := http.Get(url)
+			models, err := listModels()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to get models: %v\n", err)
-				os.Exit(1)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				fmt.Fprintf(os.Stderr, "failed to list models: server returned status %d\n", resp.StatusCode)
-				os.Exit(1)
-			}
-
-			var response struct {
-				Models map[string]*manager.Model `json:"models"`
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to read response body: %v\n", err)
-				os.Exit(1)
-			}
-
-			if err := json.Unmarshal(body, &response); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to parse response: %v\n", err)
+				fmt.Fprintf(os.Stderr, "failed to list models: %v\n", err)
 				os.Exit(1)
 			}
 
@@ -156,7 +185,7 @@ func init() {
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 			fmt.Fprintln(w, "MODEL\tREPOSITORY\tTAG\tENCLAVES")
 
-			for name, model := range response.Models {
+			for name, model := range models {
 				enclaves := "-"
 				if len(model.Enclaves) > 0 {
 					enclaves = ""
