@@ -87,7 +87,7 @@ func main() {
 			return
 		} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 			modelName = "audio-processing"
-		} else if r.URL.Path == "/v1alpha/convert/file" || r.URL.Path == "/v1alpha/convert/source" {
+		} else if r.URL.Path == "/v1/convert/file" {
 			modelName = "doc-upload"
 		} else {
 			var body struct {
