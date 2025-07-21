@@ -87,6 +87,72 @@ func update(model string) error {
 	return nil
 }
 
+func removeEnclave(model, host string) error {
+	url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, model, host)
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(response.Body)
+		if err == nil {
+			return fmt.Errorf("failed to delete enclave: server returned status %d: %s", response.StatusCode, string(body))
+		} else {
+			return fmt.Errorf("failed to delete enclave: server returned status %d", response.StatusCode)
+		}
+	}
+
+	return nil
+}
+
+func addEnclave(model, host string) error {
+	url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, model, host)
+
+	req, err := http.NewRequest(http.MethodPut, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(response.Body)
+		if err == nil {
+			return fmt.Errorf("failed to add model: server returned status %d: %s", response.StatusCode, string(body))
+		} else {
+			return fmt.Errorf("failed to add model: server returned status %d", response.StatusCode)
+		}
+	}
+
+	return nil
+}
+
+func reloadEnclave(model, host string) error {
+	if err := removeEnclave(model, host); err != nil {
+		return fmt.Errorf("failed to remove enclave %s from model %s: %v", host, model, err)
+	}
+	if err := addEnclave(model, host); err != nil {
+		return fmt.Errorf("failed to add enclave %s to model %s: %v", host, model, err)
+	}
+	return nil
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "endpoint", defaultProxyEndpoint, "Proxy endpoint URL")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Verbose output")
@@ -103,30 +169,8 @@ func init() {
 			}
 
 			model, host := args[0], args[1]
-			url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, model, host)
-
-			req, err := http.NewRequest(http.MethodPut, url, nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to create request: %v\n", err)
-				os.Exit(1)
-			}
-
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-
-			response, err := http.DefaultClient.Do(req)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to send request: %v\n", err)
-				os.Exit(1)
-			}
-			defer response.Body.Close()
-
-			if response.StatusCode != http.StatusOK {
-				body, err := io.ReadAll(response.Body)
-				if err == nil {
-					fmt.Fprintf(os.Stderr, "failed to add model: server returned status %d: %s\n", response.StatusCode, string(body))
-				} else {
-					fmt.Fprintf(os.Stderr, "failed to add model: server returned status %d\n", response.StatusCode)
-				}
+			if err := addEnclave(model, host); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to add %s: %v\n", host, err)
 				os.Exit(1)
 			}
 
@@ -217,34 +261,35 @@ func init() {
 			}
 
 			model, host := args[0], args[1]
-			url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, model, host)
-
-			req, err := http.NewRequest(http.MethodDelete, url, nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to create request: %v\n", err)
-				os.Exit(1)
-			}
-
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-
-			response, err := http.DefaultClient.Do(req)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to send request: %v\n", err)
-				os.Exit(1)
-			}
-			defer response.Body.Close()
-
-			if response.StatusCode != http.StatusOK {
-				body, err := io.ReadAll(response.Body)
-				if err == nil {
-					fmt.Fprintf(os.Stderr, "failed to delete enclave: server returned status %d: %s\n", response.StatusCode, string(body))
-				} else {
-					fmt.Fprintf(os.Stderr, "failed to delete enclave: server returned status %d\n", response.StatusCode)
-				}
+			if err := removeEnclave(model, host); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to remove enclave %s from model %s: %v\n", host, model, err)
 				os.Exit(1)
 			}
 
 			fmt.Printf("Successfully deleted enclave %s from model %s\n", host, model)
+		},
+	}
+
+	// Recreate command
+	recreateCmd := &cobra.Command{
+		Use:   "recreate [model] [host]",
+		Short: "Recreate an enclave for a model",
+		Args:  cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			if apiKey == "" {
+				fmt.Fprintf(os.Stderr, "TINFOIL_PROXY_API_KEY environment variable is not set\n")
+				os.Exit(1)
+			}
+
+			model, host := args[0], args[1]
+			if err := reloadEnclave(model, host); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to recreate enclave %s from model %s: %v\n", host, model, err)
+				os.Exit(1)
+			}
+
+			// TODO: recreate [model] should remove all enclaves for the model
+
+			fmt.Printf("Successfully recreated enclave %s from model %s\n", host, model)
 		},
 	}
 
@@ -386,7 +431,7 @@ func init() {
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, updateCmd, listCmd, deleteCmd, applyCmd)
+	rootCmd.AddCommand(addCmd, updateCmd, listCmd, deleteCmd, applyCmd, recreateCmd)
 }
 
 func main() {
