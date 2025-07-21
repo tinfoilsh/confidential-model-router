@@ -274,22 +274,42 @@ func init() {
 	recreateCmd := &cobra.Command{
 		Use:   "recreate [model] [host]",
 		Short: "Recreate an enclave for a model",
-		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			if apiKey == "" {
 				fmt.Fprintf(os.Stderr, "TINFOIL_PROXY_API_KEY environment variable is not set\n")
 				os.Exit(1)
 			}
 
-			model, host := args[0], args[1]
-			if err := reloadEnclave(model, host); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to recreate enclave %s from model %s: %v\n", host, model, err)
+			if len(args) == 2 {
+				model, host := args[0], args[1]
+				if err := reloadEnclave(model, host); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to recreate enclave %s from model %s: %v\n", host, model, err)
+					os.Exit(1)
+				}
+				fmt.Printf("Successfully recreated enclave %s from model %s\n", host, model)
+			} else if len(args) == 1 {
+				models, err := listModels()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to list models: %v\n", err)
+					os.Exit(1)
+				}
+				modelConfig, ok := models[args[0]]
+				if !ok {
+					fmt.Fprintf(os.Stderr, "model %s not found\n", args[0])
+					os.Exit(1)
+				}
+
+				for _, enclave := range modelConfig.Enclaves {
+					if err := reloadEnclave(args[0], enclave.String()); err != nil {
+						fmt.Fprintf(os.Stderr, "failed to recreate enclave %s from model %s: %v\n", enclave.String(), args[0], err)
+						os.Exit(1)
+					}
+					fmt.Printf("Successfully recreated enclave %s from model %s\n", enclave.String(), args[0])
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Usage: proxyctl recreate [model] [host]\n")
 				os.Exit(1)
 			}
-
-			// TODO: recreate [model] should remove all enclaves for the model
-
-			fmt.Printf("Successfully recreated enclave %s from model %s\n", host, model)
 		},
 	}
 
