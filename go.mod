@@ -9,7 +9,7 @@ replace github.com/google/go-sev-guest => github.com/tinfoilsh/go-sev-guest v0.0
 require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.9.1
-	github.com/tinfoilsh/verifier v0.1.15
+	github.com/tinfoilsh/verifier v0.1.16
 	gopkg.in/yaml.v2 v2.4.0
 )
 
