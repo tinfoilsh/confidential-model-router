@@ -16,4 +16,4 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:latest"
+    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:v0.0.13"
