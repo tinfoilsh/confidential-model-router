@@ -361,6 +361,11 @@ func init() {
 			}
 			defer resp.Body.Close()
 
+			if resp.StatusCode != http.StatusOK {
+				fmt.Fprintf(os.Stderr, "failed to get current state: server returned status %d\n", resp.StatusCode)
+				os.Exit(1)
+			}
+
 			var currentState struct {
 				Models map[string]*manager.Model `json:"models"`
 			}
