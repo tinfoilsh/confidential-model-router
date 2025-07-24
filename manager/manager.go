@@ -15,6 +15,8 @@ import (
 	"github.com/tinfoilsh/verifier/attestation"
 	tinfoilClient "github.com/tinfoilsh/verifier/client"
 	"gopkg.in/yaml.v2"
+	
+	"github.com/tinfoilsh/confidential-inference-proxy/tokencount"
 )
 
 type Enclave struct {
@@ -52,7 +54,7 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	return model.(*Model), true
 }
 
-func newProxy(host, publicKeyFP string) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 	httpClient := &http.Client{
 		Transport: &tinfoilClient.TLSBoundRoundTripper{
 			ExpectedPublicKey: publicKeyFP,
@@ -63,6 +65,34 @@ func newProxy(host, publicKeyFP string) *httputil.ReverseProxy {
 		Host:   host,
 	})
 	proxy.Transport = httpClient.Transport
+	
+	// Add token extraction via ModifyResponse
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		// Extract the model from the request context or headers
+		newBody, usage, err := tokencount.ExtractTokensFromResponse(resp, modelName)
+		if err != nil {
+			log.WithError(err).Error("Failed to extract tokens from response")
+			// Don't fail the request, just log the error
+			return nil
+		}
+		
+		// Replace the response body with our new reader
+		resp.Body = newBody
+		
+		// Log token usage if found
+		if usage != nil {
+			// For now, just log. Later we'll send to billing service
+			log.WithFields(log.Fields{
+				"model":             modelName,
+				"prompt_tokens":     usage.PromptTokens,
+				"completion_tokens": usage.CompletionTokens,
+				"total_tokens":      usage.TotalTokens,
+			}).Info("Token usage extracted from response")
+		}
+		
+		return nil
+	}
+	
 	return proxy
 }
 
@@ -93,9 +123,9 @@ func (em *EnclaveManager) AddEnclave(modelName, host string) error {
 	defer model.mu.Unlock()
 
 	model.Enclaves = append(model.Enclaves, &Enclave{
-		host,
-		verification.PublicKeyFP,
-		newProxy(host, verification.PublicKeyFP),
+		host:        host,
+		publicKeyFP: verification.PublicKeyFP,
+		proxy:       newProxy(host, verification.PublicKeyFP, modelName),
 	})
 	return nil
 }
@@ -133,7 +163,7 @@ func (em *EnclaveManager) UpdateModel(modelName string) error {
 			return fmt.Errorf("failed to verify enclave %s: %w", enclave.host, err)
 		}
 		enclave.publicKeyFP = verification.PublicKeyFP
-		enclave.proxy = newProxy(enclave.host, verification.PublicKeyFP)
+		enclave.proxy = newProxy(enclave.host, verification.PublicKeyFP, modelName)
 	}
 
 	return nil
