@@ -15,7 +15,7 @@ import (
 	"github.com/tinfoilsh/verifier/attestation"
 	tinfoilClient "github.com/tinfoilsh/verifier/client"
 	"gopkg.in/yaml.v2"
-	
+
 	"github.com/tinfoilsh/confidential-inference-proxy/tokencount"
 )
 
@@ -36,7 +36,8 @@ type Model struct {
 }
 
 type EnclaveManager struct {
-	models *sync.Map // model name -> *Model
+	models               *sync.Map // model name -> *Model
+	hardwareMeasurements []*attestation.HardwareMeasurement
 }
 
 // ModelExists checks if a model exists
@@ -65,7 +66,7 @@ func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 		Host:   host,
 	})
 	proxy.Transport = httpClient.Transport
-	
+
 	// Add token extraction via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// Extract the model from the request context or headers
@@ -75,10 +76,10 @@ func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 			// Don't fail the request, just log the error
 			return nil
 		}
-		
+
 		// Replace the response body with our new reader
 		resp.Body = newBody
-		
+
 		// Log token usage if found
 		if usage != nil {
 			// For now, just log. Later we'll send to billing service
@@ -89,10 +90,10 @@ func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 				"total_tokens":      usage.TotalTokens,
 			}).Info("Token usage extracted from response")
 		}
-		
+
 		return nil
 	}
-	
+
 	return proxy
 }
 
@@ -110,7 +111,7 @@ func (em *EnclaveManager) AddEnclave(modelName, host string) error {
 		}
 	}
 
-	verification, err := verifyEnclave(host)
+	verification, err := verifyEnclave(host, em.hardwareMeasurements)
 	if err != nil {
 		return fmt.Errorf("failed to verify enclave %s: %w", host, err)
 	}
@@ -150,15 +151,16 @@ func (em *EnclaveManager) UpdateModel(modelName string) error {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
-	measurement, tag, err := verifyRepo(model.Repo, "")
+	measurement, tag, hwMeasurements, err := verifyRepo(model.Repo, "")
 	if err != nil {
 		return fmt.Errorf("failed to verify repo %s: %w", model.Repo, err)
 	}
 	model.Tag = tag
 	model.SourceMeasurement = measurement
+	em.hardwareMeasurements = hwMeasurements
 
 	for _, enclave := range model.Enclaves {
-		verification, err := verifyEnclave(enclave.host)
+		verification, err := verifyEnclave(enclave.host, em.hardwareMeasurements)
 		if err != nil {
 			return fmt.Errorf("failed to verify enclave %s: %w", enclave.host, err)
 		}
@@ -242,6 +244,10 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 
+	em := &EnclaveManager{
+		models: &sync.Map{},
+	}
+
 	for modelName, repo := range config.Models {
 		wg.Add(1)
 		go func(modelName, repo string) {
@@ -255,7 +261,7 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 				tag = parts[1]
 			}
 
-			measurement, tag, err := verifyRepo(repo, tag)
+			measurement, tag, hwMeasurements, err := verifyRepo(repo, tag)
 			if err != nil {
 				select {
 				case errCh <- fmt.Errorf("failed to verify repo %s: %w", repo, err):
@@ -263,6 +269,7 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 				}
 				return
 			}
+			em.hardwareMeasurements = hwMeasurements
 
 			mu.Lock()
 			models[modelName] = &Model{
@@ -284,9 +291,8 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 	}
 
 	log.Infof("Verified %d models", len(models))
-	syncMap := &sync.Map{}
 	for k, v := range models {
-		syncMap.Store(k, v)
+		em.models.Store(k, v)
 	}
-	return &EnclaveManager{models: syncMap}, nil
+	return em, nil
 }
