@@ -269,9 +269,9 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 				}
 				return
 			}
-			em.hardwareMeasurements = hwMeasurements
 
 			mu.Lock()
+			em.hardwareMeasurements = hwMeasurements
 			models[modelName] = &Model{
 				Repo:              repo,
 				Tag:               tag,
