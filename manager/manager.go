@@ -76,9 +76,14 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		req := resp.Request
 		authHeader := req.Header.Get("Authorization")
 		userID := ""
+		apiKey := ""
 		if authHeader != "" {
-			// Use a placeholder for debugging without leaking credentials
-			userID = "authenticated_user"
+			// Extract API key from "Bearer <api_key>" format
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+				// For user ID, we can use a placeholder or the API key itself
+				userID = "authenticated_user"
+			}
 		}
 
 		requestID := resp.Header.Get("X-Request-Id")
@@ -95,6 +100,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				event := billing.Event{
 					Timestamp:        time.Now(),
 					UserID:           userID,
+					APIKey:           apiKey, // Use the actual API key from Authorization header
 					Model:            modelName,
 					PromptTokens:     usage.PromptTokens,
 					CompletionTokens: usage.CompletionTokens,
@@ -167,6 +173,13 @@ func (em *EnclaveManager) Models() map[string]*Model {
 		return true
 	})
 	return models
+}
+
+// StopBillingCollector gracefully stops the billing collector
+func (em *EnclaveManager) StopBillingCollector() {
+	if em.billingCollector != nil {
+		em.billingCollector.Stop()
+	}
 }
 
 // UpdateModel update's a model's tag and measurement, and all enclave's measurements
@@ -259,7 +272,7 @@ func (em *EnclaveManager) DeleteEnclave(modelName, host string) error {
 }
 
 // NewEnclaveManager loads model repos from the config, verifies them, and returns a map of verified models
-func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string) (*EnclaveManager, error) {
 	var config struct {
 		Models map[string]string `json:"models"` // model name -> repo
 	}
@@ -323,6 +336,6 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 		em.models.Store(k, v)
 	}
 
-	em.billingCollector = billing.NewCollector()
+	em.billingCollector = billing.NewCollector(controlPlaneURL)
 	return em, nil
 }

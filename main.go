@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"flag"
@@ -9,7 +10,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -48,19 +52,20 @@ func sendJSON(w http.ResponseWriter, data any) {
 	}
 }
 
-func loadAPIKey() (string, error) {
-	apiKey, err := os.ReadFile(*extConfigFile)
+func loadExternalConfig() (string, string, error) {
+	data, err := os.ReadFile(*extConfigFile)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	var config struct {
-		APIKey string `yaml:"proxy-api-key"`
+		APIKey       string `yaml:"proxy-api-key"`
+		ControlPlane string `yaml:"control-plane"`
 	}
-	if err := yaml.Unmarshal(apiKey, &config); err != nil {
-		return "", err
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return "", "", err
 	}
-	return config.APIKey, nil
+	return config.APIKey, config.ControlPlane, nil
 }
 
 func main() {
@@ -70,12 +75,12 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	apiKey, err := loadAPIKey()
+	apiKey, controlPlaneURL, err := loadExternalConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	mng, err := manager.NewEnclaveManager(configFile)
+	mng, err := manager.NewEnclaveManager(configFile, controlPlaneURL)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -241,8 +246,40 @@ func main() {
 		}
 	})
 
-	log.Printf("Starting proxy server on port %s\n", *port)
-	if err := http.ListenAndServe(":"+*port, nil); err != nil {
-		log.Fatal(err)
+	// Setup graceful shutdown
+	server := &http.Server{
+		Addr:         ":" + *port,
+		Handler:      nil, // Use default ServeMux
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
 	}
+
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("Starting proxy server on port %s\n", *port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Info("Shutting down server...")
+
+	// Create shutdown context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown server
+	if err := server.Shutdown(ctx); err != nil {
+		log.WithError(err).Error("Failed to gracefully shutdown server")
+	}
+
+	// Stop billing collector to ensure any remaining events are sent
+	mng.StopBillingCollector()
+
+	log.Info("Server stopped")
 }

@@ -14,7 +14,7 @@ func TestEnclaveManager_AddEnclave(t *testing.T) {
   llama3-3-70b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   qwen2-5-72b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   mistral-small-3-1-24b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
-`))
+`), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
