@@ -65,6 +65,12 @@ func loadExternalConfig() (string, string, error) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return "", "", err
 	}
+	
+	// Use default control plane if not specified
+	if config.ControlPlane == "" {
+		config.ControlPlane = "https://api.tinfoil.sh"
+	}
+	
 	return config.APIKey, config.ControlPlane, nil
 }
 
