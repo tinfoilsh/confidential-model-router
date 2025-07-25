@@ -125,6 +125,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// Replace the response body with our new reader
 		resp.Body = newBody
 
+		if streaming {
+			resp.Header.Del("Content-Length")
+		}
+
 		return nil
 	}
 
