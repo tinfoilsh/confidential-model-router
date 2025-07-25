@@ -10,12 +10,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/verifier/attestation"
 	tinfoilClient "github.com/tinfoilsh/verifier/client"
 	"gopkg.in/yaml.v2"
 
+	"github.com/tinfoilsh/confidential-inference-proxy/billing"
 	"github.com/tinfoilsh/confidential-inference-proxy/tokencount"
 )
 
@@ -38,6 +40,7 @@ type Model struct {
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
 	hardwareMeasurements []*attestation.HardwareMeasurement
+	billingCollector     *billing.Collector
 }
 
 // ModelExists checks if a model exists
@@ -55,7 +58,7 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	return model.(*Model), true
 }
 
-func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector) *httputil.ReverseProxy {
 	httpClient := &http.Client{
 		Transport: &tinfoilClient.TLSBoundRoundTripper{
 			ExpectedPublicKey: publicKeyFP,
@@ -67,10 +70,46 @@ func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 	})
 	proxy.Transport = httpClient.Transport
 
-	// Add token extraction via ModifyResponse
+	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Extract the model from the request context or headers
-		newBody, usage, err := tokencount.ExtractTokensFromResponse(resp, modelName)
+		// Extract request details that we'll need for billing
+		req := resp.Request
+		authHeader := req.Header.Get("Authorization")
+		userID := ""
+		if authHeader != "" {
+			// Use a placeholder for debugging without leaking credentials
+			userID = "authenticated_user"
+		}
+
+		requestID := resp.Header.Get("X-Request-Id")
+		if requestID == "" {
+			requestID = resp.Header.Get("X-Request-ID")
+		}
+
+		requestPath := req.URL.Path
+		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+
+		// Create a usage handler that will be called for streaming responses
+		usageHandler := func(usage *tokencount.Usage) {
+			if usage != nil && billingCollector != nil {
+				event := billing.Event{
+					Timestamp:        time.Now(),
+					UserID:           userID,
+					Model:            modelName,
+					PromptTokens:     usage.PromptTokens,
+					CompletionTokens: usage.CompletionTokens,
+					TotalTokens:      usage.TotalTokens,
+					RequestID:        requestID,
+					Enclave:          host,
+					RequestPath:      requestPath,
+					Streaming:        streaming,
+				}
+				billingCollector.AddEvent(event)
+			}
+		}
+
+		// Extract tokens with the usage handler
+		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler)
 		if err != nil {
 			log.WithError(err).Error("Failed to extract tokens from response")
 			// Don't fail the request, just log the error
@@ -79,17 +118,6 @@ func newProxy(host, publicKeyFP, modelName string) *httputil.ReverseProxy {
 
 		// Replace the response body with our new reader
 		resp.Body = newBody
-
-		// Log token usage if found
-		if usage != nil {
-			// For now, just log. Later we'll send to billing service
-			log.WithFields(log.Fields{
-				"model":             modelName,
-				"prompt_tokens":     usage.PromptTokens,
-				"completion_tokens": usage.CompletionTokens,
-				"total_tokens":      usage.TotalTokens,
-			}).Info("Token usage extracted from response")
-		}
 
 		return nil
 	}
@@ -126,7 +154,7 @@ func (em *EnclaveManager) AddEnclave(modelName, host string) error {
 	model.Enclaves = append(model.Enclaves, &Enclave{
 		host:        host,
 		publicKeyFP: verification.PublicKeyFP,
-		proxy:       newProxy(host, verification.PublicKeyFP, modelName),
+		proxy:       newProxy(host, verification.PublicKeyFP, modelName, em.billingCollector),
 	})
 	return nil
 }
@@ -165,7 +193,7 @@ func (em *EnclaveManager) UpdateModel(modelName string) error {
 			return fmt.Errorf("failed to verify enclave %s: %w", enclave.host, err)
 		}
 		enclave.publicKeyFP = verification.PublicKeyFP
-		enclave.proxy = newProxy(enclave.host, verification.PublicKeyFP, modelName)
+		enclave.proxy = newProxy(enclave.host, verification.PublicKeyFP, modelName, em.billingCollector)
 	}
 
 	return nil
@@ -294,5 +322,7 @@ func NewEnclaveManager(configFile []byte) (*EnclaveManager, error) {
 	for k, v := range models {
 		em.models.Store(k, v)
 	}
+
+	em.billingCollector = billing.NewCollector()
 	return em, nil
 }

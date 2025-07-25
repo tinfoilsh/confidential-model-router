@@ -90,9 +90,7 @@ func main() {
 		} else if r.URL.Path == "/v1/convert/file" {
 			modelName = "doc-upload"
 		} else {
-			var body struct {
-				Model string `json:"model"`
-			}
+			var body map[string]interface{}
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				jsonError(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
@@ -102,9 +100,43 @@ func main() {
 				jsonError(w, fmt.Sprintf("failed to find model parameter in request body: %v", err), http.StatusBadRequest)
 				return
 			}
+			
+			// Extract model name
+			modelInterface, ok := body["model"]
+			if !ok {
+				jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
+				return
+			}
+			modelName, ok = modelInterface.(string)
+			if !ok {
+				jsonError(w, "model parameter must be a string", http.StatusBadRequest)
+				return
+			}
+			
+			// If streaming request, ensure continuous_usage_stats is enabled
+			if stream, ok := body["stream"].(bool); ok && stream {
+				if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
+					streamOptions["continuous_usage_stats"] = true
+				} else {
+					body["stream_options"] = map[string]interface{}{
+						"continuous_usage_stats": true,
+					}
+				}
+				// Re-encode the modified body
+				newBodyBytes, err := json.Marshal(body)
+				if err != nil {
+					jsonError(w, "failed to process request body", http.StatusInternalServerError)
+					return
+				}
+				bodyBytes = newBodyBytes
+				// Update Content-Length header to match new body size
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
+				log.Debugf("Modified streaming request body to include continuous_usage_stats")
+			}
+			
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			modelName = body.Model
 		}
 
 		model, found := mng.GetModel(modelName)
