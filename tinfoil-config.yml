@@ -1,4 +1,4 @@
-shim-version: v0.1.8@sha256:795145f871b66946ab7755eb71fce866a92e4035a95d6f949ad79adee7294648
+shim-version: v0.1.9@sha256:410510c9e8e4c7489dd201fede302dee8455075ca28f4f0abbf84bded943b8f1
 cvm-version: 0.3.0
 ovmf-version: 0.0.2
 cpus: 16
@@ -16,4 +16,4 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.0.26"
+    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.0.27"
