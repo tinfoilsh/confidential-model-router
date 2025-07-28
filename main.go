@@ -256,8 +256,8 @@ func main() {
 	server := &http.Server{
 		Addr:         ":" + *port,
 		Handler:      nil, // Use default ServeMux
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadTimeout:  5 * time.Minute, // Increased to support large RAG payloads
+		WriteTimeout: 0,                // Disabled to support long-running streaming responses
 	}
 
 	// Handle shutdown signals
