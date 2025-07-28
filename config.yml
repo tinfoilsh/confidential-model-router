@@ -2,12 +2,12 @@ models:
   audio-processing: tinfoilsh/confidential-audio-processing
   doc-upload: tinfoilsh/confidential-doc-upload
   deepseek-r1-70b: tinfoilsh/confidential-deepseek-r1-70b-prod
-  llama-free: tinfoilsh/confidential-llama3-3-70b
+  llama3-3-70b: tinfoilsh/confidential-llama3-3-70b
   mistral-small-3-1-24b: tinfoilsh/confidential-mistral-small-3-1
   nomic-embed-text: tinfoilsh/confidential-nomic-embed-text
   qwen2-5-72b: tinfoilsh/confidential-qwen2-5-72b
   deepseek-r1-0528: tinfoilsh/confidential-deepseek-r1-0528
-  llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
+  llama3-3-70b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   qwen2-5-72b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   mistral-small-3-1-24b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
 
