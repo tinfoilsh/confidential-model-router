@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
 	log "github.com/sirupsen/logrus"
@@ -407,9 +408,16 @@ func init() {
 							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %v\n", host, err)
 							continue
 						}
-						response.Body.Close()
+						defer response.Body.Close()
+
 						if response.StatusCode != http.StatusOK {
-							fmt.Fprintf(os.Stderr, "failed to add enclave %s: server returned status %d\n", host, response.StatusCode)
+							bodyBytes, err := io.ReadAll(response.Body)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "failed to read response body: %v\n", err)
+								continue
+							}
+							body := strings.TrimSpace(string(bodyBytes))
+							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %d %s\n", host, response.StatusCode, body)
 							continue
 						}
 					} else {
