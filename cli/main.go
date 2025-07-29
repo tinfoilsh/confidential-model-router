@@ -394,7 +394,6 @@ func init() {
 				added := 0
 				for _, host := range desiredHosts {
 					if !currentHosts[host] {
-						added++
 						log.Debugf("Adding enclave %s to model %s\n", host, modelName)
 						url := fmt.Sprintf("%s%s?model=%s&host=%s", proxyEndpoint, enclavesPath, modelName, host)
 						req, err := http.NewRequest(http.MethodPut, url, nil)
@@ -420,6 +419,8 @@ func init() {
 							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %d %s\n", host, response.StatusCode, body)
 							continue
 						}
+
+						added++
 					} else {
 						log.Debugf("Enclave %s already exists for model %s\n", host, modelName)
 					}
