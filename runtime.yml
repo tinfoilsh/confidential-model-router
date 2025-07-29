@@ -8,7 +8,7 @@ models:
   nomic-embed-text:
     - nomic-embed-text.model.tinfoil.sh
   qwen2-5-72b:
-    - qwen2-5-72b.model.tinfoil.sh
+    - qwen2-5-72b-2.model.tinfoil.sh
   doc-upload:
     - doc-upload.model.tinfoil.sh
   audio-processing:
