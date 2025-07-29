@@ -142,6 +142,10 @@ func (em *EnclaveManager) AddEnclave(modelName, host string) error {
 		return fmt.Errorf("model %s not found", modelName)
 	}
 
+	if err := em.updateModelMeasurements(modelName); err != nil {
+		return fmt.Errorf("failed to update model measurements: %w", err)
+	}
+
 	// Check if the enclave already exists
 	for _, existingEnclave := range model.Enclaves {
 		if existingEnclave.host == host {
@@ -186,8 +190,8 @@ func (em *EnclaveManager) StopBillingCollector() {
 	}
 }
 
-// UpdateModel update's a model's tag and measurement, and all enclave's measurements
-func (em *EnclaveManager) UpdateModel(modelName string) error {
+// updateModelMeasurements update's a models measurements (including hardware measurements)
+func (em *EnclaveManager) updateModelMeasurements(modelName string) error {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return fmt.Errorf("model %s not found", modelName)
@@ -196,13 +200,27 @@ func (em *EnclaveManager) UpdateModel(modelName string) error {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
-	measurement, tag, hwMeasurements, err := verifyRepo(model.Repo, "")
+	measurement, tag, hwMeasurements, err := verifyRepo(model.Repo, model.Tag)
 	if err != nil {
 		return fmt.Errorf("failed to verify repo %s: %w", model.Repo, err)
 	}
 	model.Tag = tag
 	model.SourceMeasurement = measurement
 	em.hardwareMeasurements = hwMeasurements
+
+	return nil
+}
+
+// UpdateModel update's a model's tag and measurement, and all enclave's measurements
+func (em *EnclaveManager) UpdateModel(modelName string) error {
+	model, found := em.GetModel(modelName)
+	if !found {
+		return fmt.Errorf("model %s not found", modelName)
+	}
+
+	if err := em.updateModelMeasurements(modelName); err != nil {
+		return fmt.Errorf("failed to update model measurements: %w", err)
+	}
 
 	for _, enclave := range model.Enclaves {
 		verification, err := verifyEnclave(enclave.host, em.hardwareMeasurements)
