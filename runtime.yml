@@ -17,3 +17,5 @@ models:
     - large.inf3.tinfoil.sh
   qwen3-coder-480b:
     - large.inf3.tinfoil.sh
+  deepseek-r1-0528:
+    - deepseek-r1-0528.inf4.tinfoil.sh
