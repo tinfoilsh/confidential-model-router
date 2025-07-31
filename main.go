@@ -126,13 +126,30 @@ func main() {
 			
 			// If streaming request, ensure continuous_usage_stats is enabled
 			if stream, ok := body["stream"].(bool); ok && stream {
+				// Check if client requested usage stats before we modify anything
+				clientRequestedUsage := false
 				if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
+					// Check for OpenAI-style include_usage
+					if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+						clientRequestedUsage = true
+					}
+					// Check for vLLM-style continuous_usage_stats
+					if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
+						clientRequestedUsage = true
+					}
 					streamOptions["continuous_usage_stats"] = true
 				} else {
 					body["stream_options"] = map[string]interface{}{
 						"continuous_usage_stats": true,
 					}
 				}
+				
+				// Set internal header to indicate if client requested usage
+				// This header will be used by the proxy to decide whether to filter usage-only chunks
+				if clientRequestedUsage {
+					r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
+				}
+				
 				// Re-encode the modified body
 				newBodyBytes, err := json.Marshal(body)
 				if err != nil {
@@ -143,7 +160,7 @@ func main() {
 				// Update Content-Length header to match new body size
 				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 				r.ContentLength = int64(len(bodyBytes))
-				log.Debugf("Modified streaming request body to include continuous_usage_stats")
+				log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
 			}
 			
 			r.Body.Close()
