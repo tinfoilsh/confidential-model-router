@@ -8,8 +8,7 @@ models:
   qwen2-5-72b: tinfoilsh/confidential-qwen2-5-72b
   deepseek-r1-0528: tinfoilsh/confidential-deepseek-r1-0528
   llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
-  qwen2-5-72b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
-  mistral-small-3-1-24b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
+  qwen3-coder-480b: tinfoilsh/confidential-llama-mistral-qwen-turbo
 
   # Unsupported:
   # llama-prod: tinfoilsh/confidential-llama3-3-70b-prod
