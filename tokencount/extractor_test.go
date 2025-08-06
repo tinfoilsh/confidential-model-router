@@ -90,7 +90,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}
 
 			// Extract tokens with handler
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler)
+			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -198,7 +198,7 @@ data: [DONE]
 			}
 
 			// Extract tokens
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler)
+			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v", err)
 				return

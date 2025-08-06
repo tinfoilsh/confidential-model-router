@@ -80,11 +80,12 @@ func (t *teeReaderCloser) Close() error {
 // ExtractTokensFromResponse extracts token counts from HTTP response using TeeReader
 // It doesn't buffer the response, allowing streaming to work properly
 func ExtractTokensFromResponse(resp *http.Response, model string) (io.ReadCloser, *Usage, error) {
-	return ExtractTokensFromResponseWithHandler(resp, model, nil)
+	return ExtractTokensFromResponseWithHandler(resp, model, nil, false)
 }
 
 // ExtractTokensFromResponseWithHandler extracts token counts with an optional usage handler for streaming
-func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usageHandler func(*Usage)) (io.ReadCloser, *Usage, error) {
+// clientRequestedUsage indicates if the client explicitly requested usage stats in their request
+func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usageHandler func(*Usage), clientRequestedUsage bool) (io.ReadCloser, *Usage, error) {
 	contentType := resp.Header.Get("Content-Type")
 
 	// For streaming responses, use the streaming extractor
@@ -92,6 +93,7 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 		pr, pw := io.Pipe()
 		extractor := NewStreamingTokenExtractor(resp.Body, pw, model)
 		extractor.usageHandler = usageHandler
+		extractor.clientRequestedUsage = clientRequestedUsage
 		go extractor.processStream()
 		return pr, nil, nil
 	}
@@ -120,14 +122,15 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 
 // StreamingTokenExtractor handles token extraction for streaming responses
 type StreamingTokenExtractor struct {
-	reader       io.ReadCloser
-	writer       io.WriteCloser
-	model        string
-	usage        *Usage
-	buffer       bytes.Buffer
-	scanner      *bufio.Scanner
-	completed    bool
-	usageHandler func(*Usage) // Callback for when usage is extracted
+	reader               io.ReadCloser
+	writer               io.WriteCloser
+	model                string
+	usage                *Usage
+	buffer               bytes.Buffer
+	scanner              *bufio.Scanner
+	completed            bool
+	usageHandler         func(*Usage) // Callback for when usage is extracted
+	clientRequestedUsage bool         // Whether client explicitly requested usage stats
 }
 
 // NewStreamingTokenExtractor creates a new streaming token extractor that intercepts SSE chunks
@@ -148,38 +151,49 @@ func (s *StreamingTokenExtractor) processStream() {
 
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
-
-		// Write the line to output immediately
-		s.writer.Write([]byte(line + "\n"))
+		shouldWrite := true
 
 		// Parse SSE data lines
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				continue
-			}
+			if data != "[DONE]" {
+				// Try to parse the chunk
+				var chunk map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+					// Check for usage in the chunk
+					if usageData, ok := chunk["usage"]; ok && usageData != nil {
+						usageBytes, _ := json.Marshal(usageData)
+						var usage Usage
+						if err := json.Unmarshal(usageBytes, &usage); err == nil {
+							// Update usage data (continuous stats may send incremental updates)
+							if usage.PromptTokens > 0 {
+								s.usage.PromptTokens = usage.PromptTokens
+							}
+							if usage.CompletionTokens > 0 {
+								s.usage.CompletionTokens = usage.CompletionTokens
+							}
+							if usage.TotalTokens > 0 {
+								s.usage.TotalTokens = usage.TotalTokens
+							}
+						}
 
-			// Try to parse the chunk
-			var chunk map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-				// Check for usage in the chunk
-				if usageData, ok := chunk["usage"]; ok {
-					usageBytes, _ := json.Marshal(usageData)
-					var usage Usage
-					if err := json.Unmarshal(usageBytes, &usage); err == nil {
-						// Update usage data (continuous stats may send incremental updates)
-						if usage.PromptTokens > 0 {
-							s.usage.PromptTokens = usage.PromptTokens
-						}
-						if usage.CompletionTokens > 0 {
-							s.usage.CompletionTokens = usage.CompletionTokens
-						}
-						if usage.TotalTokens > 0 {
-							s.usage.TotalTokens = usage.TotalTokens
+						// Check if this is a usage-only chunk that should be filtered
+						if !s.clientRequestedUsage {
+							// Check if choices array exists and is empty
+							if choices, hasChoices := chunk["choices"].([]interface{}); hasChoices && len(choices) == 0 {
+								// This is a usage-only chunk with empty choices array
+								// Filter it out since client didn't request usage
+								shouldWrite = false
+							}
 						}
 					}
 				}
 			}
+		}
+
+		// Write the line to output if we should
+		if shouldWrite {
+			s.writer.Write([]byte(line + "\n"))
 		}
 	}
 

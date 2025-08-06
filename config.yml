@@ -11,7 +11,4 @@ models:
   qwen2-5-72b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   mistral-small-3-1-24b-turbo: tinfoilsh/confidential-llama-mistral-qwen-turbo
   gpt-oss-120b: tinfoilsh/confidential-gpt-oss-120b
-
-  # Unsupported:
-  # llama-prod: tinfoilsh/confidential-llama3-3-70b-prod
-  # qwen2-5-72b-2: tinfoilsh/confidential-qwen2-5-72b-2
+  qwen3-coder-480b: tinfoilsh/confidential-llama-mistral-qwen-turbo
