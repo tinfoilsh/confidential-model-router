@@ -21,3 +21,5 @@ models:
     - large.inf3.tinfoil.sh
   deepseek-r1-0528:
     - deepseek-r1-0528.inf4.tinfoil.sh
+  gpt-oss-120b:
+    - gpt-oss-120b.model.tinfoil.sh
