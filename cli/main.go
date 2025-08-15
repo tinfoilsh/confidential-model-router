@@ -199,7 +199,7 @@ func init() {
 					if err := update(modelName); err != nil {
 						fmt.Fprintf(os.Stderr, "failed to update %s: %v\n", modelName, err)
 					} else {
-						fmt.Printf("Successfully updated model %s", modelName)
+						fmt.Printf("Successfully updated model %s\n", modelName)
 					}
 				}
 			} else if len(args) == 1 {
@@ -405,7 +405,7 @@ func init() {
 						req.Header.Set("Authorization", "Bearer "+apiKey)
 						response, err := http.DefaultClient.Do(req)
 						if err != nil {
-							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %v\n", host, err)
+							fmt.Fprintf(os.Stderr, "failed to add enclave %s to model %s: %v\n", host, modelName, err)
 							continue
 						}
 						defer response.Body.Close()
@@ -417,7 +417,7 @@ func init() {
 								continue
 							}
 							body := strings.TrimSpace(string(bodyBytes))
-							fmt.Fprintf(os.Stderr, "failed to add enclave %s: %d %s\n", host, response.StatusCode, body)
+							fmt.Fprintf(os.Stderr, "failed to add enclave %s to model %s: %d %s\n", host, modelName, response.StatusCode, body)
 							continue
 						}
 					} else {
