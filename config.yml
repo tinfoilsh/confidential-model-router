@@ -7,7 +7,6 @@ models:
   nomic-embed-text: tinfoilsh/confidential-nomic-embed-text
   qwen2-5-72b: tinfoilsh/confidential-qwen2-5-72b
   deepseek-r1-0528: tinfoilsh/confidential-deepseek-r1-0528
-  # llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
-  llama3-3-70b: tinfoilsh/confidential-llama3-3-70b-prod
+  llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
   gpt-oss-120b: tinfoilsh/confidential-gpt-oss-120b
   qwen3-coder-480b: tinfoilsh/confidential-llama-mistral-qwen-turbo

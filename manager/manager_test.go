@@ -28,7 +28,7 @@ func TestEnclaveManager_AddEnclave(t *testing.T) {
 	assert.Equal(t, 5, numModels)
 
 	// Add TDX enclave
-	assert.NoError(t, manager.AddEnclave("llama3-3-70b-turbo", "large.inf3.tinfoil.sh"))
+	assert.NoError(t, manager.AddEnclave("llama3-3-70b-turbo", "large.inf4.tinfoil.sh"))
 	model, found := manager.GetModel("llama3-3-70b-turbo")
 	require.True(t, found)
 	assert.Equal(t, 1, len(model.Enclaves))
