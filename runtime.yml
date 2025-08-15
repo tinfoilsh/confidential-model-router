@@ -14,7 +14,7 @@ models:
   audio-processing:
     - audio-processing.model.tinfoil.sh
   llama3-3-70b:
-    - llama3-3-70b-p.model.tinfoil.sh
+    - large.inf4.tinfoil.sh
   qwen3-coder-480b:
     - large.inf4.tinfoil.sh
   deepseek-r1-0528:
