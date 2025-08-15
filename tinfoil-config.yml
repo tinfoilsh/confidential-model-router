@@ -9,11 +9,7 @@ shim:
   upstream-port: 8089
   publish-attestation: true
   tls-challenge: dns
-  origins:
-    - https://tinfoil.sh
-    - https://chat.tinfoil.sh
-    - http://localhost:3000
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.0.36"
+    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.0.37"
