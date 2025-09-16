@@ -193,7 +193,10 @@ func (s *StreamingTokenExtractor) processStream() {
 
 		// Write the line to output if we should
 		if shouldWrite {
-			s.writer.Write([]byte(line + "\n"))
+			if line != "" {
+				line = line + "\n\n"
+			}
+			s.writer.Write([]byte(line))
 		}
 	}
 
