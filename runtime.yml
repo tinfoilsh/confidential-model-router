@@ -19,3 +19,5 @@ models:
     - deepseek-r1-0528.inf3.tinfoil.sh
   gpt-oss-120b:
     - gpt-oss-120b.model.tinfoil.sh
+  deepseek-v31-terminus:
+    - deepseek-v31-terminus.inf7.tinfoil.sh
