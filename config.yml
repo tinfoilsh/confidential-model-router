@@ -9,3 +9,4 @@ models:
   llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
   qwen3-coder-480b: tinfoilsh/confidential-llama-mistral-qwen-turbo
   gpt-oss-120b: tinfoilsh/confidential-gpt-oss-120b
+  deepseek-v31-terminus: tinfoilsh/confidential-deepseek-v31-terminus
