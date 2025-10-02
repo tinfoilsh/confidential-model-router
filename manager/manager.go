@@ -101,6 +101,13 @@ func (em *EnclaveManager) addEnclave(
 		}
 	}
 
+	// Validate that the enclave's attested measurement matches the model's source measurement
+	if model.SourceMeasurement != nil {
+		if err := verification.Measurement.Equals(model.SourceMeasurement); err != nil {
+			return fmt.Errorf("measurement mismatch for enclave %s: %v", host, err)
+		}
+	}
+
 	model.Enclaves[host] = &Enclave{
 		host:      host,
 		predicate: verification.Measurement.Type,
