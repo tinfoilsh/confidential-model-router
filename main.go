@@ -23,6 +23,9 @@ import (
 //go:embed config.yml
 var configFile []byte // Initial (attested) config
 
+// Set by build process
+var version = "dev"
+
 var (
 	port            = flag.String("l", "8089", "port to listen on")
 	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
@@ -53,7 +56,6 @@ func sendJSON(w http.ResponseWriter, data any) {
 
 func main() {
 	flag.Parse()
-
 	if *verbose {
 		log.SetLevel(log.DebugLevel)
 	}
@@ -159,7 +161,9 @@ func main() {
 	})
 
 	http.HandleFunc("/.well-known/tinfoil-proxy", func(w http.ResponseWriter, r *http.Request) {
-		sendJSON(w, em.Status())
+		status := em.Status()
+		status["version"] = version
+		sendJSON(w, status)
 	})
 
 	// Setup graceful shutdown

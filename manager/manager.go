@@ -124,9 +124,9 @@ func (em *EnclaveManager) Models() map[string]*Model {
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
 	return map[string]any{
-		"models":       em.Models(),
-		"errors":       em.errors,
-		"last_updated": em.lastUpdated,
+		"models":  em.Models(),
+		"errors":  em.errors,
+		"updated": em.lastUpdated,
 	}
 }
 
