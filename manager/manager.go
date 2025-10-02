@@ -6,41 +6,45 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
-	"strings"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/verifier/attestation"
-	tinfoilClient "github.com/tinfoilsh/verifier/client"
-	"gopkg.in/yaml.v2"
+	"github.com/tinfoilsh/verifier/github"
+	"github.com/tinfoilsh/verifier/sigstore"
 
 	"github.com/tinfoilsh/confidential-inference-proxy/billing"
-	"github.com/tinfoilsh/confidential-inference-proxy/tokencount"
+	"github.com/tinfoilsh/confidential-inference-proxy/config"
 )
 
 type Enclave struct {
-	host        string
-	publicKeyFP string
-	proxy       *httputil.ReverseProxy
+	host      string
+	tlsKeyFP  string
+	hpkeKey   string
+	predicate attestation.PredicateType
+	proxy     *httputil.ReverseProxy
 }
 
 type Model struct {
 	Repo              string                   `json:"repo"`
 	Tag               string                   `json:"tag"`
 	SourceMeasurement *attestation.Measurement `json:"measurement"`
-	Enclaves          []*Enclave               `json:"enclaves"`
+	Enclaves          map[string]*Enclave      `json:"enclaves"`
 
 	counter uint64
 	mu      sync.RWMutex
 }
 
 type EnclaveManager struct {
-	models               *sync.Map // model name -> *Model
-	hardwareMeasurements []*attestation.HardwareMeasurement
-	billingCollector     *billing.Collector
+	models           *sync.Map // model name -> *Model
+	configURL        string
+	sigstoreClient   *sigstore.Client
+	billingCollector *billing.Collector
+	errors           []string
+	lastUpdated      time.Time
 }
 
 // ModelExists checks if a model exists
@@ -58,121 +62,52 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	return model.(*Model), true
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector) *httputil.ReverseProxy {
-	httpClient := &http.Client{
-		Transport: &tinfoilClient.TLSBoundRoundTripper{
-			ExpectedPublicKey: publicKeyFP,
-		},
-	}
-	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
-		Scheme: "https",
-		Host:   host,
-	})
-	proxy.Transport = httpClient.Transport
-
-	// Add token extraction and billing via ModifyResponse
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Extract request details that we'll need for billing
-		req := resp.Request
-		authHeader := req.Header.Get("Authorization")
-		userID := ""
-		apiKey := ""
-		if authHeader != "" {
-			// Extract API key from "Bearer <api_key>" format
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
-				// For user ID, we can use a placeholder or the API key itself
-				userID = "authenticated_user"
-			}
-		}
-
-		requestID := resp.Header.Get("X-Request-Id")
-		if requestID == "" {
-			requestID = resp.Header.Get("X-Request-ID")
-		}
-
-		requestPath := req.URL.Path
-		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
-
-		// Create a usage handler that will be called for streaming responses
-		usageHandler := func(usage *tokencount.Usage) {
-			if usage != nil && billingCollector != nil {
-				event := billing.Event{
-					Timestamp:        time.Now(),
-					UserID:           userID,
-					APIKey:           apiKey, // Use the actual API key from Authorization header
-					Model:            modelName,
-					PromptTokens:     usage.PromptTokens,
-					CompletionTokens: usage.CompletionTokens,
-					TotalTokens:      usage.TotalTokens,
-					RequestID:        requestID,
-					Enclave:          host,
-					RequestPath:      requestPath,
-					Streaming:        streaming,
-				}
-				billingCollector.AddEvent(event)
-			}
-		}
-
-		// Check if client requested usage stats (from header set in main.go)
-		clientRequestedUsage := req.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
-		
-		// Extract tokens with the usage handler
-		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage)
-		if err != nil {
-			log.WithError(err).Error("Failed to extract tokens from response")
-			// Don't fail the request, just log the error
-			return nil
-		}
-
-		// Replace the response body with our new reader
-		resp.Body = newBody
-
-		if streaming {
-			resp.Header.Del("Content-Length")
-		}
-
-		return nil
-	}
-
-	return proxy
-}
-
-// AddEnclave adds an enclave to the model enclave pool
-func (em *EnclaveManager) AddEnclave(modelName, host string) error {
+// addEnclave verifies and adds an enclave to the model enclave pool.
+// If the enclave already exists, replace it if the TLS key fingerprint is different.
+func (em *EnclaveManager) addEnclave(
+	modelName, host string,
+	hwMeasurements []*attestation.HardwareMeasurement,
+) error {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return fmt.Errorf("model %s not found", modelName)
 	}
 
-	if err := em.updateModelMeasurements(modelName); err != nil {
-		return fmt.Errorf("failed to update model measurements: %w", err)
-	}
-
-	// Check if the enclave already exists
-	for _, existingEnclave := range model.Enclaves {
-		if existingEnclave.host == host {
-			return fmt.Errorf("enclave %s already exists", host)
-		}
-	}
-
-	verification, err := verifyEnclave(host, em.hardwareMeasurements)
-	if err != nil {
-		return fmt.Errorf("failed to verify enclave %s: %w", host, err)
-	}
-
-	if err := verification.Measurement.Equals(model.SourceMeasurement); err != nil {
-		return fmt.Errorf("measurement mismatch: %w", err)
-	}
-
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
-	model.Enclaves = append(model.Enclaves, &Enclave{
-		host:        host,
-		publicKeyFP: verification.PublicKeyFP,
-		proxy:       newProxy(host, verification.PublicKeyFP, modelName, em.billingCollector),
-	})
+	// If the enclave already exists and the TLS key fingerprint is the same, do nothing
+	currentEnclave, exists := model.Enclaves[host]
+	if exists {
+		realTLSKeyFP, err := attestation.TLSPublicKey(host)
+		if err == nil && currentEnclave.tlsKeyFP == realTLSKeyFP {
+			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
+			return nil
+		}
+	}
+
+	remoteAttestation, err := attestation.Fetch(host)
+	if err != nil {
+		return fmt.Errorf("failed to fetch remote attestation: %v", err)
+	}
+	verification, err := remoteAttestation.Verify()
+	if err != nil {
+		return fmt.Errorf("failed to verify remote attestation: %v", err)
+	}
+	if verification.Measurement.Type == attestation.TdxGuestV1 {
+		_, err = attestation.VerifyHardware(hwMeasurements, verification.Measurement)
+		if err != nil {
+			return fmt.Errorf("failed to verify hardware measurements: %v", err)
+		}
+	}
+
+	model.Enclaves[host] = &Enclave{
+		host:      host,
+		predicate: verification.Measurement.Type,
+		tlsKeyFP:  verification.TLSPublicKeyFP,
+		hpkeKey:   verification.HPKEPublicKey,
+		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector),
+	}
 	return nil
 }
 
@@ -186,55 +121,20 @@ func (em *EnclaveManager) Models() map[string]*Model {
 	return models
 }
 
-// StopBillingCollector gracefully stops the billing collector
-func (em *EnclaveManager) StopBillingCollector() {
+// Status returns the status of the enclave manager to be JSON encoded
+func (em *EnclaveManager) Status() map[string]any {
+	return map[string]any{
+		"models":       em.Models(),
+		"errors":       em.errors,
+		"last_updated": em.lastUpdated,
+	}
+}
+
+// Shutdown gracefully stops the billing collector
+func (em *EnclaveManager) Shutdown() {
 	if em.billingCollector != nil {
 		em.billingCollector.Stop()
 	}
-}
-
-// updateModelMeasurements update's a models measurements (including hardware measurements)
-func (em *EnclaveManager) updateModelMeasurements(modelName string) error {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return fmt.Errorf("model %s not found", modelName)
-	}
-
-	model.mu.Lock()
-	defer model.mu.Unlock()
-
-	measurement, tag, hwMeasurements, err := verifyRepo(model.Repo, model.Tag)
-	if err != nil {
-		return fmt.Errorf("failed to verify repo %s: %w", model.Repo, err)
-	}
-	model.Tag = tag
-	model.SourceMeasurement = measurement
-	em.hardwareMeasurements = hwMeasurements
-
-	return nil
-}
-
-// UpdateModel update's a model's tag and measurement, and all enclave's measurements
-func (em *EnclaveManager) UpdateModel(modelName string) error {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return fmt.Errorf("model %s not found", modelName)
-	}
-
-	if err := em.updateModelMeasurements(modelName); err != nil {
-		return fmt.Errorf("failed to update model measurements: %w", err)
-	}
-
-	for _, enclave := range model.Enclaves {
-		verification, err := verifyEnclave(enclave.host, em.hardwareMeasurements)
-		if err != nil {
-			return fmt.Errorf("failed to verify enclave %s: %w", enclave.host, err)
-		}
-		enclave.publicKeyFP = verification.PublicKeyFP
-		enclave.proxy = newProxy(enclave.host, verification.PublicKeyFP, modelName, em.billingCollector)
-	}
-
-	return nil
 }
 
 // NextEnclave gets the next sequential enclave
@@ -246,7 +146,14 @@ func (m *Model) NextEnclave() *Enclave {
 	count := atomic.AddUint64(&m.counter, 1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.Enclaves[(count-1)%uint64(len(m.Enclaves))]
+
+	// Convert map to slice for indexed access
+	enclaves := make([]*Enclave, 0, len(m.Enclaves))
+	for _, enclave := range m.Enclaves {
+		enclaves = append(enclaves, enclave)
+	}
+
+	return enclaves[(count-1)%uint64(len(enclaves))]
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -255,10 +162,14 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Enclave) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]string{
-		"host": e.host,
-		"key":  e.publicKeyFP,
-	})
+	fields := map[string]string{
+		"predicate":  string(e.predicate),
+		"tls_key_fp": e.tlsKeyFP,
+	}
+	if e.hpkeKey != "" {
+		fields["hpke_key"] = e.hpkeKey
+	}
+	return json.Marshal(fields)
 }
 
 func (e *Enclave) UnmarshalJSON(data []byte) error {
@@ -266,8 +177,9 @@ func (e *Enclave) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
-	e.host = m["host"]
-	e.publicKeyFP = m["key"]
+	e.predicate = attestation.PredicateType(m["predicate"])
+	e.tlsKeyFP = m["tls_key_fp"]
+	e.hpkeKey = m["hpke_key"]
 	return nil
 }
 
@@ -275,92 +187,154 @@ func (e *Enclave) String() string {
 	return e.host
 }
 
-// DeleteEnclave removes an enclave from the model enclave pool
-func (em *EnclaveManager) DeleteEnclave(modelName, host string) error {
+// NewEnclaveManager loads model repos from the config into the enclave manager
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL string) (*EnclaveManager, error) {
+	cfg, err := config.FromBytes(configFile)
+	if err != nil {
+		return nil, err
+	}
+
+	sigstoreClient, err := sigstore.NewClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch trust root: %v", err)
+	}
+
+	em := &EnclaveManager{
+		models:           &sync.Map{},
+		configURL:        configURL,
+		sigstoreClient:   sigstoreClient,
+		billingCollector: billing.NewCollector(controlPlaneURL),
+	}
+
+	for modelName, modelConfig := range cfg.Models {
+		em.models.Store(modelName, &Model{
+			Repo:              modelConfig.Repo,
+			Tag:               "",
+			SourceMeasurement: nil,
+			Enclaves:          make(map[string]*Enclave),
+		})
+	}
+
+	log.Infof("Loaded %d model(s) from initial config", len(cfg.Models))
+
+	return em, nil
+}
+
+// updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
+func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
-		return fmt.Errorf("model %s not found", modelName)
+		return false, fmt.Errorf("model %s not found", modelName)
+	}
+
+	log.Tracef("updating model measurements for %s", modelName)
+
+	latestTag, err := github.FetchLatestTag(model.Repo)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch latest tag: %v", err)
+	}
+
+	if model.Tag == latestTag {
+		return false, nil
+	}
+
+	digest, err := github.FetchDigest(model.Repo, latestTag)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch latest release for %s@%s: %v", model.Repo, latestTag, err)
+	}
+	sigstoreBundle, err := github.FetchAttestationBundle(model.Repo, digest)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch attestation bundle: %v", err)
+	}
+	measurement, err := em.sigstoreClient.VerifyAttestation(sigstoreBundle, digest, model.Repo)
+	if err != nil {
+		return false, fmt.Errorf("failed to verify attestation: %v", err)
 	}
 
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
-	for i, enclave := range model.Enclaves {
-		if enclave.host == host {
-			// Remove the enclave from the slice
-			model.Enclaves = append(model.Enclaves[:i], model.Enclaves[i+1:]...)
-			return nil
-		}
-	}
+	model.Tag = latestTag
+	model.SourceMeasurement = measurement
+	model.Enclaves = make(map[string]*Enclave) // Clear all enclaves, their measurements are now invalid
 
-	return fmt.Errorf("enclave %s not found", host)
+	return true, nil
 }
 
-// NewEnclaveManager loads model repos from the config, verifies them, and returns a map of verified models
-func NewEnclaveManager(configFile []byte, controlPlaneURL string) (*EnclaveManager, error) {
-	var config struct {
-		Models map[string]string `json:"models"` // model name -> repo
-	}
-	if err := yaml.Unmarshal(configFile, &config); err != nil {
-		return nil, err
+// sync updates all model's tags and measurements, then matches them to the enclave config
+func (em *EnclaveManager) sync() error {
+	log.Debug("Updating all models")
+
+	config, err := config.Load(em.configURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch config: %v", err)
 	}
 
-	models := make(map[string]*Model)
-	var mu sync.Mutex
+	// Fetch hardware measurements
+	hwMeasurements, err := em.sigstoreClient.LatestHardwareMeasurements()
+	if err != nil {
+		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
+	}
+
 	var wg sync.WaitGroup
-	errCh := make(chan error, 1)
-
-	em := &EnclaveManager{
-		models: &sync.Map{},
-	}
-
-	for modelName, repo := range config.Models {
+	em.models.Range(func(key, value any) bool {
 		wg.Add(1)
-		go func(modelName, repo string) {
+		go func() {
 			defer wg.Done()
-			log.Debugf("verifying model %s (%s)", modelName, repo)
-
-			tag := ""
-			if strings.Contains(repo, "@") {
-				parts := strings.Split(repo, "@")
-				repo = parts[0]
-				tag = parts[1]
-			}
-
-			measurement, tag, hwMeasurements, err := verifyRepo(repo, tag)
+			modelName := key.(string)
+			_, err := em.updateModelMeasurements(modelName)
 			if err != nil {
-				select {
-				case errCh <- fmt.Errorf("failed to verify repo %s: %w", repo, err):
-				default:
+				log.Errorf("failed to update model measurements: %v", err)
+			}
+
+			log.Tracef("Updating enclave config for model %s", modelName)
+			enclaves := config.Models[modelName].Enclaves
+			for _, enclave := range enclaves {
+				err := func() error {
+					// Remove enclaves that are no longer in the config
+					model, found := em.GetModel(modelName)
+					if !found {
+						return fmt.Errorf("model %s not found", modelName)
+					}
+					for existingHost := range model.Enclaves {
+						if !slices.Contains(enclaves, existingHost) {
+							log.Warnf("Enclave %s no longer in config, removing", existingHost)
+							delete(model.Enclaves, existingHost)
+						}
+					}
+
+					log.Tracef("  + enclave %s", enclave)
+					if err := em.addEnclave(modelName, enclave, hwMeasurements); err != nil {
+						return fmt.Errorf("failed to add enclave: %v", err)
+					}
+					return nil
+				}()
+				if err != nil {
+					em.errors = append(em.errors, err.Error())
+					log.Warn(err)
 				}
-				return
 			}
 
-			mu.Lock()
-			em.hardwareMeasurements = hwMeasurements
-			models[modelName] = &Model{
-				Repo:              repo,
-				Tag:               tag,
-				SourceMeasurement: measurement,
-				Enclaves:          make([]*Enclave, 0),
-			}
-			mu.Unlock()
-		}(modelName, repo)
-	}
+		}()
+		return true
+	})
+	wg.Wait()
 
-	go func() {
-		wg.Wait()
-		close(errCh)
-	}()
-	if err := <-errCh; err != nil {
-		return nil, err
-	}
+	em.lastUpdated = time.Now()
 
-	log.Infof("Verified %d models", len(models))
-	for k, v := range models {
-		em.models.Store(k, v)
-	}
+	return nil
+}
 
-	em.billingCollector = billing.NewCollector(controlPlaneURL)
-	return em, nil
+// StartWorker starts the worker update loop
+func (em *EnclaveManager) StartWorker() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for ; true; <-ticker.C {
+		em.errors = []string{} // Clear errors
+		if err := em.sync(); err != nil {
+			log.Errorf("failed to update: %v", err)
+			em.errors = append(em.errors, err.Error())
+		}
+	}
 }
