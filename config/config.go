@@ -36,7 +36,7 @@ func Load(url string) (*Config, error) {
 	var data []byte
 	var err error
 	if !strings.HasPrefix(url, "http") {
-		data, err = os.ReadFile(url[1:])
+		data, err = os.ReadFile(url)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read runtime config: %w", err)
 		}
