@@ -6,9 +6,9 @@ memory: 16384
 shim:
   listen-port: 443
   upstream-port: 8089
-  publish-attestation: true
+  publish-attestation: false
   tls-challenge: dns
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.1.1"
+    image: "ghcr.io/tinfoilsh/confidential-inference-proxy:0.1.2"
