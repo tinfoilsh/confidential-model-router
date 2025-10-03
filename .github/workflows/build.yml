@@ -59,7 +59,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: tinfoilsh/pri-build-action@v0.1.2
+      - uses: tinfoilsh/pri-build-action@v0.5.2
         with:
           config-file: ${{ github.workspace }}/tinfoil-config.yml
           github-token: ${{ secrets.GITHUB_TOKEN }}
