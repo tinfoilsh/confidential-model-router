@@ -16,19 +16,21 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
 
 	"github.com/tinfoilsh/confidential-inference-proxy/manager"
-	"github.com/tinfoilsh/verifier/github"
 )
 
 //go:embed config.yml
-var configFile []byte
+var configFile []byte // Initial (attested) config
+
+// Set by build process
+var version = "dev"
 
 var (
-	extConfigFile = flag.String("e", "/tinfoil/external-config.yml", "path to external config file")
-	port          = flag.String("l", "8089", "port to listen on")
-	verbose       = flag.Bool("v", false, "enable verbose logging")
+	port            = flag.String("l", "8089", "port to listen on")
+	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
+	verbose         = flag.Bool("v", false, "enable verbose logging")
+	configURL       = flag.String("c", "https://raw.githubusercontent.com/tinfoilsh/confidential-inference-proxy/main/config.yml", "Path to config.yml, only used for enclaves and not measurements")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
@@ -52,44 +54,18 @@ func sendJSON(w http.ResponseWriter, data any) {
 	}
 }
 
-func loadExternalConfig() (string, string, error) {
-	data, err := os.ReadFile(*extConfigFile)
-	if err != nil {
-		return "", "", err
-	}
-
-	var config struct {
-		APIKey       string `yaml:"proxy-api-key"`
-		ControlPlane string `yaml:"control-plane"`
-	}
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return "", "", err
-	}
-	
-	// Use default control plane if not specified
-	if config.ControlPlane == "" {
-		config.ControlPlane = "https://api.tinfoil.sh"
-	}
-	
-	return config.APIKey, config.ControlPlane, nil
-}
-
 func main() {
 	flag.Parse()
-
 	if *verbose {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	apiKey, controlPlaneURL, err := loadExternalConfig()
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *configURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	mng, err := manager.NewEnclaveManager(configFile, controlPlaneURL)
-	if err != nil {
-		log.Fatal(err)
-	}
+	defer em.Shutdown()
+	go em.StartWorker()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
@@ -111,7 +87,7 @@ func main() {
 				jsonError(w, fmt.Sprintf("failed to find model parameter in request body: %v", err), http.StatusBadRequest)
 				return
 			}
-			
+
 			// Extract model name
 			modelInterface, ok := body["model"]
 			if !ok {
@@ -123,7 +99,7 @@ func main() {
 				jsonError(w, "model parameter must be a string", http.StatusBadRequest)
 				return
 			}
-			
+
 			// If streaming request, ensure continuous_usage_stats is enabled
 			if stream, ok := body["stream"].(bool); ok && stream {
 				// Check if client requested usage stats before we modify anything
@@ -143,13 +119,13 @@ func main() {
 						"continuous_usage_stats": true,
 					}
 				}
-				
+
 				// Set internal header to indicate if client requested usage
 				// This header will be used by the proxy to decide whether to filter usage-only chunks
 				if clientRequestedUsage {
 					r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
 				}
-				
+
 				// Re-encode the modified body
 				newBodyBytes, err := json.Marshal(body)
 				if err != nil {
@@ -162,12 +138,12 @@ func main() {
 				r.ContentLength = int64(len(bodyBytes))
 				log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
 			}
-			
+
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 
-		model, found := mng.GetModel(modelName)
+		model, found := em.GetModel(modelName)
 		if !found {
 			jsonError(w, "model not found", http.StatusNotFound)
 			return
@@ -185,96 +161,17 @@ func main() {
 	})
 
 	http.HandleFunc("/.well-known/tinfoil-proxy", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			sendJSON(w, map[string]any{
-				"models": mng.Models(),
-			})
-			return
-		case http.MethodPut:
-			if r.Header.Get("Authorization") != "Bearer "+apiKey {
-				jsonError(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			modelName := r.URL.Query().Get("model")
-			host := r.URL.Query().Get("host")
-			if err := mng.AddEnclave(modelName, host); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			m, found := mng.GetModel(modelName)
-			if !found {
-				jsonError(w, "model not found", http.StatusNotFound)
-				return
-			}
-			sendJSON(w, map[string]any{
-				"model": m,
-			})
-		case http.MethodPatch:
-			if r.Header.Get("Authorization") != "Bearer "+apiKey {
-				jsonError(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			modelName := r.URL.Query().Get("model")
-			model, found := mng.GetModel(modelName)
-			if !found {
-				jsonError(w, "model not found", http.StatusNotFound)
-				return
-			}
-
-			// Check if model is up to date
-			tag, err := github.FetchLatestTag(model.Repo)
-			if err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if model.Tag == tag {
-				jsonError(w, "model already up to date", http.StatusBadRequest)
-				return
-			}
-
-			if err := mng.UpdateModel(modelName); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			jsonError(w, fmt.Sprintf("Model %s updated", modelName), http.StatusOK)
-			return
-		case http.MethodDelete:
-			if r.Header.Get("Authorization") != "Bearer "+apiKey {
-				jsonError(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			modelName := r.URL.Query().Get("model")
-			host := r.URL.Query().Get("host")
-			if modelName == "" || host == "" {
-				jsonError(w, "model and host parameters are required", http.StatusBadRequest)
-				return
-			}
-
-			if err := mng.DeleteEnclave(modelName, host); err != nil {
-				jsonError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			jsonError(w, fmt.Sprintf("Enclave %s removed from model %s", host, modelName), http.StatusOK)
-			return
-		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		status := em.Status()
+		status["version"] = version
+		sendJSON(w, status)
 	})
 
 	// Setup graceful shutdown
 	server := &http.Server{
 		Addr:         ":" + *port,
-		Handler:      nil, // Use default ServeMux
+		Handler:      nil,             // Use default ServeMux
 		ReadTimeout:  5 * time.Minute, // Increased to support large RAG payloads
-		WriteTimeout: 0,                // Disabled to support long-running streaming responses
+		WriteTimeout: 0,               // Disabled to support long-running streaming responses
 	}
 
 	// Handle shutdown signals
@@ -300,9 +197,6 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.WithError(err).Error("Failed to gracefully shutdown server")
 	}
-
-	// Stop billing collector to ensure any remaining events are sent
-	mng.StopBillingCollector()
 
 	log.Info("Server stopped")
 }

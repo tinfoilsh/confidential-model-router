@@ -1,12 +1,55 @@
 models:
-  audio-processing: tinfoilsh/confidential-audio-processing
-  doc-upload: tinfoilsh/confidential-doc-upload
-  llama-free: tinfoilsh/confidential-llama3-3-70b
-  mistral-small-3-1-24b: tinfoilsh/confidential-mistral-small-3-1
-  nomic-embed-text: tinfoilsh/confidential-nomic-embed-text
-  qwen2-5-72b: tinfoilsh/confidential-qwen2-5-72b
-  deepseek-r1-0528: tinfoilsh/confidential-deepseek-r1-0528
-  llama3-3-70b: tinfoilsh/confidential-llama-mistral-qwen-turbo
-  qwen3-coder-480b: tinfoilsh/confidential-llama-mistral-qwen-turbo
-  gpt-oss-120b: tinfoilsh/confidential-gpt-oss-120b
-  deepseek-v31-terminus: tinfoilsh/confidential-deepseek-v31-terminus
+  llama-free:
+    repo: tinfoilsh/confidential-llama3-3-70b
+    enclaves:
+      - llama3-3-70b.model.tinfoil.sh
+
+  mistral-small-3-1-24b:
+    repo: tinfoilsh/confidential-mistral-small-3-1
+    enclaves:
+      - mistral-s-3-1-24b-p.model.tinfoil.sh
+
+  nomic-embed-text:
+    repo: tinfoilsh/confidential-nomic-embed-text
+    enclaves:
+      - nomic-embed-text.model.tinfoil.sh
+
+  qwen2-5-72b:
+    repo: tinfoilsh/confidential-qwen2-5-72b
+    enclaves:
+      - qwen2-5-72b-2.model.tinfoil.sh
+
+  doc-upload:
+    repo: tinfoilsh/confidential-doc-upload
+    enclaves:
+      - doc-upload.model.tinfoil.sh
+
+  audio-processing:
+    repo: tinfoilsh/confidential-audio-processing
+    enclaves:
+      - audio-processing.model.tinfoil.sh
+
+  llama3-3-70b:
+    repo: tinfoilsh/confidential-llama-mistral-qwen-turbo
+    enclaves:
+      - large.inf4.tinfoil.sh
+
+  qwen3-coder-480b:
+    repo: tinfoilsh/confidential-llama-mistral-qwen-turbo
+    enclaves:
+      - large.inf4.tinfoil.sh
+
+  deepseek-r1-0528:
+    repo: tinfoilsh/confidential-deepseek-r1-0528
+    enclaves:
+      - deepseek-r1-0528.inf3.tinfoil.sh
+
+  gpt-oss-120b:
+    repo: tinfoilsh/confidential-gpt-oss-120b
+    enclaves:
+      - gpt-oss-120b.model.tinfoil.sh
+
+  deepseek-v31-terminus:
+    repo: tinfoilsh/confidential-deepseek-v31-terminus
+    enclaves:
+      - deepseek-v31-terminus.inf7.tinfoil.sh
