@@ -39,12 +39,13 @@ type Model struct {
 }
 
 type EnclaveManager struct {
-	models           *sync.Map // model name -> *Model
-	configURL        string
-	sigstoreClient   *sigstore.Client
-	billingCollector *billing.Collector
-	errors           []string
-	lastUpdated      time.Time
+	models               *sync.Map // model name -> *Model
+	configURL            string
+	sigstoreClient       *sigstore.Client
+	billingCollector     *billing.Collector
+	errors               []string
+	lastSuccessfulUpdate time.Time
+	lastAttemptedUpdate  time.Time
 }
 
 // ModelExists checks if a model exists
@@ -131,9 +132,10 @@ func (em *EnclaveManager) Models() map[string]*Model {
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
 	return map[string]any{
-		"models":  em.Models(),
-		"errors":  em.errors,
-		"updated": em.lastUpdated,
+		"models":    em.Models(),
+		"errors":    em.errors,
+		"updated":   em.lastSuccessfulUpdate,
+		"attempted": em.lastAttemptedUpdate,
 	}
 }
 
@@ -271,6 +273,7 @@ func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error
 // sync updates all model's tags and measurements, then matches them to the enclave config
 func (em *EnclaveManager) sync() error {
 	log.Debug("Updating all models")
+	em.lastAttemptedUpdate = time.Now()
 
 	config, err := config.Load(em.configURL)
 	if err != nil {
@@ -321,13 +324,12 @@ func (em *EnclaveManager) sync() error {
 					log.Warn(err)
 				}
 			}
-
 		}()
 		return true
 	})
 	wg.Wait()
 
-	em.lastUpdated = time.Now()
+	em.lastSuccessfulUpdate = time.Now()
 
 	return nil
 }
