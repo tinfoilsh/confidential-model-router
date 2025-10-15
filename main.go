@@ -17,7 +17,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/tinfoilsh/confidential-inference-proxy/manager"
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 //go:embed config.yml
@@ -30,7 +30,7 @@ var (
 	port            = flag.String("l", "8089", "port to listen on")
 	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
 	verbose         = flag.Bool("v", false, "enable verbose logging")
-	configURL       = flag.String("c", "https://raw.githubusercontent.com/tinfoilsh/confidential-inference-proxy/main/config.yml", "Path to config.yml, only used for enclaves and not measurements")
+	configURL       = flag.String("c", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "Path to config.yml, only used for enclaves and not measurements")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {

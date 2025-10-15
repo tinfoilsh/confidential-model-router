@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"github.com/tinfoilsh/confidential-inference-proxy/manager"
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 var (

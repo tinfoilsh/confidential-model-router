@@ -16,8 +16,8 @@ import (
 	"github.com/tinfoilsh/verifier/github"
 	"github.com/tinfoilsh/verifier/sigstore"
 
-	"github.com/tinfoilsh/confidential-inference-proxy/billing"
-	"github.com/tinfoilsh/confidential-inference-proxy/config"
+	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
 type Enclave struct {

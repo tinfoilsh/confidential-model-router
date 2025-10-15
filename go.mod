@@ -1,4 +1,4 @@
-module github.com/tinfoilsh/confidential-inference-proxy
+module github.com/tinfoilsh/confidential-model-router
 
 go 1.25.1
 

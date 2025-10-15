@@ -1,5 +1,5 @@
 .idea/
-confidential-inference-proxy
+confidential-model-router
 proxy
 proxyctl
 ext.yml
