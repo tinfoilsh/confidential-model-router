@@ -7,7 +7,7 @@ models:
   mistral-small-3-1-24b:
     repo: tinfoilsh/confidential-mistral-small-3-1
     enclaves:
-      - mistral-s-3-1-24b-p.model.tinfoil.sh
+      - mistral.model.tinfoil.sh
 
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
