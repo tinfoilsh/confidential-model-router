@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -63,6 +64,35 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	return model.(*Model), true
 }
 
+// attestationFetch retrieves the attestation document from a given enclave hostname.
+// This is a local implementation that disables HTTP connection pooling to prevent
+// certificate validation errors when multiple hostnames (e.g., router.inf4.tinfoil.sh
+// and large.inf4.tinfoil.sh) resolve to the same IP address (127.0.0.1:443).
+// Without DisableKeepAlives, Go's HTTP/2 client reuses connections, causing SNI mismatches.
+func attestationFetch(host string) (*attestation.Document, error) {
+	var u url.URL
+	u.Host = host
+	u.Scheme = "https"
+	u.Path = "/.well-known/tinfoil-attestation"
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true, // Prevents connection reuse across different hostnames
+		},
+	}
+	resp, err := httpClient.Get(u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var doc attestation.Document
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
 // addEnclave verifies and adds an enclave to the model enclave pool.
 // If the enclave already exists, replace it if the TLS key fingerprint is different.
 func (em *EnclaveManager) addEnclave(
@@ -87,7 +117,7 @@ func (em *EnclaveManager) addEnclave(
 		}
 	}
 
-	remoteAttestation, err := attestation.Fetch(host)
+	remoteAttestation, err := attestationFetch(host)
 	if err != nil {
 		return fmt.Errorf("failed to fetch remote attestation: %v", err)
 	}
