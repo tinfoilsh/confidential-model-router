@@ -1,4 +1,4 @@
-shim-version: v0.2.8@sha256:dd06c2e7715f00e4ffa537a3b1acae73eec4d9bc92a8621600857fa9a4acd1d8
+shim-version: v0.2.9@sha256:cab643630f04d4d4d0a02d9d361fdf4a068c228c3f301b3e4d1c3b933310ad14
 cvm-version: 0.5.6
 cpus: 16
 memory: 16384
@@ -11,4 +11,4 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.5"
+    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.6"
