@@ -1,3 +1,8 @@
+routers:
+  router.inf4.tinfoil.sh:
+  router.inf6.tinfoil.sh:
+  router.inf7.tinfoil.sh:
+
 models:
   llama-free:
     repo: tinfoilsh/confidential-llama3-3-70b
