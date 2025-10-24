@@ -322,6 +322,31 @@ func (em *EnclaveManager) sync() error {
 		go func() {
 			defer wg.Done()
 			modelName := key.(string)
+
+			// Check if repo has changed in the config
+			model, found := em.GetModel(modelName)
+			if !found {
+				log.Errorf("model %s not found", modelName)
+				return
+			}
+
+			configModel, modelInConfig := config.Models[modelName]
+			if !modelInConfig {
+				log.Warnf("model %s no longer in config", modelName)
+				return
+			}
+
+			// If the repo has changed, update it and clear the measurement/enclaves
+			if model.Repo != configModel.Repo {
+				log.Infof("Repo changed for model %s: %s -> %s", modelName, model.Repo, configModel.Repo)
+				model.mu.Lock()
+				model.Repo = configModel.Repo
+				model.Tag = ""
+				model.SourceMeasurement = nil
+				model.Enclaves = make(map[string]*Enclave)
+				model.mu.Unlock()
+			}
+
 			_, err := em.updateModelMeasurements(modelName)
 			if err != nil {
 				log.Errorf("failed to update model measurements: %v", err)
