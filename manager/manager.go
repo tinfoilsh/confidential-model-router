@@ -27,6 +27,7 @@ type Enclave struct {
 	hpkeKey   string
 	predicate attestation.PredicateType
 	proxy     *httputil.ReverseProxy
+	metrics   *enclaveMetrics
 }
 
 type Model struct {
@@ -34,6 +35,7 @@ type Model struct {
 	Tag               string                   `json:"tag"`
 	SourceMeasurement *attestation.Measurement `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
+	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 
 	counter uint64
 	mu      sync.RWMutex
@@ -145,7 +147,9 @@ func (em *EnclaveManager) addEnclave(
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
 		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector),
+		metrics:   newEnclaveMetrics(host, modelName),
 	}
+	model.Enclaves[host].updateOverloadConfig(model.Overload)
 	return nil
 }
 
@@ -174,6 +178,15 @@ func (em *EnclaveManager) Shutdown() {
 	if em.billingCollector != nil {
 		em.billingCollector.Stop()
 	}
+	em.models.Range(func(_, value any) bool {
+		model := value.(*Model)
+		model.mu.RLock()
+		for _, enclave := range model.Enclaves {
+			enclave.shutdown()
+		}
+		model.mu.RUnlock()
+		return true
+	})
 }
 
 // NextEnclave gets the next sequential enclave
@@ -251,6 +264,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL stri
 			Tag:               "",
 			SourceMeasurement: nil,
 			Enclaves:          make(map[string]*Enclave),
+			Overload:          modelConfig.Overload,
 		})
 	}
 
@@ -295,6 +309,9 @@ func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error
 
 	model.Tag = latestTag
 	model.SourceMeasurement = measurement
+	for _, enclave := range model.Enclaves {
+		enclave.shutdown()
+	}
 	model.Enclaves = make(map[string]*Enclave) // Clear all enclaves, their measurements are now invalid
 
 	return true, nil
@@ -343,6 +360,9 @@ func (em *EnclaveManager) sync() error {
 				model.Repo = configModel.Repo
 				model.Tag = ""
 				model.SourceMeasurement = nil
+				for _, enclave := range model.Enclaves {
+					enclave.shutdown()
+				}
 				model.Enclaves = make(map[string]*Enclave)
 				model.mu.Unlock()
 			}
@@ -353,7 +373,13 @@ func (em *EnclaveManager) sync() error {
 			}
 
 			log.Tracef("Updating enclave config for model %s", modelName)
-			enclaves := config.Models[modelName].Enclaves
+			model.mu.Lock()
+			model.Overload = configModel.Overload
+			for _, enclave := range model.Enclaves {
+				enclave.updateOverloadConfig(model.Overload)
+			}
+			enclaves := configModel.Enclaves
+			model.mu.Unlock()
 			for _, enclave := range enclaves {
 				err := func() error {
 					// Remove enclaves that are no longer in the config
@@ -364,6 +390,7 @@ func (em *EnclaveManager) sync() error {
 					for existingHost := range model.Enclaves {
 						if !slices.Contains(enclaves, existingHost) {
 							log.Warnf("Enclave %s no longer in config, removing", existingHost)
+							model.Enclaves[existingHost].shutdown()
 							delete(model.Enclaves, existingHost)
 						}
 					}
@@ -401,4 +428,25 @@ func (em *EnclaveManager) StartWorker() {
 			em.errors = append(em.errors, err.Error())
 		}
 	}
+}
+
+func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig) {
+	if e == nil || e.metrics == nil {
+		return
+	}
+	e.metrics.setConfig(cfg)
+}
+
+func (e *Enclave) shutdown() {
+	if e == nil || e.metrics == nil {
+		return
+	}
+	e.metrics.shutdown()
+}
+
+func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {
+	if e == nil || e.metrics == nil {
+		return false, 0, 0
+	}
+	return e.metrics.shouldReject()
 }

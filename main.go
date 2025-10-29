@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -34,10 +36,13 @@ var (
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
-	if code == http.StatusOK {
-		log.Debugf("jsonError: %s", message)
-	} else {
+	switch {
+	case code >= 500:
 		log.Errorf("jsonError: %s", message)
+	case code >= 400:
+		log.Warnf("jsonError: %s", message)
+	default:
+		log.Debugf("jsonError: %s", message)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -155,6 +160,27 @@ func main() {
 			return
 		}
 
+		if overloaded, retryAfter, waiting := enclave.ShouldReject(); overloaded {
+			secs := int(retryAfter.Seconds())
+			if secs <= 0 {
+				secs = 60
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			log.WithFields(log.Fields{
+				"model":               modelName,
+				"enclave":             enclave.String(),
+				"requests_waiting":    waiting,
+				"retry_after_seconds": secs,
+			}).Warn("rejecting request due to backend overload")
+
+			// Record rejection metrics
+			manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
+			manager.RetryAfterSeconds.WithLabelValues(modelName).Observe(float64(secs))
+
+			jsonError(w, fmt.Sprintf("backend overloaded, retry after %d seconds", secs), http.StatusTooManyRequests)
+			return
+		}
+
 		log.Debugf("%s serving request\n", enclave)
 
 		enclave.ServeHTTP(w, r)
@@ -165,6 +191,9 @@ func main() {
 		status["version"] = version
 		sendJSON(w, status)
 	})
+
+	// Expose Prometheus metrics
+	http.Handle("/metrics", promhttp.Handler())
 
 	// Setup graceful shutdown
 	server := &http.Server{

@@ -57,3 +57,6 @@ models:
     repo: tinfoilsh/confidential-deepseek-v31-terminus
     enclaves:
       - deepseek-v31-terminus.inf7.tinfoil.sh
+    overload:
+      max_requests_waiting: 75
+      retry_after_minutes: 3

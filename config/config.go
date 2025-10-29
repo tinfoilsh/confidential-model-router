@@ -12,8 +12,15 @@ import (
 
 // Model represents the configuration for a single model
 type Model struct {
-	Repo     string   `yaml:"repo"`
-	Enclaves []string `yaml:"enclaves"`
+	Repo     string          `yaml:"repo"`
+	Enclaves []string        `yaml:"enclaves"`
+	Overload *OverloadConfig `yaml:"overload,omitempty"`
+}
+
+// OverloadConfig describes optional overload thresholds for a model.
+type OverloadConfig struct {
+	MaxRequestsWaiting int `yaml:"max_requests_waiting"`
+	RetryAfterMinutes  int `yaml:"retry_after_minutes"`
 }
 
 // Config represents the configuration structure matching config.yml
