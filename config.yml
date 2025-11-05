@@ -19,6 +19,11 @@ models:
     enclaves:
       - nomic-embed-text.model.tinfoil.sh
 
+  nomic-embed-text-long:
+    repo: tinfoilsh/confidential-nomic-embed-text-long
+    enclaves:
+      - nomic-embed-text-long.model.tinfoil.sh
+
   qwen2-5-72b:
     repo: tinfoilsh/confidential-qwen2-5-72b
     enclaves:
