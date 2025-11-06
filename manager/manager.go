@@ -112,7 +112,7 @@ func (em *EnclaveManager) addEnclave(
 	// If the enclave already exists and the TLS key fingerprint is the same, do nothing
 	currentEnclave, exists := model.Enclaves[host]
 	if exists {
-		realTLSKeyFP, err := attestation.TLSPublicKey(host)
+		realTLSKeyFP, err := attestation.TLSPublicKey(host, false)
 		if err == nil && currentEnclave.tlsKeyFP == realTLSKeyFP {
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
@@ -259,18 +259,22 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL stri
 	}
 
 	for modelName, modelConfig := range cfg.Models {
-		em.models.Store(modelName, &Model{
-			Repo:              modelConfig.Repo,
-			Tag:               "",
-			SourceMeasurement: nil,
-			Enclaves:          make(map[string]*Enclave),
-			Overload:          modelConfig.Overload,
-		})
+		em.addModel(modelName, modelConfig)
 	}
 
 	log.Infof("Loaded %d model(s) from initial config", len(cfg.Models))
 
 	return em, nil
+}
+
+func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
+	em.models.Store(modelName, &Model{
+		Repo:              modelConfig.Repo,
+		Tag:               "",
+		SourceMeasurement: nil,
+		Enclaves:          make(map[string]*Enclave),
+		Overload:          modelConfig.Overload,
+	})
 }
 
 // updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
@@ -333,6 +337,14 @@ func (em *EnclaveManager) sync() error {
 		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
 	}
 
+	// Add new models that appear in config but not in memory
+	for modelName, modelConfig := range config.Models {
+		if _, found := em.GetModel(modelName); !found {
+			log.Infof("New model detected in config: %s", modelName)
+			em.addModel(modelName, modelConfig)
+		}
+	}
+
 	var wg sync.WaitGroup
 	em.models.Range(func(key, value any) bool {
 		wg.Add(1)
@@ -350,6 +362,12 @@ func (em *EnclaveManager) sync() error {
 			configModel, modelInConfig := config.Models[modelName]
 			if !modelInConfig {
 				log.Warnf("model %s no longer in config", modelName)
+				model.mu.Lock()
+				for _, enclave := range model.Enclaves {
+					enclave.shutdown()
+				}
+				model.mu.Unlock()
+				em.models.Delete(modelName)
 				return
 			}
 
