@@ -362,6 +362,11 @@ func (em *EnclaveManager) sync() error {
 			configModel, modelInConfig := config.Models[modelName]
 			if !modelInConfig {
 				log.Warnf("model %s no longer in config", modelName)
+				model.mu.Lock()
+				for _, enclave := range model.Enclaves {
+					enclave.shutdown()
+				}
+				model.mu.Unlock()
 				em.models.Delete(modelName)
 				return
 			}
