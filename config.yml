@@ -1,6 +1,6 @@
 routers:
   inference.tinfoil.sh:
-  router.inf6.tinfoil.sh:
+  # router.inf6.tinfoil.sh:
   # router.inf7.tinfoil.sh:
 
 models:
