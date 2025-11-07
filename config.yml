@@ -19,7 +19,7 @@ models:
     enclaves:
       - nomic-embed-text.model.tinfoil.sh
 
-  nomic-embed-text-long:
+  nomic-embed-text-v1.5:
     repo: tinfoilsh/confidential-nomic-embed-text-long
     enclaves:
       - nomic-embed-text-long.model.tinfoil.sh
