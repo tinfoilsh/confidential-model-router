@@ -17,7 +17,7 @@ models:
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
     enclaves:
-      - doc-upload.inf5.tinfoil.sh
+      - doc-upload.inf6.tinfoil.sh
 
   audio-processing:
     repo: tinfoilsh/confidential-audio-processing
