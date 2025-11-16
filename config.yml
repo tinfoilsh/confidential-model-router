@@ -47,7 +47,7 @@ models:
   gpt-oss-120b-free:
     repo: tinfoilsh/confidential-gpt-oss-120b-free
     enclaves:
-      - gpt-oss-120b-free.inf6.tinfoil.sh
+      - gpt-oss-120b-free.inf5.tinfoil.sh
 
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
