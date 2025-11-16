@@ -19,10 +19,10 @@ models:
     enclaves:
       - doc-upload.inf6.tinfoil.sh
 
-  audio-processing:
-    repo: tinfoilsh/confidential-audio-processing
+  whisper-large-v3-turbo:
+    repo: tinfoilsh/confidential-whisper-large-v3
     enclaves:
-      - audio-processing.model.tinfoil.sh
+      - whisper.inf6.tinfoil.sh
 
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama-qwen
