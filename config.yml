@@ -9,20 +9,10 @@ models:
     enclaves:
       - llama3-3-70b.model.tinfoil.sh
 
-  mistral-small-3-1-24b:
-    repo: tinfoilsh/confidential-mistral-small-3-1
-    enclaves:
-      - mistral.model.tinfoil.sh
-
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
     enclaves:
       - nomic-embed-text.model.tinfoil.sh
-
-  qwen2-5-72b:
-    repo: tinfoilsh/confidential-qwen2-5-72b
-    enclaves:
-      - qwen2-5-72b-2.model.tinfoil.sh
 
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
