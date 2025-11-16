@@ -12,12 +12,12 @@ models:
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
     enclaves:
-      - nomic-embed-text.model.tinfoil.sh
+      - nomic-embed-text.inf5.tinfoil.sh
 
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
     enclaves:
-      - doc-upload.model.tinfoil.sh
+      - doc-upload.inf5.tinfoil.sh
 
   audio-processing:
     repo: tinfoilsh/confidential-audio-processing
