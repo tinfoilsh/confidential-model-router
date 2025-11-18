@@ -4,11 +4,6 @@ routers:
   router.inf7.tinfoil.sh:
 
 models:
-  llama-free:
-    repo: tinfoilsh/confidential-llama3-3-70b
-    enclaves:
-      - llama3-3-70b.model.tinfoil.sh
-
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
     enclaves:
