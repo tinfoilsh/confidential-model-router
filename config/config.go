@@ -12,9 +12,9 @@ import (
 
 // Model represents the configuration for a single model
 type Model struct {
-	Repo     string          `yaml:"repo"`
-	Enclaves []string        `yaml:"enclaves"`
-	Overload *OverloadConfig `yaml:"overload,omitempty"`
+	Repo      string          `yaml:"repo"`
+	Hostnames []string        `yaml:"enclaves"`
+	Overload  *OverloadConfig `yaml:"overload,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
