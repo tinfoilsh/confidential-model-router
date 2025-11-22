@@ -239,7 +239,7 @@ func (e *Enclave) String() string {
 	return e.host
 }
 
-// NewEnclaveManager loads model repos from the config into the enclave manager
+// NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
 func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL string) (*EnclaveManager, error) {
 	cfg, err := config.FromBytes(configFile)
 	if err != nil {
@@ -359,7 +359,7 @@ func (em *EnclaveManager) sync() error {
 
 			// If the repo has changed, display a warning.
 			if model.Repo != configModel.Repo {
-				log.Warnf("Repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
+				log.Errorf("repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
 				return
 			}
 
@@ -375,31 +375,24 @@ func (em *EnclaveManager) sync() error {
 				enclave.updateOverloadConfig(model.Overload)
 			}
 
-			log.Tracef("Updating enclaves domains for model %s", modelName)
-			enclaves := configModel.Enclaves
+			// Updating enclaves for each model
+			log.Tracef("updating enclaves for model %s", modelName)
+			hostnames := configModel.Hostnames
 			model.mu.Unlock()
-			for _, enclave := range enclaves {
-				err := func() error {
-					// Remove enclaves that are no longer in the config
-					model, found := em.GetModel(modelName)
-					if !found {
-						return fmt.Errorf("model %s not found", modelName)
-					}
-					for existingHost := range model.Enclaves {
-						if !slices.Contains(enclaves, existingHost) {
-							log.Warnf("Domain %s no longer in config, removing", existingHost)
-							model.Enclaves[existingHost].shutdown()
-							delete(model.Enclaves, existingHost)
-						}
-					}
 
-					log.Tracef("  + enclave %s", enclave)
-					if err := em.addEnclave(modelName, enclave, hwMeasurements); err != nil {
-						return fmt.Errorf("failed to add enclave: %v", err)
-					}
-					return nil
-				}()
-				if err != nil {
+			// Remove enclaves that are no longer in the config
+			for existingHost := range model.Enclaves {
+				if !slices.Contains(hostnames, existingHost) {
+					log.Warnf("hostname %s no longer in config, removing", existingHost)
+					model.Enclaves[existingHost].shutdown()
+					delete(model.Enclaves, existingHost)
+				}
+			}
+
+			// Add new enclave from the config and update attestation if needed
+			for _, host := range hostnames {
+				log.Tracef("  + host %s", host)
+				if err := em.addEnclave(modelName, host, hwMeasurements); err != nil {
 					em.errors = append(em.errors, err.Error())
 					log.Warn(err)
 				}
