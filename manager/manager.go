@@ -337,27 +337,13 @@ func (em *EnclaveManager) sync() error {
 		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
 	}
 
-	// Add new models that appear in config but not in memory
-	for modelName, modelConfig := range config.Models {
-		if _, found := em.GetModel(modelName); !found {
-			log.Infof("New model detected in config: %s", modelName)
-			em.addModel(modelName, modelConfig)
-		}
-	}
-
 	var wg sync.WaitGroup
 	em.models.Range(func(key, value any) bool {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			modelName := key.(string)
-
-			// Check if repo has changed in the config
-			model, found := em.GetModel(modelName)
-			if !found {
-				log.Errorf("model %s not found", modelName)
-				return
-			}
+			model := value.(*Model)
 
 			configModel, modelInConfig := config.Models[modelName]
 			if !modelInConfig {
@@ -371,18 +357,10 @@ func (em *EnclaveManager) sync() error {
 				return
 			}
 
-			// If the repo has changed, update it and clear the measurement/enclaves
+			// If the repo has changed, display a warning.
 			if model.Repo != configModel.Repo {
-				log.Infof("Repo changed for model %s: %s -> %s", modelName, model.Repo, configModel.Repo)
-				model.mu.Lock()
-				model.Repo = configModel.Repo
-				model.Tag = ""
-				model.SourceMeasurement = nil
-				for _, enclave := range model.Enclaves {
-					enclave.shutdown()
-				}
-				model.Enclaves = make(map[string]*Enclave)
-				model.mu.Unlock()
+				log.Warnf("Repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
+				return
 			}
 
 			_, err := em.updateModelMeasurements(modelName)
@@ -390,12 +368,14 @@ func (em *EnclaveManager) sync() error {
 				log.Errorf("failed to update model measurements: %v", err)
 			}
 
-			log.Tracef("Updating enclave config for model %s", modelName)
+			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()
 			model.Overload = configModel.Overload
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}
+
+			log.Tracef("Updating enclaves domains for model %s", modelName)
 			enclaves := configModel.Enclaves
 			model.mu.Unlock()
 			for _, enclave := range enclaves {
@@ -407,7 +387,7 @@ func (em *EnclaveManager) sync() error {
 					}
 					for existingHost := range model.Enclaves {
 						if !slices.Contains(enclaves, existingHost) {
-							log.Warnf("Enclave %s no longer in config, removing", existingHost)
+							log.Warnf("Domain %s no longer in config, removing", existingHost)
 							model.Enclaves[existingHost].shutdown()
 							delete(model.Enclaves, existingHost)
 						}
