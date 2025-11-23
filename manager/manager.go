@@ -377,7 +377,6 @@ func (em *EnclaveManager) sync() error {
 			// Updating enclaves for each model
 			log.Tracef("updating enclaves for model %s", modelName)
 			hostnames := configModel.Hostnames
-			model.mu.Unlock()
 
 			// Remove enclaves that are no longer in the config
 			for existingHost := range model.Enclaves {
@@ -387,6 +386,7 @@ func (em *EnclaveManager) sync() error {
 					delete(model.Enclaves, existingHost)
 				}
 			}
+			model.mu.Unlock()
 
 			// Add new enclave from the config and update attestation if needed
 			for _, host := range hostnames {
