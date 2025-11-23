@@ -54,8 +54,6 @@ models:
     enclaves:
       - titan-qwen2-5-05b.inf5.tinfoil.sh
 
-  
-
   deepseek-v31-terminus:
     repo: tinfoilsh/confidential-deepseek-v31-terminus
     enclaves:
