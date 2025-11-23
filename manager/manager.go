@@ -353,7 +353,6 @@ func (em *EnclaveManager) sync() error {
 					enclave.shutdown()
 				}
 				model.mu.Unlock()
-				em.models.Delete(modelName)
 				return
 			}
 
