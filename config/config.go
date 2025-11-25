@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
@@ -43,6 +44,7 @@ func FromBytes(data []byte) (*Config, error) {
 // Loads configuration from a URL or file
 func Load(url string, sha256_required bool) (*Config, error) {
 	cleanURL, expectedSHA := parseURLWithSHA(url)
+	log.Debugf("loading config from %s (sha256_required=%v)", cleanURL, sha256_required)
 	if sha256_required {
 		if expectedSHA == "" {
 			return nil, fmt.Errorf("sha256 required for %s", url)
@@ -82,6 +84,7 @@ func Load(url string, sha256_required bool) (*Config, error) {
 		if !strings.EqualFold(actual, expectedSHA) {
 			return nil, fmt.Errorf("runtime config sha256 mismatch: expected %s, got %s", expectedSHA, actual)
 		}
+		log.Debug("config sha256 verification passed")
 	}
 
 	return FromBytes(data)
