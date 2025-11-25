@@ -43,7 +43,8 @@ type Model struct {
 
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
-	configURL            string
+	initConfigURL        string
+	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
 	errors               []string
@@ -240,8 +241,14 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL string) (*EnclaveManager, error) {
-	cfg, err := config.FromBytes(configFile)
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string) (*EnclaveManager, error) {
+	var cfg *config.Config
+	var err error
+	if initConfigURL != "" {
+		cfg, err = config.Load(initConfigURL, true)
+	} else {
+		cfg, err = config.FromBytes(configFile)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +260,8 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, configURL stri
 
 	em := &EnclaveManager{
 		models:           &sync.Map{},
-		configURL:        configURL,
+		initConfigURL:    initConfigURL,
+		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL),
 	}
@@ -326,7 +334,7 @@ func (em *EnclaveManager) sync() error {
 	log.Debug("Updating all models")
 	em.lastAttemptedUpdate = time.Now()
 
-	config, err := config.Load(em.configURL)
+	config, err := config.Load(em.updateConfigURL, false)
 	if err != nil {
 		return fmt.Errorf("failed to fetch config: %v", err)
 	}
