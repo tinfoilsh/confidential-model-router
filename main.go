@@ -32,7 +32,8 @@ var (
 	port            = flag.String("l", "8089", "port to listen on")
 	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
 	verbose         = flag.Bool("v", false, "enable verbose logging")
-	configURL       = flag.String("c", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "Path to config.yml, only used to update enclave hostnames and not measurements")
+	initConfigURL   = flag.String("i", "", "Optional path to initial config.yml (requires to append @sha256:<hex> for integrity)")
+	updateConfigURL = flag.String("u", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "Path to runtime config.yml")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
@@ -65,7 +66,7 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *configURL)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL)
 	if err != nil {
 		log.Fatal(err)
 	}

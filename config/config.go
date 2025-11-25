@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,17 +40,26 @@ func FromBytes(data []byte) (*Config, error) {
 	return &config, nil
 }
 
-// Load loads configuration from a URL or file
-func Load(url string) (*Config, error) {
+// Loads configuration from a URL or file
+func Load(url string, sha256_required bool) (*Config, error) {
+	cleanURL, expectedSHA := parseURLWithSHA(url)
+	if sha256_required {
+		if expectedSHA == "" {
+			return nil, fmt.Errorf("sha256 required for %s", url)
+		}
+	}
 	var data []byte
 	var err error
-	if !strings.HasPrefix(url, "http") {
-		data, err = os.ReadFile(url)
+	if !strings.HasPrefix(cleanURL, "https") {
+		if strings.HasPrefix(cleanURL, "http") {
+			return nil, fmt.Errorf("http is not supported for config URLs. Use https instead.")
+		}
+		data, err = os.ReadFile(cleanURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read runtime config: %w", err)
 		}
 	} else {
-		resp, err := http.Get(url)
+		resp, err := http.Get(cleanURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch runtime config: %w", err)
 		}
@@ -64,5 +75,33 @@ func Load(url string) (*Config, error) {
 		}
 	}
 
+	// Optional integrity verification via URL fragment: #sha256=<hex>
+	if expectedSHA != "" {
+		sum := sha256.Sum256(data)
+		actual := hex.EncodeToString(sum[:])
+		if !strings.EqualFold(actual, expectedSHA) {
+			return nil, fmt.Errorf("runtime config sha256 mismatch: expected %s, got %s", expectedSHA, actual)
+		}
+	}
+
 	return FromBytes(data)
+}
+
+// parseURLWithSHA extracts an optional sha256 hash provided via fragment:
+//
+//	"<url-or-path>@sha256:<hex>"
+//
+// Returns the URL/path without the fragment and the expected hex string (or empty).
+func parseURLWithSHA(input string) (string, string) {
+	parts := strings.SplitN(input, "@", 2)
+	if len(parts) == 1 {
+		return input, ""
+	}
+	fragment := parts[1]
+	const prefix = "sha256:"
+	if strings.HasPrefix(strings.ToLower(fragment), prefix) {
+		return parts[0], fragment[len(prefix):]
+	}
+	// Unknown fragment: ignore for loading purposes
+	return parts[0], ""
 }
