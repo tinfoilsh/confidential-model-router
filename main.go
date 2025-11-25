@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,8 +33,9 @@ var (
 	port            = flag.String("l", "8089", "port to listen on")
 	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
 	verbose         = flag.Bool("v", false, "enable verbose logging")
-	initConfigURL   = flag.String("i", "", "Optional path to initial config.yml (requires to append @sha256:<hex> for integrity)")
-	updateConfigURL = flag.String("u", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "Path to runtime config.yml")
+	initConfigURL   = flag.String("i", "", "optional path to initial config.yml (requires to append @sha256:<hex> for integrity)")
+	updateConfigURL = flag.String("u", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "path to runtime config.yml")
+	domain          = flag.String("d", "", "domain used by this router")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
@@ -60,6 +62,51 @@ func sendJSON(w http.ResponseWriter, data any) {
 	}
 }
 
+func routeModel(w http.ResponseWriter, r *http.Request, domain string, body map[string]interface{}) (string, error) {
+	if domain != "" {
+		// Accept exact domain and any of its subdomains; derive model from leftmost subdomain
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if host != domain && !strings.HasSuffix(host, "."+domain) {
+			return "", fmt.Errorf("domain mismatch")
+		}
+		// If request is for a subdomain, use leftmost label as model name (e.g., deepseek.inference.tinfoil.sh -> deepseek)
+		if host != domain && strings.HasSuffix(host, "."+domain) {
+			sub := strings.TrimSuffix(host, "."+domain)
+			if sub == "" {
+				return "", fmt.Errorf("subdomain is empty")
+			} else {
+				parts := strings.Split(sub, ".")
+				if len(parts) > 0 && parts[0] != "" {
+					return parts[0], nil
+				} else {
+					return "", fmt.Errorf("first subdomain is empty")
+				}
+			}
+		}
+	}
+
+	if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
+		return "whisper-large-v3-turbo", nil
+	} else if r.URL.Path == "/v1/convert/file" {
+		return "doc-upload", nil
+	} else {
+		// Extract model name from request body
+		modelInterface, ok := body["model"]
+		if !ok {
+			return "", fmt.Errorf("model parameter not found in request body")
+		}
+		modelName, ok := modelInterface.(string)
+		if !ok {
+			return "", fmt.Errorf("model parameter must be a string")
+		}
+
+		return modelName, nil
+	}
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -74,80 +121,70 @@ func main() {
 	go em.StartWorker()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		var modelName string
+
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
 			return
-		} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
-			modelName = "whisper-large-v3-turbo"
-		} else if r.URL.Path == "/v1/convert/file" {
-			modelName = "doc-upload"
-		} else {
-			var body map[string]interface{}
-			bodyBytes, err := io.ReadAll(r.Body)
-			if err != nil {
-				jsonError(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
-				return
-			}
-			if err := json.Unmarshal(bodyBytes, &body); err != nil {
-				jsonError(w, fmt.Sprintf("failed to find model parameter in request body: %v", err), http.StatusBadRequest)
-				return
-			}
-
-			// Extract model name
-			modelInterface, ok := body["model"]
-			if !ok {
-				jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
-				return
-			}
-			modelName, ok = modelInterface.(string)
-			if !ok {
-				jsonError(w, "model parameter must be a string", http.StatusBadRequest)
-				return
-			}
-
-			// If streaming request, ensure continuous_usage_stats is enabled
-			if stream, ok := body["stream"].(bool); ok && stream {
-				// Check if client requested usage stats before we modify anything
-				clientRequestedUsage := false
-				if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
-					// Check for OpenAI-style include_usage
-					if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
-						clientRequestedUsage = true
-					}
-					// Check for vLLM-style continuous_usage_stats
-					if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-						clientRequestedUsage = true
-					}
-					streamOptions["continuous_usage_stats"] = true
-				} else {
-					body["stream_options"] = map[string]interface{}{
-						"continuous_usage_stats": true,
-					}
-				}
-
-				// Set internal header to indicate if client requested usage
-				// This header will be used by the proxy to decide whether to filter usage-only chunks
-				if clientRequestedUsage {
-					r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
-				}
-
-				// Re-encode the modified body
-				newBodyBytes, err := json.Marshal(body)
-				if err != nil {
-					jsonError(w, "failed to process request body", http.StatusInternalServerError)
-					return
-				}
-				bodyBytes = newBodyBytes
-				// Update Content-Length header to match new body size
-				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-				r.ContentLength = int64(len(bodyBytes))
-				log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
-			}
-
-			r.Body.Close()
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
+
+		var body map[string]interface{}
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			jsonError(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			jsonError(w, fmt.Sprintf("failed to parse request body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		modelName, err := routeModel(w, r, *domain, body)
+		if err != nil {
+			jsonError(w, fmt.Sprintf("failed to route model: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// If streaming request, ensure continuous_usage_stats is enabled
+		if stream, ok := body["stream"].(bool); ok && stream {
+			// Check if client requested usage stats before we modify anything
+			clientRequestedUsage := false
+			if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
+				// Check for OpenAI-style include_usage
+				if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+					clientRequestedUsage = true
+				}
+				// Check for vLLM-style continuous_usage_stats
+				if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
+					clientRequestedUsage = true
+				}
+				streamOptions["continuous_usage_stats"] = true
+			} else {
+				body["stream_options"] = map[string]interface{}{
+					"continuous_usage_stats": true,
+				}
+			}
+
+			// Set internal header to indicate if client requested usage
+			// This header will be used by the proxy to decide whether to filter usage-only chunks
+			if clientRequestedUsage {
+				r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
+			}
+
+			// Re-encode the modified body
+			newBodyBytes, err := json.Marshal(body)
+			if err != nil {
+				jsonError(w, "failed to process request body", http.StatusInternalServerError)
+				return
+			}
+			bodyBytes = newBodyBytes
+			// Update Content-Length header to match new body size
+			r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+			r.ContentLength = int64(len(bodyBytes))
+			log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
+		}
+
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 		model, found := em.GetModel(modelName)
 		if !found {
