@@ -63,14 +63,14 @@ func sendJSON(w http.ResponseWriter, data any) {
 }
 
 func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
-	// Accept exact domain and any of its subdomains; derive model from leftmost subdomain
+	// Check if the request is for a subdomain and derive model from leftmost subdomain.
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	log.Debugf("host: %s", host)
-	if host != domain && !strings.HasSuffix(host, "."+domain) {
-		return "", fmt.Errorf("domain mismatch")
+	if !strings.HasSuffix(host, "."+domain) {
+		return "", nil
 	}
 
 	// If request is for a subdomain, use leftmost label as model name (e.g., deepseek.inference.tinfoil.sh -> deepseek)
