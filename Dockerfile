@@ -21,4 +21,4 @@ COPY --from=builder /app/proxy .
 
 EXPOSE 8089
 
-CMD ["./proxy"]
+ENTRYPOINT ["./proxy"]
