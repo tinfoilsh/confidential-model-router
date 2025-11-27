@@ -64,11 +64,11 @@ func sendJSON(w http.ResponseWriter, data any) {
 
 func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	// Check if the request is for a subdomain and derive model from leftmost subdomain.
-	host := r.Host
+	host := r.Header.Get("X-Forwarded-Host")
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	log.Debugf("host: %s", host)
+	log.Debugf("host (from X-Forwarded-Host): %s", host)
 	if !strings.HasSuffix(host, "."+domain) {
 		return "", nil
 	}
