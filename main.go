@@ -114,6 +114,26 @@ func main() {
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
 				return
+			} else if r.URL.Path == "/v1/models" {
+				type modelInfo struct {
+					ID      string `json:"id"`
+					Object  string `json:"object"`
+					OwnedBy string `json:"owned_by"`
+				}
+				models := em.Models()
+				data := make([]modelInfo, 0, len(models))
+				for name := range models {
+					data = append(data, modelInfo{
+						ID:      name,
+						Object:  "model",
+						OwnedBy: "tinfoil",
+					})
+				}
+				sendJSON(w, map[string]any{
+					"object": "list",
+					"data":   data,
+				})
+				return
 			} else if r.URL.Path == "/.well-known/tinfoil-proxy" {
 				status := em.Status()
 				status["version"] = version
