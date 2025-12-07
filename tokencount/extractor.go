@@ -149,9 +149,20 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 func (s *StreamingTokenExtractor) processStream() {
 	defer s.writer.Close()
 
+	lastLineWasFiltered := false
+
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
 		shouldWrite := true
+
+		// If the previous line was filtered and this is an empty line, skip it
+		// to avoid consecutive empty lines in the output
+		if lastLineWasFiltered && line == "" {
+			lastLineWasFiltered = false
+			continue
+		}
+
+		lastLineWasFiltered = false
 
 		// Parse SSE data lines
 		if strings.HasPrefix(line, "data: ") {
@@ -184,6 +195,7 @@ func (s *StreamingTokenExtractor) processStream() {
 								// This is a usage-only chunk with empty choices array
 								// Filter it out since client didn't request usage
 								shouldWrite = false
+								lastLineWasFiltered = true
 							}
 						}
 					}
