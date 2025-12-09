@@ -128,7 +128,7 @@ func (em *EnclaveManager) addEnclave(
 	if err != nil {
 		return fmt.Errorf("failed to verify remote attestation: %v", err)
 	}
-	if verification.Measurement.Type == attestation.TdxGuestV1 {
+	if verification.Measurement.Type == attestation.TdxGuestV2 {
 		_, err = attestation.VerifyHardware(hwMeasurements, verification.Measurement)
 		if err != nil {
 			return fmt.Errorf("failed to verify hardware measurements: %v", err)
