@@ -21,6 +21,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/salt"
 )
 
 //go:embed config.yml
@@ -152,6 +153,13 @@ func main() {
 					return
 				}
 
+				// Create salt for KV-Cache
+				saltID := salt.SaltFromRequest(r)
+
+				// Inject cache salt into request body
+				salt.InjectSalt(body, saltID)
+				log.Debugf("Injected cache salt `%d`", saltID)
+
 				// If streaming request, ensure continuous_usage_stats is enabled
 				if stream, ok := body["stream"].(bool); ok && stream {
 					// Check if client requested usage stats before we modify anything
@@ -178,18 +186,19 @@ func main() {
 						r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
 					}
 
-					// Re-encode the modified body
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, fmt.Sprintf("failed to process request body: %v", err), http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					// Update Content-Length header to match new body size
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
 					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
 				}
+
+				// Re-encode the request body
+				newBodyBytes, err := json.Marshal(body)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("failed to process request body: %v", err), http.StatusInternalServerError)
+					return
+				}
+				bodyBytes = newBodyBytes
+				// Update Content-Length header to match new body size
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
