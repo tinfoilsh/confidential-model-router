@@ -355,6 +355,36 @@ data: [DONE]
 	}
 }
 
+func TestFilteredChunkMustNotLeaveEmptySSEEvent(t *testing.T) {
+	// When a usage-only chunk is filtered, its trailing blank line must also be
+	// suppressed. Otherwise the client receives an empty SSE event (blank data)
+	// which causes "unexpected end of JSON input" when parsed.
+	input := "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"id\":\"1\",\"choices\":[],\"usage\":{\"total_tokens\":5}}\n\ndata: [DONE]\n\n"
+
+	inputReader := io.NopCloser(strings.NewReader(input))
+	pr, pw := io.Pipe()
+
+	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor.clientRequestedUsage = false // should filter usage-only chunk
+
+	go extractor.processStream()
+
+	output, _ := io.ReadAll(pr)
+
+	// The output must NOT contain two consecutive newlines that form an empty event.
+	// Valid: "data: ...\n\ndata: ...\n\n"
+	// Invalid: "data: ...\n\n\ndata: ..." (triple newline = empty event in between)
+	if bytes.Contains(output, []byte("\n\n\n")) {
+		t.Errorf("Output contains empty SSE event (consecutive blank lines):\n%q", output)
+	}
+
+	// Also verify expected structure: two data lines separated by blank lines
+	expected := "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n"
+	if string(output) != expected {
+		t.Errorf("Expected:\n%q\nGot:\n%q", expected, output)
+	}
+}
+
 func TestEdgeCases(t *testing.T) {
 	tests := []struct {
 		name                 string
