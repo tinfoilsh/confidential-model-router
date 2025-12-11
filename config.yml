@@ -54,6 +54,11 @@ models:
     enclaves:
       - titan-qwen2-5-05b.inf5.tinfoil.sh
 
+  kimi-k2-thinking:
+    repo: tinfoilsh/confidential-kimi-k2-thinking
+    enclaves:
+      - kimi-k2-thinking.inf8.tinfoil.sh
+
   deepseek-v31-terminus:
     repo: tinfoilsh/confidential-deepseek-v31-terminus
     enclaves:
