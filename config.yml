@@ -20,9 +20,9 @@ models:
       - whisper.inf6.tinfoil.sh
 
   llama3-3-70b:
-    repo: tinfoilsh/confidential-llama-qwen
+    repo: tinfoilsh/confidential-llama3-3-70b
     enclaves:
-      - llama-qwen.inf8.tinfoil.sh
+      - llama3-3-70b.inf5.tinfoil.sh
 
   qwen3-coder-480b:
     repo: tinfoilsh/confidential-llama-qwen
