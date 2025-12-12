@@ -57,7 +57,6 @@ models:
   kimi-k2-thinking:
     repo: tinfoilsh/confidential-kimi-k2-thinking
     enclaves:
-      - kimi-k2-thinking.inf8.tinfoil.sh
 
   deepseek-v31-terminus:
     repo: tinfoilsh/confidential-deepseek-v31-terminus
