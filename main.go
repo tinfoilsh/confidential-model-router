@@ -124,7 +124,14 @@ func main() {
 				promhttp.Handler().ServeHTTP(w, r)
 				return
 			} else if r.URL.Path == "/v1/models" {
-				resp, err := http.Get(*controlPlaneURL + "/v1/models")
+				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, *controlPlaneURL+"/v1/models", nil)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("failed to create request: %v", err), http.StatusInternalServerError)
+					return
+				}
+				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					jsonError(w, fmt.Sprintf("failed to fetch models: %v", err), http.StatusBadGateway)
 					return
