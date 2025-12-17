@@ -123,6 +123,17 @@ func main() {
 				// Expose Prometheus metrics
 				promhttp.Handler().ServeHTTP(w, r)
 				return
+			} else if r.URL.Path == "/v1/models" {
+				resp, err := http.Get(*controlPlaneURL + "/v1/models")
+				if err != nil {
+					jsonError(w, fmt.Sprintf("failed to fetch models: %v", err), http.StatusBadGateway)
+					return
+				}
+				defer resp.Body.Close()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(resp.StatusCode)
+				io.Copy(w, resp.Body)
+				return
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				modelName = "whisper-large-v3-turbo"
 			} else if r.URL.Path == "/v1/convert/file" {
