@@ -34,7 +34,7 @@ var (
 	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
 	verbose         = flag.Bool("v", false, "enable verbose logging")
 	initConfigURL   = flag.String("i", "", "optional path to initial config.yml (requires to append @sha256:<hex> for integrity)")
-	updateConfigURL = flag.String("u", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "path to runtime config.yml")
+	updateConfigURL = flag.String("u", "https://api.tinfoil.sh/api/config/router", "path to runtime config.yml")
 	domain          = flag.String("d", "localhost", "domain used by this router")
 )
 
