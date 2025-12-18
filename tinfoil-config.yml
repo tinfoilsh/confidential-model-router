@@ -1,4 +1,4 @@
-shim-version: v0.3.0@sha256:fe34a829a626cfa73cc305fc5c210e0cedc61524af3829c548d9505673ef8c5a
+shim-version: v0.3.1@sha256:ff2cc20df55d3a33c527052911871f3d1d4d16a1b708b15266fc0ced01c2c21a
 cvm-version: 0.5.8
 cpus: 8
 memory: 16384
@@ -13,6 +13,6 @@ containers:
   - name: "proxy"
     image: ""
     args: [
-      "ghcr.io/tinfoilsh/confidential-model-router:0.0.26",
+      "ghcr.io/tinfoilsh/confidential-model-router:0.0.27",
       "-d","$(awk -F': *' '$1~/^domain$/{print $2; exit}' /mnt/ramdisk/external-config.yml)",
     ]
