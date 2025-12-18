@@ -8,6 +8,8 @@ on:
 jobs:
   docker-build:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -37,6 +39,7 @@ jobs:
             type=sha,format=short
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         env:
           SOURCE_DATE_EPOCH: 0
@@ -56,9 +59,38 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Update config with new digest
+        run: |
+          sed -i 's|ghcr.io/tinfoilsh/confidential-model-router[:@][^"]*|ghcr.io/tinfoilsh/confidential-model-router@${{ needs.docker-build.outputs.digest }}|' tinfoil-config.yml
+
+      - name: Print digest for other repos
+        run: |
+          echo "============================================"
+          echo "New digest: ${{ needs.docker-build.outputs.digest }}"
+          echo ""
+          echo "Update other configs to use:"
+          echo "ghcr.io/tinfoilsh/confidential-model-router@${{ needs.docker-build.outputs.digest }}"
+          echo "============================================"
+
+      - name: Create PR for digest update
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: update docker image digest to ${{ needs.docker-build.outputs.digest }}"
+          title: "Update Docker image digest"
+          body: |
+            Automated digest update from release workflow.
+
+            New digest: `${{ needs.docker-build.outputs.digest }}`
+          branch: update-docker-digest
+          base: main
+          delete-branch: true
+
       - uses: tinfoilsh/pri-build-action@v0.5.5
         with:
           config-file: ${{ github.workspace }}/tinfoil-config.yml
