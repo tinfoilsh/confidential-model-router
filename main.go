@@ -224,7 +224,7 @@ func main() {
 					// Update Content-Length header to match new body size
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
-					log.Debugf("Modified streaming request body to include continuous_usage_stats, API type: %s, client requested usage: %v", r.Header.Get("X-Tinfoil-API-Type"), clientRequestedUsage)
+					log.Debugf("Modified streaming request body for usage tracking, API type: %s, client requested usage: %v", r.Header.Get("X-Tinfoil-API-Type"), clientRequestedUsage)
 				}
 
 				r.Body.Close()
