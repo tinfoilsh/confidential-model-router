@@ -71,9 +71,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		// Check if client requested usage stats (from header set in main.go)
 		clientRequestedUsage := req.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
+		apiType := tokencount.APIType(req.Header.Get("X-Tinfoil-API-Type"))
 
 		// Extract tokens with the usage handler
-		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage)
+		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage, apiType)
 		if err != nil {
 			log.WithError(err).Error("Failed to extract tokens from response")
 			// Don't fail the request, just log the error

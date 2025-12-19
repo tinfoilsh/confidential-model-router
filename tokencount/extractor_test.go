@@ -15,6 +15,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 		responseBody string
 		contentType  string
 		statusCode   int
+		apiType      APIType
 		wantUsage    *Usage
 		wantErr      bool
 	}{
@@ -37,6 +38,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}`,
 			contentType: "application/json",
 			statusCode:  http.StatusOK,
+			apiType:     APITypeCompletions,
 			wantUsage: &Usage{
 				PromptTokens:     10,
 				CompletionTokens: 20,
@@ -57,6 +59,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}`,
 			contentType: "application/json",
 			statusCode:  http.StatusOK,
+			apiType:     APITypeCompletions,
 			wantUsage:   nil,
 		},
 		{
@@ -64,6 +67,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			responseBody: `Hello, this is plain text`,
 			contentType:  "text/plain",
 			statusCode:   http.StatusOK,
+			apiType:      APITypeCompletions,
 			wantUsage:    nil,
 		},
 		{
@@ -71,7 +75,61 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			responseBody: `{"error": "Invalid request"}`,
 			contentType:  "application/json",
 			statusCode:   http.StatusBadRequest,
+			apiType:      APITypeCompletions,
 			wantUsage:    nil,
+		},
+		{
+			name: "valid Responses API response",
+			responseBody: `{
+				"id": "resp_123",
+				"object": "response",
+				"created_at": 1677652288,
+				"output": [{"type": "message", "content": [{"type": "output_text", "text": "Hello!"}]}],
+				"usage": {
+					"input_tokens": 15,
+					"output_tokens": 25,
+					"total_tokens": 40
+				}
+			}`,
+			contentType: "application/json",
+			statusCode:  http.StatusOK,
+			apiType:     APITypeResponses,
+			wantUsage: &Usage{
+				PromptTokens:     15,
+				CompletionTokens: 25,
+				TotalTokens:      40,
+			},
+		},
+		{
+			name: "Responses API without total_tokens calculates sum",
+			responseBody: `{
+				"id": "resp_123",
+				"object": "response",
+				"usage": {
+					"input_tokens": 10,
+					"output_tokens": 20
+				}
+			}`,
+			contentType: "application/json",
+			statusCode:  http.StatusOK,
+			apiType:     APITypeResponses,
+			wantUsage: &Usage{
+				PromptTokens:     10,
+				CompletionTokens: 20,
+				TotalTokens:      30,
+			},
+		},
+		{
+			name: "Responses API without usage",
+			responseBody: `{
+				"id": "resp_123",
+				"object": "response",
+				"output": []
+			}`,
+			contentType: "application/json",
+			statusCode:  http.StatusOK,
+			apiType:     APITypeResponses,
+			wantUsage:   nil,
 		},
 	}
 
@@ -90,7 +148,11 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}
 
 			// Extract tokens with handler
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			apiType := tt.apiType
+			if apiType == "" {
+				apiType = APITypeCompletions
+			}
+			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false, apiType)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -198,7 +260,7 @@ data: [DONE]
 			}
 
 			// Extract tokens
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false, APITypeCompletions)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v", err)
 				return

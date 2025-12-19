@@ -174,7 +174,7 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 
 	// Call with clientRequestedUsage = true
-	body, usage, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, true)
+	body, usage, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, true, APITypeCompletions)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -546,6 +546,60 @@ data: [DONE]
 	// Verify stream 2 did NOT filter the usage chunk
 	if !strings.Contains(output2.String(), `"choices":[]`) {
 		t.Error("Stream 2 should NOT have filtered empty choices chunk")
+	}
+}
+
+func TestResponsesAPIStreamingUsageExtraction(t *testing.T) {
+	tests := []struct {
+		name          string
+		usage         map[string]any
+		expectedUsage *Usage
+	}{
+		{
+			name:          "extracts all token fields",
+			usage:         map[string]any{"input_tokens": float64(67), "output_tokens": float64(56), "total_tokens": float64(123)},
+			expectedUsage: &Usage{PromptTokens: 67, CompletionTokens: 56, TotalTokens: 123},
+		},
+		{
+			name:          "calculates total if missing",
+			usage:         map[string]any{"input_tokens": float64(20), "output_tokens": float64(30)},
+			expectedUsage: &Usage{PromptTokens: 20, CompletionTokens: 30, TotalTokens: 50},
+		},
+		{
+			name:          "handles partial usage",
+			usage:         map[string]any{"input_tokens": float64(10)},
+			expectedUsage: &Usage{PromptTokens: 10, CompletionTokens: 0, TotalTokens: 10},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extractor := &StreamingTokenExtractor{usage: &Usage{}}
+			data := map[string]any{"usage": tt.usage}
+			extractor.extractResponsesAPIUsage(data)
+
+			if extractor.usage.PromptTokens != tt.expectedUsage.PromptTokens ||
+				extractor.usage.CompletionTokens != tt.expectedUsage.CompletionTokens ||
+				extractor.usage.TotalTokens != tt.expectedUsage.TotalTokens {
+				t.Errorf("got %+v, want %+v", extractor.usage, tt.expectedUsage)
+			}
+		})
+	}
+}
+
+func TestResponsesAPIStreamingNoUsage(t *testing.T) {
+	extractor := &StreamingTokenExtractor{usage: &Usage{}}
+
+	// No usage field
+	extractor.extractResponsesAPIUsage(map[string]any{"id": "resp_123"})
+	if extractor.usage.TotalTokens != 0 {
+		t.Errorf("expected no usage extracted, got %+v", extractor.usage)
+	}
+
+	// Null usage
+	extractor.extractResponsesAPIUsage(map[string]any{"usage": nil})
+	if extractor.usage.TotalTokens != 0 {
+		t.Errorf("expected no usage extracted from null, got %+v", extractor.usage)
 	}
 }
 

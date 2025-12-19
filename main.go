@@ -21,6 +21,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 //go:embed config.yml
@@ -170,23 +171,40 @@ func main() {
 					return
 				}
 
+				// Determine API type based on path and set internal header (not exposed to clients)
+				apiType := tokencount.APITypeCompletions
+				if r.URL.Path == "/v1/responses" || strings.HasPrefix(r.URL.Path, "/v1/responses/") {
+					apiType = tokencount.APITypeResponses
+				}
+				r.Header.Set("X-Tinfoil-API-Type", string(apiType))
+
 				// If streaming request, ensure continuous_usage_stats is enabled
 				if stream, ok := body["stream"].(bool); ok && stream {
 					// Check if client requested usage stats before we modify anything
 					clientRequestedUsage := false
-					if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
-						// Check for OpenAI-style include_usage
-						if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+
+					if apiType == tokencount.APITypeResponses {
+						// Responses API uses include_usage at the top level
+						if includeUsage, ok := body["include_usage"].(bool); ok && includeUsage {
 							clientRequestedUsage = true
 						}
-						// Check for vLLM-style continuous_usage_stats
-						if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-							clientRequestedUsage = true
-						}
-						streamOptions["continuous_usage_stats"] = true
-					} else {
-						body["stream_options"] = map[string]interface{}{
-							"continuous_usage_stats": true,
+						body["include_usage"] = true
+					} else if apiType == tokencount.APITypeCompletions {
+						// Chat Completions API uses stream_options
+						if streamOptions, ok := body["stream_options"].(map[string]any); ok {
+							// Check for OpenAI-style include_usage
+							if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+								clientRequestedUsage = true
+							}
+							// Check for vLLM-style continuous_usage_stats
+							if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
+								clientRequestedUsage = true
+							}
+							streamOptions["continuous_usage_stats"] = true
+						} else {
+							body["stream_options"] = map[string]any{
+								"continuous_usage_stats": true,
+							}
 						}
 					}
 
@@ -206,7 +224,7 @@ func main() {
 					// Update Content-Length header to match new body size
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
-					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
+					log.Debugf("Modified streaming request body to include continuous_usage_stats, API type: %s, client requested usage: %v", r.Header.Get("X-Tinfoil-API-Type"), clientRequestedUsage)
 				}
 
 				r.Body.Close()
