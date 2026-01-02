@@ -1,7 +1,6 @@
 routers:
   inference.tinfoil.sh:
-  # router.inf6.tinfoil.sh:
-  router.inf7.tinfoil.sh:
+  router.inf5.tinfoil.sh:
 
 models:
   nomic-embed-text:
