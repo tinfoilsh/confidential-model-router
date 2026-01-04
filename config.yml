@@ -47,7 +47,7 @@ models:
     repo: tinfoilsh/confidential-qwen3-vl-30b
     enclaves:
       - qwen3-vl-30b.inf5.tinfoil.sh
-  
+
   titan-qwen2-5-05b:
     repo: tinfoilsh/confidential-titan-qwen2-5-05b
     enclaves:
@@ -65,3 +65,8 @@ models:
     overload:
       max_requests_waiting: 75
       retry_after_minutes: 3
+
+  qwen2-5-05b:
+    repo: tinfoilsh/confidential-qwen2-5-05b
+    enclaves:
+      - qwen2-5-05b.inf5.tinfoil.sh
