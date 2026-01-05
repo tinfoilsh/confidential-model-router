@@ -58,14 +58,6 @@ models:
     enclaves:
       - kimi-k2-thinking.inf10.tinfoil.sh
 
-  deepseek-v31-terminus:
-    repo: tinfoilsh/confidential-deepseek-v31-terminus
-    enclaves:
-      - deepseek-v31-terminus.inf7.tinfoil.sh
-    overload:
-      max_requests_waiting: 75
-      retry_after_minutes: 3
-
   qwen2-5-05b:
     repo: tinfoilsh/confidential-qwen2-5-05b
     enclaves:
