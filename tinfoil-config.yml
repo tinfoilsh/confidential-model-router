@@ -2,9 +2,6 @@ shim-version: v0.3.5@sha256:f44c65a1f7db476be20c3431bb6facea8c2966606a07fbb5724a
 cvm-version: 0.5.16
 cpus: 8
 memory: 16384
-platform: small_0d_amd
-cvmimage-version: cvmimage-v0.0.7
-stage0-version: stage0-v0.0.4
 
 shim:
   listen-port: 443
@@ -14,6 +11,6 @@ containers:
   - name: "proxy"
     image: ""
     args: [
-      "ghcr.io/tinfoilsh/confidential-model-router:0.0.34",
+      "ghcr.io/tinfoilsh/confidential-model-router:0.0.35",
       "-d","$(awk -F': *' '$1~/^domain$/{print $2; exit}' /mnt/ramdisk/external-config.yml)",
     ]
