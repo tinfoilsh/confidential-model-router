@@ -163,7 +163,8 @@ func main() {
 				if tools, ok := body["tools"].([]interface{}); ok {
 					if slices.ContainsFunc(tools, func(t any) bool {
 						m, _ := t.(map[string]any)
-						return m["type"] == "web_search"
+						typeVal, ok := m["type"].(string)
+						return ok && typeVal == "web_search"
 					}) {
 						modelName = "websearch"
 					}
