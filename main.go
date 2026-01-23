@@ -29,13 +29,27 @@ var configFile []byte // Initial (attested) config
 // Set by build process
 var version = "dev"
 
+// getEnvOrDefault returns the environment variable value if set, otherwise returns the default
+func getEnvOrDefault(envKey, defaultVal string) string {
+	if val := os.Getenv(envKey); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+// getEnvBool returns true if the environment variable is set to a truthy value
+func getEnvBool(envKey string) bool {
+	val := strings.ToLower(os.Getenv(envKey))
+	return val == "true" || val == "1" || val == "yes"
+}
+
 var (
-	port            = flag.String("l", "8089", "port to listen on")
-	controlPlaneURL = flag.String("C", "https://api.tinfoil.sh", "control plane URL")
-	verbose         = flag.Bool("v", false, "enable verbose logging")
-	initConfigURL   = flag.String("i", "", "optional path to initial config.yml (requires to append @sha256:<hex> for integrity)")
-	updateConfigURL = flag.String("u", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml", "path to runtime config.yml")
-	domain          = flag.String("d", "localhost", "domain used by this router")
+	port            = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	verbose         = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
@@ -95,6 +109,8 @@ func main() {
 	if *verbose {
 		log.SetLevel(log.DebugLevel)
 	}
+
+	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
 
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL)
 	if err != nil {
