@@ -66,3 +66,8 @@ models:
     repo: tinfoilsh/confidential-qwen2-5-05b
     enclaves:
       - qwen2-5-05b.inf5.tinfoil.sh
+
+  websearch:
+    repo: tinfoilsh/confidential-websearch
+    enclaves:
+      - websearch.tinfoil.functions.tinfoil.sh

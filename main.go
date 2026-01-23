@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -158,16 +159,29 @@ func main() {
 					return
 				}
 
-				// Extract model name from request body
-				modelInterface, ok := body["model"]
-				if !ok {
-					jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
-					return
+				// Tool routing logic - route to special enclaves based on tool type
+				if tools, ok := body["tools"].([]interface{}); ok {
+					if slices.ContainsFunc(tools, func(t any) bool {
+						m, _ := t.(map[string]any)
+						return m["type"] == "web_search"
+					}) {
+						modelName = "websearch"
+					}
 				}
-				modelName, ok = modelInterface.(string)
-				if !ok {
-					jsonError(w, "model parameter must be a string", http.StatusBadRequest)
-					return
+
+				// Model routing logic
+				// Extract model name from request body
+				if modelName == "" {
+					modelInterface, ok := body["model"]
+					if !ok {
+						jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
+						return
+					}
+					modelName, ok = modelInterface.(string)
+					if !ok {
+						jsonError(w, "model parameter must be a string", http.StatusBadRequest)
+						return
+					}
 				}
 
 				// If streaming request, ensure continuous_usage_stats is enabled
