@@ -136,10 +136,12 @@ func (em *EnclaveManager) addEnclave(
 	}
 
 	// Validate that the enclave's attested measurement matches the model's source measurement
-	if model.SourceMeasurement != nil {
-		if err := verification.Measurement.Equals(model.SourceMeasurement); err != nil {
-			return fmt.Errorf("measurement mismatch for enclave %s: %v", host, err)
-		}
+	// SECURITY: This check is critical - it ensures the enclave runs the expected code
+	if model.SourceMeasurement == nil {
+		return fmt.Errorf("cannot add enclave %s: source measurement not available", host)
+	}
+	if err := verification.Measurement.Equals(model.SourceMeasurement); err != nil {
+		return fmt.Errorf("measurement mismatch for enclave %s: %v", host, err)
 	}
 
 	model.Enclaves[host] = &Enclave{
@@ -372,7 +374,7 @@ func (em *EnclaveManager) sync() error {
 
 			_, err := em.updateModelMeasurements(modelName)
 			if err != nil {
-				log.Errorf("failed to update model measurements: %v", err)
+				log.Errorf("failed to update model measurements for %s: %v", modelName, err)
 			}
 
 			log.Tracef("Updating config for model %s", modelName)
@@ -401,7 +403,7 @@ func (em *EnclaveManager) sync() error {
 				log.Tracef("  + host %s", host)
 				if err := em.addEnclave(modelName, host, hwMeasurements); err != nil {
 					em.errors = append(em.errors, err.Error())
-					log.Warn(err)
+					log.Errorf("failed to add enclave %s for model %s: %v", host, modelName, err)
 				}
 			}
 		}()
