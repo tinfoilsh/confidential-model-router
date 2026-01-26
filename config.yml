@@ -20,7 +20,7 @@ models:
   voxtral-small-24b:
     repo: tinfoilsh/confidential-voxtral-small-24b
     enclaves:
-      - voxtral-small-24b.inf6.tinfoil.sh
+      - voxtral-small-24b.inf5.tinfoil.sh
 
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
