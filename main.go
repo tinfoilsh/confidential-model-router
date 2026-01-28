@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -105,6 +107,46 @@ func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	return "", nil
 }
 
+// extractModelFromMultipart extracts the model name from a multipart form request.
+// Returns the model name (empty if not found) and the buffered body bytes for forwarding.
+func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+	r.Body.Close()
+
+	contentType := r.Header.Get("Content-Type")
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", bodyBytes, nil // Can't parse, return body for forwarding
+	}
+
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", bodyBytes, nil
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(bodyBytes), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", bodyBytes, nil // Parse error, continue with default
+		}
+		if part.FormName() == "model" {
+			modelBytes, _ := io.ReadAll(part)
+			part.Close()
+			return strings.TrimSpace(string(modelBytes)), bodyBytes, nil
+		}
+		part.Close()
+	}
+
+	return "", bodyBytes, nil
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -159,7 +201,17 @@ func main() {
 				io.Copy(w, resp.Body)
 				return
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
-				modelName = "whisper-large-v3-turbo"
+				// Extract model from multipart form, default to voxtral-small-24b
+				var bodyBytes []byte
+				modelName, bodyBytes, err = extractModelFromMultipart(r)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("failed to parse request: %v", err), http.StatusBadRequest)
+					return
+				}
+				if modelName == "" {
+					modelName = "voxtral-small-24b"
+				}
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
