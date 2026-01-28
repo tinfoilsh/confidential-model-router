@@ -176,6 +176,47 @@ func (em *EnclaveManager) Status() map[string]any {
 	}
 }
 
+// PrometheusTargetGroup represents a Prometheus HTTP SD target group
+type PrometheusTargetGroup struct {
+	Targets []string          `json:"targets"`
+	Labels  map[string]string `json:"labels"`
+}
+
+// PrometheusTargets returns targets in Prometheus HTTP service discovery format
+// See: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config
+func (em *EnclaveManager) PrometheusTargets() []PrometheusTargetGroup {
+	var targetGroups []PrometheusTargetGroup
+
+	em.models.Range(func(key, value any) bool {
+		modelName := key.(string)
+		model := value.(*Model)
+
+		model.mu.RLock()
+		defer model.mu.RUnlock()
+
+		if len(model.Enclaves) == 0 {
+			return true
+		}
+
+		targets := make([]string, 0, len(model.Enclaves))
+		for host := range model.Enclaves {
+			targets = append(targets, host)
+		}
+
+		targetGroups = append(targetGroups, PrometheusTargetGroup{
+			Targets: targets,
+			Labels: map[string]string{
+				"model_name":    modelName,
+				"__param_model": modelName,
+			},
+		})
+
+		return true
+	})
+
+	return targetGroups
+}
+
 // Shutdown gracefully stops the billing collector
 func (em *EnclaveManager) Shutdown() {
 	if em.billingCollector != nil {

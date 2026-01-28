@@ -178,7 +178,12 @@ func main() {
 				status["version"] = version
 				sendJSON(w, status)
 				return
-			} else if r.URL.Path == "/metrics" {
+			} else if r.URL.Path == "/.well-known/prometheus-targets" {
+			// Prometheus HTTP service discovery endpoint
+			// See: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config
+			sendJSON(w, em.PrometheusTargets())
+			return
+		} else if r.URL.Path == "/metrics" {
 				// Expose Prometheus metrics
 				promhttp.Handler().ServeHTTP(w, r)
 				return
