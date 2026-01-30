@@ -232,14 +232,21 @@ func main() {
 					return
 				}
 
-				// Tool routing logic - route to special enclaves based on tool type
-				if tools, ok := body["tools"].([]interface{}); ok {
-					if slices.ContainsFunc(tools, func(t any) bool {
-						m, _ := t.(map[string]any)
-						typeVal, ok := m["type"].(string)
-						return ok && typeVal == "web_search"
-					}) {
-						modelName = "websearch"
+				// Web search routing - route to websearch enclave
+				// Chat Completions API: check for web_search_options field
+				if _, ok := body["web_search_options"]; ok {
+					modelName = "websearch"
+				}
+				// Responses API: check for tools array with web_search type
+				if modelName == "" {
+					if tools, ok := body["tools"].([]interface{}); ok {
+						if slices.ContainsFunc(tools, func(t any) bool {
+							m, _ := t.(map[string]any)
+							typeVal, ok := m["type"].(string)
+							return ok && typeVal == "web_search"
+						}) {
+							modelName = "websearch"
+						}
 					}
 				}
 
