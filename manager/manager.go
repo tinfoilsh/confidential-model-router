@@ -354,7 +354,7 @@ func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error
 	if err != nil {
 		return false, fmt.Errorf("failed to fetch attestation bundle: %v", err)
 	}
-	measurement, err := em.sigstoreClient.VerifyAttestation(sigstoreBundle, digest, model.Repo)
+	measurement, err := em.sigstoreClient.VerifyAttestation(sigstoreBundle, model.Repo, digest)
 	if err != nil {
 		return false, fmt.Errorf("failed to verify attestation: %v", err)
 	}
