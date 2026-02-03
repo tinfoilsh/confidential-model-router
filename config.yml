@@ -67,6 +67,11 @@ models:
     enclaves:
       - kimi-k2-thinking.inf10.tinfoil.sh
 
+  kimi-k2-5:
+    repo: tinfoilsh/confidential-kimi-k2-5
+    enclaves:
+      - kimi-k2-5.inf8.tinfoil.sh
+
   qwen2-5-05b:
     repo: tinfoilsh/confidential-qwen2-5-05b
     enclaves:
