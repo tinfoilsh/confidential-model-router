@@ -55,13 +55,13 @@ func (w *usageMetricsWriter) FormatUsage() string {
 // WriteTrailer writes the usage metrics as an HTTP trailer
 // This should be called after the response body has been fully written
 func (w *usageMetricsWriter) WriteTrailer() {
-	w.mu.Lock()
-	if !w.trailerEnabled || w.usage == nil {
-		w.mu.Unlock()
+	if !w.TrailerEnabled() {
 		return
 	}
-	formatted := formatUsage(w.usage)
-	w.mu.Unlock()
+	formatted := w.FormatUsage()
+	if formatted == "" {
+		return
+	}
 	// Set the trailer value - Go's http package will send it after the body
 	w.Header().Set(UsageMetricsResponseHeader, formatted)
 }
