@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -254,7 +255,27 @@ func (m *Model) NextEnclave() *Enclave {
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Tinfoil-Enclave", e.host)
-	e.proxy.ServeHTTP(w, r)
+
+	// Check if client requested usage metrics in response header/trailer
+	usageMetricsRequested := r.Header.Get(UsageMetricsRequestHeader) == "true"
+	if !usageMetricsRequested {
+		e.proxy.ServeHTTP(w, r)
+		return
+	}
+
+	// Wrap the ResponseWriter to capture usage and write trailer
+	wrapper := &usageMetricsWriter{ResponseWriter: w}
+
+	// Store wrapper in request context for ModifyResponse to access
+	ctx := context.WithValue(r.Context(), usageWriterKey{}, wrapper)
+
+	e.proxy.ServeHTTP(wrapper, r.WithContext(ctx))
+
+	// Write the trailer after body completes (for streaming responses)
+	// For non-streaming, the header was already set in ModifyResponse
+	if wrapper.TrailerEnabled() {
+		wrapper.WriteTrailer()
+	}
 }
 
 func (e *Enclave) MarshalJSON() ([]byte, error) {

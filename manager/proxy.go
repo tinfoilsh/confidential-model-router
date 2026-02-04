@@ -1,9 +1,14 @@
 package manager
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +16,15 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	tinfoilClient "github.com/tinfoilsh/verifier/client"
+)
+
+const (
+	// UsageMetricsRequestHeader is the request header clients set to request usage metrics
+	UsageMetricsRequestHeader = "X-Tinfoil-Request-Usage-Metrics"
+	// UsageMetricsResponseHeader is the response header (or trailer) containing usage metrics
+	UsageMetricsResponseHeader = "X-Tinfoil-Usage-Metrics"
+	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
+	maxUsageMetricsBodyBytes = int64(10 << 20)
 )
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector) *httputil.ReverseProxy {
@@ -49,13 +63,35 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		requestPath := req.URL.Path
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
-		// Create a usage handler that will be called for streaming responses
+		// Check if client requested usage metrics in response header/trailer
+		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
+		if streaming && usageMetricsRequested {
+			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
+			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+				wrapper.EnableTrailer()
+			}
+		}
+
+		// Create a usage handler that will be called when usage is extracted
 		usageHandler := func(usage *tokencount.Usage) {
-			if usage != nil && billingCollector != nil {
+			if usage == nil {
+				return
+			}
+
+			// For streaming responses, set usage on wrapper for trailer
+			// (non-streaming sets header directly in the buffering block below)
+			if streaming && usageMetricsRequested {
+				if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+					wrapper.SetUsage(usage)
+				}
+			}
+
+			// Add billing event
+			if billingCollector != nil {
 				event := billing.Event{
 					Timestamp:        time.Now(),
 					UserID:           userID,
-					APIKey:           apiKey, // Use the actual API key from Authorization header
+					APIKey:           apiKey,
 					Model:            modelName,
 					PromptTokens:     usage.PromptTokens,
 					CompletionTokens: usage.CompletionTokens,
@@ -72,7 +108,45 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// Check if client requested usage stats (from header set in main.go)
 		clientRequestedUsage := req.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
 
-		// Extract tokens with the usage handler
+		// For non-streaming JSON responses with usage metrics requested,
+		// buffer the response to extract usage and set header before sending
+		if !streaming && usageMetricsRequested && resp.StatusCode == http.StatusOK &&
+			strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+			// Buffer the entire response (bounded).
+			limited := io.LimitReader(resp.Body, maxUsageMetricsBodyBytes+1)
+			bodyBytes, err := io.ReadAll(limited)
+			if err != nil {
+				log.WithError(err).Error("Failed to read response body for usage extraction")
+				return err
+			}
+			if int64(len(bodyBytes)) > maxUsageMetricsBodyBytes {
+				log.WithField("max_bytes", maxUsageMetricsBodyBytes).
+					Warn("Usage metrics extraction skipped: response body exceeds limit")
+				resp.Body = withPrefixedBody(bodyBytes, resp.Body)
+				return nil
+			}
+			resp.Body.Close()
+
+			// Extract usage from JSON
+			var jsonResp struct {
+				Usage *tokencount.Usage `json:"usage"`
+			}
+			if err := json.Unmarshal(bodyBytes, &jsonResp); err == nil && jsonResp.Usage != nil {
+				// Call usage handler for billing
+				usageHandler(jsonResp.Usage)
+
+				// Set usage header directly on response
+				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
+			}
+
+			// Update Content-Length and restore body
+			resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			return nil
+		}
+
+		// For streaming responses, use the standard token extraction with handler
+		// (usage will be set as trailer via the wrapper)
 		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage)
 		if err != nil {
 			log.WithError(err).Error("Failed to extract tokens from response")
@@ -91,4 +165,63 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 
 	return proxy
+}
+
+// formatUsage formats token usage for the response header
+func formatUsage(usage *tokencount.Usage) string {
+	return "prompt=" + strconv.Itoa(usage.PromptTokens) +
+		",completion=" + strconv.Itoa(usage.CompletionTokens) +
+		",total=" + strconv.Itoa(usage.TotalTokens)
+}
+
+func addTrailerHeader(h http.Header, name string) {
+	canonical := textproto.CanonicalMIMEHeaderKey(name)
+	if canonical == "" {
+		return
+	}
+
+	existing := h.Values("Trailer")
+	seen := make(map[string]bool, len(existing)+1)
+	var trailers []string
+	for _, value := range existing {
+		for _, part := range strings.Split(value, ",") {
+			trailer := textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(part))
+			if trailer == "" {
+				continue
+			}
+			if !seen[trailer] {
+				seen[trailer] = true
+				trailers = append(trailers, trailer)
+			}
+		}
+	}
+
+	if !seen[canonical] {
+		trailers = append(trailers, canonical)
+	}
+
+	if len(trailers) == 0 {
+		return
+	}
+
+	h.Set("Trailer", strings.Join(trailers, ", "))
+}
+
+type prefixedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (p *prefixedReadCloser) Close() error {
+	return p.closer.Close()
+}
+
+func withPrefixedBody(prefix []byte, body io.ReadCloser) io.ReadCloser {
+	if len(prefix) == 0 {
+		return body
+	}
+	return &prefixedReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(prefix), body),
+		closer: body,
+	}
 }
