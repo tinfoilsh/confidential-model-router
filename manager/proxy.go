@@ -97,6 +97,19 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		var handlerCalled atomic.Bool
 
+		emitZeroTokenEvent := func() {
+			billingCollector.AddEvent(billing.Event{
+				Timestamp:   time.Now(),
+				UserID:      userID,
+				APIKey:      apiKey,
+				Model:       modelName,
+				RequestID:   requestID,
+				Enclave:     host,
+				RequestPath: requestPath,
+				Streaming:   streaming,
+			})
+		}
+
 		// Create a usage handler that will be called when usage is extracted
 		usageHandler := func(usage *tokencount.Usage) {
 			handlerCalled.Store(true)
@@ -164,18 +177,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				// Set usage header directly on response
 				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
 			} else if billingCollector != nil && apiKey != "" {
-				// Emit zero-token billing event for per-request models
-				// that don't return usage fields
-				billingCollector.AddEvent(billing.Event{
-					Timestamp:   time.Now(),
-					UserID:      userID,
-					APIKey:      apiKey,
-					Model:       modelName,
-					RequestID:   requestID,
-					Enclave:     host,
-					RequestPath: requestPath,
-					Streaming:   false,
-				})
+				emitZeroTokenEvent()
 			}
 
 			// Update Content-Length and restore body
@@ -205,18 +207,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			resp.Body = &billingCloser{
 				ReadCloser:    resp.Body,
 				handlerCalled: &handlerCalled,
-				emitEvent: func() {
-					billingCollector.AddEvent(billing.Event{
-						Timestamp:   time.Now(),
-						UserID:      userID,
-						APIKey:      apiKey,
-						Model:       modelName,
-						RequestID:   requestID,
-						Enclave:     host,
-						RequestPath: requestPath,
-						Streaming:   false,
-					})
-				},
+				emitEvent:     emitZeroTokenEvent,
 			}
 		}
 
