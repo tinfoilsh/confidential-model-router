@@ -10,7 +10,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 )
 
-func setupTestProxy(t *testing.T, handler http.Handler) (*httputil.ReverseProxy, *billing.Collector) {
+func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) (*httputil.ReverseProxy, *billing.Collector) {
 	t.Helper()
 	backend := httptest.NewServer(handler)
 	t.Cleanup(backend.Close)
@@ -19,7 +19,7 @@ func setupTestProxy(t *testing.T, handler http.Handler) (*httputil.ReverseProxy,
 	collector := billing.NewCollector("")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(backendURL.Host, "", "test-model", collector)
+	proxy := newProxy(backendURL.Host, "", modelName, collector)
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -27,6 +27,10 @@ func setupTestProxy(t *testing.T, handler http.Handler) (*httputil.ReverseProxy,
 	proxy.Transport = http.DefaultTransport
 
 	return proxy, collector
+}
+
+func setupTestProxy(t *testing.T, handler http.Handler) (*httputil.ReverseProxy, *billing.Collector) {
+	return setupTestProxyWithModel(t, handler, "test-model")
 }
 
 func TestProxyBilling_NonJSONEmitsEvent(t *testing.T) {
@@ -128,5 +132,36 @@ func TestProxyBilling_ErrorResponseNoEvent(t *testing.T) {
 	events := collector.GetEvents()
 	if len(events) != 0 {
 		t.Fatalf("expected 0 billing events for error response, got %d", len(events))
+	}
+}
+
+func TestProxyBilling_WebsearchEmitsTwoEvents(t *testing.T) {
+	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
+	}), websearchModel)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	events := collector.GetEvents()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 billing events for websearch, got %d", len(events))
+	}
+
+	// First event: zero-token per-request event
+	if events[0].PromptTokens != 0 || events[0].CompletionTokens != 0 || events[0].TotalTokens != 0 {
+		t.Errorf("expected first event to be zero-token, got prompt=%d completion=%d total=%d",
+			events[0].PromptTokens, events[0].CompletionTokens, events[0].TotalTokens)
+	}
+
+	// Second event: token usage event
+	if events[1].PromptTokens != 5 || events[1].CompletionTokens != 15 || events[1].TotalTokens != 20 {
+		t.Errorf("expected second event with tokens, got prompt=%d completion=%d total=%d",
+			events[1].PromptTokens, events[1].CompletionTokens, events[1].TotalTokens)
 	}
 }

@@ -27,6 +27,8 @@ const (
 	UsageMetricsResponseHeader = "X-Tinfoil-Usage-Metrics"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
+	// websearchModel is charged per-request in addition to per-token.
+	websearchModel = "websearch"
 )
 
 // billingCloser wraps a response body and emits a zero-token billing event
@@ -127,6 +129,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 			// Add billing event
 			if billingCollector != nil {
+				if modelName == websearchModel {
+					emitZeroTokenEvent()
+				}
 				event := billing.Event{
 					Timestamp:        time.Now(),
 					UserID:           userID,
