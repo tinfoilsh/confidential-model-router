@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -25,7 +27,34 @@ const (
 	UsageMetricsResponseHeader = "X-Tinfoil-Usage-Metrics"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
+	// websearchModel is charged per-request in addition to per-token.
+	websearchModel = "websearch"
 )
+
+// RequestModelKey stores the model name extracted from the request body,
+// used to bill token usage under the underlying model for tool requests.
+type RequestModelKey struct{}
+
+// billingCloser wraps a response body and emits a zero-token billing event
+// on Close() if the usageHandler was never called. This ensures per-request
+// models (e.g. docling, whisper) that don't return usage fields still
+// generate billing events.
+type billingCloser struct {
+	io.ReadCloser
+	handlerCalled *atomic.Bool
+	emitEvent     func()
+	once          sync.Once
+}
+
+func (b *billingCloser) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() {
+		if !b.handlerCalled.Load() {
+			b.emitEvent()
+		}
+	})
+	return err
+}
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector) *httputil.ReverseProxy {
 	httpClient := &http.Client{
@@ -72,8 +101,24 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			}
 		}
 
+		var handlerCalled atomic.Bool
+
+		emitZeroTokenEvent := func() {
+			billingCollector.AddEvent(billing.Event{
+				Timestamp:   time.Now(),
+				UserID:      userID,
+				APIKey:      apiKey,
+				Model:       modelName,
+				RequestID:   requestID,
+				Enclave:     host,
+				RequestPath: requestPath,
+				Streaming:   streaming,
+			})
+		}
+
 		// Create a usage handler that will be called when usage is extracted
 		usageHandler := func(usage *tokencount.Usage) {
+			handlerCalled.Store(true)
 			if usage == nil {
 				return
 			}
@@ -88,11 +133,20 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 			// Add billing event
 			if billingCollector != nil {
+				if modelName == websearchModel {
+					emitZeroTokenEvent()
+				}
+				// Use the underlying model for token billing when set (e.g., websearch
+				// bills tokens under the model specified in the inference request).
+				billingModel := modelName
+				if bm, ok := req.Context().Value(RequestModelKey{}).(string); ok && bm != "" {
+					billingModel = bm
+				}
 				event := billing.Event{
 					Timestamp:        time.Now(),
 					UserID:           userID,
 					APIKey:           apiKey,
-					Model:            modelName,
+					Model:            billingModel,
 					PromptTokens:     usage.PromptTokens,
 					CompletionTokens: usage.CompletionTokens,
 					TotalTokens:      usage.TotalTokens,
@@ -137,6 +191,8 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 				// Set usage header directly on response
 				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
+			} else if billingCollector != nil && apiKey != "" {
+				emitZeroTokenEvent()
 			}
 
 			// Update Content-Length and restore body
@@ -156,6 +212,19 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		// Replace the response body with our new reader
 		resp.Body = newBody
+
+		// For non-streaming successful responses, wrap the body so a billing
+		// event is emitted on Close() even when the response has no usage field
+		// (e.g. docling, whisper). The billingCloser only fires if the
+		// usageHandler was never called, preventing double-billing for models
+		// that do include usage.
+		if !streaming && billingCollector != nil && apiKey != "" && resp.StatusCode == http.StatusOK {
+			resp.Body = &billingCloser{
+				ReadCloser:    resp.Body,
+				handlerCalled: &handlerCalled,
+				emitEvent:     emitZeroTokenEvent,
+			}
+		}
 
 		if streaming {
 			resp.Header.Del("Content-Length")
