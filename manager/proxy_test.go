@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -144,6 +145,7 @@ func TestProxyBilling_WebsearchEmitsTwoEvents(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req = req.WithContext(context.WithValue(req.Context(), RequestModelKey{}, "deepseek-r1-0528"))
 	rec := httptest.NewRecorder()
 
 	proxy.ServeHTTP(rec, req)
@@ -153,15 +155,21 @@ func TestProxyBilling_WebsearchEmitsTwoEvents(t *testing.T) {
 		t.Fatalf("expected 2 billing events for websearch, got %d", len(events))
 	}
 
-	// First event: zero-token per-request event
+	// First event: zero-token per-request event billed as "websearch"
 	if events[0].PromptTokens != 0 || events[0].CompletionTokens != 0 || events[0].TotalTokens != 0 {
 		t.Errorf("expected first event to be zero-token, got prompt=%d completion=%d total=%d",
 			events[0].PromptTokens, events[0].CompletionTokens, events[0].TotalTokens)
 	}
+	if events[0].Model != websearchModel {
+		t.Errorf("expected first event model %q, got %q", websearchModel, events[0].Model)
+	}
 
-	// Second event: token usage event
+	// Second event: token usage billed under the underlying model
 	if events[1].PromptTokens != 5 || events[1].CompletionTokens != 15 || events[1].TotalTokens != 20 {
 		t.Errorf("expected second event with tokens, got prompt=%d completion=%d total=%d",
 			events[1].PromptTokens, events[1].CompletionTokens, events[1].TotalTokens)
+	}
+	if events[1].Model != "deepseek-r1-0528" {
+		t.Errorf("expected second event model %q, got %q", "deepseek-r1-0528", events[1].Model)
 	}
 }
