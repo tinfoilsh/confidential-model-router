@@ -31,6 +31,10 @@ const (
 	websearchModel = "websearch"
 )
 
+// RequestModelKey stores the model name extracted from the request body,
+// used to bill token usage under the underlying model for tool requests.
+type RequestModelKey struct{}
+
 // billingCloser wraps a response body and emits a zero-token billing event
 // on Close() if the usageHandler was never called. This ensures per-request
 // models (e.g. docling, whisper) that don't return usage fields still
@@ -132,11 +136,17 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				if modelName == websearchModel {
 					emitZeroTokenEvent()
 				}
+				// Use the underlying model for token billing when set (e.g., websearch
+				// bills tokens under the model specified in the inference request).
+				billingModel := modelName
+				if bm, ok := req.Context().Value(RequestModelKey{}).(string); ok && bm != "" {
+					billingModel = bm
+				}
 				event := billing.Event{
 					Timestamp:        time.Now(),
 					UserID:           userID,
 					APIKey:           apiKey,
-					Model:            modelName,
+					Model:            billingModel,
 					PromptTokens:     usage.PromptTokens,
 					CompletionTokens: usage.CompletionTokens,
 					TotalTokens:      usage.TotalTokens,

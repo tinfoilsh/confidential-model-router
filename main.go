@@ -232,37 +232,33 @@ func main() {
 					return
 				}
 
-				// Web search routing - route to websearch enclave
-				// Chat Completions API: check for web_search_options field
-				if _, ok := body["web_search_options"]; ok {
-					modelName = "websearch"
+				// Extract model name from request body
+				modelInterface, ok := body["model"]
+				if !ok {
+					jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
+					return
 				}
-				// Responses API: check for tools array with web_search type
-				if modelName == "" {
-					if tools, ok := body["tools"].([]interface{}); ok {
-						if slices.ContainsFunc(tools, func(t any) bool {
-							m, _ := t.(map[string]any)
-							typeVal, ok := m["type"].(string)
-							return ok && typeVal == "web_search"
-						}) {
-							modelName = "websearch"
-						}
-					}
+				modelName, ok = modelInterface.(string)
+				if !ok {
+					jsonError(w, "model parameter must be a string", http.StatusBadRequest)
+					return
 				}
 
-				// Model routing logic
-				// Extract model name from request body
-				if modelName == "" {
-					modelInterface, ok := body["model"]
-					if !ok {
-						jsonError(w, "model parameter not found in request body", http.StatusBadRequest)
-						return
-					}
-					modelName, ok = modelInterface.(string)
-					if !ok {
-						jsonError(w, "model parameter must be a string", http.StatusBadRequest)
-						return
-					}
+				// Check if request uses web search — route to websearch enclave
+				// but keep modelName as the underlying model for billing.
+				useWebsearch := false
+				if _, ok := body["web_search_options"]; ok {
+					useWebsearch = true
+				} else if tools, ok := body["tools"].([]interface{}); ok {
+					useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
+						m, _ := t.(map[string]any)
+						typeVal, ok := m["type"].(string)
+						return ok && typeVal == "web_search"
+					})
+				}
+				if useWebsearch {
+					r = r.WithContext(context.WithValue(r.Context(), manager.RequestModelKey{}, modelName))
+					modelName = "websearch"
 				}
 
 				// If streaming request, ensure continuous_usage_stats is enabled
