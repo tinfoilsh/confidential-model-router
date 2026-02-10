@@ -179,11 +179,11 @@ func main() {
 				sendJSON(w, status)
 				return
 			} else if r.URL.Path == "/.well-known/prometheus-targets" {
-			// Prometheus HTTP service discovery endpoint
-			// See: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config
-			sendJSON(w, em.PrometheusTargets())
-			return
-		} else if r.URL.Path == "/metrics" {
+				// Prometheus HTTP service discovery endpoint
+				// See: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config
+				sendJSON(w, em.PrometheusTargets())
+				return
+			} else if r.URL.Path == "/metrics" {
 				// Expose Prometheus metrics
 				promhttp.Handler().ServeHTTP(w, r)
 				return
@@ -249,12 +249,14 @@ func main() {
 				useWebsearch := false
 				if _, ok := body["web_search_options"]; ok {
 					useWebsearch = true
-				} else if tools, ok := body["tools"].([]interface{}); ok {
-					useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
-						m, _ := t.(map[string]any)
-						typeVal, ok := m["type"].(string)
-						return ok && typeVal == "web_search"
-					})
+				} else if r.URL.Path == "/v1/responses" {
+					if tools, ok := body["tools"].([]interface{}); ok {
+						useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
+							m, _ := t.(map[string]any)
+							typeVal, ok := m["type"].(string)
+							return ok && typeVal == "web_search"
+						})
+					}
 				}
 				if useWebsearch {
 					r = r.WithContext(context.WithValue(r.Context(), manager.RequestModelKey{}, modelName))
