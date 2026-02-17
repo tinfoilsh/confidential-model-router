@@ -48,6 +48,7 @@ type EnclaveManager struct {
 	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
+	refreshInterval      time.Duration
 	errors               []string
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
@@ -305,7 +306,11 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+	if refreshInterval <= 0 {
+		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
+	}
+
 	var cfg *config.Config
 	var err error
 	if initConfigURL != "" {
@@ -328,6 +333,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL),
+		refreshInterval:  refreshInterval,
 	}
 
 	for modelName, modelConfig := range cfg.Models {
@@ -480,7 +486,7 @@ func (em *EnclaveManager) sync() error {
 
 // StartWorker starts the worker update loop
 func (em *EnclaveManager) StartWorker() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(em.refreshInterval)
 	defer ticker.Stop()
 
 	for ; true; <-ticker.C {
