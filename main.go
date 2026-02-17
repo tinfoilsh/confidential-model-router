@@ -40,6 +40,18 @@ func getEnvOrDefault(envKey, defaultVal string) string {
 	return defaultVal
 }
 
+// getEnvOrDefaultDuration returns the environment variable value parsed as a duration if set, otherwise returns the default
+func getEnvOrDefaultDuration(envKey string, defaultVal time.Duration) time.Duration {
+	if val := os.Getenv(envKey); val != "" {
+		d, err := time.ParseDuration(val)
+		if err != nil {
+			log.Fatalf("invalid duration for %s: %v", envKey, err)
+		}
+		return d
+	}
+	return defaultVal
+}
+
 // getEnvBool returns true if the environment variable is set to a truthy value
 func getEnvBool(envKey string) bool {
 	val := strings.ToLower(os.Getenv(envKey))
@@ -53,6 +65,7 @@ var (
 	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
 	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
 	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
+	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Second), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
@@ -155,7 +168,7 @@ func main() {
 
 	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
 		log.Fatal(err)
 	}
