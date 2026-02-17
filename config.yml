@@ -27,10 +27,6 @@ models:
     enclaves:
       - llama3-3-70b.inf5.tinfoil.sh
 
-  qwen3-coder-480b:
-    repo: tinfoilsh/confidential-qwen3-coder-480b
-    enclaves:
-
   deepseek-r1-0528:
     repo: tinfoilsh/confidential-deepseek-r1-0528
     enclaves:
