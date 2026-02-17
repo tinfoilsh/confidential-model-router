@@ -78,7 +78,7 @@ func jsonError(w http.ResponseWriter, message string, errType string, code int) 
 func sendJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		jsonError(w, err.Error(), manager.ErrTypeServer, http.StatusInternalServerError)
+		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 	}
 }
 
@@ -170,7 +170,7 @@ func main() {
 		var err error
 
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
-			jsonError(w, fmt.Sprintf("failed to parse subdomain: %v", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 			return
 		} else if modelName == "" { // The request does not use a subdomain. We route using specific inference routing logic.
 			if r.URL.Path == "/" {
@@ -195,12 +195,12 @@ func main() {
 				defer cancel()
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, *controlPlaneURL+"/v1/models", nil)
 				if err != nil {
-					jsonError(w, fmt.Sprintf("failed to create request: %v", err), manager.ErrTypeServer, http.StatusInternalServerError)
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 					return
 				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
-					jsonError(w, fmt.Sprintf("failed to fetch models: %v", err), manager.ErrTypeServer, http.StatusBadGateway)
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 					return
 				}
 				defer resp.Body.Close()
@@ -213,7 +213,7 @@ func main() {
 				var bodyBytes []byte
 				modelName, bodyBytes, err = extractModelFromMultipart(r)
 				if err != nil {
-					jsonError(w, fmt.Sprintf("failed to parse request: %v", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 				if modelName == "" {
@@ -227,23 +227,23 @@ func main() {
 				bodyBytes, err := io.ReadAll(r.Body)
 
 				if err != nil {
-					jsonError(w, fmt.Sprintf("failed to read request body: %v", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
-					jsonError(w, fmt.Sprintf("failed to parse request body: %v", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 
 				// Extract model name from request body
 				modelInterface, ok := body["model"]
 				if !ok {
-					jsonError(w, "model parameter not found in request body", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					jsonError(w, "Missing required parameter: 'model'.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 				modelName, ok = modelInterface.(string)
 				if !ok {
-					jsonError(w, "model parameter must be a string", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 
@@ -295,7 +295,7 @@ func main() {
 					// Re-encode the modified body
 					newBodyBytes, err := json.Marshal(body)
 					if err != nil {
-						jsonError(w, fmt.Sprintf("failed to process request body: %v", err), manager.ErrTypeServer, http.StatusInternalServerError)
+						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 						return
 					}
 					bodyBytes = newBodyBytes
@@ -312,13 +312,13 @@ func main() {
 
 		model, found := em.GetModel(modelName)
 		if !found {
-			jsonError(w, "model not found", manager.ErrTypeInvalidRequest, http.StatusNotFound)
+			jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 			return
 		}
 
 		enclave := model.NextEnclave()
 		if enclave == nil {
-			jsonError(w, "no enclaves available", manager.ErrTypeServer, http.StatusServiceUnavailable)
+			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
 			return
 		}
 
@@ -339,7 +339,7 @@ func main() {
 			manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
 			manager.RetryAfterSeconds.WithLabelValues(modelName).Observe(float64(secs))
 
-			jsonError(w, fmt.Sprintf("backend overloaded, retry after %d seconds", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+			jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
 			return
 		}
 

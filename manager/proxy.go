@@ -38,6 +38,14 @@ const (
 	ErrTypeServer            = "server_error"
 )
 
+// Client-facing error messages, aligned with OpenAI's standard error messages
+// where applicable. See https://platform.openai.com/docs/guides/error-codes
+const (
+	ErrMsgServerError   = "The server had an error while processing your request."
+	ErrMsgOverloaded    = "The engine is currently overloaded, please try again later."
+	ErrMsgModelNotFound = "The model does not exist."
+)
+
 // RequestModelKey stores the model name extracted from the request body,
 // used to bill token usage under the underlying model for tool requests.
 type RequestModelKey struct{}
@@ -80,7 +88,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]string{
-				"message": "upstream enclave unavailable",
+				"message": ErrMsgServerError,
 				"type":    ErrTypeServer,
 			},
 		})
