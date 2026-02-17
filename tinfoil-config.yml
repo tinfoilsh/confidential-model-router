@@ -10,6 +10,6 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.54"
+    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.55"
     env:
       - DOMAIN
