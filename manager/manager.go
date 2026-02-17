@@ -49,6 +49,7 @@ type EnclaveManager struct {
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
 	refreshInterval      time.Duration
+	errorsMu             sync.Mutex
 	errors               []string
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
@@ -170,9 +171,14 @@ func (em *EnclaveManager) Models() map[string]*Model {
 
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
+	em.errorsMu.Lock()
+	errors := make([]string, len(em.errors))
+	copy(errors, em.errors)
+	em.errorsMu.Unlock()
+
 	return map[string]any{
 		"models":    em.Models(),
-		"errors":    em.errors,
+		"errors":    errors,
 		"updated":   em.lastSuccessfulUpdate,
 		"attempted": em.lastAttemptedUpdate,
 	}
@@ -470,7 +476,9 @@ func (em *EnclaveManager) sync() error {
 			for _, host := range hostnames {
 				log.Tracef("  + host %s", host)
 				if err := em.addEnclave(modelName, host, hwMeasurements); err != nil {
+					em.errorsMu.Lock()
 					em.errors = append(em.errors, err.Error())
+					em.errorsMu.Unlock()
 					log.Errorf("failed to add enclave %s for model %s: %v", host, modelName, err)
 				}
 			}
@@ -490,10 +498,14 @@ func (em *EnclaveManager) StartWorker() {
 	defer ticker.Stop()
 
 	for ; true; <-ticker.C {
+		em.errorsMu.Lock()
 		em.errors = []string{} // Clear errors
+		em.errorsMu.Unlock()
 		if err := em.sync(); err != nil {
 			log.Errorf("failed to update: %v", err)
+			em.errorsMu.Lock()
 			em.errors = append(em.errors, err.Error())
+			em.errorsMu.Unlock()
 		}
 	}
 }
