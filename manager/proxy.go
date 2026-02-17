@@ -31,6 +31,13 @@ const (
 	websearchModel = "websearch"
 )
 
+// OpenAI-compatible error type strings returned in API error responses.
+const (
+	ErrTypeInvalidRequest    = "invalid_request_error"
+	ErrTypeInsufficientQuota = "insufficient_quota"
+	ErrTypeServer            = "server_error"
+)
+
 // RequestModelKey stores the model name extracted from the request body,
 // used to bill token usage under the underlying model for tool requests.
 type RequestModelKey struct{}
@@ -67,6 +74,17 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		Host:   host,
 	})
 	proxy.Transport = httpClient.Transport
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Errorf("proxy error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"message": "upstream enclave unavailable",
+				"type":    ErrTypeServer,
+			},
+		})
+	}
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
