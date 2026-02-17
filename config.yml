@@ -25,7 +25,7 @@ models:
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
     enclaves:
-      - llama3-3-70b.inf7.tinfoil.sh
+      - llama3-3-70b.inf6.tinfoil.sh
 
   qwen3-coder-480b:
     repo: tinfoilsh/confidential-qwen3-coder-480b
@@ -39,12 +39,12 @@ models:
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gpt-oss-120b.inf7.tinfoil.sh
+      - gpt-oss-120b.inf6.tinfoil.sh
 
   gpt-oss-120b-free:
     repo: tinfoilsh/confidential-gpt-oss-120b-free
     enclaves:
-      - gpt-oss-120b-free.inf7.tinfoil.sh
+      - gpt-oss-120b-free.inf6.tinfoil.sh
 
   gpt-oss-safeguard-120b:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
