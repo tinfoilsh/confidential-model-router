@@ -56,11 +56,6 @@ models:
     enclaves:
       - qwen3-vl-30b.inf7.tinfoil.sh
 
-  titan-qwen2-5-05b:
-    repo: tinfoilsh/confidential-titan-qwen2-5-05b
-    enclaves:
-      - titan-qwen2-5-05b.inf7.tinfoil.sh
-
   kimi-k2-thinking:
     repo: tinfoilsh/confidential-kimi-k2-thinking
     enclaves:
