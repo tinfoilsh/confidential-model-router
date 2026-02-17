@@ -65,7 +65,7 @@ var (
 	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
 	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
 	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
-	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Second), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 )
 
 func jsonError(w http.ResponseWriter, message string, code int) {
