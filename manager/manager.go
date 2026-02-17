@@ -243,13 +243,13 @@ func (em *EnclaveManager) Shutdown() {
 
 // NextEnclave gets the next sequential enclave
 func (m *Model) NextEnclave() *Enclave {
-	if len(m.Enclaves) == 0 {
-		return nil
-	}
-
 	count := atomic.AddUint64(&m.counter, 1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	if len(m.Enclaves) == 0 {
+		return nil
+	}
 
 	// Convert map to slice for indexed access
 	enclaves := make([]*Enclave, 0, len(m.Enclaves))
