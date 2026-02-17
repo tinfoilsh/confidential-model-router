@@ -8,7 +8,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
-	github.com/tinfoilsh/verifier v0.11.2
+	github.com/tinfoilsh/verifier v0.11.3
 	gopkg.in/yaml.v2 v2.4.0
 )
 
