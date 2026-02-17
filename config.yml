@@ -30,7 +30,7 @@ models:
   deepseek-r1-0528:
     repo: tinfoilsh/confidential-deepseek-r1-0528
     enclaves:
-      - deepseek-r1-0528.inf9.tinfoil.sh
+      - deepseek-r1-0528.inf7.tinfoil.sh
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
