@@ -6,6 +6,7 @@ memory: 16384
 shim:
   listen-port: 443
   upstream-port: 8089
+  tls-wildcard: true
 
 containers:
   - name: "proxy"
