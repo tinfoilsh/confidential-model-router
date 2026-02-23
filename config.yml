@@ -10,7 +10,7 @@ models:
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
     enclaves:
-      - doc-upload.inf5.tinfoil.sh
+      - confidential-doc-upload.tinfoil.containers.tinfoil.sh
 
   whisper-large-v3-turbo:
     repo: tinfoilsh/confidential-whisper-large-v3
