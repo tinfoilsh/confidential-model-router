@@ -170,6 +170,7 @@ func main() {
 	}
 
 	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
+	log.Infof("Refresh interval: %s", *refreshInterval)
 
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
