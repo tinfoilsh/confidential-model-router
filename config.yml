@@ -5,7 +5,7 @@ models:
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
     enclaves:
-      - nomic-embed-text.inf6.tinfoil.sh
+      - confidential-nomic-embed-text.tinfoil.containers.tinfoil.sh
 
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
