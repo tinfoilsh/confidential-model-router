@@ -17,7 +17,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-	tinfoilClient "github.com/tinfoilsh/verifier/client"
+	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
 const (
