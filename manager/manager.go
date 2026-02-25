@@ -14,9 +14,9 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tinfoilsh/verifier/attestation"
-	"github.com/tinfoilsh/verifier/github"
-	"github.com/tinfoilsh/verifier/sigstore"
+	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
+	"github.com/tinfoilsh/tinfoil-go/verifier/github"
+	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/config"
