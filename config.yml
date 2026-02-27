@@ -47,6 +47,11 @@ models:
     enclaves:
       - gpt-oss-safeguard-120b.inf5.tinfoil.sh
 
+  qwen3-tts-1.7b:
+    repo: tinfoilsh/confidential-qwen3-tts
+    enclaves:
+      - qwen3-tts.inf6.tinfoil.sh
+
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
     enclaves:
