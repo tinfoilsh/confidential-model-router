@@ -222,6 +222,25 @@ func main() {
 				w.WriteHeader(resp.StatusCode)
 				io.Copy(w, resp.Body)
 				return
+			} else if r.URL.Path == "/v1/audio/speech" {
+				// Extract model from JSON body, default to qwen3-tts
+				var body map[string]interface{}
+				bodyBytes, err := io.ReadAll(r.Body)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				r.Body.Close()
+				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if m, ok := body["model"].(string); ok && m != "" {
+					modelName = m
+				} else {
+					modelName = "qwen3-tts"
+				}
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
