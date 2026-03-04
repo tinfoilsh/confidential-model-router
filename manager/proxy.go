@@ -46,10 +46,6 @@ const (
 	ErrMsgModelNotFound = "The model does not exist."
 )
 
-// RequestModelKey stores the model name extracted from the request body,
-// used to bill token usage under the underlying model for tool requests.
-type RequestModelKey struct{}
-
 // billingCloser wraps a response body and emits a zero-token billing event
 // on Close() if the usageHandler was never called. This ensures per-request
 // models (e.g. docling, whisper) that don't return usage fields still
@@ -160,28 +156,27 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			// Add billing event
 			if billingCollector != nil {
 				if modelName == websearchModel {
+					// Only emit the per-request websearch fee. Skip the
+					// token-based event because the websearch service's
+					// responder call goes through the proxy with the
+					// user's API key and gets billed there directly.
 					emitZeroTokenEvent()
+				} else {
+					event := billing.Event{
+						Timestamp:        time.Now(),
+						UserID:           userID,
+						APIKey:           apiKey,
+						Model:            modelName,
+						PromptTokens:     usage.PromptTokens,
+						CompletionTokens: usage.CompletionTokens,
+						TotalTokens:      usage.TotalTokens,
+						RequestID:        requestID,
+						Enclave:          host,
+						RequestPath:      requestPath,
+						Streaming:        streaming,
+					}
+					billingCollector.AddEvent(event)
 				}
-				// Use the underlying model for token billing when set (e.g., websearch
-				// bills tokens under the model specified in the inference request).
-				billingModel := modelName
-				if bm, ok := req.Context().Value(RequestModelKey{}).(string); ok && bm != "" {
-					billingModel = bm
-				}
-				event := billing.Event{
-					Timestamp:        time.Now(),
-					UserID:           userID,
-					APIKey:           apiKey,
-					Model:            billingModel,
-					PromptTokens:     usage.PromptTokens,
-					CompletionTokens: usage.CompletionTokens,
-					TotalTokens:      usage.TotalTokens,
-					RequestID:        requestID,
-					Enclave:          host,
-					RequestPath:      requestPath,
-					Streaming:        streaming,
-				}
-				billingCollector.AddEvent(event)
 			}
 		}
 

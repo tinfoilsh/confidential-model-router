@@ -280,8 +280,9 @@ func main() {
 					return
 				}
 
-				// Check if request uses web search — route to websearch enclave
-				// but keep modelName as the underlying model for billing.
+				// Check if request uses web search — route to websearch enclave.
+				// The original model name is preserved in the request body so the
+				// websearch service knows which model to use for inference.
 				useWebsearch := false
 				if _, ok := body["web_search_options"]; ok {
 					useWebsearch = true
@@ -295,7 +296,6 @@ func main() {
 					}
 				}
 				if useWebsearch {
-					r = r.WithContext(context.WithValue(r.Context(), manager.RequestModelKey{}, modelName))
 					modelName = "websearch"
 				}
 
