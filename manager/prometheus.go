@@ -60,4 +60,13 @@ var (
 		},
 		[]string{"model", "enclave"},
 	)
+
+	// RateLimitDemotionsTotal tracks requests deprioritized due to token rate limits
+	RateLimitDemotionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_demotions_total",
+			Help: "Total number of requests sent with lower vLLM priority due to token rate limits",
+		},
+		[]string{"model"},
+	)
 )
