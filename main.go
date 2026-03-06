@@ -183,12 +183,6 @@ func main() {
 		var modelName string
 		var err error
 
-		// Extract API key early for rate limiting decisions
-		apiKey := ""
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			apiKey = strings.TrimPrefix(auth, "Bearer ")
-		}
-
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
 			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 			return
@@ -301,27 +295,8 @@ func main() {
 						})
 					}
 				}
-				rateLimitModel := modelName
 				if useWebsearch {
 					modelName = "websearch"
-				}
-
-				// Strip any user-supplied priority to prevent circumventing rate limits
-				// or jumping ahead of other users.
-				_, hadPriority := body["priority"]
-				delete(body, "priority")
-
-				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified := hadPriority
-				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
-					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
-						body["priority"] = 1
-						bodyModified = true
-						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
-						log.WithFields(log.Fields{
-							"model": rateLimitModel,
-						}).Debug("rate limited: injecting lower vLLM priority")
-					}
 				}
 
 				// If streaming request, ensure continuous_usage_stats is enabled
@@ -361,18 +336,6 @@ func main() {
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
 					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
-				}
-
-				// Re-encode body if rate limiting modified it (non-streaming path)
-				if bodyModified {
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
 				}
 
 				r.Body.Close()
