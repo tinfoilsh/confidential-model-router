@@ -20,7 +20,6 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/config"
-	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 )
 
 type Enclave struct {
@@ -38,7 +37,6 @@ type Model struct {
 	SourceMeasurement *attestation.Measurement `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
-	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 
 	counter uint64
 	mu      sync.RWMutex
@@ -50,7 +48,6 @@ type EnclaveManager struct {
 	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
-	requestTracker       *ratelimit.RequestTracker
 	refreshInterval      time.Duration
 	errorsMu             sync.Mutex
 	errors               []string
@@ -71,22 +68,6 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 		return nil, false
 	}
 	return model.(*Model), true
-}
-
-// RequestTracker returns the shared request tracker for rate limiting.
-func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
-	return em.requestTracker
-}
-
-// GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
-func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimitConfig {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return nil
-	}
-	model.mu.RLock()
-	defer model.mu.RUnlock()
-	return model.RateLimit
 }
 
 // attestationFetch retrieves the attestation document from a given enclave hostname.
@@ -358,7 +339,6 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL),
-		requestTracker:   ratelimit.NewRequestTracker(),
 		refreshInterval:  refreshInterval,
 	}
 
@@ -378,7 +358,6 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		SourceMeasurement: nil,
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
-		RateLimit:         modelConfig.RateLimit,
 	})
 }
 
@@ -475,7 +454,6 @@ func (em *EnclaveManager) sync() error {
 			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()
 			model.Overload = configModel.Overload
-			model.RateLimit = configModel.RateLimit
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}
