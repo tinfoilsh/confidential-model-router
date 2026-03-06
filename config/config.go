@@ -13,11 +13,19 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// RateLimitConfig describes optional per-API-key request rate limits for a model.
+// When configured, requests from API keys that exceed the per-minute budget
+// are sent to vLLM with a lower scheduling priority.
+type RateLimitConfig struct {
+	MaxRequestsPerMinute int64 `yaml:"max_requests_per_minute"`
+}
+
 // Model represents the configuration for a single model
 type Model struct {
-	Repo      string          `yaml:"repo"`
-	Hostnames []string        `yaml:"enclaves"`
-	Overload  *OverloadConfig `yaml:"overload,omitempty"`
+	Repo      string           `yaml:"repo"`
+	Hostnames []string         `yaml:"enclaves"`
+	Overload  *OverloadConfig  `yaml:"overload,omitempty"`
+	RateLimit *RateLimitConfig `yaml:"rate_limit,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
