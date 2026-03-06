@@ -26,7 +26,7 @@ models:
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
     enclaves:
-      - llama3-3-70b.inf5.tinfoil.sh
+      - llama3-3-70b.tinfoil.containers.tinfoil.dev
 
   deepseek-r1-0528:
     repo: tinfoilsh/confidential-deepseek-r1-0528
