@@ -67,8 +67,6 @@ models:
     repo: tinfoilsh/confidential-kimi-k2-5
     enclaves:
       - kimi-k2-5.inf8.tinfoil.sh
-    rate_limit:
-      max_requests_per_minute: 4
 
   qwen2-5-05b:
     repo: tinfoilsh/confidential-qwen2-5-05b
