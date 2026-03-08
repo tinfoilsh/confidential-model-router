@@ -37,6 +37,11 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
       - gpt-oss-120b.inf5.tinfoil.sh
+    
+  gpt-oss-20b:
+    repo: opal-org/gpt-oss-20b
+    enclaves:
+      - gpt-oss-20b.sky-computing-lab.containers.tinfoil.dev
 
   gpt-oss-120b-free:
     repo: tinfoilsh/confidential-gpt-oss-120b-free
