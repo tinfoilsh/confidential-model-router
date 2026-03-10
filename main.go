@@ -163,23 +163,6 @@ func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
 	return "", bodyBytes, nil
 }
 
-// replaceMultipartFieldValue finds a form field by its header pattern in raw
-// multipart bytes and splices in a replacement value.
-func replaceMultipartFieldValue(body []byte, fieldName, oldValue, newValue string) []byte {
-	marker := []byte("name=\"" + fieldName + "\"\r\n\r\n" + oldValue + "\r\n")
-	idx := bytes.Index(body, marker)
-	if idx == -1 {
-		return body
-	}
-	valueStart := idx + len("name=\""+fieldName+"\"\r\n\r\n")
-	valueEnd := valueStart + len(oldValue)
-	result := make([]byte, 0, len(body)-len(oldValue)+len(newValue))
-	result = append(result, body[:valueStart]...)
-	result = append(result, []byte(newValue)...)
-	result = append(result, body[valueEnd:]...)
-	return result
-}
-
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -280,13 +263,10 @@ func main() {
 				if modelName == "" {
 					modelName = "voxtral-small-24b"
 				}
-				resolved := em.ResolveModelName(modelName)
-				if resolved != modelName {
-					bodyBytes = replaceMultipartFieldValue(bodyBytes, "model", modelName, resolved)
-					modelName = resolved
-				}
-				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-				r.ContentLength = int64(len(bodyBytes))
+				// Resolve alias for routing. The original model name is preserved
+				// in the body; if aliases are added to audio models, the enclave's
+				// --served-model-name must include them.
+				modelName = em.ResolveModelName(modelName)
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"

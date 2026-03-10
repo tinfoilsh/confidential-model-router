@@ -126,32 +126,6 @@ func TestBodyPreservedAfterExtraction(t *testing.T) {
 	t.Log("Body preserved correctly for forwarding to backend")
 }
 
-func TestReplaceMultipartFieldValue(t *testing.T) {
-	// Build a multipart body where the model name also appears inside the file data
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	writer.WriteField("model", "old-alias")
-	filePart, _ := writer.CreateFormFile("file", "test.wav")
-	filePart.Write([]byte("audio data containing old-alias in content"))
-	writer.Close()
-
-	original := body.Bytes()
-	result := replaceMultipartFieldValue(original, "model", "old-alias", "canonical-model-name")
-
-	// The model field value should be replaced
-	if bytes.Contains(result, []byte("name=\"model\"\r\n\r\nold-alias\r\n")) {
-		t.Error("model field value was not replaced")
-	}
-	if !bytes.Contains(result, []byte("name=\"model\"\r\n\r\ncanonical-model-name\r\n")) {
-		t.Error("model field value should contain the new value")
-	}
-
-	// The file data should still contain the old model name (not replaced)
-	if !bytes.Contains(result, []byte("audio data containing old-alias in content")) {
-		t.Error("file data should not be modified")
-	}
-}
-
 // TestAudioTranscriptionRouting tests the full HTTP handler routing logic for audio endpoints
 func TestAudioTranscriptionRouting(t *testing.T) {
 	tests := []struct {
@@ -199,7 +173,7 @@ func TestAudioTranscriptionRouting(t *testing.T) {
 
 				// This is the exact logic from main.go for audio paths
 				if r.URL.Path == "/v1/audio/transcriptions" || r.URL.Path == "/v1/audio/speech" ||
-				   len(r.URL.Path) > 10 && r.URL.Path[:10] == "/v1/audio/" {
+					len(r.URL.Path) > 10 && r.URL.Path[:10] == "/v1/audio/" {
 					modelName, bodyBytes, err = extractModelFromMultipart(r)
 					if err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
