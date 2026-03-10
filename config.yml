@@ -38,10 +38,6 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
       - gpt-oss-120b.inf5.tinfoil.sh
-    
-  gpt-oss-20b:
-    repo: opal-org/gpt-oss-20b
-    enclaves:
 
   gpt-oss-120b-free:
     repo: tinfoilsh/confidential-gpt-oss-120b-free
@@ -71,7 +67,7 @@ models:
   kimi-k2-5:
     repo: tinfoilsh/confidential-kimi-k2-5
     enclaves:
-      - kimi-k2-5.inf8.tinfoil.sh
+      - kimi-k2-5.tinfoil.containers.tinfoil.dev
     rate_limit:
       max_requests_per_minute: 4
 
