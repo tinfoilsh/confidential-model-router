@@ -391,16 +391,26 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
 	})
-	for _, alias := range modelConfig.Aliases {
+	em.registerAliases(modelName, modelConfig.Aliases, em.aliases)
+}
+
+// registerAliases registers aliases for a model into the provided alias map,
+// skipping any that conflict with canonical model names or existing aliases.
+func (em *EnclaveManager) registerAliases(modelName string, aliases []string, aliasMap *sync.Map) {
+	if _, isAlias := aliasMap.Load(modelName); isAlias {
+		log.Errorf("model %q is itself an alias; cannot register aliases for it, skipping", modelName)
+		return
+	}
+	for _, alias := range aliases {
 		if _, isCanonical := em.models.Load(alias); isCanonical {
 			log.Errorf("alias %q for model %q conflicts with canonical model name, skipping", alias, modelName)
 			continue
 		}
-		if existing, loaded := em.aliases.Load(alias); loaded && existing.(string) != modelName {
+		if existing, loaded := aliasMap.Load(alias); loaded && existing.(string) != modelName {
 			log.Errorf("alias %q for model %q conflicts with existing alias for model %q, skipping", alias, modelName, existing.(string))
 			continue
 		}
-		em.aliases.Store(alias, modelName)
+		aliasMap.Store(alias, modelName)
 	}
 }
 
@@ -465,23 +475,19 @@ func (em *EnclaveManager) sync() error {
 	}
 
 	// Rebuild aliases from updated config
+	newAliases := &sync.Map{}
+	for modelName, modelConfig := range config.Models {
+		em.registerAliases(modelName, modelConfig.Aliases, newAliases)
+	}
+	// Swap in the new alias map
 	em.aliases.Range(func(key, _ any) bool {
 		em.aliases.Delete(key)
 		return true
 	})
-	for modelName, modelConfig := range config.Models {
-		for _, alias := range modelConfig.Aliases {
-			if _, isCanonical := em.models.Load(alias); isCanonical {
-				log.Errorf("alias %q for model %q conflicts with canonical model name, skipping", alias, modelName)
-				continue
-			}
-			if existing, loaded := em.aliases.Load(alias); loaded && existing.(string) != modelName {
-				log.Errorf("alias %q for model %q conflicts with existing alias for model %q, skipping", alias, modelName, existing.(string))
-				continue
-			}
-			em.aliases.Store(alias, modelName)
-		}
-	}
+	newAliases.Range(func(key, value any) bool {
+		em.aliases.Store(key, value)
+		return true
+	})
 
 	var wg sync.WaitGroup
 	em.models.Range(func(key, value any) bool {
