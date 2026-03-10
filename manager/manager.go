@@ -45,8 +45,8 @@ type Model struct {
 }
 
 type EnclaveManager struct {
-	models               *sync.Map // model name -> *Model
-	aliases              *sync.Map // alias name -> canonical model name
+	models               *sync.Map                // model name -> *Model
+	aliases              atomic.Pointer[sync.Map] // alias name -> canonical model name
 	initConfigURL        string
 	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
@@ -65,9 +65,14 @@ func (em *EnclaveManager) ModelExists(modelName string) bool {
 	return found
 }
 
+// loadAliases returns the current alias map.
+func (em *EnclaveManager) loadAliases() *sync.Map {
+	return em.aliases.Load()
+}
+
 // ResolveModelName returns the canonical model name, resolving aliases if necessary.
 func (em *EnclaveManager) ResolveModelName(modelName string) string {
-	if canonical, ok := em.aliases.Load(modelName); ok {
+	if canonical, ok := em.loadAliases().Load(modelName); ok {
 		return canonical.(string)
 	}
 	return modelName
@@ -364,7 +369,6 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 
 	em := &EnclaveManager{
 		models:           &sync.Map{},
-		aliases:          &sync.Map{},
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
@@ -372,6 +376,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 		requestTracker:   ratelimit.NewRequestTracker(),
 		refreshInterval:  refreshInterval,
 	}
+	em.aliases.Store(&sync.Map{})
 
 	for modelName, modelConfig := range cfg.Models {
 		em.addModel(modelName, modelConfig)
@@ -391,7 +396,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
 	})
-	em.registerAliases(modelName, modelConfig.Aliases, em.aliases)
+	em.registerAliases(modelName, modelConfig.Aliases, em.loadAliases())
 }
 
 // registerAliases registers aliases for a model into the provided alias map,
@@ -474,20 +479,12 @@ func (em *EnclaveManager) sync() error {
 		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
 	}
 
-	// Rebuild aliases from updated config
+	// Rebuild aliases from updated config and atomically swap
 	newAliases := &sync.Map{}
 	for modelName, modelConfig := range config.Models {
 		em.registerAliases(modelName, modelConfig.Aliases, newAliases)
 	}
-	// Swap in the new alias map
-	em.aliases.Range(func(key, _ any) bool {
-		em.aliases.Delete(key)
-		return true
-	})
-	newAliases.Range(func(key, value any) bool {
-		em.aliases.Store(key, value)
-		return true
-	})
+	em.aliases.Store(newAliases)
 
 	var wg sync.WaitGroup
 	em.models.Range(func(key, value any) bool {
