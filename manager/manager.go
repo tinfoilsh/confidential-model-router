@@ -65,15 +65,18 @@ func (em *EnclaveManager) ModelExists(modelName string) bool {
 	return found
 }
 
+// ResolveModelName returns the canonical model name, resolving aliases if necessary.
+func (em *EnclaveManager) ResolveModelName(modelName string) string {
+	if canonical, ok := em.aliases.Load(modelName); ok {
+		return canonical.(string)
+	}
+	return modelName
+}
+
 // GetModel gets a model by name, resolving aliases if necessary
 func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
-	model, found := em.models.Load(modelName)
-	if !found {
-		// Check if it's an alias
-		if canonical, ok := em.aliases.Load(modelName); ok {
-			model, found = em.models.Load(canonical.(string))
-		}
-	}
+	resolved := em.ResolveModelName(modelName)
+	model, found := em.models.Load(resolved)
 	if !found {
 		return nil, false
 	}

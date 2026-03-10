@@ -163,6 +163,23 @@ func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
 	return "", bodyBytes, nil
 }
 
+// replaceMultipartFieldValue finds a form field by its header pattern in raw
+// multipart bytes and splices in a replacement value.
+func replaceMultipartFieldValue(body []byte, fieldName, oldValue, newValue string) []byte {
+	marker := []byte("name=\"" + fieldName + "\"\r\n\r\n" + oldValue + "\r\n")
+	idx := bytes.Index(body, marker)
+	if idx == -1 {
+		return body
+	}
+	valueStart := idx + len("name=\""+fieldName+"\"\r\n\r\n")
+	valueEnd := valueStart + len(oldValue)
+	result := make([]byte, 0, len(body)-len(oldValue)+len(newValue))
+	result = append(result, body[:valueStart]...)
+	result = append(result, []byte(newValue)...)
+	result = append(result, body[valueEnd:]...)
+	return result
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -246,6 +263,11 @@ func main() {
 				} else {
 					modelName = "qwen3-tts"
 				}
+				modelName = em.ResolveModelName(modelName)
+				body["model"] = modelName
+				bodyBytes, _ = json.Marshal(body)
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
@@ -258,6 +280,13 @@ func main() {
 				if modelName == "" {
 					modelName = "voxtral-small-24b"
 				}
+				resolved := em.ResolveModelName(modelName)
+				if resolved != modelName {
+					bodyBytes = replaceMultipartFieldValue(bodyBytes, "model", modelName, resolved)
+					modelName = resolved
+				}
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
@@ -286,6 +315,10 @@ func main() {
 					return
 				}
 
+				originalModelName := modelName
+				modelName = em.ResolveModelName(modelName)
+				body["model"] = modelName
+
 				// Check if request uses web search — route to websearch enclave.
 				// The original model name is preserved in the request body so the
 				// websearch service knows which model to use for inference.
@@ -312,7 +345,7 @@ func main() {
 				delete(body, "priority")
 
 				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified := hadPriority
+				bodyModified := hadPriority || (originalModelName != modelName)
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
 					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
