@@ -392,6 +392,14 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		RateLimit:         modelConfig.RateLimit,
 	})
 	for _, alias := range modelConfig.Aliases {
+		if _, isCanonical := em.models.Load(alias); isCanonical {
+			log.Errorf("alias %q for model %q conflicts with canonical model name, skipping", alias, modelName)
+			continue
+		}
+		if existing, loaded := em.aliases.Load(alias); loaded && existing.(string) != modelName {
+			log.Errorf("alias %q for model %q conflicts with existing alias for model %q, skipping", alias, modelName, existing.(string))
+			continue
+		}
 		em.aliases.Store(alias, modelName)
 	}
 }
@@ -463,6 +471,14 @@ func (em *EnclaveManager) sync() error {
 	})
 	for modelName, modelConfig := range config.Models {
 		for _, alias := range modelConfig.Aliases {
+			if _, isCanonical := em.models.Load(alias); isCanonical {
+				log.Errorf("alias %q for model %q conflicts with canonical model name, skipping", alias, modelName)
+				continue
+			}
+			if existing, loaded := em.aliases.Load(alias); loaded && existing.(string) != modelName {
+				log.Errorf("alias %q for model %q conflicts with existing alias for model %q, skipping", alias, modelName, existing.(string))
+				continue
+			}
 			em.aliases.Store(alias, modelName)
 		}
 	}
