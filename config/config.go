@@ -24,6 +24,7 @@ type RateLimitConfig struct {
 type Model struct {
 	Repo      string           `yaml:"repo"`
 	Hostnames []string         `yaml:"enclaves"`
+	Aliases   []string         `yaml:"aliases,omitempty"`
 	Overload  *OverloadConfig  `yaml:"overload,omitempty"`
 	RateLimit *RateLimitConfig `yaml:"rate_limit,omitempty"`
 }

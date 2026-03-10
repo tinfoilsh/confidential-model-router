@@ -46,6 +46,7 @@ type Model struct {
 
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
+	aliases              *sync.Map // alias name -> canonical model name
 	initConfigURL        string
 	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
@@ -64,9 +65,15 @@ func (em *EnclaveManager) ModelExists(modelName string) bool {
 	return found
 }
 
-// GetModel gets a model by name
+// GetModel gets a model by name, resolving aliases if necessary
 func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	model, found := em.models.Load(modelName)
+	if !found {
+		// Check if it's an alias
+		if canonical, ok := em.aliases.Load(modelName); ok {
+			model, found = em.models.Load(canonical.(string))
+		}
+	}
 	if !found {
 		return nil, false
 	}
@@ -354,6 +361,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 
 	em := &EnclaveManager{
 		models:           &sync.Map{},
+		aliases:          &sync.Map{},
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
@@ -380,6 +388,9 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
 	})
+	for _, alias := range modelConfig.Aliases {
+		em.aliases.Store(alias, modelName)
+	}
 }
 
 // updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
@@ -440,6 +451,17 @@ func (em *EnclaveManager) sync() error {
 	hwMeasurements, err := em.sigstoreClient.LatestHardwareMeasurements()
 	if err != nil {
 		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
+	}
+
+	// Rebuild aliases from updated config
+	em.aliases.Range(func(key, _ any) bool {
+		em.aliases.Delete(key)
+		return true
+	})
+	for modelName, modelConfig := range config.Models {
+		for _, alias := range modelConfig.Aliases {
+			em.aliases.Store(alias, modelName)
+		}
 	}
 
 	var wg sync.WaitGroup
