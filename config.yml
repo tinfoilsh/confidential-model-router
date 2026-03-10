@@ -26,6 +26,9 @@ models:
 
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
+    aliases:
+      - tinfoil-free
+      - tinfoil-summary-model
     enclaves:
       - llama3-3-70b.tinfoil.containers.tinfoil.dev
 
