@@ -39,11 +39,6 @@ models:
     enclaves:
       - gpt-oss-120b.inf5.tinfoil.sh
 
-  gpt-oss-120b-free:
-    repo: tinfoilsh/confidential-gpt-oss-120b-free
-    enclaves:
-      - gpt-oss-120b-free.inf5.tinfoil.sh
-
   gpt-oss-safeguard-120b:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
     enclaves:
