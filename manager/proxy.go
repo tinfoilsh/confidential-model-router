@@ -207,6 +207,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				Usage *tokencount.Usage `json:"usage"`
 			}
 			if err := json.Unmarshal(bodyBytes, &jsonResp); err == nil && jsonResp.Usage != nil {
+				jsonResp.Usage.Normalize()
 				// Call usage handler for billing
 				usageHandler(jsonResp.Usage)
 
