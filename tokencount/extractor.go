@@ -11,11 +11,27 @@ import (
 	"sync"
 )
 
-// Usage represents token usage information from inference responses
+// Usage represents token usage information from inference responses.
+// Supports both Chat Completions (prompt_tokens/completion_tokens) and
+// Responses API (input_tokens/output_tokens) field names.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+}
+
+// Normalize maps Responses API fields (input_tokens/output_tokens) into
+// Chat Completions fields (prompt_tokens/completion_tokens) so billing
+// works uniformly regardless of which API produced the usage data.
+func (u *Usage) Normalize() {
+	if u.PromptTokens == 0 && u.InputTokens > 0 {
+		u.PromptTokens = u.InputTokens
+	}
+	if u.CompletionTokens == 0 && u.OutputTokens > 0 {
+		u.CompletionTokens = u.OutputTokens
+	}
 }
 
 // OpenAIResponse represents a standard OpenAI-compatible response
@@ -45,6 +61,7 @@ func (j *JSONTokenExtractor) ExtractUsage() {
 
 	var resp OpenAIResponse
 	if err := json.Unmarshal(j.buffer.Bytes(), &resp); err == nil && resp.Usage != nil {
+		resp.Usage.Normalize()
 		j.usage = resp.Usage
 		log.Printf("[TokenExtractor] Model: %s, Tokens - Input: %d, Output: %d, Total: %d",
 			j.model,
@@ -171,11 +188,19 @@ func (s *StreamingTokenExtractor) processStream() {
 				// Try to parse the chunk
 				var chunk map[string]interface{}
 				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-					// Check for usage in the chunk
-					if usageData, ok := chunk["usage"]; ok && usageData != nil {
+					// Check for usage in the chunk (Chat Completions API)
+					// or nested under "response" (Responses API streaming)
+					usageData, ok := chunk["usage"]
+					if (!ok || usageData == nil) {
+						if respObj, rOk := chunk["response"].(map[string]interface{}); rOk {
+							usageData, ok = respObj["usage"]
+						}
+					}
+					if ok && usageData != nil {
 						usageBytes, _ := json.Marshal(usageData)
 						var usage Usage
 						if err := json.Unmarshal(usageBytes, &usage); err == nil {
+							usage.Normalize()
 							// Update usage data (continuous stats may send incremental updates)
 							if usage.PromptTokens > 0 {
 								s.usage.PromptTokens = usage.PromptTokens
