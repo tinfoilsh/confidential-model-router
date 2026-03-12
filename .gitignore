@@ -4,4 +4,3 @@ proxy
 proxyctl
 ext.yml
 tuf-repo-cdn.sigstore.dev.json
-config.yml
