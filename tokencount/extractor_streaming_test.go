@@ -549,6 +549,50 @@ data: [DONE]
 	}
 }
 
+func TestResponsesAPIStreamingUsageExtraction(t *testing.T) {
+	// Responses API puts usage inside response.completed event at chunk["response"]["usage"],
+	// not at the top-level chunk["usage"] like Chat Completions.
+	input := `event: response.created
+data: {"response":{"id":"resp_abc123","status":"in_progress","usage":null},"type":"response.created"}
+
+event: response.output_item.added
+data: {"item":{"id":"msg_001","type":"reasoning"},"output_index":0,"type":"response.output_item.added"}
+
+event: response.reasoning_text.delta
+data: {"content_index":0,"delta":"Hello","item_id":"msg_001","output_index":0,"type":"response.reasoning_text.delta"}
+
+event: response.completed
+data: {"response":{"id":"resp_abc123","status":"completed","output":[{"id":"msg_001","type":"reasoning","content":[{"text":"Hello","type":"reasoning_text"}]}],"usage":{"input_tokens":69,"input_tokens_details":{"cached_tokens":64},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":18},"total_tokens":89}},"type":"response.completed"}
+
+`
+
+	inputReader := io.NopCloser(strings.NewReader(input))
+	pr, pw := io.Pipe()
+
+	var capturedUsage *Usage
+	extractor := NewStreamingTokenExtractor(inputReader, pw, "gpt-oss-120b")
+	extractor.usageHandler = func(usage *Usage) {
+		capturedUsage = usage
+	}
+
+	go extractor.processStream()
+	io.ReadAll(pr)
+
+	if capturedUsage == nil {
+		t.Fatal("Usage handler was not called — Responses API streaming usage was not extracted")
+	}
+	if capturedUsage.TotalTokens != 89 {
+		t.Errorf("Expected total_tokens=89, got %d", capturedUsage.TotalTokens)
+	}
+	// Responses API uses input_tokens/output_tokens; Normalize() should map them
+	if capturedUsage.PromptTokens != 69 {
+		t.Errorf("Expected prompt_tokens=69 (from input_tokens), got %d", capturedUsage.PromptTokens)
+	}
+	if capturedUsage.CompletionTokens != 20 {
+		t.Errorf("Expected completion_tokens=20 (from output_tokens), got %d", capturedUsage.CompletionTokens)
+	}
+}
+
 func TestRealWorldScenarios(t *testing.T) {
 	// Test scenarios based on actual vLLM and OpenAI responses
 	tests := []struct {
