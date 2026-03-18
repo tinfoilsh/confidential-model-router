@@ -39,6 +39,11 @@ models:
     enclaves:
       - gpt-oss-120b.inf9.tinfoil.sh
       - gpt-oss-120b-2.inf9.tinfoil.sh
+      - gpt-oss-120b.inf6.tinfoil.sh
+      - gpt-oss-120b-2.inf6.tinfoil.sh
+    overload:
+      max_requests_waiting: 8
+      retry_after_minutes: 1
 
   gpt-oss-safeguard-120b:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
