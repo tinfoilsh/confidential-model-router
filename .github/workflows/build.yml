@@ -1,15 +1,9 @@
 name: Docker Build and Publish
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release (e.g. v1.0.0)'
-        required: true
-        type: string
-
-concurrency:
-  group: build-and-release
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   docker-build:
@@ -17,8 +11,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -40,12 +32,11 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
       - name: Build and push Docker image
-        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
         env:
           SOURCE_DATE_EPOCH: 0
@@ -55,22 +46,21 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ inputs.version }}
+            VERSION=${{ github.ref_name }}
 
   release:
     needs: docker-build
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
       contents: write
       packages: write
       id-token: write
       attestations: write
 
     steps:
-      - uses: tinfoilsh/container-release-action@63f9a2f3e3eab910919aff711131060bae939fc0 # v0.2.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
+      - uses: tinfoilsh/pri-build-action@5d450a7f30904866efc401e24484b935b7ed52dd # v0.6.1
         with:
-          digest: ${{ needs.docker-build.outputs.digest }}
-          version: ${{ inputs.version }}
+          config-file: ${{ github.workspace }}/tinfoil-config.yml
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          release-branch: ${{ github.ref_name }}
+          prerelease: "true"
