@@ -55,7 +55,7 @@ models:
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
     enclaves:
-      - qwen3-vl-30b.tinfoil.containers.tinfoil.dev
+      - qwen3-vl-30b.inf9.tinfoil.sh
 
   kimi-k2-thinking:
     repo: tinfoilsh/confidential-kimi-k2-thinking
