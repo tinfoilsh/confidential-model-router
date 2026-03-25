@@ -23,6 +23,11 @@ models:
     enclaves:
       - voxtral-small-24b.inf9.tinfoil.sh
 
+  voxtral-mini-4b-realtime:
+    repo: tinfoilsh/confidential-realtime-models
+    enclaves:
+      - realtime-models.tinfoil.containers.tinfoil.dev
+
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
     enclaves:
@@ -47,9 +52,9 @@ models:
       - gpt-oss-safeguard-120b.tinfoil.containers.tinfoil.dev
 
   qwen3-tts:
-    repo: tinfoilsh/confidential-qwen3-tts
+    repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - qwen3-tts.inf6.tinfoil.sh
+      - realtime-models.tinfoil.containers.tinfoil.dev
 
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
