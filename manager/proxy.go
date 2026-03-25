@@ -92,6 +92,13 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		// WebSocket/protocol upgrade: the reverse proxy will hijack both
+		// connections and copy bidirectionally after this callback returns.
+		// We must not touch the body or wrap it.
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			return nil
+		}
+
 		// Extract request details that we'll need for billing
 		req := resp.Request
 		authHeader := req.Header.Get("Authorization")

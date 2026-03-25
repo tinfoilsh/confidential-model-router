@@ -95,6 +95,10 @@ func sendJSON(w http.ResponseWriter, data any) {
 	}
 }
 
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
 func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	// Check if the request is for a subdomain and derive model from leftmost subdomain.
 	host := r.Header.Get("X-Forwarded-Host")
@@ -192,6 +196,21 @@ func main() {
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
 			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 			return
+		}
+
+		// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing
+		if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
+			if modelName == "" {
+				modelName = r.URL.Query().Get("model")
+			}
+			if modelName == "" {
+				jsonError(w, "Missing required parameter: 'model' (use ?model=<name> query parameter for WebSocket requests).", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				return
+			}
+			log.WithFields(log.Fields{
+				"model": modelName,
+				"path":  r.URL.Path,
+			}).Debug("WebSocket upgrade request")
 		} else if modelName == "" { // The request does not use a subdomain. We route using specific inference routing logic.
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
