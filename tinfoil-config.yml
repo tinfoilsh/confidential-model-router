@@ -1,4 +1,4 @@
-cvm-version: 0.7.1
+cvm-version: 0.7.3
 cpus: 8
 memory: 16384
 
@@ -8,7 +8,7 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.70"
+    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.71"
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
