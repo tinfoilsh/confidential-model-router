@@ -94,17 +94,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// Extract request details that we'll need for billing
 		req := resp.Request
-		authHeader := req.Header.Get("Authorization")
-		userID := ""
-		apiKey := ""
-		if authHeader != "" {
-			// Extract API key from "Bearer <api_key>" format
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
-				// For user ID, we can use a placeholder or the API key itself
-				userID = "authenticated_user"
-			}
-		}
+		userID, apiKey := extractAuthBillingFields(req)
 
 		requestID := resp.Header.Get("X-Request-Id")
 		if requestID == "" {
@@ -115,7 +105,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 		emitZeroTokenEvent := func() {
-			billingCollector.AddEvent(billing.Event{
+			addBillingEvent(billingCollector, billing.Event{
 				Timestamp:   time.Now(),
 				UserID:      userID,
 				APIKey:      apiKey,
@@ -185,7 +175,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 						RequestPath:      requestPath,
 						Streaming:        streaming,
 					}
-					billingCollector.AddEvent(event)
+					addBillingEvent(billingCollector, event)
 				}
 			}
 		}
@@ -222,7 +212,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -275,7 +265,37 @@ func formatUsage(usage *tokencount.Usage) string {
 		",total=" + strconv.Itoa(usage.TotalTokens)
 }
 
-func addTrailerHeader(h http.Header, name string) {
+// FormatUsage formats token usage for the response header value.
+func FormatUsage(usage *tokencount.Usage) string {
+	return formatUsage(usage)
+}
+
+func extractAuthBillingFields(req *http.Request) (userID string, apiKey string) {
+	if req == nil {
+		return "", ""
+	}
+
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", ""
+	}
+
+	apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+	if apiKey == "" {
+		return "", ""
+	}
+
+	return "authenticated_user", apiKey
+}
+
+func addBillingEvent(collector *billing.Collector, event billing.Event) {
+	if collector == nil {
+		return
+	}
+	collector.AddEvent(event)
+}
+
+func AddTrailerHeader(h http.Header, name string) {
 	canonical := textproto.CanonicalMIMEHeaderKey(name)
 	if canonical == "" {
 		return

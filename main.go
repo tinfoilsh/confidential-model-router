@@ -24,6 +24,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolexec"
 )
 
 //go:embed config.yml
@@ -59,13 +60,16 @@ func getEnvBool(envKey string) bool {
 }
 
 var (
-	port            = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
-	controlPlaneURL = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
-	verbose         = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
-	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
-	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
-	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	port                       = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL            = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	verbose                    = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL              = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL            = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	domain                     = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
+	refreshInterval            = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	codeInterpreterBaseURL     = flag.String("I", getEnvOrDefault("CODE_INTERPRETER_BASE_URL", ""), "code interpreter backend base URL (env: CODE_INTERPRETER_BASE_URL)")
+	codeInterpreterRepo        = flag.String("R", getEnvOrDefault("CODE_INTERPRETER_REPO", ""), "GitHub repo for code interpreter attestation, e.g. org/repo (env: CODE_INTERPRETER_REPO)")
+	codeInterpreterExecTimeout = flag.Duration("t", getEnvOrDefaultDuration("CODE_INTERPRETER_EXEC_TIMEOUT", 60*time.Second), "code interpreter execution timeout (env: CODE_INTERPRETER_EXEC_TIMEOUT)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -190,6 +194,11 @@ func main() {
 	}
 	defer em.Shutdown()
 	go em.StartWorker()
+
+	toolExecutor, err := toolexec.New(*codeInterpreterBaseURL, *codeInterpreterRepo, *codeInterpreterExecTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
@@ -338,25 +347,7 @@ func main() {
 					return
 				}
 
-				// Check if request uses web search — route to websearch enclave.
-				// The original model name is preserved in the request body so the
-				// websearch service knows which model to use for inference.
-				useWebsearch := false
-				if _, ok := body["web_search_options"]; ok {
-					useWebsearch = true
-				} else if r.URL.Path == "/v1/responses" {
-					if tools, ok := body["tools"].([]interface{}); ok {
-						useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
-							m, _ := t.(map[string]any)
-							typeVal, ok := m["type"].(string)
-							return ok && typeVal == "web_search"
-						})
-					}
-				}
 				rateLimitModel := modelName
-				if useWebsearch {
-					modelName = "websearch"
-				}
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
@@ -425,6 +416,40 @@ func main() {
 					bodyBytes = newBodyBytes
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
+				}
+
+				if handles, effectiveModel := toolExecutor.NeedsHandling(r.URL.Path, modelName, body); handles {
+					invoker, err := em.NewUpstreamInvoker(effectiveModel)
+					if err != nil {
+						jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+						return
+					}
+
+					enclave := invoker.Enclave()
+					if overloaded, retryAfter, waiting := enclave.ShouldReject(); overloaded {
+						secs := int(retryAfter.Seconds())
+						if secs <= 0 {
+							secs = 60
+						}
+						w.Header().Set("Retry-After", strconv.Itoa(secs))
+						log.WithFields(log.Fields{
+							"model":               effectiveModel,
+							"enclave":             enclave.String(),
+							"requests_waiting":    waiting,
+							"retry_after_seconds": secs,
+						}).Warn("rejecting request due to backend overload")
+
+						manager.RequestsRejectedTotal.WithLabelValues(effectiveModel).Inc()
+						manager.RetryAfterSeconds.WithLabelValues(effectiveModel).Observe(float64(secs))
+
+						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+						return
+					}
+
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					if handled := toolExecutor.HandleWithInvoker(r.Context(), w, r, body, invoker); handled {
+						return
+					}
 				}
 
 				r.Body.Close()
