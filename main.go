@@ -215,6 +215,31 @@ func main() {
 				jsonError(w, "Missing required parameter: 'model' (use ?model=<name> query parameter for WebSocket requests).", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 				return
 			}
+
+			// Browser WebSocket auth: extract API key from Sec-WebSocket-Protocol subprotocol
+			// Browsers can't set Authorization headers, so they pass the key as:
+			//   new WebSocket(url, ["realtime", "openai-insecure-api-key.<key>"])
+			if apiKey == "" {
+				const subprotoPrefix = "openai-insecure-api-key."
+				var cleaned []string
+				for _, proto := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+					proto = strings.TrimSpace(proto)
+					if strings.HasPrefix(proto, subprotoPrefix) {
+						apiKey = strings.TrimPrefix(proto, subprotoPrefix)
+					} else if proto != "" {
+						cleaned = append(cleaned, proto)
+					}
+				}
+				if apiKey != "" {
+					r.Header.Set("Authorization", "Bearer "+apiKey)
+					if len(cleaned) > 0 {
+						r.Header.Set("Sec-WebSocket-Protocol", strings.Join(cleaned, ", "))
+					} else {
+						r.Header.Del("Sec-WebSocket-Protocol")
+					}
+				}
+			}
+
 			log.WithFields(log.Fields{
 				"model": modelName,
 				"path":  r.URL.Path,
