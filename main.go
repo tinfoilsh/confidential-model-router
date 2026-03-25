@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +21,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -282,19 +283,18 @@ func main() {
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
-				var body map[string]interface{}
 				bodyBytes, err := io.ReadAll(r.Body)
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 				r.Body.Close()
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				if !gjson.ValidBytes(bodyBytes) {
+					jsonError(w, "Invalid request body: invalid JSON.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
-				if m, ok := body["model"].(string); ok && m != "" {
-					modelName = m
+				if r := gjson.GetBytes(bodyBytes, "model"); r.Type == gjson.String && r.String() != "" {
+					modelName = r.String()
 				} else {
 					modelName = "qwen3-tts"
 				}
@@ -314,44 +314,40 @@ func main() {
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
-				var body map[string]interface{}
 				bodyBytes, err := io.ReadAll(r.Body)
-
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				if !gjson.ValidBytes(bodyBytes) {
+					jsonError(w, "Invalid request body: invalid JSON.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 
 				// Extract model name from request body
-				modelInterface, ok := body["model"]
-				if !ok {
+				modelResult := gjson.GetBytes(bodyBytes, "model")
+				if !modelResult.Exists() {
 					jsonError(w, "Missing required parameter: 'model'.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
-				modelName, ok = modelInterface.(string)
-				if !ok {
+				if modelResult.Type != gjson.String {
 					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
+				modelName = modelResult.String()
 
 				// Check if request uses web search — route to websearch enclave.
 				// The original model name is preserved in the request body so the
 				// websearch service knows which model to use for inference.
-				useWebsearch := false
-				if _, ok := body["web_search_options"]; ok {
-					useWebsearch = true
-				} else if r.URL.Path == "/v1/responses" {
-					if tools, ok := body["tools"].([]interface{}); ok {
-						useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
-							m, _ := t.(map[string]any)
-							typeVal, ok := m["type"].(string)
-							return ok && typeVal == "web_search"
-						})
-					}
+				useWebsearch := gjson.GetBytes(bodyBytes, "web_search_options").Exists()
+				if !useWebsearch && r.URL.Path == "/v1/responses" {
+					gjson.GetBytes(bodyBytes, "tools").ForEach(func(_, tool gjson.Result) bool {
+						if tool.Get("type").String() == "web_search" {
+							useWebsearch = true
+							return false
+						}
+						return true
+					})
 				}
 				rateLimitModel := modelName
 				if useWebsearch {
@@ -360,14 +356,15 @@ func main() {
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
-				_, hadPriority := body["priority"]
-				delete(body, "priority")
+				bodyModified := gjson.GetBytes(bodyBytes, "priority").Exists()
+				if bodyModified {
+					bodyBytes, _ = sjson.DeleteBytes(bodyBytes, "priority")
+				}
 
 				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified := hadPriority
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
 					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
-						body["priority"] = 1
+						bodyBytes, _ = sjson.SetBytes(bodyBytes, "priority", 1)
 						bodyModified = true
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{
@@ -377,24 +374,13 @@ func main() {
 				}
 
 				// If streaming request, ensure continuous_usage_stats is enabled
-				if stream, ok := body["stream"].(bool); ok && stream {
+				if gjson.GetBytes(bodyBytes, "stream").Type == gjson.True {
 					// Check if client requested usage stats before we modify anything
-					clientRequestedUsage := false
-					if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
-						// Check for OpenAI-style include_usage
-						if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
-							clientRequestedUsage = true
-						}
-						// Check for vLLM-style continuous_usage_stats
-						if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-							clientRequestedUsage = true
-						}
-						streamOptions["continuous_usage_stats"] = true
-					} else {
-						body["stream_options"] = map[string]interface{}{
-							"continuous_usage_stats": true,
-						}
-					}
+					clientRequestedUsage := gjson.GetBytes(bodyBytes, "stream_options.include_usage").Type == gjson.True ||
+						gjson.GetBytes(bodyBytes, "stream_options.continuous_usage_stats").Type == gjson.True
+
+					bodyBytes, _ = sjson.SetBytes(bodyBytes, "stream_options.continuous_usage_stats", true)
+					bodyModified = true
 
 					// Set internal header to indicate if client requested usage
 					// This header will be used by the proxy to decide whether to filter usage-only chunks
@@ -402,27 +388,10 @@ func main() {
 						r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
 					}
 
-					// Re-encode the modified body
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					// Update Content-Length header to match new body size
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
 					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
 				}
 
-				// Re-encode body if rate limiting modified it (non-streaming path)
 				if bodyModified {
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
 				}
