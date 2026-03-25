@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolexec/codeinterpreter"
@@ -88,7 +87,6 @@ func (e *Executor) handleChat(ctx context.Context, w http.ResponseWriter, r *htt
 			if jsonString(function["name"]) != codeInterpreterToolName {
 				continue
 			}
-			log.WithField("arguments", jsonString(function["arguments"])).Info("code_interpreter tool call (non-streaming)")
 			result, execErr := e.codeInterpreter.Execute(ctx, jsonString(toolCall["id"]), jsonString(function["arguments"]), normalized.session, bearerToken(r))
 			if execErr != nil {
 				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
@@ -226,7 +224,6 @@ func (e *Executor) handleChatStream(w http.ResponseWriter, req *http.Request, re
 			if builder == nil || builder.Name != codeInterpreterToolName {
 				continue
 			}
-			log.WithField("arguments", builder.Arguments.String()).Info("code_interpreter tool call (streaming)")
 			result, err := e.codeInterpreter.Execute(req.Context(), builder.ID, builder.Arguments.String(), session, bearerToken(req))
 			if err != nil {
 				return err

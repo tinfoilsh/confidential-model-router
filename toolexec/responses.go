@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolexec/codeinterpreter"
 )
@@ -244,7 +243,6 @@ func (e *Executor) processResponsesOutput(ctx context.Context, outputItems []any
 			continue
 		}
 
-		log.WithField("arguments", jsonString(item["arguments"])).Info("code_interpreter tool call (responses)")
 		execResult, err := e.codeInterpreter.Execute(ctx, jsonString(item["call_id"]), jsonString(item["arguments"]), session, apiKey)
 		if err != nil {
 			return nil, err
