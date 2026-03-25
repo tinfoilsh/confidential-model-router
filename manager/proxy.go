@@ -92,13 +92,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// WebSocket/protocol upgrade: the reverse proxy will hijack both
-		// connections and copy bidirectionally after this callback returns.
-		// We must not touch the body or wrap it.
-		if resp.StatusCode == http.StatusSwitchingProtocols {
-			return nil
-		}
-
 		// Extract request details that we'll need for billing
 		req := resp.Request
 		authHeader := req.Header.Get("Authorization")
@@ -121,17 +114,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		requestPath := req.URL.Path
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
-		// Check if client requested usage metrics in response header/trailer
-		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
-		if streaming && usageMetricsRequested {
-			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
-			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
-				wrapper.EnableTrailer()
-			}
-		}
-
-		var handlerCalled atomic.Bool
-
 		emitZeroTokenEvent := func() {
 			billingCollector.AddEvent(billing.Event{
 				Timestamp:   time.Now(),
@@ -144,6 +126,27 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				Streaming:   streaming,
 			})
 		}
+
+		// WebSocket/protocol upgrade: the reverse proxy will hijack both
+		// connections and copy bidirectionally after this callback returns.
+		// We must not touch the body or wrap it, but still emit a billing event.
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			if billingCollector != nil && apiKey != "" {
+				emitZeroTokenEvent()
+			}
+			return nil
+		}
+
+		// Check if client requested usage metrics in response header/trailer
+		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
+		if streaming && usageMetricsRequested {
+			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
+			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+				wrapper.EnableTrailer()
+			}
+		}
+
+		var handlerCalled atomic.Bool
 
 		// Create a usage handler that will be called when usage is extracted
 		usageHandler := func(usage *tokencount.Usage) {
