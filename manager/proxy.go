@@ -213,9 +213,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			resp.Body.Close()
 
 			// Extract usage from JSON
-			var jsonResp struct {
-				Usage *tokencount.Usage `json:"usage"`
-			}
+			var jsonResp tokencount.OpenAIResponse
 			if err := json.Unmarshal(bodyBytes, &jsonResp); err == nil && jsonResp.Usage != nil {
 				jsonResp.Usage.Normalize()
 				// Call usage handler for billing

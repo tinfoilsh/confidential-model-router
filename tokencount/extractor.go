@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/tidwall/gjson"
 )
 
 // Usage represents token usage information from inference responses.
@@ -185,43 +187,35 @@ func (s *StreamingTokenExtractor) processStream() {
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			if data != "[DONE]" {
-				// Try to parse the chunk
-				var chunk map[string]interface{}
-				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-					// Check for usage in the chunk (Chat Completions API)
-					// or nested under "response" (Responses API streaming)
-					usageData, ok := chunk["usage"]
-					if (!ok || usageData == nil) {
-						if respObj, rOk := chunk["response"].(map[string]interface{}); rOk {
-							usageData, ok = respObj["usage"]
+				// Check for usage in the chunk (Chat Completions API)
+				// or nested under "response" (Responses API streaming)
+				usageResult := gjson.Get(data, "usage")
+				if !usageResult.Exists() || usageResult.Type == gjson.Null {
+					usageResult = gjson.Get(data, "response.usage")
+				}
+				if usageResult.Exists() && usageResult.Type != gjson.Null {
+					var usage Usage
+					if err := json.Unmarshal([]byte(usageResult.Raw), &usage); err == nil {
+						usage.Normalize()
+						// Update usage data (continuous stats may send incremental updates)
+						if usage.PromptTokens > 0 {
+							s.usage.PromptTokens = usage.PromptTokens
+						}
+						if usage.CompletionTokens > 0 {
+							s.usage.CompletionTokens = usage.CompletionTokens
+						}
+						if usage.TotalTokens > 0 {
+							s.usage.TotalTokens = usage.TotalTokens
 						}
 					}
-					if ok && usageData != nil {
-						usageBytes, _ := json.Marshal(usageData)
-						var usage Usage
-						if err := json.Unmarshal(usageBytes, &usage); err == nil {
-							usage.Normalize()
-							// Update usage data (continuous stats may send incremental updates)
-							if usage.PromptTokens > 0 {
-								s.usage.PromptTokens = usage.PromptTokens
-							}
-							if usage.CompletionTokens > 0 {
-								s.usage.CompletionTokens = usage.CompletionTokens
-							}
-							if usage.TotalTokens > 0 {
-								s.usage.TotalTokens = usage.TotalTokens
-							}
-						}
 
-						// Check if this is a usage-only chunk that should be filtered
-						if !s.clientRequestedUsage {
-							// Check if choices array exists and is empty
-							if choices, hasChoices := chunk["choices"].([]interface{}); hasChoices && len(choices) == 0 {
-								// This is a usage-only chunk with empty choices array
-								// Filter it out since client didn't request usage
-								shouldWrite = false
-								lastLineWasFiltered = true
-							}
+					// Check if this is a usage-only chunk that should be filtered
+					if !s.clientRequestedUsage {
+						// Check if choices array exists and is empty
+						choices := gjson.Get(data, "choices")
+						if choices.Exists() && choices.IsArray() && len(choices.Array()) == 0 {
+							shouldWrite = false
+							lastLineWasFiltered = true
 						}
 					}
 				}
