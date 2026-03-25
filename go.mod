@@ -70,6 +70,10 @@ require (
 	github.com/sigstore/timestamp-authority/v2 v2.0.3 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.1 // indirect
+	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/tidwall/match v1.2.0 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/transparency-dev/formats v0.0.0-20251103090025-99ec6f4410eb // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect
 	go.mongodb.org/mongo-driver v1.17.6 // indirect
