@@ -8,7 +8,7 @@ shim:
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router:0.0.74"
+    image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:80303ab5091c232cd9c912b7262c1687813b5a4d39e87629c57e5413d73c40d8" # v0.0.75
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
