@@ -164,3 +164,29 @@ func TestProxyBilling_WebsearchEmitsOnlyZeroTokenEvent(t *testing.T) {
 		t.Errorf("expected event model %q, got %q", websearchModel, events[0].Model)
 	}
 }
+
+func TestProxyBilling_SwitchingProtocolsEmitsZeroTokenEvent(t *testing.T) {
+	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "Upgrade")
+		w.Header().Set("Upgrade", "websocket")
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=test-model", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	events := collector.GetEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 billing event for switching protocols, got %d", len(events))
+	}
+	e := events[0]
+	if e.PromptTokens != 0 || e.CompletionTokens != 0 || e.TotalTokens != 0 {
+		t.Errorf("expected zero-token event, got prompt=%d completion=%d total=%d",
+			e.PromptTokens, e.CompletionTokens, e.TotalTokens)
+	}
+}

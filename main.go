@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,8 +22,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/tinfoilsh/confidential-model-router/builtins/codeinterpreter"
+	"github.com/tinfoilsh/confidential-model-router/builtins/websearch"
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/toolexec"
+	"github.com/tinfoilsh/confidential-model-router/openaiapi"
 )
 
 //go:embed config.yml
@@ -68,7 +69,9 @@ var (
 	domain                     = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
 	refreshInterval            = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 	codeInterpreterBaseURL     = flag.String("I", getEnvOrDefault("CODE_INTERPRETER_BASE_URL", ""), "code interpreter backend base URL (env: CODE_INTERPRETER_BASE_URL)")
+	codeInterpreterImage       = flag.String("J", getEnvOrDefault("CODE_INTERPRETER_IMAGE", ""), "managed sandbox image for code interpreter (env: CODE_INTERPRETER_IMAGE)")
 	codeInterpreterRepo        = flag.String("R", getEnvOrDefault("CODE_INTERPRETER_REPO", ""), "GitHub repo for code interpreter attestation, e.g. org/repo (env: CODE_INTERPRETER_REPO)")
+	controlPlaneSandboxAPIKey  = flag.String("K", getEnvOrDefault("CONTROL_PLANE_SANDBOX_API_KEY", ""), "router-to-controlplane sandbox orchestration bearer token (env: CONTROL_PLANE_SANDBOX_API_KEY)")
 	codeInterpreterExecTimeout = flag.Duration("t", getEnvOrDefaultDuration("CODE_INTERPRETER_EXEC_TIMEOUT", 60*time.Second), "code interpreter execution timeout (env: CODE_INTERPRETER_EXEC_TIMEOUT)")
 )
 
@@ -111,6 +114,31 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	return false
 }
 
+func applyRealtimeWebSocketAuth(r *http.Request, apiKey string) string {
+	if apiKey != "" {
+		return apiKey
+	}
+
+	const subprotoPrefix = "openai-insecure-api-key."
+	var cleaned []string
+	for _, proto := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		proto = strings.TrimSpace(proto)
+		if strings.HasPrefix(proto, subprotoPrefix) {
+			apiKey = strings.TrimPrefix(proto, subprotoPrefix)
+		} else if proto != "" {
+			cleaned = append(cleaned, proto)
+		}
+	}
+	if apiKey != "" {
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+		if len(cleaned) > 0 {
+			r.Header.Set("Sec-WebSocket-Protocol", strings.Join(cleaned, ", "))
+		} else {
+			r.Header.Del("Sec-WebSocket-Protocol")
+		}
+	}
+	return apiKey
+}
 func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	// Check if the request is for a subdomain and derive model from leftmost subdomain.
 	host := r.Header.Get("X-Forwarded-Host")
@@ -195,10 +223,18 @@ func main() {
 	defer em.Shutdown()
 	go em.StartWorker()
 
-	toolExecutor, err := toolexec.New(*codeInterpreterBaseURL, *codeInterpreterRepo, *codeInterpreterExecTimeout)
+	codeInterpreterTool, err := codeinterpreter.New(codeinterpreter.Config{
+		ControlPlaneURL:    *controlPlaneURL,
+		ControlPlaneAPIKey: *controlPlaneSandboxAPIKey,
+		BaseURL:            *codeInterpreterBaseURL,
+		Image:              *codeInterpreterImage,
+		Repo:               *codeInterpreterRepo,
+		ExecTimeout:        *codeInterpreterExecTimeout,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
+	openaiRunner := openaiapi.NewRunner(websearch.New(), codeInterpreterTool)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
@@ -215,8 +251,8 @@ func main() {
 			return
 		}
 
-		// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing
-		if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
+			// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing.
+			if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
 			if modelName == "" {
 				modelName = r.URL.Query().Get("model")
 			}
@@ -225,31 +261,9 @@ func main() {
 				return
 			}
 
-			// Browser WebSocket auth: extract API key from Sec-WebSocket-Protocol subprotocol
-			// Browsers can't set Authorization headers, so they pass the key as:
-			//   new WebSocket(url, ["realtime", "openai-insecure-api-key.<key>"])
-			if apiKey == "" {
-				const subprotoPrefix = "openai-insecure-api-key."
-				var cleaned []string
-				for _, proto := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
-					proto = strings.TrimSpace(proto)
-					if strings.HasPrefix(proto, subprotoPrefix) {
-						apiKey = strings.TrimPrefix(proto, subprotoPrefix)
-					} else if proto != "" {
-						cleaned = append(cleaned, proto)
-					}
-				}
-				if apiKey != "" {
-					r.Header.Set("Authorization", "Bearer "+apiKey)
-					if len(cleaned) > 0 {
-						r.Header.Set("Sec-WebSocket-Protocol", strings.Join(cleaned, ", "))
-					} else {
-						r.Header.Del("Sec-WebSocket-Protocol")
-					}
-				}
-			}
+				apiKey = applyRealtimeWebSocketAuth(r, apiKey)
 
-			log.WithFields(log.Fields{
+				log.WithFields(log.Fields{
 				"model": modelName,
 				"path":  r.URL.Path,
 			}).Debug("WebSocket upgrade request")
@@ -323,137 +337,20 @@ func main() {
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
-				var body map[string]interface{}
 				bodyBytes, err := io.ReadAll(r.Body)
-
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				r.Body.Close()
+
+				plan, err := openaiRunner.PlanRequest(r, bodyBytes)
+				if err != nil {
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
-
-				// Extract model name from request body
-				modelInterface, ok := body["model"]
-				if !ok {
-					jsonError(w, "Missing required parameter: 'model'.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
-					return
-				}
-				modelName, ok = modelInterface.(string)
-				if !ok {
-					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
-					return
-				}
-
-				rateLimitModel := modelName
-
-				// Strip any user-supplied priority to prevent circumventing rate limits
-				// or jumping ahead of other users.
-				_, hadPriority := body["priority"]
-				delete(body, "priority")
-
-				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified := hadPriority
-				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
-					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
-						body["priority"] = 1
-						bodyModified = true
-						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
-						log.WithFields(log.Fields{
-							"model": rateLimitModel,
-						}).Debug("rate limited: injecting lower vLLM priority")
-					}
-				}
-
-				// If streaming request, ensure continuous_usage_stats is enabled
-				if stream, ok := body["stream"].(bool); ok && stream {
-					// Check if client requested usage stats before we modify anything
-					clientRequestedUsage := false
-					if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
-						// Check for OpenAI-style include_usage
-						if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
-							clientRequestedUsage = true
-						}
-						// Check for vLLM-style continuous_usage_stats
-						if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-							clientRequestedUsage = true
-						}
-						streamOptions["continuous_usage_stats"] = true
-					} else {
-						body["stream_options"] = map[string]interface{}{
-							"continuous_usage_stats": true,
-						}
-					}
-
-					// Set internal header to indicate if client requested usage
-					// This header will be used by the proxy to decide whether to filter usage-only chunks
-					if clientRequestedUsage {
-						r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
-					}
-
-					// Re-encode the modified body
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					// Update Content-Length header to match new body size
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
-					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
-				}
-
-				// Re-encode body if rate limiting modified it (non-streaming path)
-				if bodyModified {
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
-				}
-
-				if handles, effectiveModel := toolExecutor.NeedsHandling(r.URL.Path, modelName, body); handles {
-					invoker, err := em.NewUpstreamInvoker(effectiveModel)
-					if err != nil {
-						jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
-						return
-					}
-
-					enclave := invoker.Enclave()
-					if overloaded, retryAfter, waiting := enclave.ShouldReject(); overloaded {
-						secs := int(retryAfter.Seconds())
-						if secs <= 0 {
-							secs = 60
-						}
-						w.Header().Set("Retry-After", strconv.Itoa(secs))
-						log.WithFields(log.Fields{
-							"model":               effectiveModel,
-							"enclave":             enclave.String(),
-							"requests_waiting":    waiting,
-							"retry_after_seconds": secs,
-						}).Warn("rejecting request due to backend overload")
-
-						manager.RequestsRejectedTotal.WithLabelValues(effectiveModel).Inc()
-						manager.RetryAfterSeconds.WithLabelValues(effectiveModel).Observe(float64(secs))
-
-						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
-						return
-					}
-
-					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					if handled := toolExecutor.HandleWithInvoker(r.Context(), w, r, body, invoker); handled {
-						return
-					}
-				}
-
-				r.Body.Close()
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				plan.Serve(r.Context(), w, r, em, apiKey)
+				return
 			}
 		}
 

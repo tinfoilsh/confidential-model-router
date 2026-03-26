@@ -24,7 +24,7 @@ const (
 )
 
 type AutoConfig struct {
-	MemoryLimit string
+	TTLSeconds int32
 }
 
 type ContainerConfig struct {
@@ -35,7 +35,7 @@ type ContainerConfig struct {
 type Session struct {
 	ContainerID string
 	Managed     bool
-	MemoryLimit string
+	TTLSeconds  int32
 }
 
 type Args struct {
@@ -145,8 +145,8 @@ func NewSession(config ContainerConfig) (*Session, error) {
 	}
 	if config.Auto != nil {
 		return &Session{
-			Managed:     true,
-			MemoryLimit: strings.TrimSpace(config.Auto.MemoryLimit),
+			Managed:    true,
+			TTLSeconds: config.Auto.TTLSeconds,
 		}, nil
 	}
 	return &Session{
@@ -185,6 +185,35 @@ func (c *Client) ExecuteArgs(ctx context.Context, callID string, args Args, sess
 	}
 
 	result.ContainerID = execution.ContainerID
+	result.Outputs = execution.Outputs
+	result.ExitCode = execution.ExitCode
+	if execution.ExitCode == 0 {
+		result.Status = StatusCompleted
+	} else {
+		result.Status = StatusFailed
+	}
+	return result, nil
+}
+
+func (c *Client) ExecuteDefault(ctx context.Context, callID string, rawArgs string, containerID string, apiKey string) (Result, error) {
+	args, err := ParseArgs(rawArgs)
+	if err != nil {
+		return failedResult(callID, nil, "", err), nil
+	}
+
+	result := Result{
+		ID:          callID,
+		Code:        args.Code,
+		ContainerID: strings.TrimSpace(containerID),
+		Status:      StatusFailed,
+		ExitCode:    -1,
+	}
+
+	execution, err := c.execute(ctx, "", args.Code, apiKey)
+	if err != nil {
+		return failedResult(callID, &Session{ContainerID: result.ContainerID}, args.Code, err), nil
+	}
+
 	result.Outputs = execution.Outputs
 	result.ExitCode = execution.ExitCode
 	if execution.ExitCode == 0 {
@@ -398,4 +427,32 @@ func failedResult(callID string, session *Session, code string, err error) Resul
 		Outputs:     outputs,
 		ExitCode:    -1,
 	}
+}
+
+func (c *Client) DeleteContext(ctx context.Context, contextID string, apiKey string) error {
+	contextID = strings.TrimSpace(contextID)
+	if contextID == "" {
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/contexts/"+url.PathEscape(contextID), nil)
+	if err != nil {
+		return fmt.Errorf("build delete context request: %w", err)
+	}
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete context request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		payload, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete context returned %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	return nil
 }

@@ -140,9 +140,10 @@ func envOrDefault(key, def string) string {
 
 // newTinfoilClient returns an OpenAI client and its underlying HTTP client.
 //
-// When E2E_TINFOIL_ENCLAVE is set it performs full enclave attestation.
-// Otherwise it returns an unverified EHBP client against E2E_ROUTER_URL, which
-// is suitable for local development without a TEE.
+// When E2E_TINFOIL_ENCLAVE is set it performs full enclave attestation via
+// tinfoil-go. Otherwise it returns a plain OpenAI-compatible client pointed
+// at E2E_ROUTER_URL, suitable for local development against a plain router
+// (no TEE, no EHBP encryption required).
 func newTinfoilClient(t *testing.T, cfg testCfg) (openai.Client, *http.Client) {
 	t.Helper()
 	apiKey := cfg.APIKey
@@ -159,14 +160,18 @@ func newTinfoilClient(t *testing.T, cfg testCfg) (openai.Client, *http.Client) {
 		}
 		return *tfClient.Client, tfClient.HTTPClient()
 	}
-	uClient, err := tinfoil.NewUnverifiedClient(tinfoil.UnverifiedClientOptions{BaseURL: cfg.RouterURL + "/v1/"},
+	// Plain mode: use the standard OpenAI Go client pointed at the local router.
+	// tinfoil.NewUnverifiedClient is intentionally NOT used here because it
+	// requires the router to expose /.well-known/hpke-keys for EHBP key
+	// exchange, which a plain local router does not implement.
+	httpClient := &http.Client{}
+	oaiClient := openai.NewClient(
+		option.WithBaseURL(cfg.RouterURL+"/v1/"),
 		option.WithAPIKey(apiKey),
 		option.WithMaxRetries(0),
+		option.WithHTTPClient(httpClient),
 	)
-	if err != nil {
-		t.Fatalf("failed to create unverified client: %v", err)
-	}
-	return *uClient.Client, uClient.HTTPClient()
+	return oaiClient, httpClient
 }
 
 // newOpenAIClient returns an OpenAI-compatible client for the router under test.

@@ -1,4 +1,4 @@
-package toolexec
+package openaiapi
 
 import (
 	"bytes"
@@ -11,10 +11,6 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-)
-
-const (
-	codeInterpreterToolName = "code_interpreter"
 )
 
 type usageAccumulator struct {
@@ -134,8 +130,13 @@ func usageMetricsRequested(req *http.Request) bool {
 	return req != nil && req.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 }
 
-func bearerToken(req *http.Request) string {
-	return strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+func resetRequestBody(r *http.Request, body []byte) {
+	if r == nil {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }
 
 func clientRequestedStreamingUsage(req *http.Request) bool {
@@ -191,56 +192,6 @@ func findStringSlice(value any) []string {
 func jsonString(value any) string {
 	text, _ := value.(string)
 	return strings.TrimSpace(text)
-}
-
-// toolSchema returns the code_interpreter function definition for the Chat
-// Completions API, which wraps the function spec inside a "function" object:
-//
-//	{"type": "function", "function": {"name": ..., "parameters": ...}}
-func toolSchema() map[string]any {
-	return map[string]any{
-		"type": "function",
-		"function": map[string]any{
-			"name":        codeInterpreterToolName,
-			"description": codeInterpreterDescription,
-			"strict":      true,
-			"parameters":  codeInterpreterParameters(),
-		},
-	}
-}
-
-// responsesToolSchema returns the code_interpreter function definition for the
-// Responses API, which uses a flat layout (no "function" wrapper):
-//
-//	{"type": "function", "name": ..., "parameters": ...}
-func responsesToolSchema() map[string]any {
-	return map[string]any{
-		"type":        "function",
-		"name":        codeInterpreterToolName,
-		"description": codeInterpreterDescription,
-		"strict":      true,
-		"parameters":  codeInterpreterParameters(),
-	}
-}
-
-const codeInterpreterDescription = "Execute Python code in a reusable sandbox container. Use this when code execution would help answer the user."
-
-func codeInterpreterParameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"code": map[string]any{
-				"type":        "string",
-				"description": "Python code to execute inside the reusable sandbox container.",
-			},
-			"container_id": map[string]any{
-				"type":        "string",
-				"description": "Optional container ID to reuse an existing sandbox session.",
-			},
-		},
-		"required":             []string{"code"},
-		"additionalProperties": false,
-	}
 }
 
 func rawJSONMap(value any) map[string]any {
@@ -317,4 +268,37 @@ func encodeSSE(data map[string]any) ([]byte, error) {
 	buf.Write(payload)
 	buf.WriteString("\n\n")
 	return buf.Bytes(), nil
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func jsonInt32(value any) int32 {
+	switch typed := value.(type) {
+	case float64:
+		return int32(typed)
+	case float32:
+		return int32(typed)
+	case int:
+		return int32(typed)
+	case int32:
+		return typed
+	case int64:
+		return int32(typed)
+	default:
+		return 0
+	}
+}
+
+func mergeMap(dst map[string]any, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	for key, value := range src {
+		dst[key] = value
+	}
 }

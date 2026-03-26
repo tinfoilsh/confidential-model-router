@@ -144,6 +144,11 @@ func TestWebsearch_Responses_WebSearchTool_Streaming(t *testing.T) {
 
 // TestWebsearch_RoutedToWebsearchEnclave verifies the Tinfoil-Enclave response
 // header identifies the websearch enclave (not a general model enclave).
+//
+// Note: WebSearchOptions: openai.ChatCompletionNewParamsWebSearchOptions{} is
+// intentionally NOT used here. The empty struct is marked as zero by paramObj
+// and omitted from serialized JSON (omitzero), so web_search_options never
+// reaches the router. We use option.WithJSONSet to force the field in.
 func TestWebsearch_RoutedToWebsearchEnclave(t *testing.T) {
 	cfg := getConfig(t)
 	cfg.requireWebsearch(t)
@@ -155,8 +160,8 @@ func TestWebsearch_RoutedToWebsearchEnclave(t *testing.T) {
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage("Search for AI news."),
 		},
-		WebSearchOptions: openai.ChatCompletionNewParamsWebSearchOptions{},
-	}, option.WithResponseInto(&rawResp))
+	}, option.WithJSONSet("web_search_options", map[string]any{}),
+		option.WithResponseInto(&rawResp))
 
 	if rawResp == nil {
 		t.Skip("Tinfoil-Enclave header not present (router may not set it for proxied requests)")

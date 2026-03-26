@@ -1,0 +1,738 @@
+package codeinterpreter
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
+	"github.com/tinfoilsh/confidential-model-router/openaiapi"
+)
+
+const (
+	ToolName        = "code_interpreter"
+	toolDescription = "Execute Python code in a sandbox container. Use this when code execution would help answer the user."
+)
+
+type Config struct {
+	ControlPlaneURL    string
+	ControlPlaneAPIKey string
+	BaseURL            string
+	Image              string
+	Repo               string
+	ExecTimeout        time.Duration
+}
+
+type Tool struct {
+	directClient        *Client
+	sandboxControlplane *SandboxControlplaneClient
+	sandboxBootstrapper *SandboxBootstrapper
+	sandboxSpec         SandboxSpec
+}
+
+type runtime interface {
+	Execute(ctx context.Context, callID, rawArgs string) (Result, error)
+	Close(ctx context.Context) error
+}
+
+type directRuntime struct {
+	client  *Client
+	session *Session
+	apiKey  string
+}
+
+type sandboxRuntime struct {
+	manager *SandboxManager
+}
+
+type preparedState struct {
+	tool           *Tool
+	authToken      string
+	callerAPIKeyID string
+	session        *Session
+	runtime        runtime
+	includeOutputs bool
+	mu             sync.Mutex
+}
+
+func New(cfg Config) (*Tool, error) {
+	tool := &Tool{}
+
+	if strings.TrimSpace(cfg.BaseURL) != "" {
+		client, err := NewClient(cfg.BaseURL, cfg.Repo, cfg.ExecTimeout)
+		if err != nil {
+			return nil, err
+		}
+		tool.directClient = client
+	}
+
+	if strings.TrimSpace(cfg.Image) != "" {
+		if strings.TrimSpace(cfg.ControlPlaneURL) == "" {
+			return nil, fmt.Errorf("control plane url is required when managed sandboxes are enabled")
+		}
+		if strings.TrimSpace(cfg.Repo) == "" {
+			return nil, fmt.Errorf("code interpreter repo is required when managed sandboxes are enabled")
+		}
+		tool.sandboxControlplane = NewSandboxControlplaneClient(cfg.ControlPlaneURL, cfg.ControlPlaneAPIKey)
+		tool.sandboxBootstrapper = NewSandboxBootstrapper(cfg.ExecTimeout)
+		tool.sandboxSpec = SandboxSpec{
+			Workload:   sandboxWorkloadCodeInterpreter,
+			Image:      cfg.Image,
+			SourceRepo: cfg.Repo,
+		}
+	}
+
+	return tool, nil
+}
+
+func (t *Tool) ID() string {
+	return ToolName
+}
+
+func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+	switch req.Kind {
+	case openaiapi.EndpointChatCompletions:
+		return t.prepareChat(req)
+	case openaiapi.EndpointResponses:
+		return t.prepareResponses(req)
+	default:
+		return nil, nil
+	}
+}
+
+func (t *Tool) Execute(ctx context.Context, call *openaiapi.InferenceToolCall) (*openaiapi.ExecutionResult, error) {
+	if call == nil {
+		return nil, fmt.Errorf("tool call is required")
+	}
+	state, ok := call.State.(*preparedState)
+	if !ok || state == nil {
+		return nil, fmt.Errorf("code interpreter runtime is not prepared")
+	}
+	runtime, err := state.runtimeForExecution()
+	if err != nil {
+		return nil, err
+	}
+
+	switch call.Endpoint {
+	case openaiapi.EndpointChatCompletions:
+		return executeChatCall(ctx, runtime, call.Raw)
+	case openaiapi.EndpointResponses:
+		return executeResponsesCall(ctx, runtime, state.includeOutputs, call.Raw)
+	default:
+		return nil, fmt.Errorf("unsupported endpoint %q", call.Endpoint)
+	}
+}
+
+func (s *preparedState) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Close(ctx)
+}
+
+func (s *preparedState) runtimeForExecution() (runtime, error) {
+	if s == nil {
+		return nil, fmt.Errorf("code interpreter runtime is not prepared")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.runtime != nil {
+		return s.runtime, nil
+	}
+	if s.tool == nil {
+		return nil, fmt.Errorf("code interpreter tool is not available")
+	}
+
+	runtime, err := s.tool.newRuntime(s.authToken, s.callerAPIKeyID, s.session)
+	if err != nil {
+		return nil, err
+	}
+	s.runtime = runtime
+	return s.runtime, nil
+}
+
+func (r *directRuntime) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
+	return r.client.Execute(ctx, callID, rawArgs, r.session, r.apiKey)
+}
+
+func (r *directRuntime) Close(ctx context.Context) error {
+	if r == nil || r.client == nil || r.session == nil || !r.session.Managed || strings.TrimSpace(r.session.ContainerID) == "" {
+		return nil
+	}
+	return r.client.DeleteContext(ctx, r.session.ContainerID, r.apiKey)
+}
+
+func (r *sandboxRuntime) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
+	return r.manager.Execute(ctx, callID, rawArgs)
+}
+
+func (r *sandboxRuntime) Close(ctx context.Context) error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	return r.manager.Close(ctx)
+}
+
+func (t *Tool) prepareChat(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+	if req == nil || req.Chat == nil || !hasNonNullRawMessage(req.Chat.CodeInterpreterOptions) {
+		return nil, nil
+	}
+
+	for _, tool := range req.Chat.Params.Tools {
+		if chatToolHasName(tool, ToolName) {
+			return nil, fmt.Errorf("tool name collision with reserved tool %q", ToolName)
+		}
+	}
+
+	config, err := parseContainerConfigRaw(req.Chat.CodeInterpreterOptions, true)
+	if err != nil {
+		return nil, err
+	}
+	session, err := NewSession(config)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := cloneRawFields(req.RawFields)
+	delete(fields, "code_interpreter_options")
+
+	tools, err := rawArray(fields["tools"])
+	if err != nil {
+		return nil, fmt.Errorf("invalid parameter: 'tools' must be an array")
+	}
+	toolBytes, err := json.Marshal(chatCodeInterpreterToolParam())
+	if err != nil {
+		return nil, err
+	}
+	tools = append(tools, toolBytes)
+	encodedTools, err := json.Marshal(tools)
+	if err != nil {
+		return nil, err
+	}
+	fields["tools"] = encodedTools
+
+	bodyBytes, err := marshalRawFields(fields)
+	if err != nil {
+		return nil, err
+	}
+
+	return &openaiapi.PreparedRequest{
+		EffectiveModel: req.Model,
+		Body:           bodyBytes,
+		State: &preparedState{
+			tool:           t,
+			authToken:      req.AuthToken,
+			callerAPIKeyID: req.CallerAPIKeyID,
+			session:        session,
+		},
+	}, nil
+}
+
+func (t *Tool) prepareResponses(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+	if req == nil || req.Responses == nil {
+		return nil, nil
+	}
+
+	toolsRaw, err := rawArray(req.RawFields["tools"])
+	if err != nil {
+		return nil, fmt.Errorf("invalid parameter: 'tools' must be an array")
+	}
+
+	hasBuiltinCI := false
+	hasFunctionCI := false
+	hasOtherTools := false
+	for _, tool := range req.Responses.Params.Tools {
+		if tool.OfCodeInterpreter != nil {
+			hasBuiltinCI = true
+		}
+		if responsesToolHasName(tool, ToolName) && tool.OfFunction != nil {
+			hasFunctionCI = true
+		}
+		if tool.OfCodeInterpreter == nil {
+			hasOtherTools = true
+		}
+	}
+	if !hasBuiltinCI {
+		return nil, nil
+	}
+	if hasFunctionCI {
+		return nil, fmt.Errorf("tool name collision with reserved tool %q", ToolName)
+	}
+
+	var (
+		config         ContainerConfig
+		foundCI        bool
+		includeOutputs bool
+		rewritten      []json.RawMessage
+	)
+
+	for idx, tool := range req.Responses.Params.Tools {
+		if responsesToolHasName(tool, ToolName) && tool.OfFunction != nil {
+			if idx < len(toolsRaw) {
+				rewritten = append(rewritten, cloneRawMessage(toolsRaw[idx]))
+			}
+			continue
+		}
+
+		if tool.OfCodeInterpreter == nil {
+			if idx < len(toolsRaw) {
+				rewritten = append(rewritten, cloneRawMessage(toolsRaw[idx]))
+			}
+			continue
+		}
+
+		if foundCI {
+			return nil, fmt.Errorf("only one code_interpreter tool is supported in this increment")
+		}
+		foundCI = true
+
+		var toolRaw json.RawMessage
+		if idx < len(toolsRaw) {
+			toolRaw = toolsRaw[idx]
+		}
+		parsed, err := parseResponsesContainerConfigRaw(toolRaw)
+		if err != nil {
+			return nil, err
+		}
+		config = parsed
+	}
+
+	for _, include := range req.Responses.Params.Include {
+		if string(include) == "code_interpreter_call.outputs" {
+			includeOutputs = true
+			break
+		}
+	}
+
+	session, err := NewSession(config)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := cloneRawFields(req.RawFields)
+	injectedTool, err := json.Marshal(responsesCodeInterpreterToolParam())
+	if err != nil {
+		return nil, err
+	}
+	rewritten = append(rewritten, injectedTool)
+	encodedTools, err := json.Marshal(rewritten)
+	if err != nil {
+		return nil, err
+	}
+	fields["tools"] = encodedTools
+
+	if err := normalizeResponsesToolChoice(req, fields, hasOtherTools); err != nil {
+		return nil, err
+	}
+
+	bodyBytes, err := marshalRawFields(fields)
+	if err != nil {
+		return nil, err
+	}
+
+	return &openaiapi.PreparedRequest{
+		EffectiveModel: req.Model,
+		Body:           bodyBytes,
+		State: &preparedState{
+			tool:           t,
+			authToken:      req.AuthToken,
+			callerAPIKeyID: req.CallerAPIKeyID,
+			session:        session,
+			includeOutputs: includeOutputs,
+		},
+	}, nil
+}
+
+func (t *Tool) newRuntime(authToken string, callerAPIKeyID string, session *Session) (runtime, error) {
+	if session == nil {
+		return nil, fmt.Errorf("code interpreter session is required")
+	}
+	if t.sandboxControlplane != nil {
+		if !session.Managed {
+			return nil, fmt.Errorf("explicit code interpreter container selection is not supported")
+		}
+		return &sandboxRuntime{
+			manager: NewSandboxManager(
+				t.sandboxSpec,
+				session,
+				callerAPIKeyID,
+				t.sandboxControlplane,
+				t.sandboxBootstrapper,
+			),
+		}, nil
+	}
+	if t.directClient == nil {
+		return nil, fmt.Errorf("code interpreter is not configured")
+	}
+	return &directRuntime{
+		client:  t.directClient,
+		session: session,
+		apiKey:  authToken,
+	}, nil
+}
+
+func executeChatCall(ctx context.Context, runtime runtime, raw json.RawMessage) (*openaiapi.ExecutionResult, error) {
+	toolCall, err := rawObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	function := rawJSONMap(toolCall["function"])
+	result, err := runtime.Execute(ctx, jsonString(toolCall["id"]), jsonString(function["arguments"]))
+	if err != nil {
+		return nil, err
+	}
+	return &openaiapi.ExecutionResult{
+		ChatPatch: map[string]any{
+			"status":       result.Status,
+			"container_id": result.ContainerID,
+			"outputs":      outputsToAny(result.Outputs),
+		},
+	}, nil
+}
+
+func executeResponsesCall(ctx context.Context, runtime runtime, includeOutputs bool, raw json.RawMessage) (*openaiapi.ExecutionResult, error) {
+	item, err := rawObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	result, err := runtime.Execute(ctx, jsonString(item["call_id"]), jsonString(item["arguments"]))
+	if err != nil {
+		return nil, err
+	}
+
+	publicItem := map[string]any{
+		"id":           firstNonEmpty(jsonString(item["id"]), result.ID),
+		"type":         "code_interpreter_call",
+		"code":         result.Code,
+		"container_id": result.ContainerID,
+		"status":       result.Status,
+	}
+	if includeOutputs {
+		publicItem["outputs"] = outputsToAny(result.Outputs)
+	}
+
+	toolOutputPayload := map[string]any{
+		"status":       result.Status,
+		"container_id": result.ContainerID,
+		"outputs":      outputsToAny(result.Outputs),
+		"exit_code":    result.ExitCode,
+	}
+
+	return &openaiapi.ExecutionResult{
+		ResponsesPublicItem: publicItem,
+		ResponsesReplayItem: map[string]any{
+			"type":    "function_call_output",
+			"call_id": jsonString(item["call_id"]),
+			"output":  compactJSONString(toolOutputPayload),
+		},
+	}, nil
+}
+
+func normalizeResponsesToolChoice(req *openaiapi.Request, fields map[string]json.RawMessage, hasOtherTools bool) error {
+	rawChoice, exists := fields["tool_choice"]
+	if !exists {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(rawChoice))
+	if trimmed == "" || trimmed == "null" {
+		delete(fields, "tool_choice")
+		return nil
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		return nil
+	}
+
+	choice := req.Responses.Params.ToolChoice
+	choiceType := strings.TrimSpace(stringValue(choice.GetType()))
+	choiceName := strings.TrimSpace(stringValue(choice.GetName()))
+
+	if (choiceType == ToolName || (choiceType == "function" && choiceName == ToolName)) && !hasOtherTools {
+		// The hosted "code_interpreter" tool_choice is rewritten to the plain
+		// "auto" string because some Responses API backends (e.g. vLLM Harmony)
+		// do not support "required". The rewritten function tool will still be
+		// called by the model given an appropriate prompt.
+		fields["tool_choice"] = json.RawMessage(`"auto"`)
+		return nil
+	}
+
+	// When there are other user tools present and the tool_choice targets one
+	// of those tools (not code_interpreter), rewrite to "auto". Object-form
+	// tool_choice (e.g. {type:"function", name:"..."}) is not supported by some
+	// Responses API backends (e.g. vLLM Harmony); "auto" is accepted universally
+	// and the model will still call the indicated tool given an appropriate prompt.
+	if hasOtherTools && choiceType != ToolName && !(choiceType == "function" && choiceName == ToolName) {
+		fields["tool_choice"] = json.RawMessage(`"auto"`)
+		return nil
+	}
+
+	return fmt.Errorf("unsupported responses tool_choice for intercepted code_interpreter request")
+}
+
+func parseContainerConfig(value any, defaultAuto bool) (ContainerConfig, error) {
+	switch typed := value.(type) {
+	case nil:
+		if defaultAuto {
+			return ContainerConfig{Auto: &AutoConfig{}}, nil
+		}
+		return ContainerConfig{}, fmt.Errorf("code interpreter container config is required")
+	case string:
+		if typed == "" {
+			if defaultAuto {
+				return ContainerConfig{Auto: &AutoConfig{}}, nil
+			}
+			return ContainerConfig{}, fmt.Errorf("code interpreter container config is required")
+		}
+		return ContainerConfig{ContainerID: typed}, nil
+	case map[string]any:
+		if len(typed) == 0 {
+			return ContainerConfig{Auto: &AutoConfig{}}, nil
+		}
+
+		autoType := jsonString(typed["type"])
+		if autoType == "" {
+			autoType = "auto"
+		}
+		if autoType != "auto" {
+			return ContainerConfig{}, fmt.Errorf("unsupported code interpreter container type %q", autoType)
+		}
+		if len(rawJSONArray(typed["file_ids"])) > 0 {
+			return ContainerConfig{}, fmt.Errorf("code interpreter file_ids are not implemented in this increment")
+		}
+		if networkPolicy := rawJSONMap(typed["network_policy"]); networkPolicy != nil {
+			if jsonString(networkPolicy["type"]) != "disabled" {
+				return ContainerConfig{}, fmt.Errorf("only code interpreter network_policy type \"disabled\" is supported in this increment")
+			}
+		}
+		if _, ok := typed["memory_limit"]; ok {
+			return ContainerConfig{}, fmt.Errorf("code interpreter memory_limit is not supported in this increment")
+		}
+		if _, ok := typed["cpus"]; ok {
+			return ContainerConfig{}, fmt.Errorf("code interpreter cpus is not supported in this increment")
+		}
+
+		return ContainerConfig{
+			Auto: &AutoConfig{
+				TTLSeconds: jsonInt32(typed["ttl"]),
+			},
+		}, nil
+	default:
+		return ContainerConfig{}, fmt.Errorf("invalid code interpreter container config")
+	}
+}
+
+func parseContainerConfigRaw(raw json.RawMessage, defaultAuto bool) (ContainerConfig, error) {
+	if len(raw) == 0 {
+		return parseContainerConfig(nil, defaultAuto)
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ContainerConfig{}, fmt.Errorf("invalid code interpreter container config")
+	}
+	return parseContainerConfig(value, defaultAuto)
+}
+
+func parseResponsesContainerConfigRaw(toolRaw json.RawMessage) (ContainerConfig, error) {
+	if len(toolRaw) == 0 {
+		return parseContainerConfig(nil, true)
+	}
+	var toolFields map[string]json.RawMessage
+	if err := json.Unmarshal(toolRaw, &toolFields); err != nil {
+		return ContainerConfig{}, fmt.Errorf("invalid code interpreter tool")
+	}
+	containerRaw := toolFields["container"]
+	if len(containerRaw) == 0 {
+		containerRaw = json.RawMessage(`{"type":"auto"}`)
+	}
+	return parseContainerConfigRaw(containerRaw, true)
+}
+
+func chatToolHasName(tool openai.ChatCompletionToolUnionParam, name string) bool {
+	return tool.OfFunction != nil && strings.TrimSpace(tool.OfFunction.Function.Name) == name
+}
+
+func responsesToolHasName(tool responses.ToolUnionParam, name string) bool {
+	if tool.OfCodeInterpreter != nil {
+		return name == ToolName
+	}
+	return tool.OfFunction != nil && strings.TrimSpace(tool.OfFunction.Name) == name
+}
+
+func chatCodeInterpreterToolParam() openai.ChatCompletionToolUnionParam {
+	return openai.ChatCompletionToolUnionParam{
+		OfFunction: &openai.ChatCompletionFunctionToolParam{
+			Function: shared.FunctionDefinitionParam{
+				Name:        ToolName,
+				Description: openai.String(toolDescription),
+				Strict:      openai.Bool(true),
+				Parameters:  codeInterpreterParameters(),
+			},
+		},
+	}
+}
+
+func responsesCodeInterpreterToolParam() responses.ToolUnionParam {
+	return responses.ToolUnionParam{
+		OfFunction: &responses.FunctionToolParam{
+			Name:        ToolName,
+			Description: openai.String(toolDescription),
+			Strict:      openai.Bool(true),
+			Parameters:  codeInterpreterParameters(),
+		},
+	}
+}
+
+func codeInterpreterParameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"code": map[string]any{
+				"type":        "string",
+				"description": "Python code to execute inside the reusable sandbox container.",
+			},
+			"container_id": map[string]any{
+				"type":        "string",
+				"description": "Optional container ID to reuse an existing sandbox session.",
+			},
+		},
+		"required":             []string{"code"},
+		"additionalProperties": false,
+	}
+}
+
+func outputsToAny(outputs []Output) []any {
+	if len(outputs) == 0 {
+		return nil
+	}
+	result := make([]any, 0, len(outputs))
+	for _, output := range outputs {
+		item := map[string]any{"type": output.Type}
+		if output.Logs != "" {
+			item["logs"] = output.Logs
+		}
+		if output.URL != "" {
+			item["url"] = output.URL
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func rawObject(raw json.RawMessage) (map[string]any, error) {
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func cloneRawFields(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for key, value := range src {
+		dst[key] = cloneRawMessage(value)
+	}
+	return dst
+}
+
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func hasNonNullRawMessage(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null"
+}
+
+func marshalRawFields(fields map[string]json.RawMessage) ([]byte, error) {
+	if fields == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(fields)
+}
+
+func rawArray(raw json.RawMessage) ([]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func rawJSONMap(value any) map[string]any {
+	existing, _ := value.(map[string]any)
+	return existing
+}
+
+func rawJSONArray(value any) []any {
+	existing, _ := value.([]any)
+	return existing
+}
+
+func jsonString(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
+func jsonInt32(value any) int32 {
+	switch typed := value.(type) {
+	case float64:
+		return int32(typed)
+	case float32:
+		return int32(typed)
+	case int:
+		return int32(typed)
+	case int32:
+		return typed
+	case int64:
+		return int32(typed)
+	default:
+		return 0
+	}
+}
+
+func compactJSONString(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	payload, _ := json.Marshal(value)
+	return string(payload)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}

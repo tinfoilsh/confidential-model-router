@@ -10,6 +10,32 @@ import (
 	"testing"
 )
 
+func TestIsWebSocketUpgrade(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=test", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+
+	if !isWebSocketUpgrade(req) {
+		t.Fatal("expected websocket upgrade request to be detected")
+	}
+}
+
+func TestApplyRealtimeWebSocketAuth(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=test", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "realtime, openai-insecure-api-key.test-key, json")
+
+	apiKey := applyRealtimeWebSocketAuth(req, "")
+	if apiKey != "test-key" {
+		t.Fatalf("expected API key %q, got %q", "test-key", apiKey)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer test-key" {
+		t.Fatalf("expected Authorization header to be rewritten, got %q", got)
+	}
+	if got := req.Header.Get("Sec-WebSocket-Protocol"); got != "realtime, json" {
+		t.Fatalf("expected websocket protocols to be cleaned, got %q", got)
+	}
+}
+
 func TestExtractModelFromMultipart(t *testing.T) {
 	tests := []struct {
 		name          string
