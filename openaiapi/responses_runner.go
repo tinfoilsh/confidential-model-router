@@ -11,10 +11,11 @@ import (
 	"strings"
 
 	oairesponses "github.com/openai/openai-go/v3/responses"
+	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-const maxResponsesToolIterations = 8
+const maxResponsesToolIterations = 12
 
 type processedResponsesOutput struct {
 	publicItems         []any
@@ -120,6 +121,7 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 		requestBody["input"] = internalInput
 	}
 
+	log.Warnf("responses: reached max tool iterations (%d), terminating", maxResponsesToolIterations)
 	return fmt.Errorf("max tool iterations exceeded")
 }
 
@@ -219,6 +221,9 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 					hadToolThisHop = true
 					outputIndex := int(numberValue(event["output_index"]))
 					itemID := jsonString(item["id"])
+					if itemID == "" {
+						return nil // skip malformed events with missing item id
+					}
 					streamCalls[itemID] = toolStreamCall{
 						ItemID:      itemID,
 						OutputIndex: outputIndex,
@@ -367,6 +372,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 		requestBody["input"] = internalInput
 	}
 
+	log.Warnf("responses: reached max tool iterations (%d), terminating", maxResponsesToolIterations)
 	return fmt.Errorf("max tool iterations exceeded")
 }
 

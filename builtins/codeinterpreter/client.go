@@ -103,6 +103,9 @@ func NewClient(baseURL, repo string, execTimeout time.Duration) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("invalid code interpreter base URL %q: %w", trimmed, err)
 	}
+	if repo != "" && u.Scheme != "https" {
+		return nil, fmt.Errorf("code interpreter base URL must use HTTPS for attested clients (got scheme %q)", u.Scheme)
+	}
 	if execTimeout <= 0 {
 		execTimeout = 30 * time.Second
 	}

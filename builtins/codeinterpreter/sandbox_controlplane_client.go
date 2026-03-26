@@ -94,7 +94,10 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read create sandbox response: %w", err)
+	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, fmt.Errorf("create sandbox returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -163,7 +166,10 @@ func (c *SandboxControlplaneClient) getSandbox(ctx context.Context, sandboxID st
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read sandbox response: %w", err)
+	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, fmt.Errorf("get sandbox returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
