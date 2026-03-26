@@ -138,12 +138,12 @@ func envOrDefault(key, def string) string {
 
 // ─── Tinfoil / OpenAI SDK client ─────────────────────────────────────────────
 
-// newTinfoilClient returns a tinfoil.Client.
+// newTinfoilClient returns an OpenAI client and its underlying HTTP client.
 //
 // When E2E_TINFOIL_ENCLAVE is set it performs full enclave attestation.
-// Otherwise it returns an insecure client against E2E_ROUTER_URL, which is
-// suitable for local development without a TEE.
-func newTinfoilClient(t *testing.T, cfg testCfg) *tinfoil.Client {
+// Otherwise it returns an unverified EHBP client against E2E_ROUTER_URL, which
+// is suitable for local development without a TEE.
+func newTinfoilClient(t *testing.T, cfg testCfg) (openai.Client, *http.Client) {
 	t.Helper()
 	apiKey := cfg.APIKey
 	if apiKey == "" {
@@ -157,18 +157,23 @@ func newTinfoilClient(t *testing.T, cfg testCfg) *tinfoil.Client {
 		if err != nil {
 			t.Fatalf("tinfoil attestation failed: %v", err)
 		}
-		return tfClient
+		return *tfClient.Client, tfClient.HTTPClient()
 	}
-	return tinfoil.NewInsecureClient(cfg.RouterURL+"/v1/",
+	uClient, err := tinfoil.NewUnverifiedClient(tinfoil.UnverifiedClientOptions{BaseURL: cfg.RouterURL + "/v1/"},
 		option.WithAPIKey(apiKey),
 		option.WithMaxRetries(0),
 	)
+	if err != nil {
+		t.Fatalf("failed to create unverified client: %v", err)
+	}
+	return *uClient.Client, uClient.HTTPClient()
 }
 
 // newOpenAIClient returns an OpenAI-compatible client for the router under test.
 func newOpenAIClient(t *testing.T, cfg testCfg) openai.Client {
 	t.Helper()
-	return *newTinfoilClient(t, cfg).Client
+	c, _ := newTinfoilClient(t, cfg)
+	return c
 }
 
 // newResponsesClient returns the Responses service from the router client.
@@ -193,7 +198,7 @@ type routerClient struct {
 
 func newRouterClient(t *testing.T, cfg testCfg) *routerClient {
 	t.Helper()
-	tfClient := newTinfoilClient(t, cfg)
+	_, httpClient := newTinfoilClient(t, cfg)
 	baseURL := cfg.RouterURL
 	if cfg.TinfoilEnclave != "" {
 		baseURL = "https://" + cfg.TinfoilEnclave
@@ -201,7 +206,7 @@ func newRouterClient(t *testing.T, cfg testCfg) *routerClient {
 	return &routerClient{
 		baseURL: baseURL,
 		apiKey:  cfg.APIKey,
-		http:    tfClient.HTTPClient(),
+		http:    httpClient,
 	}
 }
 
@@ -351,7 +356,7 @@ func codeInterpreterTool() responses.ToolUnionParam {
 // webSearchTool returns a responses ToolUnionParam for the web_search built-in.
 func webSearchTool() responses.ToolUnionParam {
 	return responses.ToolUnionParam{
-		OfWebSearch: &responses.WebSearchToolParam{},
+		OfWebSearch: &responses.WebSearchToolParam{Type: "web_search"},
 	}
 }
 

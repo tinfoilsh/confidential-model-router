@@ -1,8 +1,11 @@
 package toolexec
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -26,6 +29,29 @@ func New(codeInterpreterBaseURL, codeInterpreterRepo string, execTimeout time.Du
 		return nil, err
 	}
 	return &Executor{codeInterpreter: client}, nil
+}
+
+// normalizeWebsearchResponsesBody returns a copy of the responses body with
+// web_search entries removed from tools. The websearch enclave is purpose-built
+// for search and does not need the tool declaration; passing it causes vLLM
+// validation errors because "web_search" is not a valid vLLM tool schema type.
+func normalizeWebsearchResponsesBody(body map[string]any) (map[string]any, error) {
+	normalized, err := deepCopyMap(body)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []any
+	for _, tool := range rawJSONArray(normalized["tools"]) {
+		if jsonString(rawJSONMap(tool)["type"]) != "web_search" {
+			filtered = append(filtered, tool)
+		}
+	}
+	if len(filtered) == 0 {
+		delete(normalized, "tools")
+	} else {
+		normalized["tools"] = filtered
+	}
+	return normalized, nil
 }
 
 // isWebsearch reports whether the request is a web search request.
@@ -70,8 +96,26 @@ func (e *Executor) HandleWithInvoker(ctx context.Context, w http.ResponseWriter,
 		return false
 	}
 
-	// Websearch: forward the request as-is to the websearch enclave.
+	// Websearch: normalize the body before forwarding to the websearch enclave.
+	// For /v1/responses, the client signals websearch via tools=[{type:"web_search"}],
+	// but the websearch enclave does not accept that as a vLLM tool schema. Strip
+	// web_search entries from tools so the enclave receives a clean request.
 	if isWebsearch(r.URL.Path, body) {
+		if r.URL.Path == "/v1/responses" {
+			normalized, err := normalizeWebsearchResponsesBody(body)
+			if err != nil {
+				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+				return true
+			}
+			bodyBytes, err := json.Marshal(normalized)
+			if err != nil {
+				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+				return true
+			}
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			r.ContentLength = int64(len(bodyBytes))
+			r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+		}
 		invoker.Enclave().ServeHTTP(w, r)
 		return true
 	}
