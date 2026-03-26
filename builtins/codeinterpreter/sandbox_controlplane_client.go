@@ -35,25 +35,35 @@ type sandboxCreateRequest struct {
 type sandboxCreateResponse struct {
 	SandboxID string `json:"sandbox_id"`
 	Domain    string `json:"domain"`
+	Status    string `json:"status"`
 	ExpiresAt string `json:"expires_at"`
 }
 
+type sandboxGetResponse struct {
+	SandboxID string `json:"sandbox_id"`
+	Domain    string `json:"domain"`
+	Status    string `json:"status"`
+	ExpiresAt string `json:"expires_at"`
+	LastError string `json:"last_error"`
+}
+
 type SandboxControlplaneClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL         string
+	apiKey          string
+	httpClient      *http.Client
+	pollInterval    time.Duration
 }
 
 func NewSandboxControlplaneClient(baseURL, apiKey string) *SandboxControlplaneClient {
 	return &SandboxControlplaneClient{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		apiKey:  strings.TrimSpace(apiKey),
-		httpClient: &http.Client{
-			Timeout: 2 * time.Minute,
-		},
+		baseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		apiKey:       strings.TrimSpace(apiKey),
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		pollInterval: 2 * time.Second,
 	}
 }
 
+// CreateSandbox creates a sandbox and polls until it is ready or the context is cancelled.
 func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session, callerAPIKeyID string) (*Sandbox, error) {
 	if c == nil || c.baseURL == "" {
 		return nil, fmt.Errorf("sandbox controlplane client is not configured")
@@ -69,7 +79,7 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 		return nil, fmt.Errorf("marshal sandbox create request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/sandbox", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/sandboxes/", bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox create request: %w", err)
 	}
@@ -99,11 +109,70 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 		return nil, fmt.Errorf("parse sandbox expiry: %w", err)
 	}
 
+	sandboxID := strings.TrimSpace(parsed.SandboxID)
+	if err := c.pollUntilReady(ctx, sandboxID); err != nil {
+		return nil, err
+	}
+
 	return &Sandbox{
-		ID:        strings.TrimSpace(parsed.SandboxID),
+		ID:        sandboxID,
 		Domain:    strings.TrimSpace(parsed.Domain),
 		ExpiresAt: expiresAt,
 	}, nil
+}
+
+// pollUntilReady polls GET /api/sandboxes/:id until the sandbox reaches ready or failed status.
+func (c *SandboxControlplaneClient) pollUntilReady(ctx context.Context, sandboxID string) error {
+	ticker := time.NewTicker(c.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s, err := c.getSandbox(ctx, sandboxID)
+			if err != nil {
+				return fmt.Errorf("poll sandbox status: %w", err)
+			}
+			switch s.Status {
+			case "ready":
+				return nil
+			case "failed":
+				if s.LastError != "" {
+					return fmt.Errorf("sandbox deployment failed: %s", s.LastError)
+				}
+				return fmt.Errorf("sandbox deployment failed")
+			}
+		}
+	}
+}
+
+func (c *SandboxControlplaneClient) getSandbox(ctx context.Context, sandboxID string) (*sandboxGetResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/sandboxes/"+sandboxID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build sandbox get request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("get sandbox returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed sandboxGetResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode sandbox get response: %w", err)
+	}
+	return &parsed, nil
 }
 
 func (c *SandboxControlplaneClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
@@ -111,7 +180,7 @@ func (c *SandboxControlplaneClient) DeleteSandbox(ctx context.Context, sandboxID
 		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/api/sandbox/"+strings.TrimSpace(sandboxID), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/api/sandboxes/"+strings.TrimSpace(sandboxID), nil)
 	if err != nil {
 		return fmt.Errorf("build sandbox delete request: %w", err)
 	}
