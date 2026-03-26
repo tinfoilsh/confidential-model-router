@@ -126,6 +126,37 @@ func NewClient(baseURL, repo string, execTimeout time.Duration) (*Client, error)
 	}, nil
 }
 
+type claimResponse struct {
+	Token string `json:"token"`
+}
+
+// Claim calls POST /claim on the sandbox, binding it to this client and
+// returning the bearer token required for all subsequent requests.
+// It must be called exactly once, immediately after attestation.
+func (c *Client) Claim(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/claim", nil)
+	if err != nil {
+		return "", fmt.Errorf("build claim request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("claim request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("claim returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed claimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", fmt.Errorf("decode claim response: %w", err)
+	}
+	if strings.TrimSpace(parsed.Token) == "" {
+		return "", fmt.Errorf("claim returned empty token")
+	}
+	return parsed.Token, nil
+}
+
 func ParseArgs(raw string) (Args, error) {
 	var args Args
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
@@ -256,7 +287,7 @@ func (c *Client) resolveContainerID(ctx context.Context, session *Session, hinte
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -303,7 +334,7 @@ func (c *Client) execute(ctx context.Context, containerID string, code string, a
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -440,7 +471,7 @@ func (c *Client) DeleteContext(ctx context.Context, contextID string, apiKey str
 		return fmt.Errorf("build delete context request: %w", err)
 	}
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
