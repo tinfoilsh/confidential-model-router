@@ -130,7 +130,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// Check if client requested usage metrics in response header/trailer
 		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
 		if streaming && usageMetricsRequested {
-			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
+			AddTrailerHeader(resp.Header, UsageMetricsResponseHeader)
 			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
 				wrapper.EnableTrailer()
 			}
