@@ -16,7 +16,7 @@ import (
 
 const (
 	ToolName        = "code_interpreter"
-	toolDescription = "Execute Python code in a sandbox container. Use this when code execution would help answer the user."
+	toolDescription = "Execute Python code in a sandbox container."
 )
 
 type Config struct {

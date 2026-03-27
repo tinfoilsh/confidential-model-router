@@ -77,12 +77,11 @@ func TestClientNewAcceptsHTTPSWithRepo(t *testing.T) {
 	}
 }
 
-func TestClientNewAcceptsHTTPWithoutRepo(t *testing.T) {
+func TestClientNewRejectsEmptyRepo(t *testing.T) {
 	t.Parallel()
 
-	// No attestation repo → HTTP is allowed (dev / local mode).
-	_, err := NewClient("http://localhost:8080", "", 0)
-	if err != nil {
-		t.Fatalf("expected no error for http:// base URL without repo, got: %v", err)
+	_, err := NewClient("https://sandbox.example.com", "", 0)
+	if err == nil {
+		t.Fatal("expected error when attestation repo is missing")
 	}
 }

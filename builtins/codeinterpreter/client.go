@@ -89,38 +89,35 @@ type Client struct {
 	execTimeout time.Duration
 }
 
-// NewClient constructs a code interpreter client for baseURL.
-// When repo is non-empty (e.g. "tinfoilsh/code-interpreter") the client
-// performs full attestation via tinfoil-go's SecureClient before the first
-// request, mirroring the trust chain used for inference model enclaves.
-// When repo is empty the client uses a plain http.Client (local dev / debug).
+// NewClient constructs an attested code interpreter client for baseURL.
+// It always performs full attestation via tinfoil-go's SecureClient before the
+// first request, mirroring the trust chain used for inference model enclaves.
 func NewClient(baseURL, repo string, execTimeout time.Duration) (*Client, error) {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if trimmed == "" {
 		return nil, fmt.Errorf("code interpreter base URL is required")
 	}
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return nil, fmt.Errorf("code interpreter source repo is required for attestation")
+	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("invalid code interpreter base URL %q: %w", trimmed, err)
 	}
-	if repo != "" && u.Scheme != "https" {
-		return nil, fmt.Errorf("code interpreter base URL must use HTTPS for attested clients (got scheme %q)", u.Scheme)
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("code interpreter base URL must use HTTPS for attestation (got scheme %q)", u.Scheme)
 	}
 	if execTimeout <= 0 {
 		execTimeout = 30 * time.Second
 	}
 
-	var httpClient *http.Client
-	if repo != "" {
-		sc := tinfoilClient.NewSecureClient(u.Host, repo)
-		httpClient, err = sc.HTTPClient()
-		if err != nil {
-			return nil, fmt.Errorf("attest code interpreter enclave %s: %w", u.Host, err)
-		}
-		httpClient.Timeout = 2 * time.Minute
-	} else {
-		httpClient = &http.Client{Timeout: 2 * time.Minute}
+	sc := tinfoilClient.NewSecureClient(u.Host, repo)
+	httpClient, err := sc.HTTPClient()
+	if err != nil {
+		return nil, fmt.Errorf("attest code interpreter enclave %s: %w", u.Host, err)
 	}
+	httpClient.Timeout = 2 * time.Minute
 
 	return &Client{
 		baseURL:     trimmed,
