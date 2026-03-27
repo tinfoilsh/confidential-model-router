@@ -105,7 +105,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 		emitZeroTokenEvent := func() {
-			addBillingEvent(billingCollector, billing.Event{
+			if billingCollector == nil {
+				return
+			}
+			billingCollector.AddEvent(billing.Event{
 				Timestamp:   time.Now(),
 				UserID:      userID,
 				APIKey:      apiKey,
@@ -175,7 +178,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 						RequestPath:      requestPath,
 						Streaming:        streaming,
 					}
-					addBillingEvent(billingCollector, event)
+					billingCollector.AddEvent(event)
 				}
 			}
 		}
@@ -212,7 +215,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage))
+				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -265,11 +268,6 @@ func formatUsage(usage *tokencount.Usage) string {
 		",total=" + strconv.Itoa(usage.TotalTokens)
 }
 
-// FormatUsage formats token usage for the response header value.
-func FormatUsage(usage *tokencount.Usage) string {
-	return formatUsage(usage)
-}
-
 func extractAuthBillingFields(req *http.Request) (userID string, apiKey string) {
 	if req == nil {
 		return "", ""
@@ -286,13 +284,6 @@ func extractAuthBillingFields(req *http.Request) (userID string, apiKey string) 
 	}
 
 	return "authenticated_user", apiKey
-}
-
-func addBillingEvent(collector *billing.Collector, event billing.Event) {
-	if collector == nil {
-		return
-	}
-	collector.AddEvent(event)
 }
 
 func AddTrailerHeader(h http.Header, name string) {

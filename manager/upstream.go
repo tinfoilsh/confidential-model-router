@@ -96,7 +96,7 @@ func (i *UpstreamInvoker) RecordUsage(req *http.Request, requestID string, usage
 		event.CompletionTokens = usage.CompletionTokens
 		event.TotalTokens = usage.TotalTokens
 	}
-	addBillingEvent(i.billingCollector, event)
+	i.billingCollector.AddEvent(event)
 }
 
 func cloneHeader(header http.Header) http.Header {
