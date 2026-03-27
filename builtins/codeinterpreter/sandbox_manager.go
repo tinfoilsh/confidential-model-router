@@ -5,84 +5,113 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 type sandboxControlplane interface {
-	CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error)
+	CreateSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error)
+	GetSandbox(ctx context.Context, sandboxID string) (*SandboxInfo, error)
 	DeleteSandbox(ctx context.Context, sandboxID string) error
 }
 
 type sandboxBootstrapper interface {
-	Bootstrap(ctx context.Context, sandbox *Sandbox, sourceRepo string) (*SandboxGateway, error)
+	Bootstrap(ctx context.Context, info *SandboxInfo, sourceRepo string) (*Sandbox, error)
+}
+
+// SandboxCred identifies an existing sandbox and provides its claim token,
+// allowing the manager to connect without re-provisioning or re-claiming.
+type SandboxCred struct {
+	ID    string // sandbox_id
+	Token string // claim token from a previous Claim call
 }
 
 type SandboxManager struct {
 	spec         SandboxSpec
-	session      *Session
+	execTimeout  time.Duration
+	cred         SandboxCred // zero value = auto-provision
 	controlplane sandboxControlplane
 	bootstrapper sandboxBootstrapper
 
 	mu      sync.Mutex
 	sandbox *Sandbox
-	gateway *SandboxGateway
 }
 
-func NewSandboxManager(spec SandboxSpec, session *Session, controlplane sandboxControlplane, bootstrapper sandboxBootstrapper) *SandboxManager {
+// NewSandboxManager creates a SandboxManager. If cred is provided, the manager
+// attests the sandbox and connects using the pre-existing claim token instead of
+// auto-provisioning a new one.
+func NewSandboxManager(spec SandboxSpec, execTimeout time.Duration, controlplane sandboxControlplane, bootstrapper sandboxBootstrapper, cred ...SandboxCred) *SandboxManager {
+	var c SandboxCred
+	if len(cred) > 0 {
+		c = cred[0]
+	}
 	return &SandboxManager{
 		spec:         spec,
-		session:      session,
+		execTimeout:  execTimeout,
+		cred:         c,
 		controlplane: controlplane,
 		bootstrapper: bootstrapper,
 	}
 }
 
-func (m *SandboxManager) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
-	if err := m.ensure(ctx); err != nil {
-		return failedResult(callID, nil, "", err), nil
-	}
-	return m.gateway.Execute(ctx, callID, rawArgs, m.sandbox.ID)
-}
-
-func (m *SandboxManager) ensure(ctx context.Context) error {
+// GetSandbox returns the initialised Sandbox, lazily provisioning if needed.
+func (m *SandboxManager) GetSandbox(ctx context.Context) (*Sandbox, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.gateway != nil && m.sandbox != nil {
-		return nil
+	if m.sandbox != nil {
+		return m.sandbox, nil
 	}
 
 	if m.controlplane == nil {
-		return fmt.Errorf("sandbox controlplane client is not configured")
+		return nil, fmt.Errorf("sandbox controlplane client is not configured")
 	}
 	if m.bootstrapper == nil {
-		return fmt.Errorf("sandbox bootstrapper is not configured")
-	}
-	if m.session == nil || !m.session.Managed {
-		return fmt.Errorf("managed sandbox session is required")
-	}
-	if strings.TrimSpace(m.spec.Workload) == "" || strings.TrimSpace(m.spec.SourceRepo) == "" {
-		return fmt.Errorf("sandbox workload and source repo are required")
+		return nil, fmt.Errorf("sandbox bootstrapper is not configured")
 	}
 
-	// Provisioning is serialized so one manager/session maps to one sandbox.
-	sandbox, err := m.controlplane.CreateSandbox(ctx, m.spec, m.session)
-	if err != nil {
-		return err
-	}
+	var (
+		info *SandboxInfo
+		err  error
+	)
 
-	gateway, err := m.bootstrapper.Bootstrap(ctx, sandbox, m.spec.SourceRepo)
-	if err != nil {
-		_ = m.controlplane.DeleteSandbox(context.Background(), sandbox.ID)
-		return err
+	var sandbox *Sandbox
+	if strings.TrimSpace(m.cred.ID) != "" {
+		// Existing sandbox: attest and connect using the pre-existing claim token.
+		info, err = m.controlplane.GetSandbox(ctx, m.cred.ID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := NewClient("https://"+info.Domain, m.spec.SourceRepo, m.execTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("attest sandbox %s: %w", info.Domain, err)
+		}
+		sandbox = &Sandbox{ID: info.ID, client: client, token: m.cred.Token}
+	} else {
+		// Auto-provision: create via controlplane then bootstrap (attest + claim).
+		if strings.TrimSpace(m.spec.Workload) == "" || strings.TrimSpace(m.spec.SourceRepo) == "" {
+			return nil, fmt.Errorf("sandbox workload and source repo are required")
+		}
+		info, err = m.controlplane.CreateSandbox(ctx, m.spec)
+		if err != nil {
+			return nil, err
+		}
+		sandbox, err = m.bootstrapper.Bootstrap(ctx, info, m.spec.SourceRepo)
+		if err != nil {
+			_ = m.controlplane.DeleteSandbox(context.Background(), info.ID)
+			return nil, err
+		}
 	}
 
 	m.sandbox = sandbox
-	m.gateway = gateway
-	return nil
+	return m.sandbox, nil
 }
 
+// Close deletes auto-provisioned sandboxes from the controlplane.
 func (m *SandboxManager) Close(ctx context.Context) error {
 	if m == nil || m.controlplane == nil {
+		return nil
+	}
+	if strings.TrimSpace(m.cred.ID) != "" {
 		return nil
 	}
 
@@ -99,7 +128,6 @@ func (m *SandboxManager) Close(ctx context.Context) error {
 
 	m.mu.Lock()
 	m.sandbox = nil
-	m.gateway = nil
 	m.mu.Unlock()
 	return nil
 }

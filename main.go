@@ -110,6 +110,34 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	return false
 }
 
+func applyRealtimeWebSocketAuth(r *http.Request, apiKey string) string {
+	if r == nil || strings.TrimSpace(apiKey) != "" {
+		return apiKey
+	}
+
+	const subprotoPrefix = "openai-insecure-api-key."
+	var cleaned []string
+	for _, proto := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		proto = strings.TrimSpace(proto)
+		if strings.HasPrefix(proto, subprotoPrefix) {
+			apiKey = strings.TrimPrefix(proto, subprotoPrefix)
+		} else if proto != "" {
+			cleaned = append(cleaned, proto)
+		}
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return ""
+	}
+
+	r.Header.Set("Authorization", "Bearer "+apiKey)
+	if len(cleaned) > 0 {
+		r.Header.Set("Sec-WebSocket-Protocol", strings.Join(cleaned, ", "))
+	} else {
+		r.Header.Del("Sec-WebSocket-Protocol")
+	}
+	return apiKey
+}
+
 func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	// Check if the request is for a subdomain and derive model from leftmost subdomain.
 	host := r.Header.Get("X-Forwarded-Host")
@@ -236,26 +264,7 @@ func main() {
 			// Browser WebSocket auth: extract API key from Sec-WebSocket-Protocol subprotocol
 			// Browsers can't set Authorization headers, so they pass the key as:
 			//   new WebSocket(url, ["realtime", "openai-insecure-api-key.<key>"])
-			if apiKey == "" {
-				const subprotoPrefix = "openai-insecure-api-key."
-				var cleaned []string
-				for _, proto := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
-					proto = strings.TrimSpace(proto)
-					if strings.HasPrefix(proto, subprotoPrefix) {
-						apiKey = strings.TrimPrefix(proto, subprotoPrefix)
-					} else if proto != "" {
-						cleaned = append(cleaned, proto)
-					}
-				}
-				if apiKey != "" {
-					r.Header.Set("Authorization", "Bearer "+apiKey)
-					if len(cleaned) > 0 {
-						r.Header.Set("Sec-WebSocket-Protocol", strings.Join(cleaned, ", "))
-					} else {
-						r.Header.Del("Sec-WebSocket-Protocol")
-					}
-				}
-			}
+			apiKey = applyRealtimeWebSocketAuth(r, apiKey)
 
 			log.WithFields(log.Fields{
 				"model": modelName,

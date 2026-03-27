@@ -61,15 +61,6 @@ func parseChatCompletionsRequest(path string, header http.Header, body []byte) (
 		return nil, true, err
 	}
 
-	if restored, err := restoreDeferredChatFields(fields); err != nil {
-		return nil, true, err
-	} else if restored {
-		body, err = marshalRawFields(fields)
-		if err != nil {
-			return nil, true, err
-		}
-	}
-
 	var params openai.ChatCompletionNewParams
 	if err := json.Unmarshal(body, &params); err != nil {
 		return nil, true, err

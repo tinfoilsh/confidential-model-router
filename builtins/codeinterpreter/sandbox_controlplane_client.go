@@ -13,15 +13,18 @@ import (
 
 const sandboxWorkloadCodeInterpreter = "toolexec.code-interpreter"
 
-type SandboxSpec struct {
-	Workload   string
-	SourceRepo string
-}
-
-type Sandbox struct {
+// SandboxInfo holds the runtime details of a provisioned sandbox.
+type SandboxInfo struct {
 	ID        string
 	Domain    string
 	ExpiresAt time.Time
+}
+
+// SandboxSpec describes the workload and parameters for creating a sandbox.
+type SandboxSpec struct {
+	Workload   string
+	SourceRepo string
+	TTLSeconds int32
 }
 
 type sandboxCreateRequest struct {
@@ -61,14 +64,14 @@ func NewSandboxControlplaneClient(baseURL, callerAPIKey string) *SandboxControlp
 }
 
 // CreateSandbox creates a sandbox and polls until it is ready or the context is cancelled.
-func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error) {
+func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error) {
 	if c == nil || c.baseURL == "" {
 		return nil, fmt.Errorf("sandbox controlplane client is not configured")
 	}
 
 	payload, err := json.Marshal(sandboxCreateRequest{
 		Workload: spec.Workload,
-		TTL:      session.TTLSeconds,
+		TTL:      spec.TTLSeconds,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal sandbox create request: %w", err)
@@ -126,9 +129,26 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 		return nil, fmt.Errorf("parse ready sandbox expiry: %w", err)
 	}
 
-	return &Sandbox{
+	return &SandboxInfo{
 		ID:        sandboxID,
 		Domain:    strings.TrimSpace(parsed.Domain),
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+// GetSandbox fetches the current state of a sandbox by ID.
+func (c *SandboxControlplaneClient) GetSandbox(ctx context.Context, sandboxID string) (*SandboxInfo, error) {
+	s, err := c.getSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, s.ExpiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse sandbox expiry: %w", err)
+	}
+	return &SandboxInfo{
+		ID:        strings.TrimSpace(s.SandboxID),
+		Domain:    strings.TrimSpace(s.Domain),
 		ExpiresAt: expiresAt,
 	}, nil
 }

@@ -41,9 +41,6 @@ func (r *Runner) PrepareWebSearch(req *Request) (*ProxyRequest, error) {
 	if r == nil || r.webSearch == nil || req == nil {
 		return nil, nil
 	}
-	if err := req.PrepareDeferredChatFieldsForWebSearch(); err != nil {
-		return nil, err
-	}
 	return r.webSearch.Prepare(req)
 }
 

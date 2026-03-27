@@ -244,8 +244,24 @@ func TestResponsesActivationReturnsLazySession(t *testing.T) {
 	if !requestSession.includeOutputs {
 		t.Fatal("expected session to preserve includeOutputs")
 	}
-	if requestSession.runtime != nil {
-		t.Fatal("expected runtime to remain lazy until execute")
+	if requestSession.sandbox != nil {
+		t.Fatal("expected sandbox to remain lazy until execute")
+	}
+}
+
+func TestCodeInterpreterParametersExposeContextID(t *testing.T) {
+	t.Parallel()
+
+	params := codeInterpreterParameters()
+	properties, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %T", params["properties"])
+	}
+	if _, exists := properties["context_id"]; !exists {
+		t.Fatal("expected context_id to be exposed to the model")
+	}
+	if _, exists := properties["container_id"]; exists {
+		t.Fatal("did not expect legacy container_id in the tool schema")
 	}
 }
 

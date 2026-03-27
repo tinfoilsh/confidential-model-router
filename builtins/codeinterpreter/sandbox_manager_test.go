@@ -3,6 +3,7 @@ package codeinterpreter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -15,9 +16,17 @@ type fixedControlplane struct {
 	domain string
 }
 
-func (f *fixedControlplane) CreateSandbox(_ context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
-	return &Sandbox{
+func (f *fixedControlplane) CreateSandbox(_ context.Context, _ SandboxSpec) (*SandboxInfo, error) {
+	return &SandboxInfo{
 		ID:        "mock-" + f.domain,
+		Domain:    f.domain,
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	}, nil
+}
+
+func (f *fixedControlplane) GetSandbox(_ context.Context, sandboxID string) (*SandboxInfo, error) {
+	return &SandboxInfo{
+		ID:        sandboxID,
 		Domain:    f.domain,
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}, nil
@@ -32,7 +41,11 @@ type errControlplane struct {
 	err error
 }
 
-func (e *errControlplane) CreateSandbox(_ context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
+func (e *errControlplane) CreateSandbox(_ context.Context, _ SandboxSpec) (*SandboxInfo, error) {
+	return nil, e.err
+}
+
+func (e *errControlplane) GetSandbox(_ context.Context, _ string) (*SandboxInfo, error) {
 	return nil, e.err
 }
 
@@ -47,11 +60,15 @@ type countingControlplane struct {
 	count int
 }
 
-func (c *countingControlplane) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error) {
+func (c *countingControlplane) CreateSandbox(ctx context.Context, spec SandboxSpec) (*SandboxInfo, error) {
 	c.mu.Lock()
 	c.count++
 	c.mu.Unlock()
-	return c.fixedControlplane.CreateSandbox(ctx, spec, session)
+	return c.fixedControlplane.CreateSandbox(ctx, spec)
+}
+
+func (c *countingControlplane) GetSandbox(ctx context.Context, sandboxID string) (*SandboxInfo, error) {
+	return c.fixedControlplane.GetSandbox(ctx, sandboxID)
 }
 
 func (c *countingControlplane) DeleteSandbox(ctx context.Context, sandboxID string) error {
@@ -64,29 +81,52 @@ func (c *countingControlplane) getCount() int {
 	return c.count
 }
 
-// stubBootstrapper returns a SandboxGateway backed by a test HTTP server.
+// stubBootstrapper returns a Sandbox backed by a test HTTP server.
 type stubBootstrapper struct {
 	server *httptest.Server
+	mu     sync.Mutex
+	count  int
 }
 
 func newStubBootstrapper(t *testing.T) *stubBootstrapper {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"type":"stdout","text":"2\n"}` + "\n"))
+	bootstrapper := &stubBootstrapper{}
+	bootstrapper.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/contexts":
+			bootstrapper.mu.Lock()
+			bootstrapper.count++
+			contextID := fmt.Sprintf("ctx-%d", bootstrapper.count)
+			bootstrapper.mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"%s"}`, contextID)))
+		case "/execute":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"type":"stdout","text":"2\n"}` + "\n"))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
-	t.Cleanup(server.Close)
-	return &stubBootstrapper{server: server}
+	t.Cleanup(bootstrapper.server.Close)
+	return bootstrapper
 }
 
-func (s *stubBootstrapper) Bootstrap(_ context.Context, sandbox *Sandbox, _ string) (*SandboxGateway, error) {
+func (s *stubBootstrapper) Bootstrap(_ context.Context, info *SandboxInfo, _ string) (*Sandbox, error) {
 	client := &Client{
 		baseURL:     s.server.URL,
 		httpClient:  s.server.Client(),
 		execTimeout: 10 * time.Second,
 	}
-	return &SandboxGateway{client: client, runtimeCredential: "test-token"}, nil
+	return &Sandbox{ID: info.ID, client: client, token: "test-token"}, nil
+}
+
+func (s *stubBootstrapper) contextCreateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
 }
 
 func newTestSpec() SandboxSpec {
@@ -96,27 +136,20 @@ func newTestSpec() SandboxSpec {
 	}
 }
 
-func newManagedSession() *Session {
-	return &Session{Managed: true, TTLSeconds: 300}
-}
-
 func TestSandboxManagerCreationFailure(t *testing.T) {
 	t.Parallel()
 
 	mgr := NewSandboxManager(
 		newTestSpec(),
-		newManagedSession(),
+		10*time.Second,
 		&errControlplane{err: errors.New("controlplane unavailable")},
 		newStubBootstrapper(t),
 	)
 	defer mgr.Close(context.Background())
 
-	result, err := mgr.Execute(context.Background(), "call-1", `{"code": "print(1+1)"}`)
-	if err != nil {
-		t.Fatalf("Execute returned unexpected error: %v", err)
-	}
-	if result.Status != StatusFailed {
-		t.Fatalf("expected status %q, got %q", StatusFailed, result.Status)
+	_, err := mgr.GetSandbox(context.Background())
+	if err == nil {
+		t.Fatal("expected error from GetSandbox, got nil")
 	}
 }
 
@@ -126,18 +159,15 @@ func TestSandboxManagerBootstrapFailure(t *testing.T) {
 	fcp := &fixedControlplane{domain: "sandbox.test.local"}
 	mgr := NewSandboxManager(
 		newTestSpec(),
-		newManagedSession(),
+		10*time.Second,
 		fcp,
 		&errBootstrapper{err: errors.New("attestation failed")},
 	)
 	defer mgr.Close(context.Background())
 
-	result, err := mgr.Execute(context.Background(), "call-1", `{"code": "print(1+1)"}`)
-	if err != nil {
-		t.Fatalf("Execute returned unexpected error: %v", err)
-	}
-	if result.Status != StatusFailed {
-		t.Fatalf("expected status %q, got %q", StatusFailed, result.Status)
+	_, err := mgr.GetSandbox(context.Background())
+	if err == nil {
+		t.Fatal("expected error from GetSandbox, got nil")
 	}
 }
 
@@ -146,7 +176,7 @@ type errBootstrapper struct {
 	err error
 }
 
-func (e *errBootstrapper) Bootstrap(_ context.Context, _ *Sandbox, _ string) (*SandboxGateway, error) {
+func (e *errBootstrapper) Bootstrap(_ context.Context, _ *SandboxInfo, _ string) (*Sandbox, error) {
 	return nil, e.err
 }
 
@@ -155,11 +185,12 @@ func TestSandboxManagerConcurrentExecute(t *testing.T) {
 
 	domain := "sandbox.test.local"
 	cp := &countingControlplane{fixedControlplane: fixedControlplane{domain: domain}}
+	bootstrapper := newStubBootstrapper(t)
 	mgr := NewSandboxManager(
 		newTestSpec(),
-		newManagedSession(),
+		10*time.Second,
 		cp,
-		newStubBootstrapper(t),
+		bootstrapper,
 	)
 	defer mgr.Close(context.Background())
 
@@ -169,7 +200,12 @@ func TestSandboxManagerConcurrentExecute(t *testing.T) {
 	for range goroutines {
 		go func() {
 			defer wg.Done()
-			result, err := mgr.Execute(context.Background(), "call-concurrent", `{"code": "print(1)"}`)
+			sandbox, err := mgr.GetSandbox(context.Background())
+			if err != nil {
+				t.Errorf("GetSandbox returned unexpected error: %v", err)
+				return
+			}
+			result, err := sandbox.Execute(context.Background(), "call-concurrent", Args{Code: "print(1)"})
 			if err != nil {
 				t.Errorf("Execute returned unexpected error: %v", err)
 				return
@@ -184,6 +220,9 @@ func TestSandboxManagerConcurrentExecute(t *testing.T) {
 	if count := cp.getCount(); count != 1 {
 		t.Errorf("expected exactly one sandbox creation, got %d", count)
 	}
+	if count := bootstrapper.contextCreateCount(); count != 1 {
+		t.Errorf("expected exactly one context creation, got %d", count)
+	}
 }
 
 func TestSandboxManagerContextCancellation(t *testing.T) {
@@ -195,7 +234,7 @@ func TestSandboxManagerContextCancellation(t *testing.T) {
 
 	mgr := NewSandboxManager(
 		newTestSpec(),
-		newManagedSession(),
+		10*time.Second,
 		blocking,
 		newStubBootstrapper(t),
 	)
@@ -204,12 +243,9 @@ func TestSandboxManagerContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	result, err := mgr.Execute(ctx, "call-1", `{"code": "print(1)"}`)
-	if err != nil {
-		t.Fatalf("Execute returned unexpected error: %v", err)
-	}
-	if result.Status != StatusFailed {
-		t.Fatalf("expected status %q after context cancellation, got %q", StatusFailed, result.Status)
+	_, err := mgr.GetSandbox(ctx)
+	if err == nil {
+		t.Fatal("expected error after context cancellation, got nil")
 	}
 }
 
@@ -218,13 +254,17 @@ type blockingControlplane struct {
 	blockCh chan struct{}
 }
 
-func (b *blockingControlplane) CreateSandbox(ctx context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
+func (b *blockingControlplane) CreateSandbox(ctx context.Context, _ SandboxSpec) (*SandboxInfo, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-b.blockCh:
 		return nil, errors.New("released")
 	}
+}
+
+func (b *blockingControlplane) GetSandbox(_ context.Context, _ string) (*SandboxInfo, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (b *blockingControlplane) DeleteSandbox(_ context.Context, _ string) error {

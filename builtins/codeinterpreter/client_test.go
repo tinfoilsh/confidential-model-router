@@ -2,6 +2,7 @@ package codeinterpreter
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,13 +41,9 @@ func TestClientExecuteTimeout(t *testing.T) {
 		execTimeout: 100 * time.Millisecond,
 	}
 
-	session := &Session{}
-	result, err := client.Execute(context.Background(), "call-1", `{"code": "import time; time.sleep(10)"}`, session, "")
-	if err != nil {
-		t.Fatalf("Execute returned unexpected error: %v", err)
-	}
-	if result.Status != StatusFailed {
-		t.Fatalf("expected status %q on timeout, got %q", StatusFailed, result.Status)
+	_, _, err := client.Execute(context.Background(), "ctx-test", Args{Code: "import time; time.sleep(10)"}, "")
+	if err == nil {
+		t.Fatal("expected error on timeout, got nil")
 	}
 }
 
@@ -83,5 +80,68 @@ func TestClientNewRejectsEmptyRepo(t *testing.T) {
 	_, err := NewClient("https://sandbox.example.com", "", 0)
 	if err == nil {
 		t.Fatal("expected error when attestation repo is missing")
+	}
+}
+
+func TestParseArgsAcceptsContextID(t *testing.T) {
+	t.Parallel()
+
+	args, err := ParseArgs(`{"code":"print(1)","context_id":"ctx-123"}`)
+	if err != nil {
+		t.Fatalf("ParseArgs: %v", err)
+	}
+	if args.ContextID != "ctx-123" {
+		t.Fatalf("expected context_id to be preserved, got %q", args.ContextID)
+	}
+}
+
+
+func TestParseArgsRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseArgs(`{"code":"print(1)","extra":true}`)
+	if err == nil {
+		t.Fatal("expected unknown field validation error")
+	}
+}
+
+func TestClientExecuteUsesExplicitContextID(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/execute":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("io.ReadAll: %v", err)
+			}
+			requests <- string(body)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"type":"stdout","text":"ok\n"}` + "\n"))
+		case "/contexts":
+			t.Fatal("did not expect /contexts when context_id is provided")
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+		execTimeout: 10 * time.Second,
+	}
+
+	outputs, _, err := client.Execute(context.Background(), "ctx-123", Args{Code: "print(1)", ContextID: "ctx-123"}, "")
+	if err != nil {
+		t.Fatalf("Execute returned unexpected error: %v", err)
+	}
+	_ = outputs
+
+	body := <-requests
+	if !strings.Contains(body, `"context_id":"ctx-123"`) {
+		t.Fatalf("expected execute request to include context_id, got %s", body)
 	}
 }
