@@ -3,7 +3,6 @@ package codeinterpreter
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/openaiapi"
@@ -145,6 +144,36 @@ func TestPrepareResponsesExpandsBuiltinAndRewritesExplicitToolChoice(t *testing.
 	}
 }
 
+func TestPrepareResponsesRewritesRequiredToolChoice(t *testing.T) {
+	t.Parallel()
+
+	tool := newTestTool(t)
+	req := mustParseRequest(t, "/v1/responses", map[string]any{
+		"model": "gpt-test",
+		"input": "hi",
+		"tools": []any{
+			map[string]any{"type": "code_interpreter"},
+		},
+		"tool_choice": "required",
+	})
+
+	prepared, err := tool.Prepare(req)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if prepared == nil {
+		t.Fatal("expected active builtin")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(prepared.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("expected required tool_choice to be rewritten to \"auto\", got %#v", body["tool_choice"])
+	}
+}
+
 func TestPrepareResponsesRejectsUnsupportedExplicitToolChoiceWithOtherTools(t *testing.T) {
 	t.Parallel()
 
@@ -213,12 +242,7 @@ func TestPrepareResponsesAttachesPreparedExecutor(t *testing.T) {
 
 func newTestTool(t *testing.T) *Tool {
 	t.Helper()
-	server := httptest.NewServer(http.NotFoundHandler())
-	t.Cleanup(server.Close)
-
-	tool, err := New(Config{
-		BaseURL: server.URL,
-	})
+	tool, err := New(Config{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

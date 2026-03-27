@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -117,7 +118,14 @@ func (p *RequestPlan) serveTyped(ctx context.Context, w http.ResponseWriter, htt
 
 	invoker, err := em.NewUpstreamInvoker(effectiveModel)
 	if err != nil {
-		writeAPIError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+		switch {
+		case errors.Is(err, manager.ErrNoEnclaveAvailable("")):
+			writeAPIError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
+		case errors.Is(err, manager.ErrModelNotFound("")):
+			writeAPIError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+		default:
+			writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		}
 		return
 	}
 	if rejectOverloadedEnclave(w, invoker.Enclave(), effectiveModel) {

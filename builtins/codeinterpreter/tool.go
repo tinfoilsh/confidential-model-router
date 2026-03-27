@@ -21,14 +21,12 @@ const (
 
 type Config struct {
 	ControlPlaneURL string
-	BaseURL         string
 	Image           string
 	Repo            string
 	ExecTimeout     time.Duration
 }
 
 type Tool struct {
-	directClient        *Client
 	controlPlaneURL     string
 	sandboxBootstrapper sandboxBootstrapper
 	sandboxSpec         SandboxSpec
@@ -37,12 +35,6 @@ type Tool struct {
 type runtime interface {
 	Execute(ctx context.Context, callID, rawArgs string) (Result, error)
 	Close(ctx context.Context) error
-}
-
-type directRuntime struct {
-	client  *Client
-	session *Session
-	apiKey  string
 }
 
 type sandboxRuntime struct {
@@ -69,14 +61,6 @@ func newPreparedExecutor(tool *Tool, callerAPIKey string, session *Session, incl
 
 func New(cfg Config) (*Tool, error) {
 	tool := &Tool{}
-
-	if strings.TrimSpace(cfg.BaseURL) != "" {
-		client, err := NewClient(cfg.BaseURL, cfg.Repo, cfg.ExecTimeout)
-		if err != nil {
-			return nil, err
-		}
-		tool.directClient = client
-	}
 
 	if strings.TrimSpace(cfg.Image) != "" {
 		if strings.TrimSpace(cfg.ControlPlaneURL) == "" {
@@ -164,17 +148,6 @@ func (p *preparedExecutor) runtimeForExecution() (runtime, error) {
 	}
 	p.runtime = runtime
 	return p.runtime, nil
-}
-
-func (r *directRuntime) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
-	return r.client.Execute(ctx, callID, rawArgs, r.session, r.apiKey)
-}
-
-func (r *directRuntime) Close(ctx context.Context) error {
-	if r == nil || r.client == nil || r.session == nil || !r.session.Managed || strings.TrimSpace(r.session.ContainerID) == "" {
-		return nil
-	}
-	return r.client.DeleteContext(ctx, r.session.ContainerID, r.apiKey)
 }
 
 func (r *sandboxRuntime) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
@@ -368,14 +341,7 @@ func (t *Tool) newRuntime(callerAPIKey string, session *Session) (runtime, error
 			),
 		}, nil
 	}
-	if t.directClient == nil {
-		return nil, fmt.Errorf("code interpreter is not configured")
-	}
-	return &directRuntime{
-		client:  t.directClient,
-		session: session,
-		apiKey:  callerAPIKey,
-	}, nil
+	return nil, fmt.Errorf("code interpreter is not configured")
 }
 
 func executeChatCall(ctx context.Context, runtime runtime, raw json.RawMessage) (*openaiapi.ExecutionResult, error) {
@@ -446,6 +412,10 @@ func normalizeResponsesToolChoice(req *openaiapi.Request, fields map[string]json
 		return nil
 	}
 	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var mode string
+		if err := json.Unmarshal(rawChoice, &mode); err == nil && strings.TrimSpace(mode) == "required" {
+			fields["tool_choice"] = json.RawMessage(`"auto"`)
+		}
 		return nil
 	}
 

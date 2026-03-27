@@ -26,6 +26,7 @@ type Sandbox struct {
 }
 
 type sandboxCreateRequest struct {
+	Workload   string `json:"workload,omitempty"`
 	Image      string `json:"image"`
 	SourceRepo string `json:"source_repo"`
 	TTL        int32  `json:"ttl,omitempty"`
@@ -69,6 +70,7 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 	}
 
 	payload, err := json.Marshal(sandboxCreateRequest{
+		Workload:   spec.Workload,
 		Image:      spec.Image,
 		SourceRepo: spec.SourceRepo,
 		TTL:        session.TTLSeconds,
@@ -111,8 +113,22 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 	}
 
 	sandboxID := strings.TrimSpace(parsed.SandboxID)
-	if err := c.pollUntilReady(ctx, sandboxID); err != nil {
+	ready, err := c.pollUntilReady(ctx, sandboxID)
+	if err != nil {
 		return nil, err
+	}
+	if ready == nil {
+		return nil, fmt.Errorf("sandbox deployment completed without status details")
+	}
+	if strings.TrimSpace(ready.Domain) != "" {
+		parsed.Domain = ready.Domain
+	}
+	if strings.TrimSpace(ready.ExpiresAt) != "" {
+		parsed.ExpiresAt = ready.ExpiresAt
+	}
+	expiresAt, err = time.Parse(time.RFC3339Nano, parsed.ExpiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse ready sandbox expiry: %w", err)
 	}
 
 	return &Sandbox{
@@ -123,27 +139,27 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 }
 
 // pollUntilReady polls GET /api/sandboxes/:id until the sandbox reaches ready or failed status.
-func (c *SandboxControlplaneClient) pollUntilReady(ctx context.Context, sandboxID string) error {
+func (c *SandboxControlplaneClient) pollUntilReady(ctx context.Context, sandboxID string) (*sandboxGetResponse, error) {
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-ticker.C:
 			s, err := c.getSandbox(ctx, sandboxID)
 			if err != nil {
-				return fmt.Errorf("poll sandbox status: %w", err)
+				return nil, fmt.Errorf("poll sandbox status: %w", err)
 			}
 			switch s.Status {
 			case "ready":
-				return nil
+				return s, nil
 			case "failed":
 				if s.LastError != "" {
-					return fmt.Errorf("sandbox deployment failed: %s", s.LastError)
+					return nil, fmt.Errorf("sandbox deployment failed: %s", s.LastError)
 				}
-				return fmt.Errorf("sandbox deployment failed")
+				return nil, fmt.Errorf("sandbox deployment failed")
 			}
 		}
 	}

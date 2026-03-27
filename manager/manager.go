@@ -46,7 +46,6 @@ type Model struct {
 
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
-	initConfigURL        string
 	updateConfigURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
@@ -330,21 +329,25 @@ func (e *Enclave) String() string {
 	return e.host
 }
 
-// NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
+// NewEnclaveManager loads the attested initial router config, then constructs
+// an enclave manager that will refresh operational routing state from
+// updateConfigURL.
 func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+	cfg, err := config.LoadInitial(configFile, initConfigURL)
+	if err != nil {
+		return nil, err
+	}
+	return NewEnclaveManagerFromConfig(cfg, controlPlaneURL, updateConfigURL, refreshInterval)
+}
+
+// NewEnclaveManagerFromConfig constructs an enclave manager from an already
+// loaded initial router config.
+func NewEnclaveManagerFromConfig(cfg *config.Config, controlPlaneURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
 	}
-
-	var cfg *config.Config
-	var err error
-	if initConfigURL != "" {
-		cfg, err = config.Load(initConfigURL, true)
-	} else {
-		cfg, err = config.FromBytes(configFile)
-	}
-	if err != nil {
-		return nil, err
+	if cfg == nil {
+		return nil, fmt.Errorf("initial config is required")
 	}
 
 	sigstoreClient, err := sigstore.NewClient()
@@ -354,7 +357,6 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 
 	em := &EnclaveManager{
 		models:           &sync.Map{},
-		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL),

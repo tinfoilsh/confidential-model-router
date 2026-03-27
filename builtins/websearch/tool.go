@@ -77,6 +77,9 @@ func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, erro
 			}
 			fields["tools"] = encoded
 		}
+		if err := normalizeResponsesToolChoice(fields, len(filtered)); err != nil {
+			return nil, err
+		}
 
 		body, err := marshalRawFields(fields)
 		if err != nil {
@@ -134,4 +137,42 @@ func rawArray(raw json.RawMessage) ([]json.RawMessage, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+func normalizeResponsesToolChoice(fields map[string]json.RawMessage, remainingTools int) error {
+	rawChoice, exists := fields["tool_choice"]
+	if !exists {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(string(rawChoice))
+	if trimmed == "" || trimmed == "null" {
+		delete(fields, "tool_choice")
+		return nil
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var mode string
+		if err := json.Unmarshal(rawChoice, &mode); err != nil {
+			return fmt.Errorf("invalid parameter: 'tool_choice' must be a string or object")
+		}
+		if strings.TrimSpace(mode) == "required" && remainingTools == 0 {
+			fields["tool_choice"] = json.RawMessage(`"auto"`)
+		}
+		return nil
+	}
+
+	var choice map[string]any
+	if err := json.Unmarshal(rawChoice, &choice); err != nil {
+		return fmt.Errorf("invalid parameter: 'tool_choice' must be a string or object")
+	}
+	switch jsonString(choice["type"]) {
+	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		fields["tool_choice"] = json.RawMessage(`"auto"`)
+	}
+	return nil
+}
+
+func jsonString(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
 }

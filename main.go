@@ -24,6 +24,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/builtins/codeinterpreter"
 	"github.com/tinfoilsh/confidential-model-router/builtins/websearch"
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/openaiapi"
 )
@@ -61,17 +62,13 @@ func getEnvBool(envKey string) bool {
 }
 
 var (
-	port                       = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
-	controlPlaneURL            = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
-	verbose                    = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
-	initConfigURL              = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
-	updateConfigURL            = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	domain                     = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
-	refreshInterval            = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
-	codeInterpreterBaseURL     = flag.String("I", getEnvOrDefault("CODE_INTERPRETER_BASE_URL", ""), "code interpreter backend base URL (env: CODE_INTERPRETER_BASE_URL)")
-	codeInterpreterImage       = flag.String("J", getEnvOrDefault("CODE_INTERPRETER_IMAGE", ""), "managed sandbox image for code interpreter (env: CODE_INTERPRETER_IMAGE)")
-	codeInterpreterRepo        = flag.String("R", getEnvOrDefault("CODE_INTERPRETER_REPO", ""), "GitHub repo for code interpreter attestation, e.g. org/repo (env: CODE_INTERPRETER_REPO)")
-	codeInterpreterExecTimeout = flag.Duration("t", getEnvOrDefaultDuration("CODE_INTERPRETER_EXEC_TIMEOUT", 60*time.Second), "code interpreter execution timeout (env: CODE_INTERPRETER_EXEC_TIMEOUT)")
+	port            = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	verbose         = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
+	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -215,7 +212,12 @@ func main() {
 	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
 	log.Infof("Refresh interval: %s", *refreshInterval)
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL, *refreshInterval)
+	initialConfig, err := config.LoadInitial(configFile, *initConfigURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	em, err := manager.NewEnclaveManagerFromConfig(initialConfig, *controlPlaneURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -224,10 +226,8 @@ func main() {
 
 	codeInterpreterTool, err := codeinterpreter.New(codeinterpreter.Config{
 		ControlPlaneURL: *controlPlaneURL,
-		BaseURL:         *codeInterpreterBaseURL,
-		Image:           *codeInterpreterImage,
-		Repo:            *codeInterpreterRepo,
-		ExecTimeout:     *codeInterpreterExecTimeout,
+		Image:           initialConfig.CodeInterpreter.Image,
+		Repo:            initialConfig.CodeInterpreter.Repo,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -249,8 +249,8 @@ func main() {
 			return
 		}
 
-			// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing.
-			if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
+		// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing.
+		if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
 			if modelName == "" {
 				modelName = r.URL.Query().Get("model")
 			}
@@ -259,9 +259,9 @@ func main() {
 				return
 			}
 
-				apiKey = applyRealtimeWebSocketAuth(r, apiKey)
+			apiKey = applyRealtimeWebSocketAuth(r, apiKey)
 
-				log.WithFields(log.Fields{
+			log.WithFields(log.Fields{
 				"model": modelName,
 				"path":  r.URL.Path,
 			}).Debug("WebSocket upgrade request")

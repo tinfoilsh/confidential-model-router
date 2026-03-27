@@ -20,6 +20,13 @@ type RateLimitConfig struct {
 	MaxRequestsPerMinute int64 `yaml:"max_requests_per_minute"`
 }
 
+// CodeInterpreterConfig describes the trusted sandbox provisioning inputs for
+// the hosted code interpreter builtin.
+type CodeInterpreterConfig struct {
+	Image string `yaml:"image"`
+	Repo  string `yaml:"repo"`
+}
+
 // Model represents the configuration for a single model
 type Model struct {
 	Repo      string           `yaml:"repo"`
@@ -36,7 +43,8 @@ type OverloadConfig struct {
 
 // Config represents the configuration structure matching config.yml
 type Config struct {
-	Models map[string]Model `yaml:"models"`
+	CodeInterpreter CodeInterpreterConfig `yaml:"code_interpreter,omitempty"`
+	Models          map[string]Model      `yaml:"models"`
 }
 
 // FromBytes parses a YAML config from bytes
@@ -96,6 +104,15 @@ func Load(url string, sha256_required bool) (*Config, error) {
 	}
 
 	return FromBytes(data)
+}
+
+// LoadInitial loads the attested initial router config from either an
+// integrity-pinned external source or the embedded default config.
+func LoadInitial(defaultConfig []byte, initConfigURL string) (*Config, error) {
+	if strings.TrimSpace(initConfigURL) != "" {
+		return Load(initConfigURL, true)
+	}
+	return FromBytes(defaultConfig)
 }
 
 // parseURLWithSHA extracts an optional sha256 hash provided via fragment:

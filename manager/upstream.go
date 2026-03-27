@@ -117,6 +117,11 @@ func (e errModelNotFound) Error() string {
 	return "model " + string(e) + " not found"
 }
 
+func (e errModelNotFound) Is(target error) bool {
+	_, ok := target.(errModelNotFound)
+	return ok
+}
+
 // ErrModelNotFound reports a missing model for direct invocation.
 func ErrModelNotFound(modelName string) error {
 	return errModelNotFound(modelName)
@@ -126,6 +131,11 @@ type errNoEnclaveAvailable string
 
 func (e errNoEnclaveAvailable) Error() string {
 	return "no enclave available for model " + string(e)
+}
+
+func (e errNoEnclaveAvailable) Is(target error) bool {
+	_, ok := target.(errNoEnclaveAvailable)
+	return ok
 }
 
 // ErrNoEnclaveAvailable reports a model with no ready enclaves.
