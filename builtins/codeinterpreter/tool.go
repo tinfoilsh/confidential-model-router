@@ -21,7 +21,6 @@ const (
 
 type Config struct {
 	ControlPlaneURL string
-	Image           string
 	Repo            string
 	ExecTimeout     time.Duration
 }
@@ -62,18 +61,14 @@ func newToolSession(tool *Tool, callerAPIKey string, session *Session, includeOu
 func New(cfg Config) (*Tool, error) {
 	tool := &Tool{}
 
-	if strings.TrimSpace(cfg.Image) != "" {
+	if strings.TrimSpace(cfg.Repo) != "" {
 		if strings.TrimSpace(cfg.ControlPlaneURL) == "" {
 			return nil, fmt.Errorf("control plane url is required when managed sandboxes are enabled")
-		}
-		if strings.TrimSpace(cfg.Repo) == "" {
-			return nil, fmt.Errorf("code interpreter repo is required when managed sandboxes are enabled")
 		}
 		tool.controlPlaneURL = cfg.ControlPlaneURL
 		tool.sandboxBootstrapper = NewSandboxBootstrapper(cfg.ExecTimeout)
 		tool.sandboxSpec = SandboxSpec{
 			Workload:   sandboxWorkloadCodeInterpreter,
-			Image:      cfg.Image,
 			SourceRepo: cfg.Repo,
 		}
 	}

@@ -23,8 +23,7 @@ type RateLimitConfig struct {
 // CodeInterpreterConfig describes the trusted sandbox provisioning inputs for
 // the hosted code interpreter builtin.
 type CodeInterpreterConfig struct {
-	Image string `yaml:"image"`
-	Repo  string `yaml:"repo"`
+	Repo string `yaml:"repo"`
 }
 
 // Model represents the configuration for a single model

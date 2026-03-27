@@ -15,7 +15,6 @@ const sandboxWorkloadCodeInterpreter = "toolexec.code-interpreter"
 
 type SandboxSpec struct {
 	Workload   string
-	Image      string
 	SourceRepo string
 }
 
@@ -26,10 +25,8 @@ type Sandbox struct {
 }
 
 type sandboxCreateRequest struct {
-	Workload   string `json:"workload,omitempty"`
-	Image      string `json:"image"`
-	SourceRepo string `json:"source_repo"`
-	TTL        int32  `json:"ttl,omitempty"`
+	Workload string `json:"workload,omitempty"`
+	TTL      int32  `json:"ttl,omitempty"`
 }
 
 type sandboxCreateResponse struct {
@@ -70,10 +67,8 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 	}
 
 	payload, err := json.Marshal(sandboxCreateRequest{
-		Workload:   spec.Workload,
-		Image:      spec.Image,
-		SourceRepo: spec.SourceRepo,
-		TTL:        session.TTLSeconds,
+		Workload: spec.Workload,
+		TTL:      session.TTLSeconds,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal sandbox create request: %w", err)

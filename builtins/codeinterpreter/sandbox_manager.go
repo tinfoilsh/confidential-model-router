@@ -60,8 +60,8 @@ func (m *SandboxManager) ensure(ctx context.Context) error {
 	if m.session == nil || !m.session.Managed {
 		return fmt.Errorf("managed sandbox session is required")
 	}
-	if strings.TrimSpace(m.spec.Image) == "" || strings.TrimSpace(m.spec.SourceRepo) == "" {
-		return fmt.Errorf("sandbox image and source repo are required")
+	if strings.TrimSpace(m.spec.Workload) == "" || strings.TrimSpace(m.spec.SourceRepo) == "" {
+		return fmt.Errorf("sandbox workload and source repo are required")
 	}
 
 	// Provisioning is serialized so one manager/session maps to one sandbox.

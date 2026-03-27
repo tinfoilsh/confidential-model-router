@@ -23,7 +23,7 @@ func (t *Tool) ID() string {
 	return ToolName
 }
 
-func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.ProxyRequest, error) {
 	switch req.Kind {
 	case openaiapi.EndpointChatCompletions:
 		if !hasNonNullField(req.RawFields, "web_search_options") {
@@ -33,7 +33,7 @@ func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, erro
 		if err != nil {
 			return nil, err
 		}
-		return &openaiapi.PreparedRequest{
+		return &openaiapi.ProxyRequest{
 			EffectiveModel: EffectiveModel,
 			Body:           body,
 		}, nil
@@ -85,7 +85,7 @@ func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, erro
 		if err != nil {
 			return nil, err
 		}
-		return &openaiapi.PreparedRequest{
+		return &openaiapi.ProxyRequest{
 			EffectiveModel: EffectiveModel,
 			Body:           body,
 		}, nil

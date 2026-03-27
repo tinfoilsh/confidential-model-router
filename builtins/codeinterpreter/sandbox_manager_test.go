@@ -92,7 +92,6 @@ func (s *stubBootstrapper) Bootstrap(_ context.Context, sandbox *Sandbox, _ stri
 func newTestSpec() SandboxSpec {
 	return SandboxSpec{
 		Workload:   sandboxWorkloadCodeInterpreter,
-		Image:      "ghcr.io/test/img:latest",
 		SourceRepo: "test/repo",
 	}
 }

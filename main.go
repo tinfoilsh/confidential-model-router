@@ -201,7 +201,6 @@ func main() {
 
 	codeInterpreterTool, err := codeinterpreter.New(codeinterpreter.Config{
 		ControlPlaneURL: *controlPlaneURL,
-		Image:           initialConfig.CodeInterpreter.Image,
 		Repo:            initialConfig.CodeInterpreter.Repo,
 	})
 	if err != nil {

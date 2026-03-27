@@ -3,7 +3,6 @@ routers:
   router.inf6.tinfoil.sh:
 
 code_interpreter:
-  image: ghcr.io/tinfoilsh/test-code-container:0.0.5
   repo: tinfoilsh/code-interpreter
 
 models:
