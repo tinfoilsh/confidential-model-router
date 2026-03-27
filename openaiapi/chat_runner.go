@@ -29,15 +29,8 @@ type chatChunkMetadata struct {
 	SystemFingerprint string
 }
 
-func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, active *ActiveTool, invoker *manager.UpstreamInvoker) error {
-	execTool, _ := active.Executor()
-	cleanupCtx, cancelCleanup := cleanupContext(httpReq)
-	defer cancelCleanup()
-	defer func() {
-		_ = closePreparedState(cleanupCtx, active.Prepared)
-	}()
-
-	resp, err := invoker.Do(ctx, httpReq.Method, httpReq.URL.Path, httpReq.Header, active.Prepared.Body)
+func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, toolSet *ToolSet, body []byte, invoker *manager.UpstreamInvoker) error {
+	resp, err := invoker.Do(ctx, httpReq.Method, httpReq.URL.Path, httpReq.Header, body)
 	if err != nil {
 		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 		return nil
@@ -58,23 +51,13 @@ func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, http
 		return nil
 	}
 
-	var completion openai.ChatCompletion
-	if err := json.Unmarshal(responseBody, &completion); err != nil {
-		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
-		return nil
-	}
-	if !chatCompletionHasToolCalls(&completion, active.Tool.ID()) {
-		setUsageHeaderOrTrailer(w, httpReq, usage)
-		forwardResponse(w, resp, responseBody)
-		return nil
-	}
-
 	payload, err := copyResponseMap(responseBody)
 	if err != nil {
 		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 		return nil
 	}
 
+	executedAny := false
 	for _, choiceValue := range rawJSONArray(payload["choices"]) {
 		choice := rawJSONMap(choiceValue)
 		message := rawJSONMap(choice["message"])
@@ -82,38 +65,40 @@ func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, http
 		for _, toolCallValue := range toolCalls {
 			toolCall := rawJSONMap(toolCallValue)
 			function := rawJSONMap(toolCall["function"])
-			if jsonString(function["name"]) != active.Tool.ID() {
+			name := jsonString(function["name"])
+			session, ok := toolSet.SessionForCall(name)
+			if !ok {
 				continue
 			}
 
-			raw, err := json.Marshal(toolCall)
-			if err != nil {
-				return err
-			}
-			result, execErr := execTool.Execute(ctx, &InferenceToolCall{
+			result, execErr := session.Execute(ctx, &ToolCall{
 				Endpoint: EndpointChatCompletions,
-				Raw:      raw,
+				Name:     name,
+				Value:    toolCall,
 			})
 			if execErr != nil {
 				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 				return nil
 			}
+			if err := ensureChatExecutionPatch(result); err != nil {
+				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+				return nil
+			}
+			executedAny = true
 			mergeMap(toolCall, result.ChatPatch)
 		}
 	}
 
 	setUsageHeaderOrTrailer(w, httpReq, usage)
+	if !executedAny {
+		forwardResponse(w, resp, responseBody)
+		return nil
+	}
 	return writeJSON(w, resp.StatusCode, payload)
 }
 
-func (r *Runner) handleChatStream(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, active *ActiveTool, invoker *manager.UpstreamInvoker) error {
-	cleanupCtx, cancelCleanup := cleanupContext(httpReq)
-	defer cancelCleanup()
-	defer func() {
-		_ = closePreparedState(cleanupCtx, active.Prepared)
-	}()
-
-	resp, err := invoker.Do(ctx, httpReq.Method, httpReq.URL.Path, httpReq.Header, active.Prepared.Body)
+func (r *Runner) handleChatStream(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, toolSet *ToolSet, body []byte, invoker *manager.UpstreamInvoker) error {
+	resp, err := invoker.Do(ctx, httpReq.Method, httpReq.URL.Path, httpReq.Header, body)
 	if err != nil {
 		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 		return nil
@@ -130,11 +115,10 @@ func (r *Runner) handleChatStream(ctx context.Context, w http.ResponseWriter, ht
 		return nil
 	}
 
-	return r.streamChatResponse(w, httpReq, resp, invoker, active)
+	return r.streamChatResponse(w, httpReq, resp, invoker, toolSet)
 }
 
-func (r *Runner) streamChatResponse(w http.ResponseWriter, httpReq *http.Request, resp *http.Response, invoker *manager.UpstreamInvoker, active *ActiveTool) error {
-	execTool, _ := active.Executor()
+func (r *Runner) streamChatResponse(w http.ResponseWriter, httpReq *http.Request, resp *http.Response, invoker *manager.UpstreamInvoker, toolSet *ToolSet) error {
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -212,25 +196,30 @@ func (r *Runner) streamChatResponse(w http.ResponseWriter, httpReq *http.Request
 	hasExecution := false
 	for choiceIndex, choiceBuilders := range builders {
 		for toolIndex, builder := range choiceBuilders {
-			if builder == nil || builder.Name != active.Tool.ID() {
+			if builder == nil {
+				continue
+			}
+			session, ok := toolSet.SessionForCall(builder.Name)
+			if !ok {
 				continue
 			}
 
-			raw, err := json.Marshal(map[string]any{
+			call := map[string]any{
 				"id": builder.ID,
 				"function": map[string]any{
 					"name":      builder.Name,
 					"arguments": builder.Arguments.String(),
 				},
+			}
+			result, err := session.Execute(httpReq.Context(), &ToolCall{
+				Endpoint: EndpointChatCompletions,
+				Name:     builder.Name,
+				Value:    call,
 			})
 			if err != nil {
 				return err
 			}
-			result, err := execTool.Execute(httpReq.Context(), &InferenceToolCall{
-				Endpoint: EndpointChatCompletions,
-				Raw:      raw,
-			})
-			if err != nil {
+			if err := ensureChatExecutionPatch(result); err != nil {
 				return err
 			}
 
@@ -385,9 +374,12 @@ func usageFromChatChunk(chunk openai.ChatCompletionChunk) *tokencount.Usage {
 	return &usage
 }
 
-func ensureExecutionPatch(result *ExecutionResult) error {
+func ensureChatExecutionPatch(result *ExecutionResult) error {
 	if result == nil {
 		return fmt.Errorf("missing execution result")
+	}
+	if result.ChatPatch == nil {
+		return fmt.Errorf("missing chat execution patch")
 	}
 	return nil
 }

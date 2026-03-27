@@ -84,34 +84,49 @@ func (p *RequestPlan) serveTyped(ctx context.Context, w http.ResponseWriter, htt
 		log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", p.typed.ClientRequestedStreamingUsage)
 	}
 
-	activeTool, err := p.runner.Prepare(p.typed)
+	webSearchRequest, err := p.runner.PrepareWebSearch(p.typed)
+	if err != nil {
+		writeAPIError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		return
+	}
+	if webSearchRequest != nil {
+		bodyBytes := webSearchRequest.Body
+		if len(bodyBytes) == 0 {
+			bodyBytes, err = p.typed.BodyBytes()
+			if err != nil {
+				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+				return
+			}
+		}
+		effectiveModel := webSearchRequest.EffectiveModel
+		if effectiveModel == "" {
+			effectiveModel = p.typed.Model
+		}
+		serveProxyModel(w, httpReq, em, effectiveModel, bodyBytes)
+		return
+	}
+
+	toolSet, err := p.runner.Activate(p.typed)
+	if err != nil {
+		writeAPIError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		return
+	}
+	if toolSet != nil {
+		cleanupCtx, cancelCleanup := cleanupContext(httpReq)
+		defer cancelCleanup()
+		defer func() {
+			_ = toolSet.Close(cleanupCtx)
+		}()
+	}
+
+	bodyBytes, err := p.runner.BuildRequestBody(p.typed, toolSet)
 	if err != nil {
 		writeAPIError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 		return
 	}
 
-	bodyBytes, err := p.typed.BodyBytes()
-	if err != nil {
-		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-		return
-	}
-
 	effectiveModel := p.typed.Model
-	if activeTool != nil && activeTool.Prepared != nil {
-		if len(activeTool.Prepared.Body) > 0 {
-			bodyBytes = activeTool.Prepared.Body
-		}
-		if activeTool.Prepared.EffectiveModel != "" {
-			effectiveModel = activeTool.Prepared.EffectiveModel
-		}
-	}
-
-	if activeTool == nil {
-		serveProxyModel(w, httpReq, em, effectiveModel, bodyBytes)
-		return
-	}
-
-	if _, ok := activeTool.Executor(); !ok {
+	if toolSet == nil || toolSet.Empty() {
 		serveProxyModel(w, httpReq, em, effectiveModel, bodyBytes)
 		return
 	}
@@ -134,9 +149,9 @@ func (p *RequestPlan) serveTyped(ctx context.Context, w http.ResponseWriter, htt
 
 	resetRequestBody(httpReq, bodyBytes)
 	if p.typed.Stream {
-		err = p.runner.HandleStream(ctx, w, httpReq, p.typed, activeTool, invoker)
+		err = p.runner.HandleStream(ctx, w, httpReq, p.typed, toolSet, bodyBytes, invoker)
 	} else {
-		err = p.runner.HandleJSON(ctx, w, httpReq, p.typed, activeTool, invoker)
+		err = p.runner.HandleJSON(ctx, w, httpReq, p.typed, toolSet, bodyBytes, invoker)
 	}
 	if err != nil {
 		writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)

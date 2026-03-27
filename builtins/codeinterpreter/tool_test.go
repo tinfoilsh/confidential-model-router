@@ -8,10 +8,11 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/openaiapi"
 )
 
-func TestPrepareChatInjectsToolAndPreservesToolChoice(t *testing.T) {
+func TestChatActivationInjectsToolAndPreservesToolChoice(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
+	runner := openaiapi.NewRunner(nil, tool)
 	req := mustParseRequest(t, "/v1/chat/completions", map[string]any{
 		"model": "gpt-test",
 		"messages": []any{
@@ -34,31 +35,36 @@ func TestPrepareChatInjectsToolAndPreservesToolChoice(t *testing.T) {
 		},
 	})
 
-	prepared, err := tool.Prepare(req)
+	toolSet, err := runner.Activate(req)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("Activate: %v", err)
 	}
-	if prepared == nil {
+	if toolSet == nil {
 		t.Fatal("expected active builtin")
 	}
 
-	var body map[string]any
-	if err := json.Unmarshal(prepared.Body, &body); err != nil {
+	body, err := runner.BuildRequestBody(req, toolSet)
+	if err != nil {
+		t.Fatalf("BuildRequestBody: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	if _, exists := body["code_interpreter_options"]; exists {
+	if _, exists := payload["code_interpreter_options"]; exists {
 		t.Fatal("expected code_interpreter_options to be stripped")
 	}
-	tools, _ := body["tools"].([]any)
+	tools, _ := payload["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("expected injected tool, got %d tools", len(tools))
 	}
-	if _, exists := body["tool_choice"]; !exists {
+	if _, exists := payload["tool_choice"]; !exists {
 		t.Fatal("expected tool_choice to be preserved")
 	}
 }
 
-func TestPrepareChatIgnoresNullCodeInterpreterOptions(t *testing.T) {
+func TestChatActivationIgnoresNullCodeInterpreterOptions(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
@@ -70,16 +76,16 @@ func TestPrepareChatIgnoresNullCodeInterpreterOptions(t *testing.T) {
 		"code_interpreter_options": nil,
 	})
 
-	prepared, err := tool.Prepare(req)
+	params, session, err := tool.GetParams(req, openaiapi.EndpointChatCompletions)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("GetParams: %v", err)
 	}
-	if prepared != nil {
+	if params != nil || session != nil {
 		t.Fatal("expected null code_interpreter_options to leave the builtin inactive")
 	}
 }
 
-func TestPrepareChatDoesNotRequireRuntimeConfiguration(t *testing.T) {
+func TestChatActivationDoesNotRequireRuntimeConfiguration(t *testing.T) {
 	t.Parallel()
 
 	tool, err := New(Config{})
@@ -94,19 +100,20 @@ func TestPrepareChatDoesNotRequireRuntimeConfiguration(t *testing.T) {
 		"code_interpreter_options": map[string]any{},
 	})
 
-	prepared, err := tool.Prepare(req)
+	params, session, err := tool.GetParams(req, openaiapi.EndpointChatCompletions)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("GetParams: %v", err)
 	}
-	if prepared == nil {
+	if params == nil || session == nil {
 		t.Fatal("expected active builtin")
 	}
 }
 
-func TestPrepareResponsesExpandsBuiltinAndRewritesExplicitToolChoice(t *testing.T) {
+func TestResponsesActivationExpandsBuiltinAndRewritesExplicitToolChoice(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
+	runner := openaiapi.NewRunner(nil, tool)
 	req := mustParseRequest(t, "/v1/responses", map[string]any{
 		"model": "gpt-test",
 		"input": "hi",
@@ -119,19 +126,20 @@ func TestPrepareResponsesExpandsBuiltinAndRewritesExplicitToolChoice(t *testing.
 		"include": []any{"code_interpreter_call.outputs"},
 	})
 
-	prepared, err := tool.Prepare(req)
+	toolSet, err := runner.Activate(req)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("Activate: %v", err)
 	}
-	if prepared == nil {
-		t.Fatal("expected active builtin")
+	body, err := runner.BuildRequestBody(req, toolSet)
+	if err != nil {
+		t.Fatalf("BuildRequestBody: %v", err)
 	}
 
-	var body map[string]any
-	if err := json.Unmarshal(prepared.Body, &body); err != nil {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	tools, _ := body["tools"].([]any)
+	tools, _ := payload["tools"].([]any)
 	if len(tools) != 1 {
 		t.Fatalf("expected injected function tool only, got %d", len(tools))
 	}
@@ -139,15 +147,16 @@ func TestPrepareResponsesExpandsBuiltinAndRewritesExplicitToolChoice(t *testing.
 	if injected["type"] != "function" || injected["name"] != ToolName {
 		t.Fatalf("unexpected injected tool: %#v", injected)
 	}
-	if body["tool_choice"] != "auto" {
-		t.Fatalf("expected tool_choice to be rewritten to \"auto\", got %#v", body["tool_choice"])
+	if payload["tool_choice"] != "auto" {
+		t.Fatalf("expected tool_choice to be rewritten to auto, got %#v", payload["tool_choice"])
 	}
 }
 
-func TestPrepareResponsesRewritesRequiredToolChoice(t *testing.T) {
+func TestResponsesActivationRewritesRequiredToolChoice(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
+	runner := openaiapi.NewRunner(nil, tool)
 	req := mustParseRequest(t, "/v1/responses", map[string]any{
 		"model": "gpt-test",
 		"input": "hi",
@@ -157,38 +166,38 @@ func TestPrepareResponsesRewritesRequiredToolChoice(t *testing.T) {
 		"tool_choice": "required",
 	})
 
-	prepared, err := tool.Prepare(req)
+	toolSet, err := runner.Activate(req)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("Activate: %v", err)
 	}
-	if prepared == nil {
-		t.Fatal("expected active builtin")
+	body, err := runner.BuildRequestBody(req, toolSet)
+	if err != nil {
+		t.Fatalf("BuildRequestBody: %v", err)
 	}
 
-	var body map[string]any
-	if err := json.Unmarshal(prepared.Body, &body); err != nil {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	if body["tool_choice"] != "auto" {
-		t.Fatalf("expected required tool_choice to be rewritten to \"auto\", got %#v", body["tool_choice"])
+	if payload["tool_choice"] != "auto" {
+		t.Fatalf("expected required tool_choice to be rewritten to auto, got %#v", payload["tool_choice"])
 	}
 }
 
-func TestPrepareResponsesRejectsUnsupportedExplicitToolChoiceWithOtherTools(t *testing.T) {
+func TestResponsesActivationRejectsUnsupportedExplicitToolChoiceWithOtherTools(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
+	runner := openaiapi.NewRunner(nil, tool)
 	req := mustParseRequest(t, "/v1/responses", map[string]any{
 		"model": "gpt-test",
 		"input": "hi",
 		"tools": []any{
 			map[string]any{"type": "code_interpreter"},
 			map[string]any{
-				"type": "function",
-				"name": "weather",
-				"parameters": map[string]any{
-					"type": "object",
-				},
+				"type":       "function",
+				"name":       "weather",
+				"parameters": map[string]any{"type": "object"},
 			},
 		},
 		"tool_choice": map[string]any{
@@ -196,12 +205,16 @@ func TestPrepareResponsesRejectsUnsupportedExplicitToolChoiceWithOtherTools(t *t
 		},
 	})
 
-	if _, err := tool.Prepare(req); err == nil {
+	toolSet, err := runner.Activate(req)
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if _, err := runner.BuildRequestBody(req, toolSet); err == nil {
 		t.Fatal("expected unsupported tool_choice error")
 	}
 }
 
-func TestPrepareResponsesAttachesPreparedExecutor(t *testing.T) {
+func TestResponsesActivationReturnsLazySession(t *testing.T) {
 	t.Parallel()
 
 	tool := newTestTool(t)
@@ -216,27 +229,23 @@ func TestPrepareResponsesAttachesPreparedExecutor(t *testing.T) {
 		"include": []any{"code_interpreter_call.outputs"},
 	})
 
-	prepared, err := tool.Prepare(req)
+	params, session, err := tool.GetParams(req, openaiapi.EndpointResponses)
 	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("GetParams: %v", err)
 	}
-	if prepared == nil {
+	if params == nil || session == nil {
 		t.Fatal("expected active builtin")
 	}
 
-	executor, ok := prepared.Executor.(*preparedExecutor)
-	if !ok || executor == nil {
-		t.Fatalf("expected prepared executor, got %T", prepared.Executor)
+	requestSession, ok := session.(*toolSession)
+	if !ok || requestSession == nil {
+		t.Fatalf("expected request-scoped tool session, got %T", session)
 	}
-	state, ok := prepared.State.(*preparedExecutor)
-	if !ok || state == nil {
-		t.Fatalf("expected prepared state to be a prepared executor, got %T", prepared.State)
+	if !requestSession.includeOutputs {
+		t.Fatal("expected session to preserve includeOutputs")
 	}
-	if executor != state {
-		t.Fatal("expected prepared state and executor to share the same runtime owner")
-	}
-	if !executor.includeOutputs {
-		t.Fatal("expected prepared executor to preserve includeOutputs")
+	if requestSession.runtime != nil {
+		t.Fatal("expected runtime to remain lazy until execute")
 	}
 }
 

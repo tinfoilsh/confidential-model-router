@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 
-	oairesponses "github.com/openai/openai-go/v3/responses"
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -29,19 +28,14 @@ type toolStreamCall struct {
 	ItemID      string
 	OutputIndex int
 	CallID      string
+	Name        string
 	Code        string
 }
 
-func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, active *ActiveTool, invoker *manager.UpstreamInvoker) error {
-	cleanupCtx, cancelCleanup := cleanupContext(httpReq)
-	defer cancelCleanup()
-	defer func() {
-		_ = closePreparedState(cleanupCtx, active.Prepared)
-	}()
-
+func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, toolSet *ToolSet, body []byte, invoker *manager.UpstreamInvoker) error {
 	w.Header().Set("Tinfoil-Enclave", invoker.Enclave().String())
 
-	requestBody, err := copyResponseMap(active.Prepared.Body)
+	requestBody, err := copyResponseMap(body)
 	if err != nil {
 		return err
 	}
@@ -50,9 +44,8 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 
 	publicOutput := []any{}
 	usage := &usageAccumulator{}
-	execTool, _ := active.Executor()
 
-	for range maxResponsesToolIterations {
+	for iteration := 0; iteration < maxResponsesToolIterations; iteration++ {
 		bodyBytes, err := json.Marshal(requestBody)
 		if err != nil {
 			return err
@@ -78,13 +71,6 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 			return nil
 		}
 
-		var typedResponse oairesponses.Response
-		if err := json.Unmarshal(responseBody, &typedResponse); err == nil && len(publicOutput) == 0 && !responsesHasToolCalls(&typedResponse, active.Tool.ID()) {
-			setUsageHeaderOrTrailer(w, httpReq, usage.ToUsage())
-			forwardResponse(w, resp, responseBody)
-			return nil
-		}
-
 		payload, err := copyResponseMap(responseBody)
 		if err != nil {
 			writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
@@ -92,7 +78,7 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 		}
 
 		outputItems := append([]any(nil), rawJSONArray(payload["output"])...)
-		processed, err := processResponsesOutput(ctx, outputItems, active, execTool)
+		processed, err := processResponsesOutput(ctx, outputItems, toolSet)
 		if err != nil {
 			writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 			return nil
@@ -101,9 +87,12 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 		publicOutput = append(publicOutput, processed.publicItems...)
 
 		if !processed.executedAny {
-			if len(publicOutput) > 0 {
-				payload["output"] = publicOutput
+			if iteration == 0 && len(processed.replayItems) == 0 && !processed.mixedWithUserTools && len(publicOutput) == len(processed.publicItems) {
+				setUsageHeaderOrTrailer(w, httpReq, usage.ToUsage())
+				forwardResponse(w, resp, responseBody)
+				return nil
 			}
+			payload["output"] = publicOutput
 			payload["usage"] = usage.ToUsage()
 			setUsageHeaderOrTrailer(w, httpReq, usage.ToUsage())
 			return writeJSON(w, http.StatusOK, payload)
@@ -125,31 +114,32 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 	return fmt.Errorf("max tool iterations exceeded")
 }
 
-func processResponsesOutput(ctx context.Context, outputItems []any, active *ActiveTool, execTool PreparedExecutor) (*processedResponsesOutput, error) {
+func processResponsesOutput(ctx context.Context, outputItems []any, toolSet *ToolSet) (*processedResponsesOutput, error) {
 	result := &processedResponsesOutput{}
 	for _, itemValue := range outputItems {
 		item := rawJSONMap(itemValue)
-		if jsonString(item["type"]) != "function_call" || jsonString(item["name"]) != active.Tool.ID() {
+		if jsonString(item["type"]) != "function_call" {
 			result.publicItems = append(result.publicItems, itemValue)
-			if jsonString(item["type"]) == "function_call" {
-				result.mixedWithUserTools = true
-			}
+			continue
+		}
+		name := jsonString(item["name"])
+		session, ok := toolSet.SessionForCall(name)
+		if !ok {
+			result.publicItems = append(result.publicItems, itemValue)
+			result.mixedWithUserTools = true
 			continue
 		}
 
-		raw, err := json.Marshal(item)
-		if err != nil {
-			return nil, err
-		}
-		execResult, err := execTool.Execute(ctx, &InferenceToolCall{
+		execResult, err := session.Execute(ctx, &ToolCall{
 			Endpoint: EndpointResponses,
-			Raw:      raw,
+			Name:     name,
+			Value:    item,
 		})
 		if err != nil {
 			return nil, err
 		}
 		if execResult == nil || execResult.ResponsesPublicItem == nil || execResult.ResponsesReplayItem == nil {
-			return nil, fmt.Errorf("tool %s returned incomplete responses execution result", active.Tool.ID())
+			return nil, fmt.Errorf("tool %s returned incomplete responses execution result", name)
 		}
 
 		result.executedAny = true
@@ -160,13 +150,7 @@ func processResponsesOutput(ctx context.Context, outputItems []any, active *Acti
 	return result, nil
 }
 
-func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, active *ActiveTool, invoker *manager.UpstreamInvoker) error {
-	cleanupCtx, cancelCleanup := cleanupContext(httpReq)
-	defer cancelCleanup()
-	defer func() {
-		_ = closePreparedState(cleanupCtx, active.Prepared)
-	}()
-
+func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, toolSet *ToolSet, body []byte, invoker *manager.UpstreamInvoker) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -175,7 +159,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 
 	flusher, _ := w.(http.Flusher)
 
-	requestBody, err := copyResponseMap(active.Prepared.Body)
+	requestBody, err := copyResponseMap(body)
 	if err != nil {
 		return err
 	}
@@ -185,7 +169,6 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 	publicOutput := []any{}
 	usage := &usageAccumulator{}
 	var sequence int64 = 1
-	execTool, _ := active.Executor()
 
 	for range maxResponsesToolIterations {
 		bodyBytes, err := json.Marshal(requestBody)
@@ -216,7 +199,11 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 			switch eventType {
 			case "response.output_item.added":
 				item := rawJSONMap(event["item"])
-				if jsonString(item["type"]) == "function_call" && jsonString(item["name"]) == active.Tool.ID() {
+				name := jsonString(item["name"])
+				if jsonString(item["type"]) == "function_call" {
+					if _, ok := toolSet.SessionForCall(name); !ok {
+						break
+					}
 					hadToolThisHop = true
 					outputIndex := int(numberValue(event["output_index"]))
 					itemID := jsonString(item["id"])
@@ -227,13 +214,14 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 						ItemID:      itemID,
 						OutputIndex: outputIndex,
 						CallID:      jsonString(item["call_id"]),
+						Name:        name,
 					}
 					return emitResponsesEvent(w, &sequence, map[string]any{
 						"type":         "response.output_item.added",
 						"output_index": outputIndex,
 						"item": map[string]any{
 							"id":     firstNonEmpty(itemID, jsonString(item["call_id"])),
-							"type":   responsesToolOutputType(active.Tool.ID()),
+							"type":   responsesToolOutputType(name),
 							"status": "in_progress",
 						},
 					}, flusher)
@@ -252,7 +240,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 					streamCalls[itemID] = call
 					if call.Code != "" {
 						if err := emitResponsesEvent(w, &sequence, map[string]any{
-							"type":         responsesToolCodeEventType(active.Tool.ID(), "delta"),
+							"type":         responsesToolCodeEventType(call.Name, "delta"),
 							"item_id":      itemID,
 							"output_index": call.OutputIndex,
 							"delta":        call.Code,
@@ -260,7 +248,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 							return err
 						}
 						return emitResponsesEvent(w, &sequence, map[string]any{
-							"type":         responsesToolCodeEventType(active.Tool.ID(), "done"),
+							"type":         responsesToolCodeEventType(call.Name, "done"),
 							"item_id":      itemID,
 							"output_index": call.OutputIndex,
 							"code":         call.Code,
@@ -270,9 +258,11 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 				}
 			case "response.output_item.done":
 				item := rawJSONMap(event["item"])
-				if jsonString(item["type"]) == "function_call" && jsonString(item["name"]) == active.Tool.ID() {
-					hadToolThisHop = true
-					return nil
+				if jsonString(item["type"]) == "function_call" {
+					if _, ok := toolSet.SessionForCall(jsonString(item["name"])); ok {
+						hadToolThisHop = true
+						return nil
+					}
 				}
 			case "response.completed":
 				completed = rawJSONMap(event["response"])
@@ -313,7 +303,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 		}
 
 		outputItems := append([]any(nil), rawJSONArray(completed["output"])...)
-		processed, err := processResponsesOutput(ctx, outputItems, active, execTool)
+		processed, err := processResponsesOutput(ctx, outputItems, toolSet)
 		if err != nil {
 			return err
 		}
@@ -326,21 +316,21 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 			itemID := jsonString(item["id"])
 			call := streamCalls[itemID]
 			if err := emitResponsesEvent(w, &sequence, map[string]any{
-				"type":         responsesToolEventType(active.Tool.ID(), "in_progress"),
+				"type":         responsesToolEventType(call.Name, "in_progress"),
 				"item_id":      itemID,
 				"output_index": call.OutputIndex,
 			}, flusher); err != nil {
 				return err
 			}
 			if err := emitResponsesEvent(w, &sequence, map[string]any{
-				"type":         responsesToolEventType(active.Tool.ID(), "interpreting"),
+				"type":         responsesToolEventType(call.Name, "interpreting"),
 				"item_id":      itemID,
 				"output_index": call.OutputIndex,
 			}, flusher); err != nil {
 				return err
 			}
 			if err := emitResponsesEvent(w, &sequence, map[string]any{
-				"type":         responsesToolEventType(active.Tool.ID(), "completed"),
+				"type":         responsesToolEventType(call.Name, "completed"),
 				"item_id":      itemID,
 				"output_index": call.OutputIndex,
 			}, flusher); err != nil {
@@ -373,18 +363,6 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 
 	log.Warnf("responses: reached max tool iterations (%d), terminating", maxResponsesToolIterations)
 	return fmt.Errorf("max tool iterations exceeded")
-}
-
-func responsesHasToolCalls(resp *oairesponses.Response, toolName string) bool {
-	if resp == nil {
-		return false
-	}
-	for _, item := range resp.Output {
-		if item.Type == "function_call" && strings.TrimSpace(item.Name) == toolName {
-			return true
-		}
-	}
-	return false
 }
 
 func emitResponsesEvent(w http.ResponseWriter, sequence *int64, event map[string]any, flusher http.Flusher) error {

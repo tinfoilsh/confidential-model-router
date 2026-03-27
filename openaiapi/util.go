@@ -147,7 +147,13 @@ func setUsageHeaderOrTrailer(w http.ResponseWriter, req *http.Request, usage *to
 	if !usageMetricsRequested(req) || usage == nil {
 		return
 	}
-	w.Header().Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usage))
+	usage.Normalize()
+	w.Header().Set(
+		manager.UsageMetricsResponseHeader,
+		"prompt="+strconv.Itoa(usage.PromptTokens)+
+			",completion="+strconv.Itoa(usage.CompletionTokens)+
+			",total="+strconv.Itoa(usage.TotalTokens),
+	)
 }
 
 func prepareUsageTrailer(w http.ResponseWriter, req *http.Request) {

@@ -41,15 +41,15 @@ type sandboxRuntime struct {
 	manager *SandboxManager
 }
 
-type preparedExecutor struct {
+type toolSession struct {
 	newRuntime     func() (runtime, error)
 	includeOutputs bool
 	runtime        runtime
 	mu             sync.Mutex
 }
 
-func newPreparedExecutor(tool *Tool, callerAPIKey string, session *Session, includeOutputs bool) *preparedExecutor {
-	return &preparedExecutor{
+func newToolSession(tool *Tool, callerAPIKey string, session *Session, includeOutputs bool) *toolSession {
+	return &toolSession{
 		// The prepared executor owns the caller API key for this request so the
 		// eventual runtime and sandbox controlplane client are authorized as that caller.
 		newRuntime: func() (runtime, error) {
@@ -85,18 +85,18 @@ func (t *Tool) ID() string {
 	return ToolName
 }
 
-func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
-	switch req.Kind {
+func (t *Tool) GetParams(req *openaiapi.Request, endpoint openaiapi.Endpoint) (*openaiapi.ToolParams, openaiapi.ToolSession, error) {
+	switch endpoint {
 	case openaiapi.EndpointChatCompletions:
-		return t.prepareChat(req)
+		return t.getChatParams(req)
 	case openaiapi.EndpointResponses:
-		return t.prepareResponses(req)
+		return t.getResponsesParams(req)
 	default:
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
-func (p *preparedExecutor) Execute(ctx context.Context, call *openaiapi.InferenceToolCall) (*openaiapi.ExecutionResult, error) {
+func (p *toolSession) Execute(ctx context.Context, call *openaiapi.ToolCall) (*openaiapi.ExecutionResult, error) {
 	if call == nil {
 		return nil, fmt.Errorf("tool call is required")
 	}
@@ -107,15 +107,15 @@ func (p *preparedExecutor) Execute(ctx context.Context, call *openaiapi.Inferenc
 
 	switch call.Endpoint {
 	case openaiapi.EndpointChatCompletions:
-		return executeChatCall(ctx, runtime, call.Raw)
+		return executeChatCall(ctx, runtime, call)
 	case openaiapi.EndpointResponses:
-		return executeResponsesCall(ctx, runtime, p.includeOutputs, call.Raw)
+		return executeResponsesCall(ctx, runtime, p.includeOutputs, call)
 	default:
 		return nil, fmt.Errorf("unsupported endpoint %q", call.Endpoint)
 	}
 }
 
-func (p *preparedExecutor) Close(ctx context.Context) error {
+func (p *toolSession) Close(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
@@ -127,7 +127,7 @@ func (p *preparedExecutor) Close(ctx context.Context) error {
 	return p.runtime.Close(ctx)
 }
 
-func (p *preparedExecutor) runtimeForExecution() (runtime, error) {
+func (p *toolSession) runtimeForExecution() (runtime, error) {
 	if p == nil {
 		return nil, fmt.Errorf("code interpreter runtime is not prepared")
 	}
@@ -161,113 +161,64 @@ func (r *sandboxRuntime) Close(ctx context.Context) error {
 	return r.manager.Close(ctx)
 }
 
-func (t *Tool) prepareChat(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+func (t *Tool) getChatParams(req *openaiapi.Request) (*openaiapi.ToolParams, openaiapi.ToolSession, error) {
 	if req == nil || req.Chat == nil || !hasNonNullRawMessage(req.Chat.CodeInterpreterOptions) {
-		return nil, nil
-	}
-
-	for _, tool := range req.Chat.Params.Tools {
-		if chatToolHasName(tool, ToolName) {
-			return nil, fmt.Errorf("tool name collision with reserved tool %q", ToolName)
-		}
+		return nil, nil, nil
 	}
 
 	config, err := parseContainerConfigRaw(req.Chat.CodeInterpreterOptions, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	session, err := NewSession(config)
 	if err != nil {
-		return nil, err
-	}
-
-	fields := cloneRawFields(req.RawFields)
-	delete(fields, "code_interpreter_options")
-
-	tools, err := rawArray(fields["tools"])
-	if err != nil {
-		return nil, fmt.Errorf("invalid parameter: 'tools' must be an array")
+		return nil, nil, err
 	}
 	toolBytes, err := json.Marshal(chatCodeInterpreterToolParam())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	tools = append(tools, toolBytes)
-	encodedTools, err := json.Marshal(tools)
-	if err != nil {
-		return nil, err
-	}
-	fields["tools"] = encodedTools
 
-	bodyBytes, err := marshalRawFields(fields)
-	if err != nil {
-		return nil, err
-	}
-	prepared := newPreparedExecutor(t, req.AuthToken, session, false)
-
-	return &openaiapi.PreparedRequest{
-		EffectiveModel: req.Model,
-		Body:           bodyBytes,
-		State:          prepared,
-		Executor:       prepared,
-	}, nil
+	return &openaiapi.ToolParams{
+		ChatTools:   []openaiapi.ChatToolSpec{toolBytes},
+		CallNames:   []string{ToolName},
+		StripFields: []string{"code_interpreter_options"},
+	}, newToolSession(t, req.AuthToken, session, false), nil
 }
 
-func (t *Tool) prepareResponses(req *openaiapi.Request) (*openaiapi.PreparedRequest, error) {
+func (t *Tool) getResponsesParams(req *openaiapi.Request) (*openaiapi.ToolParams, openaiapi.ToolSession, error) {
 	if req == nil || req.Responses == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	toolsRaw, err := rawArray(req.RawFields["tools"])
 	if err != nil {
-		return nil, fmt.Errorf("invalid parameter: 'tools' must be an array")
+		return nil, nil, fmt.Errorf("invalid parameter: 'tools' must be an array")
 	}
 
 	hasBuiltinCI := false
-	hasFunctionCI := false
-	hasOtherTools := false
 	for _, tool := range req.Responses.Params.Tools {
 		if tool.OfCodeInterpreter != nil {
 			hasBuiltinCI = true
 		}
-		if responsesToolHasName(tool, ToolName) && tool.OfFunction != nil {
-			hasFunctionCI = true
-		}
-		if tool.OfCodeInterpreter == nil {
-			hasOtherTools = true
-		}
 	}
 	if !hasBuiltinCI {
-		return nil, nil
-	}
-	if hasFunctionCI {
-		return nil, fmt.Errorf("tool name collision with reserved tool %q", ToolName)
+		return nil, nil, nil
 	}
 
 	var (
 		config         ContainerConfig
 		foundCI        bool
 		includeOutputs bool
-		rewritten      []json.RawMessage
 	)
 
 	for idx, tool := range req.Responses.Params.Tools {
-		if responsesToolHasName(tool, ToolName) && tool.OfFunction != nil {
-			if idx < len(toolsRaw) {
-				rewritten = append(rewritten, cloneRawMessage(toolsRaw[idx]))
-			}
-			continue
-		}
-
 		if tool.OfCodeInterpreter == nil {
-			if idx < len(toolsRaw) {
-				rewritten = append(rewritten, cloneRawMessage(toolsRaw[idx]))
-			}
 			continue
 		}
 
 		if foundCI {
-			return nil, fmt.Errorf("only one code_interpreter tool is supported in this increment")
+			return nil, nil, fmt.Errorf("only one code_interpreter tool is supported in this increment")
 		}
 		foundCI = true
 
@@ -277,7 +228,7 @@ func (t *Tool) prepareResponses(req *openaiapi.Request) (*openaiapi.PreparedRequ
 		}
 		parsed, err := parseResponsesContainerConfigRaw(toolRaw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		config = parsed
 	}
@@ -291,37 +242,19 @@ func (t *Tool) prepareResponses(req *openaiapi.Request) (*openaiapi.PreparedRequ
 
 	session, err := NewSession(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	fields := cloneRawFields(req.RawFields)
 	injectedTool, err := json.Marshal(responsesCodeInterpreterToolParam())
 	if err != nil {
-		return nil, err
-	}
-	rewritten = append(rewritten, injectedTool)
-	encodedTools, err := json.Marshal(rewritten)
-	if err != nil {
-		return nil, err
-	}
-	fields["tools"] = encodedTools
-
-	if err := normalizeResponsesToolChoice(req, fields, hasOtherTools); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	bodyBytes, err := marshalRawFields(fields)
-	if err != nil {
-		return nil, err
-	}
-	prepared := newPreparedExecutor(t, req.AuthToken, session, includeOutputs)
-
-	return &openaiapi.PreparedRequest{
-		EffectiveModel: req.Model,
-		Body:           bodyBytes,
-		State:          prepared,
-		Executor:       prepared,
-	}, nil
+	return &openaiapi.ToolParams{
+		ResponseTools:          []openaiapi.ResponseToolSpec{injectedTool},
+		CallNames:              []string{ToolName},
+		ResponseInterceptTypes: []string{ToolName},
+	}, newToolSession(t, req.AuthToken, session, includeOutputs), nil
 }
 
 func (t *Tool) newRuntime(callerAPIKey string, session *Session) (runtime, error) {
@@ -344,8 +277,8 @@ func (t *Tool) newRuntime(callerAPIKey string, session *Session) (runtime, error
 	return nil, fmt.Errorf("code interpreter is not configured")
 }
 
-func executeChatCall(ctx context.Context, runtime runtime, raw json.RawMessage) (*openaiapi.ExecutionResult, error) {
-	toolCall, err := rawObject(raw)
+func executeChatCall(ctx context.Context, runtime runtime, call *openaiapi.ToolCall) (*openaiapi.ExecutionResult, error) {
+	toolCall, err := toolCallObject(call)
 	if err != nil {
 		return nil, err
 	}
@@ -363,8 +296,8 @@ func executeChatCall(ctx context.Context, runtime runtime, raw json.RawMessage) 
 	}, nil
 }
 
-func executeResponsesCall(ctx context.Context, runtime runtime, includeOutputs bool, raw json.RawMessage) (*openaiapi.ExecutionResult, error) {
-	item, err := rawObject(raw)
+func executeResponsesCall(ctx context.Context, runtime runtime, includeOutputs bool, call *openaiapi.ToolCall) (*openaiapi.ExecutionResult, error) {
+	item, err := toolCallObject(call)
 	if err != nil {
 		return nil, err
 	}
@@ -495,6 +428,16 @@ func parseContainerConfig(value any, defaultAuto bool) (ContainerConfig, error) 
 	default:
 		return ContainerConfig{}, fmt.Errorf("invalid code interpreter container config")
 	}
+}
+
+func toolCallObject(call *openaiapi.ToolCall) (map[string]any, error) {
+	if call == nil {
+		return nil, fmt.Errorf("tool call is required")
+	}
+	if call.Value != nil {
+		return call.Value, nil
+	}
+	return rawObject(call.Raw)
 }
 
 func parseContainerConfigRaw(raw json.RawMessage, defaultAuto bool) (ContainerConfig, error) {
