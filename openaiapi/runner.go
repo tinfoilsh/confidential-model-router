@@ -53,7 +53,7 @@ func (r *Runner) HandleJSON(ctx context.Context, w http.ResponseWriter, httpReq 
 		return nil
 	}
 
-	if _, ok := active.Executable(); !ok {
+	if _, ok := active.Executor(); !ok {
 		resetRequestBody(httpReq, active.Prepared.Body)
 		invoker.Enclave().ServeHTTP(w, httpReq)
 		return nil
@@ -74,7 +74,7 @@ func (r *Runner) HandleStream(ctx context.Context, w http.ResponseWriter, httpRe
 		return nil
 	}
 
-	if _, ok := active.Executable(); !ok {
+	if _, ok := active.Executor(); !ok {
 		resetRequestBody(httpReq, active.Prepared.Body)
 		invoker.Enclave().ServeHTTP(w, httpReq)
 		return nil
@@ -94,9 +94,5 @@ func closePreparedState(ctx context.Context, prepared *PreparedRequest) error {
 	if prepared == nil || prepared.State == nil {
 		return nil
 	}
-	closer, ok := prepared.State.(StateCloser)
-	if !ok {
-		return nil
-	}
-	return closer.Close(ctx)
+	return prepared.State.Close(ctx)
 }

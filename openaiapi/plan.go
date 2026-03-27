@@ -110,7 +110,7 @@ func (p *RequestPlan) serveTyped(ctx context.Context, w http.ResponseWriter, htt
 		return
 	}
 
-	if _, ok := activeTool.Executable(); !ok {
+	if _, ok := activeTool.Executor(); !ok {
 		serveProxyModel(w, httpReq, em, effectiveModel, bodyBytes)
 		return
 	}

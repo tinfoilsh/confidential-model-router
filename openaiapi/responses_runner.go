@@ -50,7 +50,7 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 
 	publicOutput := []any{}
 	usage := &usageAccumulator{}
-	execTool, _ := active.Executable()
+	execTool, _ := active.Executor()
 
 	for range maxResponsesToolIterations {
 		bodyBytes, err := json.Marshal(requestBody)
@@ -125,7 +125,7 @@ func (r *Runner) handleResponsesJSON(ctx context.Context, w http.ResponseWriter,
 	return fmt.Errorf("max tool iterations exceeded")
 }
 
-func processResponsesOutput(ctx context.Context, outputItems []any, active *ActiveTool, execTool ExecutableTool) (*processedResponsesOutput, error) {
+func processResponsesOutput(ctx context.Context, outputItems []any, active *ActiveTool, execTool PreparedExecutor) (*processedResponsesOutput, error) {
 	result := &processedResponsesOutput{}
 	for _, itemValue := range outputItems {
 		item := rawJSONMap(itemValue)
@@ -144,7 +144,6 @@ func processResponsesOutput(ctx context.Context, outputItems []any, active *Acti
 		execResult, err := execTool.Execute(ctx, &InferenceToolCall{
 			Endpoint: EndpointResponses,
 			Raw:      raw,
-			State:    active.Prepared.State,
 		})
 		if err != nil {
 			return nil, err
@@ -186,7 +185,7 @@ func (r *Runner) handleResponsesStream(ctx context.Context, w http.ResponseWrite
 	publicOutput := []any{}
 	usage := &usageAccumulator{}
 	var sequence int64 = 1
-	execTool, _ := active.Executable()
+	execTool, _ := active.Executor()
 
 	for range maxResponsesToolIterations {
 		bodyBytes, err := json.Marshal(requestBody)

@@ -30,7 +30,7 @@ type chatChunkMetadata struct {
 }
 
 func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, httpReq *http.Request, req *Request, active *ActiveTool, invoker *manager.UpstreamInvoker) error {
-	execTool, _ := active.Executable()
+	execTool, _ := active.Executor()
 	cleanupCtx, cancelCleanup := cleanupContext(httpReq)
 	defer cancelCleanup()
 	defer func() {
@@ -93,7 +93,6 @@ func (r *Runner) handleChatJSON(ctx context.Context, w http.ResponseWriter, http
 			result, execErr := execTool.Execute(ctx, &InferenceToolCall{
 				Endpoint: EndpointChatCompletions,
 				Raw:      raw,
-				State:    active.Prepared.State,
 			})
 			if execErr != nil {
 				writeAPIError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
@@ -135,7 +134,7 @@ func (r *Runner) handleChatStream(ctx context.Context, w http.ResponseWriter, ht
 }
 
 func (r *Runner) streamChatResponse(w http.ResponseWriter, httpReq *http.Request, resp *http.Response, invoker *manager.UpstreamInvoker, active *ActiveTool) error {
-	execTool, _ := active.Executable()
+	execTool, _ := active.Executor()
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -230,7 +229,6 @@ func (r *Runner) streamChatResponse(w http.ResponseWriter, httpReq *http.Request
 			result, err := execTool.Execute(httpReq.Context(), &InferenceToolCall{
 				Endpoint: EndpointChatCompletions,
 				Raw:      raw,
-				State:    active.Prepared.State,
 			})
 			if err != nil {
 				return err

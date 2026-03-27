@@ -172,6 +172,45 @@ func TestPrepareResponsesRejectsUnsupportedExplicitToolChoiceWithOtherTools(t *t
 	}
 }
 
+func TestPrepareResponsesAttachesPreparedExecutor(t *testing.T) {
+	t.Parallel()
+
+	tool := newTestTool(t)
+	req := mustParseRequestWithHeader(t, "/v1/responses", http.Header{
+		"Authorization": []string{"Bearer sk-user"},
+	}, map[string]any{
+		"model": "gpt-test",
+		"input": "hi",
+		"tools": []any{
+			map[string]any{"type": "code_interpreter"},
+		},
+		"include": []any{"code_interpreter_call.outputs"},
+	})
+
+	prepared, err := tool.Prepare(req)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if prepared == nil {
+		t.Fatal("expected active builtin")
+	}
+
+	executor, ok := prepared.Executor.(*preparedExecutor)
+	if !ok || executor == nil {
+		t.Fatalf("expected prepared executor, got %T", prepared.Executor)
+	}
+	state, ok := prepared.State.(*preparedExecutor)
+	if !ok || state == nil {
+		t.Fatalf("expected prepared state to be a prepared executor, got %T", prepared.State)
+	}
+	if executor != state {
+		t.Fatal("expected prepared state and executor to share the same runtime owner")
+	}
+	if !executor.includeOutputs {
+		t.Fatal("expected prepared executor to preserve includeOutputs")
+	}
+}
+
 func newTestTool(t *testing.T) *Tool {
 	t.Helper()
 	server := httptest.NewServer(http.NotFoundHandler())
@@ -188,12 +227,17 @@ func newTestTool(t *testing.T) *Tool {
 
 func mustParseRequest(t *testing.T, path string, body map[string]any) *openaiapi.Request {
 	t.Helper()
+	return mustParseRequestWithHeader(t, path, nil, body)
+}
+
+func mustParseRequestWithHeader(t *testing.T, path string, header http.Header, body map[string]any) *openaiapi.Request {
+	t.Helper()
 
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	req, handled, err := openaiapi.ParseRequest(path, nil, raw)
+	req, handled, err := openaiapi.ParseRequest(path, header, raw)
 	if err != nil {
 		t.Fatalf("ParseRequest: %v", err)
 	}

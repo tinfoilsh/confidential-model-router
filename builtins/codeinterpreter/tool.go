@@ -20,18 +20,17 @@ const (
 )
 
 type Config struct {
-	ControlPlaneURL    string
-	ControlPlaneAPIKey string
-	BaseURL            string
-	Image              string
-	Repo               string
-	ExecTimeout        time.Duration
+	ControlPlaneURL string
+	BaseURL         string
+	Image           string
+	Repo            string
+	ExecTimeout     time.Duration
 }
 
 type Tool struct {
 	directClient        *Client
-	sandboxControlplane *SandboxControlplaneClient
-	sandboxBootstrapper *SandboxBootstrapper
+	controlPlaneURL     string
+	sandboxBootstrapper sandboxBootstrapper
 	sandboxSpec         SandboxSpec
 }
 
@@ -50,14 +49,22 @@ type sandboxRuntime struct {
 	manager *SandboxManager
 }
 
-type preparedState struct {
-	tool           *Tool
-	authToken      string
-	callerAPIKeyID string
-	session        *Session
-	runtime        runtime
+type preparedExecutor struct {
+	newRuntime     func() (runtime, error)
 	includeOutputs bool
+	runtime        runtime
 	mu             sync.Mutex
+}
+
+func newPreparedExecutor(tool *Tool, callerAPIKey string, session *Session, includeOutputs bool) *preparedExecutor {
+	return &preparedExecutor{
+		// The prepared executor owns the caller API key for this request so the
+		// eventual runtime and sandbox controlplane client are authorized as that caller.
+		newRuntime: func() (runtime, error) {
+			return tool.newRuntime(callerAPIKey, session)
+		},
+		includeOutputs: includeOutputs,
+	}
 }
 
 func New(cfg Config) (*Tool, error) {
@@ -78,7 +85,7 @@ func New(cfg Config) (*Tool, error) {
 		if strings.TrimSpace(cfg.Repo) == "" {
 			return nil, fmt.Errorf("code interpreter repo is required when managed sandboxes are enabled")
 		}
-		tool.sandboxControlplane = NewSandboxControlplaneClient(cfg.ControlPlaneURL, cfg.ControlPlaneAPIKey)
+		tool.controlPlaneURL = cfg.ControlPlaneURL
 		tool.sandboxBootstrapper = NewSandboxBootstrapper(cfg.ExecTimeout)
 		tool.sandboxSpec = SandboxSpec{
 			Workload:   sandboxWorkloadCodeInterpreter,
@@ -105,15 +112,11 @@ func (t *Tool) Prepare(req *openaiapi.Request) (*openaiapi.PreparedRequest, erro
 	}
 }
 
-func (t *Tool) Execute(ctx context.Context, call *openaiapi.InferenceToolCall) (*openaiapi.ExecutionResult, error) {
+func (p *preparedExecutor) Execute(ctx context.Context, call *openaiapi.InferenceToolCall) (*openaiapi.ExecutionResult, error) {
 	if call == nil {
 		return nil, fmt.Errorf("tool call is required")
 	}
-	state, ok := call.State.(*preparedState)
-	if !ok || state == nil {
-		return nil, fmt.Errorf("code interpreter runtime is not prepared")
-	}
-	runtime, err := state.runtimeForExecution()
+	runtime, err := p.runtimeForExecution()
 	if err != nil {
 		return nil, err
 	}
@@ -122,45 +125,45 @@ func (t *Tool) Execute(ctx context.Context, call *openaiapi.InferenceToolCall) (
 	case openaiapi.EndpointChatCompletions:
 		return executeChatCall(ctx, runtime, call.Raw)
 	case openaiapi.EndpointResponses:
-		return executeResponsesCall(ctx, runtime, state.includeOutputs, call.Raw)
+		return executeResponsesCall(ctx, runtime, p.includeOutputs, call.Raw)
 	default:
 		return nil, fmt.Errorf("unsupported endpoint %q", call.Endpoint)
 	}
 }
 
-func (s *preparedState) Close(ctx context.Context) error {
-	if s == nil {
+func (p *preparedExecutor) Close(ctx context.Context) error {
+	if p == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.runtime == nil {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.runtime == nil {
 		return nil
 	}
-	return s.runtime.Close(ctx)
+	return p.runtime.Close(ctx)
 }
 
-func (s *preparedState) runtimeForExecution() (runtime, error) {
-	if s == nil {
+func (p *preparedExecutor) runtimeForExecution() (runtime, error) {
+	if p == nil {
 		return nil, fmt.Errorf("code interpreter runtime is not prepared")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if s.runtime != nil {
-		return s.runtime, nil
+	if p.runtime != nil {
+		return p.runtime, nil
 	}
-	if s.tool == nil {
+	if p.newRuntime == nil {
 		return nil, fmt.Errorf("code interpreter tool is not available")
 	}
 
-	runtime, err := s.tool.newRuntime(s.authToken, s.callerAPIKeyID, s.session)
+	runtime, err := p.newRuntime()
 	if err != nil {
 		return nil, err
 	}
-	s.runtime = runtime
-	return s.runtime, nil
+	p.runtime = runtime
+	return p.runtime, nil
 }
 
 func (r *directRuntime) Execute(ctx context.Context, callID, rawArgs string) (Result, error) {
@@ -227,16 +230,13 @@ func (t *Tool) prepareChat(req *openaiapi.Request) (*openaiapi.PreparedRequest, 
 	if err != nil {
 		return nil, err
 	}
+	prepared := newPreparedExecutor(t, req.AuthToken, session, false)
 
 	return &openaiapi.PreparedRequest{
 		EffectiveModel: req.Model,
 		Body:           bodyBytes,
-		State: &preparedState{
-			tool:           t,
-			authToken:      req.AuthToken,
-			callerAPIKeyID: req.CallerAPIKeyID,
-			session:        session,
-		},
+		State:          prepared,
+		Executor:       prepared,
 	}, nil
 }
 
@@ -341,25 +341,21 @@ func (t *Tool) prepareResponses(req *openaiapi.Request) (*openaiapi.PreparedRequ
 	if err != nil {
 		return nil, err
 	}
+	prepared := newPreparedExecutor(t, req.AuthToken, session, includeOutputs)
 
 	return &openaiapi.PreparedRequest{
 		EffectiveModel: req.Model,
 		Body:           bodyBytes,
-		State: &preparedState{
-			tool:           t,
-			authToken:      req.AuthToken,
-			callerAPIKeyID: req.CallerAPIKeyID,
-			session:        session,
-			includeOutputs: includeOutputs,
-		},
+		State:          prepared,
+		Executor:       prepared,
 	}, nil
 }
 
-func (t *Tool) newRuntime(authToken string, callerAPIKeyID string, session *Session) (runtime, error) {
+func (t *Tool) newRuntime(callerAPIKey string, session *Session) (runtime, error) {
 	if session == nil {
 		return nil, fmt.Errorf("code interpreter session is required")
 	}
-	if t.sandboxControlplane != nil {
+	if t.controlPlaneURL != "" {
 		if !session.Managed {
 			return nil, fmt.Errorf("explicit code interpreter container selection is not supported")
 		}
@@ -367,8 +363,7 @@ func (t *Tool) newRuntime(authToken string, callerAPIKeyID string, session *Sess
 			manager: NewSandboxManager(
 				t.sandboxSpec,
 				session,
-				callerAPIKeyID,
-				t.sandboxControlplane,
+				NewSandboxControlplaneClient(t.controlPlaneURL, callerAPIKey),
 				t.sandboxBootstrapper,
 			),
 		}, nil
@@ -379,7 +374,7 @@ func (t *Tool) newRuntime(authToken string, callerAPIKeyID string, session *Sess
 	return &directRuntime{
 		client:  t.directClient,
 		session: session,
-		apiKey:  authToken,
+		apiKey:  callerAPIKey,
 	}, nil
 }
 

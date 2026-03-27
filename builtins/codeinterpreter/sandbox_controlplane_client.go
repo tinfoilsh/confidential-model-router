@@ -26,10 +26,9 @@ type Sandbox struct {
 }
 
 type sandboxCreateRequest struct {
-	Image          string `json:"image"`
-	SourceRepo     string `json:"source_repo"`
-	TTL            int32  `json:"ttl,omitempty"`
-	CallerAPIKeyID string `json:"caller_api_key_id,omitempty"`
+	Image      string `json:"image"`
+	SourceRepo string `json:"source_repo"`
+	TTL        int32  `json:"ttl,omitempty"`
 }
 
 type sandboxCreateResponse struct {
@@ -48,32 +47,31 @@ type sandboxGetResponse struct {
 }
 
 type SandboxControlplaneClient struct {
-	baseURL         string
-	apiKey          string
-	httpClient      *http.Client
-	pollInterval    time.Duration
+	baseURL      string
+	httpClient   *http.Client
+	pollInterval time.Duration
+	callerAPIKey string
 }
 
-func NewSandboxControlplaneClient(baseURL, apiKey string) *SandboxControlplaneClient {
+func NewSandboxControlplaneClient(baseURL, callerAPIKey string) *SandboxControlplaneClient {
 	return &SandboxControlplaneClient{
 		baseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		apiKey:       strings.TrimSpace(apiKey),
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 		pollInterval: 2 * time.Second,
+		callerAPIKey: strings.TrimSpace(callerAPIKey),
 	}
 }
 
 // CreateSandbox creates a sandbox and polls until it is ready or the context is cancelled.
-func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session, callerAPIKeyID string) (*Sandbox, error) {
+func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error) {
 	if c == nil || c.baseURL == "" {
 		return nil, fmt.Errorf("sandbox controlplane client is not configured")
 	}
 
 	payload, err := json.Marshal(sandboxCreateRequest{
-		Image:          spec.Image,
-		SourceRepo:     spec.SourceRepo,
-		TTL:            session.TTLSeconds,
-		CallerAPIKeyID: strings.TrimSpace(callerAPIKeyID),
+		Image:      spec.Image,
+		SourceRepo: spec.SourceRepo,
+		TTL:        session.TTLSeconds,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal sandbox create request: %w", err)
@@ -84,8 +82,8 @@ func (c *SandboxControlplaneClient) CreateSandbox(ctx context.Context, spec Sand
 		return nil, fmt.Errorf("build sandbox create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.callerAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.callerAPIKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -156,8 +154,8 @@ func (c *SandboxControlplaneClient) getSandbox(ctx context.Context, sandboxID st
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox get request: %w", err)
 	}
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.callerAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.callerAPIKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -190,8 +188,8 @@ func (c *SandboxControlplaneClient) DeleteSandbox(ctx context.Context, sandboxID
 	if err != nil {
 		return fmt.Errorf("build sandbox delete request: %w", err)
 	}
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.callerAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.callerAPIKey)
 	}
 
 	resp, err := c.httpClient.Do(req)

@@ -8,7 +8,7 @@ import (
 )
 
 type sandboxControlplane interface {
-	CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session, callerAPIKeyID string) (*Sandbox, error)
+	CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error)
 	DeleteSandbox(ctx context.Context, sandboxID string) error
 }
 
@@ -17,24 +17,22 @@ type sandboxBootstrapper interface {
 }
 
 type SandboxManager struct {
-	spec           SandboxSpec
-	session        *Session
-	callerAPIKeyID string
-	controlplane   sandboxControlplane
-	bootstrapper   sandboxBootstrapper
+	spec         SandboxSpec
+	session      *Session
+	controlplane sandboxControlplane
+	bootstrapper sandboxBootstrapper
 
 	mu      sync.Mutex
 	sandbox *Sandbox
 	gateway *SandboxGateway
 }
 
-func NewSandboxManager(spec SandboxSpec, session *Session, callerAPIKeyID string, controlplane sandboxControlplane, bootstrapper sandboxBootstrapper) *SandboxManager {
+func NewSandboxManager(spec SandboxSpec, session *Session, controlplane sandboxControlplane, bootstrapper sandboxBootstrapper) *SandboxManager {
 	return &SandboxManager{
-		spec:           spec,
-		session:        session,
-		callerAPIKeyID: strings.TrimSpace(callerAPIKeyID),
-		controlplane:   controlplane,
-		bootstrapper:   bootstrapper,
+		spec:         spec,
+		session:      session,
+		controlplane: controlplane,
+		bootstrapper: bootstrapper,
 	}
 }
 
@@ -47,11 +45,11 @@ func (m *SandboxManager) Execute(ctx context.Context, callID, rawArgs string) (R
 
 func (m *SandboxManager) ensure(ctx context.Context) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.gateway != nil && m.sandbox != nil {
-		m.mu.Unlock()
 		return nil
 	}
-	m.mu.Unlock()
 
 	if m.controlplane == nil {
 		return fmt.Errorf("sandbox controlplane client is not configured")
@@ -66,7 +64,8 @@ func (m *SandboxManager) ensure(ctx context.Context) error {
 		return fmt.Errorf("sandbox image and source repo are required")
 	}
 
-	sandbox, err := m.controlplane.CreateSandbox(ctx, m.spec, m.session, m.callerAPIKeyID)
+	// Provisioning is serialized so one manager/session maps to one sandbox.
+	sandbox, err := m.controlplane.CreateSandbox(ctx, m.spec, m.session)
 	if err != nil {
 		return err
 	}
@@ -77,12 +76,8 @@ func (m *SandboxManager) ensure(ctx context.Context) error {
 		return err
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.gateway == nil {
-		m.sandbox = sandbox
-		m.gateway = gateway
-	}
+	m.sandbox = sandbox
+	m.gateway = gateway
 	return nil
 }
 
@@ -98,5 +93,13 @@ func (m *SandboxManager) Close(ctx context.Context) error {
 		return nil
 	}
 
-	return m.controlplane.DeleteSandbox(ctx, sandbox.ID)
+	if err := m.controlplane.DeleteSandbox(ctx, sandbox.ID); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.sandbox = nil
+	m.gateway = nil
+	m.mu.Unlock()
+	return nil
 }

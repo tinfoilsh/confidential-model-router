@@ -71,7 +71,6 @@ var (
 	codeInterpreterBaseURL     = flag.String("I", getEnvOrDefault("CODE_INTERPRETER_BASE_URL", ""), "code interpreter backend base URL (env: CODE_INTERPRETER_BASE_URL)")
 	codeInterpreterImage       = flag.String("J", getEnvOrDefault("CODE_INTERPRETER_IMAGE", ""), "managed sandbox image for code interpreter (env: CODE_INTERPRETER_IMAGE)")
 	codeInterpreterRepo        = flag.String("R", getEnvOrDefault("CODE_INTERPRETER_REPO", ""), "GitHub repo for code interpreter attestation, e.g. org/repo (env: CODE_INTERPRETER_REPO)")
-	controlPlaneSandboxAPIKey  = flag.String("K", getEnvOrDefault("CONTROL_PLANE_SANDBOX_API_KEY", ""), "router-to-controlplane sandbox orchestration bearer token (env: CONTROL_PLANE_SANDBOX_API_KEY)")
 	codeInterpreterExecTimeout = flag.Duration("t", getEnvOrDefaultDuration("CODE_INTERPRETER_EXEC_TIMEOUT", 60*time.Second), "code interpreter execution timeout (env: CODE_INTERPRETER_EXEC_TIMEOUT)")
 )
 
@@ -224,12 +223,11 @@ func main() {
 	go em.StartWorker()
 
 	codeInterpreterTool, err := codeinterpreter.New(codeinterpreter.Config{
-		ControlPlaneURL:    *controlPlaneURL,
-		ControlPlaneAPIKey: *controlPlaneSandboxAPIKey,
-		BaseURL:            *codeInterpreterBaseURL,
-		Image:              *codeInterpreterImage,
-		Repo:               *codeInterpreterRepo,
-		ExecTimeout:        *codeInterpreterExecTimeout,
+		ControlPlaneURL: *controlPlaneURL,
+		BaseURL:         *codeInterpreterBaseURL,
+		Image:           *codeInterpreterImage,
+		Repo:            *codeInterpreterRepo,
+		ExecTimeout:     *codeInterpreterExecTimeout,
 	})
 	if err != nil {
 		log.Fatal(err)

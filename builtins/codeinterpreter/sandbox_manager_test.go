@@ -10,12 +10,29 @@ import (
 	"time"
 )
 
+// fixedControlplane is a mock sandboxControlplane that returns a pre-set domain.
+type fixedControlplane struct {
+	domain string
+}
+
+func (f *fixedControlplane) CreateSandbox(_ context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
+	return &Sandbox{
+		ID:        "mock-" + f.domain,
+		Domain:    f.domain,
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	}, nil
+}
+
+func (f *fixedControlplane) DeleteSandbox(_ context.Context, _ string) error {
+	return nil
+}
+
 // errControlplane always returns an error from CreateSandbox.
 type errControlplane struct {
 	err error
 }
 
-func (e *errControlplane) CreateSandbox(_ context.Context, _ SandboxSpec, _ *Session, _ string) (*Sandbox, error) {
+func (e *errControlplane) CreateSandbox(_ context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
 	return nil, e.err
 }
 
@@ -30,11 +47,15 @@ type countingControlplane struct {
 	count int
 }
 
-func (c *countingControlplane) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session, callerAPIKeyID string) (*Sandbox, error) {
+func (c *countingControlplane) CreateSandbox(ctx context.Context, spec SandboxSpec, session *Session) (*Sandbox, error) {
 	c.mu.Lock()
 	c.count++
 	c.mu.Unlock()
-	return c.fixedControlplane.CreateSandbox(ctx, spec, session, callerAPIKeyID)
+	return c.fixedControlplane.CreateSandbox(ctx, spec, session)
+}
+
+func (c *countingControlplane) DeleteSandbox(ctx context.Context, sandboxID string) error {
+	return c.fixedControlplane.DeleteSandbox(ctx, sandboxID)
 }
 
 func (c *countingControlplane) getCount() int {
@@ -86,7 +107,6 @@ func TestSandboxManagerCreationFailure(t *testing.T) {
 	mgr := NewSandboxManager(
 		newTestSpec(),
 		newManagedSession(),
-		"",
 		&errControlplane{err: errors.New("controlplane unavailable")},
 		newStubBootstrapper(t),
 	)
@@ -108,7 +128,6 @@ func TestSandboxManagerBootstrapFailure(t *testing.T) {
 	mgr := NewSandboxManager(
 		newTestSpec(),
 		newManagedSession(),
-		"",
 		fcp,
 		&errBootstrapper{err: errors.New("attestation failed")},
 	)
@@ -140,7 +159,6 @@ func TestSandboxManagerConcurrentExecute(t *testing.T) {
 	mgr := NewSandboxManager(
 		newTestSpec(),
 		newManagedSession(),
-		"",
 		cp,
 		newStubBootstrapper(t),
 	)
@@ -164,11 +182,8 @@ func TestSandboxManagerConcurrentExecute(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The sandbox should have been created at most once per successful bootstrap.
-	// Due to the DCL pattern, a small number of concurrent creations is possible,
-	// but it must not be equal to goroutines (which would indicate no deduplication).
-	if count := cp.getCount(); count == goroutines {
-		t.Errorf("expected sandbox creation to be deduplicated, but CreateSandbox was called %d times", count)
+	if count := cp.getCount(); count != 1 {
+		t.Errorf("expected exactly one sandbox creation, got %d", count)
 	}
 }
 
@@ -182,7 +197,6 @@ func TestSandboxManagerContextCancellation(t *testing.T) {
 	mgr := NewSandboxManager(
 		newTestSpec(),
 		newManagedSession(),
-		"",
 		blocking,
 		newStubBootstrapper(t),
 	)
@@ -205,7 +219,7 @@ type blockingControlplane struct {
 	blockCh chan struct{}
 }
 
-func (b *blockingControlplane) CreateSandbox(ctx context.Context, _ SandboxSpec, _ *Session, _ string) (*Sandbox, error) {
+func (b *blockingControlplane) CreateSandbox(ctx context.Context, _ SandboxSpec, _ *Session) (*Sandbox, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

@@ -10,21 +10,20 @@ type Tool interface {
 	Prepare(req *Request) (*PreparedRequest, error)
 }
 
-type ExecutableTool interface {
-	Tool
+type PreparedExecutor interface {
 	Execute(ctx context.Context, call *InferenceToolCall) (*ExecutionResult, error)
 }
 
 type PreparedRequest struct {
 	EffectiveModel string
 	Body           []byte
-	State          any
+	State          StateCloser
+	Executor       PreparedExecutor
 }
 
 type InferenceToolCall struct {
 	Endpoint Endpoint
 	Raw      json.RawMessage
-	State    any
 }
 
 type ExecutionResult struct {
@@ -42,10 +41,9 @@ type ActiveTool struct {
 	Prepared *PreparedRequest
 }
 
-func (a *ActiveTool) Executable() (ExecutableTool, bool) {
-	if a == nil || a.Tool == nil {
+func (a *ActiveTool) Executor() (PreparedExecutor, bool) {
+	if a == nil || a.Prepared == nil || a.Prepared.Executor == nil {
 		return nil, false
 	}
-	tool, ok := a.Tool.(ExecutableTool)
-	return tool, ok
+	return a.Prepared.Executor, true
 }
