@@ -42,6 +42,8 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
       - gpt-oss-120b-inf5.tinfoil.containers.tinfoil.dev
+      - gpt-oss-120b-inf5-2.tinfoil.containers.tinfoil.dev
+      - gpt-oss-120b-inf5-3.inf5.tinfoil.sh
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
