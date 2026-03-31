@@ -53,7 +53,7 @@ type EnclaveManager struct {
 	billingCollector     *billing.Collector
 	requestTracker       *ratelimit.RequestTracker
 	refreshInterval      time.Duration
-	errorsMu             sync.Mutex
+	stateMu              sync.Mutex
 	errors               []string
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
@@ -193,7 +193,10 @@ func (em *EnclaveManager) Models() map[string]*Model {
 // at least one verified enclave. Models with no configured hostnames are
 // excluded. It also returns the list of unhealthy model names.
 func (em *EnclaveManager) Healthy() (bool, []string) {
-	if em.lastSuccessfulUpdate.IsZero() {
+	em.stateMu.Lock()
+	synced := !em.lastSuccessfulUpdate.IsZero()
+	em.stateMu.Unlock()
+	if !synced {
 		return false, []string{"initial sync has not completed"}
 	}
 	var unhealthy []string
@@ -213,16 +216,18 @@ func (em *EnclaveManager) Healthy() (bool, []string) {
 
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
-	em.errorsMu.Lock()
+	em.stateMu.Lock()
 	errors := make([]string, len(em.errors))
 	copy(errors, em.errors)
-	em.errorsMu.Unlock()
+	updated := em.lastSuccessfulUpdate
+	attempted := em.lastAttemptedUpdate
+	em.stateMu.Unlock()
 
 	return map[string]any{
 		"models":    em.Models(),
 		"errors":    errors,
-		"updated":   em.lastSuccessfulUpdate,
-		"attempted": em.lastAttemptedUpdate,
+		"updated":   updated,
+		"attempted": attempted,
 	}
 }
 
@@ -453,7 +458,9 @@ func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error
 // sync updates all model's tags and measurements, then matches them to the enclave config
 func (em *EnclaveManager) sync() error {
 	log.Debug("Updating all models")
+	em.stateMu.Lock()
 	em.lastAttemptedUpdate = time.Now()
+	em.stateMu.Unlock()
 
 	config, err := config.Load(em.updateConfigURL, false)
 	if err != nil {
@@ -478,9 +485,11 @@ func (em *EnclaveManager) sync() error {
 			if !modelInConfig {
 				log.Warnf("model %s no longer in config", modelName)
 				model.mu.Lock()
+				model.expectedHosts = 0
 				for _, enclave := range model.Enclaves {
 					enclave.shutdown()
 				}
+				model.Enclaves = make(map[string]*Enclave)
 				model.mu.Unlock()
 				return
 			}
@@ -523,9 +532,9 @@ func (em *EnclaveManager) sync() error {
 			for _, host := range hostnames {
 				log.Tracef("  + host %s", host)
 				if err := em.addEnclave(modelName, host, hwMeasurements); err != nil {
-					em.errorsMu.Lock()
+					em.stateMu.Lock()
 					em.errors = append(em.errors, err.Error())
-					em.errorsMu.Unlock()
+					em.stateMu.Unlock()
 					log.Errorf("failed to add enclave %s for model %s: %v", host, modelName, err)
 				}
 			}
@@ -534,7 +543,9 @@ func (em *EnclaveManager) sync() error {
 	})
 	wg.Wait()
 
+	em.stateMu.Lock()
 	em.lastSuccessfulUpdate = time.Now()
+	em.stateMu.Unlock()
 
 	return nil
 }
@@ -545,14 +556,14 @@ func (em *EnclaveManager) StartWorker() {
 	defer ticker.Stop()
 
 	for ; true; <-ticker.C {
-		em.errorsMu.Lock()
+		em.stateMu.Lock()
 		em.errors = []string{} // Clear errors
-		em.errorsMu.Unlock()
+		em.stateMu.Unlock()
 		if err := em.sync(); err != nil {
 			log.Errorf("failed to update: %v", err)
-			em.errorsMu.Lock()
+			em.stateMu.Lock()
 			em.errors = append(em.errors, err.Error())
-			em.errorsMu.Unlock()
+			em.stateMu.Unlock()
 		}
 	}
 }
