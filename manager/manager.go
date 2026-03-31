@@ -30,6 +30,7 @@ type Enclave struct {
 	predicate attestation.PredicateType
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
+	cb        *circuitBreaker
 }
 
 type Model struct {
@@ -167,13 +168,15 @@ func (em *EnclaveManager) addEnclave(
 		return fmt.Errorf("measurement mismatch for enclave %s: %v", host, err)
 	}
 
+	cb := newCircuitBreaker()
 	model.Enclaves[host] = &Enclave{
 		host:      host,
 		predicate: verification.Measurement.Type,
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector),
+		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
 		metrics:   newEnclaveMetrics(host, modelName),
+		cb:        cb,
 	}
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
 	return nil
@@ -288,7 +291,10 @@ func (em *EnclaveManager) Shutdown() {
 	})
 }
 
-// NextEnclave gets the next sequential enclave
+// NextEnclave returns the next enclave using round-robin, preferring enclaves
+// whose circuit breaker is not open. If all circuit breakers are open, it
+// falls back to round-robin across all enclaves (degraded service is better
+// than no service).
 func (m *Model) NextEnclave() *Enclave {
 	count := atomic.AddUint64(&m.counter, 1)
 	m.mu.RLock()
@@ -298,13 +304,21 @@ func (m *Model) NextEnclave() *Enclave {
 		return nil
 	}
 
-	// Convert map to slice for indexed access
-	enclaves := make([]*Enclave, 0, len(m.Enclaves))
+	all := make([]*Enclave, 0, len(m.Enclaves))
+	available := make([]*Enclave, 0, len(m.Enclaves))
 	for _, enclave := range m.Enclaves {
-		enclaves = append(enclaves, enclave)
+		all = append(all, enclave)
+		if enclave.cb == nil || enclave.cb.Available() {
+			available = append(available, enclave)
+		}
 	}
 
-	return enclaves[(count-1)%uint64(len(enclaves))]
+	pool := available
+	if len(pool) == 0 {
+		pool = all
+	}
+
+	return pool[(count-1)%uint64(len(pool))]
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {

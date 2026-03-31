@@ -69,4 +69,33 @@ var (
 		},
 		[]string{"model"},
 	)
+
+	// CircuitBreakerState tracks the current state of each enclave's circuit breaker (0=closed, 1=open, 2=half-open)
+	CircuitBreakerState = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_circuit_breaker_state",
+			Help: "Current circuit breaker state (0=closed/healthy, 1=open/unhealthy, 2=half-open/probing)",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// ProxySuccessTotal tracks successful proxy responses per enclave
+	ProxySuccessTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_proxy_success_total",
+			Help: "Total number of successful proxy responses (status < 500)",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// ProxyFailureTotal tracks failed proxy responses and transport errors per enclave.
+	// The "reason" label classifies the failure: timeout, tls_mismatch, connection_refused,
+	// connection_reset, dns_error, tls_error, canceled, transport_error, or http_<status>.
+	ProxyFailureTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_proxy_failure_total",
+			Help: "Total number of failed proxy responses (status >= 500 or transport error)",
+		},
+		[]string{"model", "enclave", "reason"},
+	)
 )
