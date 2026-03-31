@@ -132,6 +132,17 @@ func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+	recordFailure := func(reason string) {
+		cb.RecordFailure()
+		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
+		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+	}
+	recordSuccess := func() {
+		cb.RecordSuccess()
+		ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
+		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+	}
+
 	transport := &slowHeaderTripper{
 		base: &tinfoilClient.TLSBoundRoundTripper{
 			ExpectedPublicKey: publicKeyFP,
@@ -143,9 +154,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"enclave": host,
 				"timeout": responseHeaderTimeout,
 			}).Warn("backend slow: response headers not received within timeout")
-			cb.RecordFailure()
-			ProxyFailureTotal.WithLabelValues(modelName, host, "slow").Inc()
-			CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+			recordFailure("slow")
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
@@ -161,9 +170,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			"reason":  reason,
 			"error":   err.Error(),
 		}).Error("proxy error")
-		cb.RecordFailure()
-		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
-		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+		recordFailure(reason)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -177,13 +184,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if resp.StatusCode >= 500 {
-			cb.RecordFailure()
-			ProxyFailureTotal.WithLabelValues(modelName, host, httpFailureReason(resp.StatusCode)).Inc()
+			recordFailure(httpFailureReason(resp.StatusCode))
 		} else {
-			cb.RecordSuccess()
-			ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
+			recordSuccess()
 		}
-		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
 
 		// Extract request details that we'll need for billing
 		req := resp.Request
