@@ -5,7 +5,9 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 )
@@ -19,7 +21,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	collector := billing.NewCollector("")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(backendURL.Host, "", modelName, collector)
+	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker())
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -162,5 +164,205 @@ func TestProxyBilling_WebsearchEmitsOnlyZeroTokenEvent(t *testing.T) {
 	}
 	if events[0].Model != websearchModel {
 		t.Errorf("expected event model %q, got %q", websearchModel, events[0].Model)
+	}
+}
+
+// --- Circuit breaker tests ---
+
+func TestCircuitBreaker_StartsClosedAndAvailable(t *testing.T) {
+	cb := newCircuitBreaker()
+	if cb.State() != cbClosed {
+		t.Fatalf("expected closed, got %d", cb.State())
+	}
+	if !cb.Available() {
+		t.Fatal("expected available")
+	}
+}
+
+func TestCircuitBreaker_OpensAfterThreshold(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold-1; i++ {
+		cb.RecordFailure()
+		if cb.State() != cbClosed {
+			t.Fatalf("expected closed after %d failures, got %d", i+1, cb.State())
+		}
+	}
+	cb.RecordFailure()
+	if cb.State() != cbOpen {
+		t.Fatalf("expected open after %d failures, got %d", cbFailureThreshold, cb.State())
+	}
+	if cb.Available() {
+		t.Fatal("expected unavailable when open")
+	}
+}
+
+func TestCircuitBreaker_SuccessResetsClosed(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	if cb.State() != cbOpen {
+		t.Fatal("expected open")
+	}
+	cb.RecordSuccess()
+	if cb.State() != cbClosed {
+		t.Fatalf("expected closed after success, got %d", cb.State())
+	}
+	if cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected 0 failures after success, got %d", cb.ConsecutiveFailures())
+	}
+}
+
+func TestCircuitBreaker_HalfOpenAfterCooldown(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	// Simulate cooldown by backdating lastFailureNano
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+
+	if !cb.Available() {
+		t.Fatal("expected available after cooldown")
+	}
+	if cb.State() != cbHalfOpen {
+		t.Fatalf("expected half-open, got %d", cb.State())
+	}
+	// Second call should return false (half-open allows only one probe)
+	if cb.Available() {
+		t.Fatal("expected unavailable while half-open")
+	}
+}
+
+func TestCircuitBreaker_HalfOpenToClosedOnSuccess(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	cb.Available() // transition to half-open
+
+	cb.RecordSuccess()
+	if cb.State() != cbClosed {
+		t.Fatalf("expected closed after half-open success, got %d", cb.State())
+	}
+}
+
+func TestCircuitBreaker_HalfOpenToOpenOnFailure(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	cb.Available() // transition to half-open
+
+	cb.RecordFailure()
+	if cb.State() != cbOpen {
+		t.Fatalf("expected open after half-open failure, got %d", cb.State())
+	}
+}
+
+func TestCircuitBreaker_SuccessResetsFailureCount(t *testing.T) {
+	cb := newCircuitBreaker()
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if cb.ConsecutiveFailures() != 2 {
+		t.Fatalf("expected 2 failures, got %d", cb.ConsecutiveFailures())
+	}
+	cb.RecordSuccess()
+	if cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected 0 failures after success, got %d", cb.ConsecutiveFailures())
+	}
+	// Verify it takes full threshold again to trip
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	if cb.State() != cbOpen {
+		t.Fatal("expected open after fresh threshold failures")
+	}
+}
+
+// --- Slow header tripper tests ---
+
+func TestSlowHeaderTripper_FastResponse_NoCallback(t *testing.T) {
+	var called atomic.Bool
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 100 * time.Millisecond,
+		onSlow: func() {
+			called.Store(true)
+		},
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	resp, err := tripper.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+
+	// Give a bit of time to ensure callback wasn't called
+	time.Sleep(150 * time.Millisecond)
+	if called.Load() {
+		t.Fatal("onSlow should not be called for fast responses")
+	}
+}
+
+func TestSlowHeaderTripper_SlowResponse_CallbackFired(t *testing.T) {
+	var called atomic.Bool
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 50 * time.Millisecond,
+		onSlow: func() {
+			called.Store(true)
+		},
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	resp, err := tripper.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+
+	if !called.Load() {
+		t.Fatal("onSlow should be called for slow responses")
+	}
+}
+
+func TestSlowHeaderTripper_SlowResponse_RequestNotKilled(t *testing.T) {
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 50 * time.Millisecond,
+		onSlow:  func() {},
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	resp, err := tripper.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("request was killed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }

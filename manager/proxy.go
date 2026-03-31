@@ -2,8 +2,12 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
@@ -12,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -21,6 +26,12 @@ import (
 )
 
 const (
+	// responseHeaderTimeout is the maximum time to wait for the backend to
+	// start responding (send response headers). This catches hanging backends
+	// without affecting long-running streaming responses, since the timeout
+	// only applies before the first byte is received.
+	responseHeaderTimeout = 60 * time.Second
+
 	// UsageMetricsRequestHeader is the request header clients set to request usage metrics
 	UsageMetricsRequestHeader = "X-Tinfoil-Request-Usage-Metrics"
 	// UsageMetricsResponseHeader is the response header (or trailer) containing usage metrics
@@ -30,6 +41,42 @@ const (
 	// websearchModel is charged per-request in addition to per-token.
 	websearchModel = "websearch"
 )
+
+// classifyProxyError maps a transport-level error to a bounded set of reason
+// labels for Prometheus. The raw error message is logged but not exposed as a
+// label to avoid unbounded cardinality.
+func classifyProxyError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, tinfoilClient.ErrCertMismatch) {
+		return "tls_mismatch"
+	}
+	if errors.Is(err, tinfoilClient.ErrNoTLS) || errors.Is(err, tinfoilClient.ErrNoValidCertificate) {
+		return "tls_error"
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		if errors.Is(netErr.Err, syscall.ECONNREFUSED) {
+			return "connection_refused"
+		}
+		if errors.Is(netErr.Err, syscall.ECONNRESET) {
+			return "connection_reset"
+		}
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns_error"
+	}
+	return "transport_error"
+}
+
+func httpFailureReason(statusCode int) string {
+	return fmt.Sprintf("http_%d", statusCode)
+}
 
 // OpenAI-compatible error type strings returned in API error responses.
 const (
@@ -67,19 +114,56 @@ func (b *billingCloser) Close() error {
 	return err
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector) *httputil.ReverseProxy {
-	httpClient := &http.Client{
-		Transport: &tinfoilClient.TLSBoundRoundTripper{
+// slowHeaderTripper wraps an http.RoundTripper and passively detects when a
+// backend takes longer than the configured timeout to send response headers.
+// Unlike a hard timeout, the request is never killed — the onSlow callback is
+// invoked for circuit breaker / metrics bookkeeping while the request continues.
+type slowHeaderTripper struct {
+	base    http.RoundTripper
+	timeout time.Duration
+	onSlow  func()
+}
+
+func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	timer := time.AfterFunc(t.timeout, t.onSlow)
+	resp, err := t.base.RoundTrip(req)
+	timer.Stop()
+	return resp, err
+}
+
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+	transport := &slowHeaderTripper{
+		base: &tinfoilClient.TLSBoundRoundTripper{
 			ExpectedPublicKey: publicKeyFP,
+		},
+		timeout: responseHeaderTimeout,
+		onSlow: func() {
+			log.WithFields(log.Fields{
+				"model":   modelName,
+				"enclave": host,
+				"timeout": responseHeaderTimeout,
+			}).Warn("backend slow: response headers not received within timeout")
+			cb.RecordFailure()
+			ProxyFailureTotal.WithLabelValues(modelName, host, "slow").Inc()
+			CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
 		Scheme: "https",
 		Host:   host,
 	})
-	proxy.Transport = httpClient.Transport
+	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Errorf("proxy error: %v", err)
+		reason := classifyProxyError(err)
+		log.WithFields(log.Fields{
+			"model":   modelName,
+			"enclave": host,
+			"reason":  reason,
+			"error":   err.Error(),
+		}).Error("proxy error")
+		cb.RecordFailure()
+		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
+		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -92,6 +176,15 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		if resp.StatusCode >= 500 {
+			cb.RecordFailure()
+			ProxyFailureTotal.WithLabelValues(modelName, host, httpFailureReason(resp.StatusCode)).Inc()
+		} else {
+			cb.RecordSuccess()
+			ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
+		}
+		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+
 		// Extract request details that we'll need for billing
 		req := resp.Request
 		authHeader := req.Header.Get("Authorization")
