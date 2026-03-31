@@ -40,8 +40,9 @@ type Model struct {
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 
-	counter uint64
-	mu      sync.RWMutex
+	expectedHosts int // number of configured hostnames; 0 means no backends expected
+	counter       uint64
+	mu            sync.RWMutex
 }
 
 type EnclaveManager struct {
@@ -186,6 +187,28 @@ func (em *EnclaveManager) Models() map[string]*Model {
 		return true
 	})
 	return models
+}
+
+// Healthy returns true if every model that has configured hostnames also has
+// at least one verified enclave. Models with no configured hostnames are
+// excluded. It also returns the list of unhealthy model names.
+func (em *EnclaveManager) Healthy() (bool, []string) {
+	if em.lastSuccessfulUpdate.IsZero() {
+		return false, []string{"initial sync has not completed"}
+	}
+	var unhealthy []string
+	em.models.Range(func(key, value any) bool {
+		model := value.(*Model)
+		model.mu.RLock()
+		expected := model.expectedHosts
+		actual := len(model.Enclaves)
+		model.mu.RUnlock()
+		if expected > 0 && actual == 0 {
+			unhealthy = append(unhealthy, key.(string))
+		}
+		return true
+	})
+	return len(unhealthy) == 0, unhealthy
 }
 
 // Status returns the status of the enclave manager to be JSON encoded
@@ -379,6 +402,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
+		expectedHosts:     len(modelConfig.Hostnames),
 	})
 }
 
@@ -474,6 +498,7 @@ func (em *EnclaveManager) sync() error {
 
 			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()
+			model.expectedHosts = len(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
 			for _, enclave := range model.Enclaves {
