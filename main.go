@@ -248,6 +248,19 @@ func main() {
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
 				return
+			} else if r.URL.Path == "/health" {
+				healthy, issues := em.Healthy()
+				if healthy {
+					sendJSON(w, map[string]string{"status": "ok"})
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					json.NewEncoder(w).Encode(map[string]any{
+						"status":          "unhealthy",
+						"unhealthy_models": issues,
+					})
+				}
+				return
 			} else if r.URL.Path == "/.well-known/tinfoil-proxy" {
 				status := em.Status()
 				status["version"] = version
