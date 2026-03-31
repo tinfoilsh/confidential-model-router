@@ -313,12 +313,12 @@ func TestSlowHeaderTripper_FastResponse_NoCallback(t *testing.T) {
 }
 
 func TestSlowHeaderTripper_SlowResponse_CallbackFired(t *testing.T) {
-	var called atomic.Bool
+	called := make(chan struct{}, 1)
 	tripper := &slowHeaderTripper{
 		base:    http.DefaultTransport,
 		timeout: 50 * time.Millisecond,
 		onSlow: func() {
-			called.Store(true)
+			called <- struct{}{}
 		},
 	}
 
@@ -335,7 +335,9 @@ func TestSlowHeaderTripper_SlowResponse_CallbackFired(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if !called.Load() {
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
 		t.Fatal("onSlow should be called for slow responses")
 	}
 }
