@@ -169,13 +169,13 @@ func TestProxyBilling_WebsearchEmitsOnlyZeroTokenEvent(t *testing.T) {
 
 // --- Circuit breaker tests ---
 
-func TestCircuitBreaker_StartsClosedAndAvailable(t *testing.T) {
+func TestCircuitBreaker_StartsClosed(t *testing.T) {
 	cb := newCircuitBreaker()
 	if cb.State() != cbClosed {
 		t.Fatalf("expected closed, got %d", cb.State())
 	}
-	if !cb.Available() {
-		t.Fatal("expected available")
+	if !cb.Closed() {
+		t.Fatal("expected closed")
 	}
 }
 
@@ -191,8 +191,8 @@ func TestCircuitBreaker_OpensAfterThreshold(t *testing.T) {
 	if cb.State() != cbOpen {
 		t.Fatalf("expected open after %d failures, got %d", cbFailureThreshold, cb.State())
 	}
-	if cb.Available() {
-		t.Fatal("expected unavailable when open")
+	if cb.Closed() {
+		t.Fatal("expected not closed when open")
 	}
 }
 
@@ -213,23 +213,26 @@ func TestCircuitBreaker_SuccessResetsClosed(t *testing.T) {
 	}
 }
 
-func TestCircuitBreaker_HalfOpenAfterCooldown(t *testing.T) {
+func TestCircuitBreaker_NeedProbeAfterCooldown(t *testing.T) {
 	cb := newCircuitBreaker()
 	for i := 0; i < cbFailureThreshold; i++ {
 		cb.RecordFailure()
 	}
+	if cb.NeedProbe() {
+		t.Fatal("should not probe before cooldown")
+	}
 	// Simulate cooldown by backdating lastFailureNano
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 
-	if !cb.Available() {
-		t.Fatal("expected available after cooldown")
+	if !cb.NeedProbe() {
+		t.Fatal("expected probe after cooldown")
 	}
 	if cb.State() != cbHalfOpen {
 		t.Fatalf("expected half-open, got %d", cb.State())
 	}
-	// Second call should return false (half-open allows only one probe)
-	if cb.Available() {
-		t.Fatal("expected unavailable while half-open")
+	// Second call should return false (only one probe allowed)
+	if cb.NeedProbe() {
+		t.Fatal("expected no second probe while half-open")
 	}
 }
 
@@ -239,7 +242,7 @@ func TestCircuitBreaker_HalfOpenToClosedOnSuccess(t *testing.T) {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	cb.Available() // transition to half-open
+	cb.NeedProbe() // transition to half-open
 
 	cb.RecordSuccess()
 	if cb.State() != cbClosed {
@@ -253,7 +256,7 @@ func TestCircuitBreaker_HalfOpenToOpenOnFailure(t *testing.T) {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	cb.Available() // transition to half-open
+	cb.NeedProbe() // transition to half-open
 
 	cb.RecordFailure()
 	if cb.State() != cbOpen {

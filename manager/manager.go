@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"math/rand/v2"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -42,7 +42,6 @@ type Model struct {
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
-	counter       uint64
 	mu            sync.RWMutex
 }
 
@@ -179,6 +178,7 @@ func (em *EnclaveManager) addEnclave(
 		cb:        cb,
 	}
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
+	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
 
@@ -275,12 +275,10 @@ func (em *EnclaveManager) Shutdown() {
 	})
 }
 
-// NextEnclave returns the next enclave using round-robin, preferring enclaves
-// whose circuit breaker is not open. If all circuit breakers are open, it
-// falls back to round-robin across all enclaves (degraded service is better
-// than no service).
+// NextEnclave picks a uniformly random enclave with a closed circuit breaker.
+// If an open breaker is past its cooldown, it sends a probe to that enclave.
+// If all breakers are open, it picks a random enclave (degraded > unavailable).
 func (m *Model) NextEnclave() *Enclave {
-	count := atomic.AddUint64(&m.counter, 1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -289,20 +287,20 @@ func (m *Model) NextEnclave() *Enclave {
 	}
 
 	all := make([]*Enclave, 0, len(m.Enclaves))
-	available := make([]*Enclave, 0, len(m.Enclaves))
+	var closed []*Enclave
 	for _, enclave := range m.Enclaves {
 		all = append(all, enclave)
-		if enclave.cb == nil || enclave.cb.Available() {
-			available = append(available, enclave)
+		if enclave.cb == nil || enclave.cb.Closed() {
+			closed = append(closed, enclave)
+		} else if enclave.cb.NeedProbe() {
+			return enclave
 		}
 	}
 
-	pool := available
-	if len(pool) == 0 {
-		pool = all
+	if len(closed) > 0 {
+		return closed[rand.IntN(len(closed))]
 	}
-
-	return pool[(count-1)%uint64(len(pool))]
+	return all[rand.IntN(len(all))]
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
