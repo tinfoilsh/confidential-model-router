@@ -21,7 +21,7 @@ models:
   voxtral-small-24b:
     repo: tinfoilsh/confidential-voxtral-small-24b
     enclaves:
-      - voxtral-small-24b.inf9.tinfoil.sh
+      - voxtral-small-24b.inf5.tinfoil.sh
 
   voxtral-mini-4b-realtime:
     repo: tinfoilsh/confidential-realtime-models
