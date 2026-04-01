@@ -192,30 +192,14 @@ func (em *EnclaveManager) Models() map[string]*Model {
 	return models
 }
 
-// Healthy returns true if every model that has configured hostnames also has
-// at least one verified enclave. Models with no configured hostnames are
-// excluded. It also returns the list of unhealthy model names.
-func (em *EnclaveManager) Healthy() (bool, []string) {
+// Ready returns true if the router has completed at least one successful sync
+// and is able to serve requests.
+func (em *EnclaveManager) Ready() bool {
 	em.stateMu.Lock()
-	synced := !em.lastSuccessfulUpdate.IsZero()
-	em.stateMu.Unlock()
-	if !synced {
-		return false, []string{"initial sync has not completed"}
-	}
-	var unhealthy []string
-	em.models.Range(func(key, value any) bool {
-		model := value.(*Model)
-		model.mu.RLock()
-		expected := model.expectedHosts
-		actual := len(model.Enclaves)
-		model.mu.RUnlock()
-		if expected > 0 && actual == 0 {
-			unhealthy = append(unhealthy, key.(string))
-		}
-		return true
-	})
-	return len(unhealthy) == 0, unhealthy
+	defer em.stateMu.Unlock()
+	return !em.lastSuccessfulUpdate.IsZero()
 }
+
 
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
