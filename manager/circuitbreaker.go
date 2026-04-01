@@ -60,30 +60,23 @@ func (cb *circuitBreaker) RecordFailure() {
 	}
 }
 
-// Available reports whether the enclave should receive traffic.
-//
-//   - Closed: always available.
-//   - Open: available only after the cooldown has elapsed, at which point the
-//     state transitions to half-open so exactly one probe request goes through.
-//   - Half-open: not available (a probe is already in flight).
-func (cb *circuitBreaker) Available() bool {
-	switch cb.loadState() {
-	case cbClosed:
-		return true
-	case cbOpen:
-		last := time.Unix(0, cb.lastFailureNano.Load())
-		if time.Since(last) < cbCooldown {
-			return false
-		}
-		if cb.casState(cbOpen, cbHalfOpen) {
-			return true
-		}
+// Closed reports whether the circuit breaker is in the closed (healthy) state.
+func (cb *circuitBreaker) Closed() bool {
+	return cb.loadState() == cbClosed
+}
+
+// NeedProbe attempts to transition an open circuit breaker to half-open after
+// the cooldown has elapsed. Returns true if this caller won the CAS and should
+// send exactly one probe request to this enclave.
+func (cb *circuitBreaker) NeedProbe() bool {
+	if cb.loadState() != cbOpen {
 		return false
-	case cbHalfOpen:
-		return false
-	default:
-		return true
 	}
+	last := time.Unix(0, cb.lastFailureNano.Load())
+	if time.Since(last) < cbCooldown {
+		return false
+	}
+	return cb.casState(cbOpen, cbHalfOpen)
 }
 
 // State returns the current state for observability.
