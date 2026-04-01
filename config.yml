@@ -31,7 +31,7 @@ models:
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
     enclaves:
-      - llama3-3-70b.inf9.tinfoil.sh
+      - llama3-3-70b.tinfoil.containers.tinfoil.dev
 
   deepseek-r1-0528:
     repo: tinfoilsh/confidential-deepseek-r1-0528
@@ -61,7 +61,7 @@ models:
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
     enclaves:
-      - qwen3-vl-30b.inf9.tinfoil.sh
+      - qwen3-vl-30b.tinfoil.containers.tinfoil.dev
 
   kimi-k2-thinking:
     repo: tinfoilsh/confidential-kimi-k2-thinking
