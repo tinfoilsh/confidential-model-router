@@ -84,3 +84,8 @@ models:
     repo: tinfoilsh/confidential-websearch
     enclaves:
       - websearch.tinfoil.functions.tinfoil.sh
+
+  grok2:
+    repo: tinfoilsh/confidential-grok2
+    enclaves:
+      - grok-2.tinfoil.containers.tinfoil.dev
