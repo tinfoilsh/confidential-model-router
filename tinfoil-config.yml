@@ -10,7 +10,7 @@ containers:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8001/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s
       timeout: 5s
       start_period: 5m
