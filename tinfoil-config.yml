@@ -1,14 +1,20 @@
-cvm-version: 0.7.3
-cpus: 8
+cvm-version: 0.7.5
 memory: 16384
-
-shim:
-  upstream-port: 8089
-  tls-wildcard: true
+cpus: 8
 
 containers:
   - name: "proxy"
     image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:bc8cb29f4711ce87035f02c2ddde7df76748b59e5f8b193638755ca8fd825dfc" # v0.0.79
+    restart: always
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
+
+shim:
+  upstream-port: 8089
+  tls-wildcard: true
