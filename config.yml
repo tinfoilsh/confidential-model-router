@@ -85,7 +85,7 @@ models:
     enclaves:
       - websearch.tinfoil.functions.tinfoil.sh
 
-  grok2:
-    repo: tinfoilsh/confidential-grok2
+  gemma4-31b:
+    repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
-      - grok-2.tinfoil.containers.tinfoil.dev
+      - gemma4-31b.tinfoil.containers.tinfoil.dev
