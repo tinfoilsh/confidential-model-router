@@ -88,4 +88,4 @@ models:
   gemma4-31b:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
-      - gemma4-31b.tinfoil.containers.tinfoil.dev
+      - gemma4-31b-1.inf5.tinfoil.sh
