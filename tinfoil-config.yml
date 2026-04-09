@@ -4,7 +4,7 @@ cpus: 8
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:72b2039e1a3fc1b0d307094a1a4608569856657ee11e9761cb844be5c9595464" # v0.0.82
+    image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:08511a229ec660af15d76a34cabf98c31b3598ec97fffde465c361388ee2e658" # v0.0.83
     restart: always
     env:
       - DOMAIN
