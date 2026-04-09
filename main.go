@@ -175,6 +175,38 @@ func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
 	return "", bodyBytes, nil
 }
 
+// ensureStreamingUsageOptions forces upstream streaming requests to include
+// usage and continuous usage stats so billing can extract token counts and all
+// models follow the same streaming usage behavior. If the client explicitly
+// asked for usage stats, we mark that in a header so the proxy can preserve
+// usage-only chunks instead of filtering them out.
+func ensureStreamingUsageOptions(body map[string]interface{}, headers http.Header) {
+	clientRequestedUsage := false
+
+	streamOptions, ok := body["stream_options"].(map[string]interface{})
+	if !ok {
+		streamOptions = map[string]interface{}{}
+		body["stream_options"] = streamOptions
+	}
+
+	// Check if the client explicitly requested usage stats before we modify the
+	// request. The proxy uses this signal to decide whether to filter
+	// usage-only chunks from the streamed response.
+	if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+		clientRequestedUsage = true
+	}
+	if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
+		clientRequestedUsage = true
+	}
+
+	streamOptions["include_usage"] = true
+	streamOptions["continuous_usage_stats"] = true
+
+	if clientRequestedUsage {
+		headers.Set("X-Tinfoil-Client-Requested-Usage", "true")
+	}
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -387,31 +419,9 @@ func main() {
 					}
 				}
 
-				// If streaming request, ensure continuous_usage_stats is enabled
+				// If streaming request, ensure upstream usage is available for billing.
 				if stream, ok := body["stream"].(bool); ok && stream {
-					// Check if client requested usage stats before we modify anything
-					clientRequestedUsage := false
-					if streamOptions, ok := body["stream_options"].(map[string]interface{}); ok {
-						// Check for OpenAI-style include_usage
-						if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
-							clientRequestedUsage = true
-						}
-						// Check for vLLM-style continuous_usage_stats
-						if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-							clientRequestedUsage = true
-						}
-						streamOptions["continuous_usage_stats"] = true
-					} else {
-						body["stream_options"] = map[string]interface{}{
-							"continuous_usage_stats": true,
-						}
-					}
-
-					// Set internal header to indicate if client requested usage
-					// This header will be used by the proxy to decide whether to filter usage-only chunks
-					if clientRequestedUsage {
-						r.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
-					}
+					ensureStreamingUsageOptions(body, r.Header)
 
 					// Re-encode the modified body
 					newBodyBytes, err := json.Marshal(body)
@@ -423,7 +433,8 @@ func main() {
 					// Update Content-Length header to match new body size
 					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 					r.ContentLength = int64(len(bodyBytes))
-					log.Debugf("Modified streaming request body to include continuous_usage_stats, client requested usage: %v", clientRequestedUsage)
+					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
+						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}
 
 				// Re-encode body if rate limiting modified it (non-streaming path)

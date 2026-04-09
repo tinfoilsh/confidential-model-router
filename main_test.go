@@ -170,8 +170,8 @@ func TestAudioTranscriptionRouting(t *testing.T) {
 				var modelName string
 
 				// This is the exact logic from main.go for audio paths
-				if r.URL.Path == "/v1/audio/transcriptions" || r.URL.Path == "/v1/audio/speech" || 
-				   len(r.URL.Path) > 10 && r.URL.Path[:10] == "/v1/audio/" {
+				if r.URL.Path == "/v1/audio/transcriptions" || r.URL.Path == "/v1/audio/speech" ||
+					len(r.URL.Path) > 10 && r.URL.Path[:10] == "/v1/audio/" {
 					var bodyBytes []byte
 					var err error
 					modelName, bodyBytes, err = extractModelFromMultipart(r)
@@ -283,6 +283,97 @@ func TestJSONRoutingUnchanged(t *testing.T) {
 			}
 
 			t.Logf("✓ JSON request to %s correctly extracts model: %s", tt.path, routedModel)
+		})
+	}
+}
+
+func TestEnsureStreamingUsageOptions(t *testing.T) {
+	tests := []struct {
+		name                  string
+		body                  map[string]interface{}
+		wantIncludeUsage      bool
+		wantContinuousPresent bool
+		wantContinuousUsage   bool
+		wantClientUsageHeader bool
+	}{
+		{
+			name:                  "adds include and continuous usage when stream_options missing",
+			body:                  map[string]interface{}{"stream": true},
+			wantIncludeUsage:      true,
+			wantContinuousPresent: true,
+			wantContinuousUsage:   true,
+		},
+		{
+			name: "preserves client continuous usage request",
+			body: map[string]interface{}{
+				"stream": true,
+				"stream_options": map[string]interface{}{
+					"continuous_usage_stats": true,
+				},
+			},
+			wantIncludeUsage:      true,
+			wantContinuousPresent: true,
+			wantContinuousUsage:   true,
+			wantClientUsageHeader: true,
+		},
+		{
+			name: "marks client include usage request",
+			body: map[string]interface{}{
+				"stream": true,
+				"stream_options": map[string]interface{}{
+					"include_usage": true,
+				},
+			},
+			wantIncludeUsage:      true,
+			wantContinuousPresent: true,
+			wantContinuousUsage:   true,
+			wantClientUsageHeader: true,
+		},
+		{
+			name: "does not mark explicit false as client usage request",
+			body: map[string]interface{}{
+				"stream": true,
+				"stream_options": map[string]interface{}{
+					"include_usage": false,
+				},
+			},
+			wantIncludeUsage:      true,
+			wantContinuousPresent: true,
+			wantContinuousUsage:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := make(http.Header)
+
+			ensureStreamingUsageOptions(tt.body, headers)
+
+			streamOptions, ok := tt.body["stream_options"].(map[string]interface{})
+			if !ok {
+				t.Fatal("stream_options should be present")
+			}
+
+			includeUsage, ok := streamOptions["include_usage"].(bool)
+			if !ok {
+				t.Fatal("include_usage should be a bool")
+			}
+			if includeUsage != tt.wantIncludeUsage {
+				t.Fatalf("include_usage = %v, want %v", includeUsage, tt.wantIncludeUsage)
+			}
+
+			continuousUsage, hasContinuous := streamOptions["continuous_usage_stats"].(bool)
+			if hasContinuous != tt.wantContinuousPresent {
+				t.Fatalf("continuous_usage_stats present = %v, want %v", hasContinuous, tt.wantContinuousPresent)
+			}
+			if hasContinuous && continuousUsage != tt.wantContinuousUsage {
+				t.Fatalf("continuous_usage_stats = %v, want %v", continuousUsage, tt.wantContinuousUsage)
+			}
+
+			gotHeader := headers.Get("X-Tinfoil-Client-Requested-Usage") == "true"
+			if gotHeader != tt.wantClientUsageHeader {
+				t.Fatalf("client usage header = %v, want %v", gotHeader, tt.wantClientUsageHeader)
+			}
 		})
 	}
 }
