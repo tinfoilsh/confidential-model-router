@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -180,12 +181,12 @@ func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
 // models follow the same streaming usage behavior. If the client explicitly
 // asked for usage stats, we mark that in a header so the proxy can preserve
 // usage-only chunks instead of filtering them out.
-func ensureStreamingUsageOptions(body map[string]interface{}, headers http.Header) {
+func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	clientRequestedUsage := false
 
-	streamOptions, ok := body["stream_options"].(map[string]interface{})
+	streamOptions, ok := body["stream_options"].(map[string]any)
 	if !ok {
-		streamOptions = map[string]interface{}{}
+		streamOptions = map[string]any{}
 		body["stream_options"] = streamOptions
 	}
 
@@ -325,7 +326,7 @@ func main() {
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
-				var body map[string]interface{}
+				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
@@ -357,7 +358,7 @@ func main() {
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
-				var body map[string]interface{}
+				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 
 				if err != nil {
@@ -388,7 +389,7 @@ func main() {
 				if _, ok := body["web_search_options"]; ok {
 					useWebsearch = true
 				} else if r.URL.Path == "/v1/responses" {
-					if tools, ok := body["tools"].([]interface{}); ok {
+					if tools, ok := body["tools"].([]any); ok {
 						useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
 							m, _ := t.(map[string]any)
 							typeVal, ok := m["type"].(string)
@@ -401,13 +402,45 @@ func main() {
 					modelName = "websearch"
 				}
 
+				bodyModified := false
+				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
+					rewritten := false
+					switch r.URL.Path {
+					case "/v1/responses":
+						rewritten, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"))
+					case "/v1/chat/completions":
+						rewritten, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"))
+					}
+					if err != nil {
+						var inputErr *fileInputError
+						if errors.As(err, &inputErr) {
+							jsonError(w, inputErr.Message, manager.ErrTypeInvalidRequest, inputErr.StatusCode)
+							return
+						}
+
+						var conversionErr *manager.FileConversionError
+						if errors.As(err, &conversionErr) {
+							errType := manager.ErrTypeServer
+							if conversionErr.StatusCode >= 400 && conversionErr.StatusCode < 500 {
+								errType = manager.ErrTypeInvalidRequest
+							}
+							jsonError(w, conversionErr.Message, errType, conversionErr.StatusCode)
+							return
+						}
+
+						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+						return
+					}
+					bodyModified = rewritten
+				}
+
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
 				_, hadPriority := body["priority"]
 				delete(body, "priority")
 
 				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified := hadPriority
+				bodyModified = bodyModified || hadPriority
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
 					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
