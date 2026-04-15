@@ -44,6 +44,9 @@ models:
       - gpt-oss-120b-inf5.tinfoil.containers.tinfoil.dev
       - gpt-oss-120b-inf5-2.tinfoil.containers.tinfoil.dev
       - gpt-oss-120b-inf5-3.inf5.tinfoil.sh
+      - gpt-oss-120b-0.inf9.tinfoil.sh
+      - gpt-oss-120b-1.inf9.tinfoil.sh
+      - gpt-oss-120b-2.inf9.tinfoil.sh
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
