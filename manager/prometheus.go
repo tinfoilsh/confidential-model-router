@@ -98,4 +98,16 @@ var (
 		},
 		[]string{"model", "enclave", "reason"},
 	)
+
+	// ProxySlowHeaderTotal tracks requests where the backend took longer than
+	// responseHeaderTimeout to send response headers. This is observability only
+	// and does not affect circuit breakers, since large-context prefill can
+	// legitimately exceed the timeout.
+	ProxySlowHeaderTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_proxy_slow_header_total",
+			Help: "Total number of requests where response headers were slow (observability only, not a failure)",
+		},
+		[]string{"model", "enclave"},
+	)
 )

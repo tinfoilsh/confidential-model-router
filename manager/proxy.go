@@ -116,8 +116,9 @@ func (b *billingCloser) Close() error {
 
 // slowHeaderTripper wraps an http.RoundTripper and passively detects when a
 // backend takes longer than the configured timeout to send response headers.
-// Unlike a hard timeout, the request is never killed — the onSlow callback is
-// invoked for circuit breaker / metrics bookkeeping while the request continues.
+// The request is never killed — the onSlow callback fires for observability
+// only. It does NOT count as a circuit breaker failure because large-context
+// requests can legitimately take minutes for prefill before the first token.
 type slowHeaderTripper struct {
 	base    http.RoundTripper
 	timeout time.Duration
@@ -154,7 +155,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"enclave": host,
 				"timeout": responseHeaderTimeout,
 			}).Warn("backend slow: response headers not received within timeout")
-			recordFailure("slow")
+			ProxySlowHeaderTotal.WithLabelValues(modelName, host).Inc()
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
