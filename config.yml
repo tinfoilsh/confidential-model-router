@@ -6,12 +6,12 @@ models:
   nomic-embed-text:
     repo: tinfoilsh/confidential-nomic-embed-text
     enclaves:
-      - nomic-embed-text.tinfoil.containers.tinfoil.dev
+      - nomic.inf9.tinfoil.sh
 
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
     enclaves:
-      - confidential-doc-upload.tinfoil.containers.tinfoil.dev
+      - doc-upload.inf9.tinfoil.sh
 
   whisper-large-v3-turbo:
     repo: tinfoilsh/confidential-whisper-large-v3
@@ -41,9 +41,6 @@ models:
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gpt-oss-120b-inf5.tinfoil.containers.tinfoil.dev
-      - gpt-oss-120b-inf5-2.tinfoil.containers.tinfoil.dev
-      - gpt-oss-120b-inf5-3.inf5.tinfoil.sh
       - gpt-oss-120b-0.inf9.tinfoil.sh
       - gpt-oss-120b-1.inf9.tinfoil.sh
       - gpt-oss-120b-2.inf9.tinfoil.sh
