@@ -25,6 +25,8 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
 //go:embed config.yml
@@ -60,13 +62,19 @@ func getEnvBool(envKey string) bool {
 }
 
 var (
-	port            = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
-	controlPlaneURL = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
-	verbose         = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
-	initConfigURL   = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
-	updateConfigURL = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	domain          = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
-	refreshInterval = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	port                = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL     = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	usageReporterID     = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
+	usageReporterSecret = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
+	verbose             = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL       = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL     = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	domain              = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
+	refreshInterval     = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	// debug enables non-production behaviors such as honoring
+	// LOCAL_WEBSEARCH_MCP_ENDPOINT to bypass attested TLS pinning for the
+	// websearch MCP server. MUST NOT be enabled in deployed enclaves.
+	debug = flag.Bool("debug", getEnvBool("DEBUG"), "enable debug-only overrides for local development (env: DEBUG)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -217,9 +225,13 @@ func main() {
 	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
 	log.Infof("Refresh interval: %s", *refreshInterval)
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *initConfigURL, *updateConfigURL, *refreshInterval)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
 		log.Fatal(err)
+	}
+	em.SetDebugMode(*debug)
+	if *debug {
+		log.Warn("debug mode enabled: local development overrides are active; do not use in production")
 	}
 	defer em.Shutdown()
 	go em.StartWorker()
@@ -382,9 +394,8 @@ func main() {
 					return
 				}
 
-				// Check if request uses web search — route to websearch enclave.
-				// The original model name is preserved in the request body so the
-				// websearch service knows which model to use for inference.
+				// Check if request uses web search so the router can run the
+				// tool loop locally against the configured tool server profile.
 				useWebsearch := false
 				if _, ok := body["web_search_options"]; ok {
 					useWebsearch = true
@@ -398,9 +409,6 @@ func main() {
 					}
 				}
 				rateLimitModel := modelName
-				if useWebsearch {
-					modelName = "websearch"
-				}
 
 				bodyModified := false
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
@@ -484,6 +492,17 @@ func main() {
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+				if useWebsearch {
+					if err := toolruntime.Handle(w, r, em, toolprofile.WebSearch, body, modelName); err != nil {
+						log.WithError(err).WithFields(log.Fields{
+							"model": modelName,
+							"path":  r.URL.Path,
+						}).Error("tool runtime failed")
+						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					}
+					return
+				}
 			}
 		}
 

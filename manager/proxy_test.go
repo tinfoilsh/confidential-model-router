@@ -21,7 +21,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	t.Cleanup(backend.Close)
 
 	backendURL, _ := url.Parse(backend.URL)
-	collector := billing.NewCollector("")
+	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 
 	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker())
@@ -140,12 +140,12 @@ func TestProxyBilling_ErrorResponseNoEvent(t *testing.T) {
 	}
 }
 
-func TestProxyBilling_WebsearchEmitsOnlyZeroTokenEvent(t *testing.T) {
+func TestProxyBilling_WebsearchUsageEmitsTokenEvent(t *testing.T) {
 	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
-	}), websearchModel)
+	}), "websearch")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer test-key-1234567890")
@@ -155,18 +155,39 @@ func TestProxyBilling_WebsearchEmitsOnlyZeroTokenEvent(t *testing.T) {
 
 	events := collector.GetEvents()
 	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event for websearch (zero-token only), got %d", len(events))
+		t.Fatalf("expected 1 billing event for websearch, got %d", len(events))
 	}
 
-	// Only the zero-token per-request event billed as "websearch".
-	// Token usage is billed when the responder calls the underlying
-	// model through the proxy with the user's API key.
-	if events[0].PromptTokens != 0 || events[0].CompletionTokens != 0 || events[0].TotalTokens != 0 {
-		t.Errorf("expected zero-token event, got prompt=%d completion=%d total=%d",
+	if events[0].PromptTokens != 5 || events[0].CompletionTokens != 15 || events[0].TotalTokens != 20 {
+		t.Errorf("expected token event, got prompt=%d completion=%d total=%d",
 			events[0].PromptTokens, events[0].CompletionTokens, events[0].TotalTokens)
 	}
-	if events[0].Model != websearchModel {
-		t.Errorf("expected event model %q, got %q", websearchModel, events[0].Model)
+	if events[0].Model != "websearch" {
+		t.Errorf("expected event model %q, got %q", "websearch", events[0].Model)
+	}
+}
+
+func TestProxyBilling_ClientHeaderCannotBypassBilling(t *testing.T) {
+	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
+	}))
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req.Header.Set("X-Tinfoil-Internal-Tool-Loop", "true")
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	events := collector.GetEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 billing event even with legacy internal header, got %d", len(events))
+	}
+	if events[0].PromptTokens != 5 || events[0].CompletionTokens != 15 {
+		t.Errorf("expected token event preserved, got prompt=%d completion=%d",
+			events[0].PromptTokens, events[0].CompletionTokens)
 	}
 }
 
