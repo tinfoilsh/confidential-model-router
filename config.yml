@@ -78,7 +78,7 @@ models:
   websearch:
     repo: tinfoilsh/confidential-websearch
     enclaves:
-      - websearch.tinfoil.functions.tinfoil.sh
+      - websearch.tinfoil.sh
 
   gemma4-31b:
     repo: tinfoilsh/confidential-gemma4-31b
