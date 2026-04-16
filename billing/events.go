@@ -1,15 +1,17 @@
 package billing
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+
+	usageclient "github.com/tinfoilsh/usage-reporting-go/client"
+	"github.com/tinfoilsh/usage-reporting-go/contract"
 )
 
 // Event represents a billing event with token usage
@@ -27,22 +29,18 @@ type Event struct {
 	APIKey           string    `json:"api_key"`
 }
 
-// ShadowBillingRequest represents the payload sent to the control plane
-type ShadowBillingRequest struct {
-	Events []Event `json:"events"`
-	Source string  `json:"source"` // "proxy" to distinguish from tfshim
-}
+// maxRetainedEvents bounds the in-memory event buffer exposed for tests and
+// debugging. The authoritative event sink is the usage-reporting client; this
+// local buffer is a best-effort tail that must not grow without bound.
+const maxRetainedEvents = 1024
 
-// Collector collects billing events in memory and sends them to the control plane
+// Collector ships billing events to the control plane via the usage reporter
+// and retains the most recent events in memory for tests and debugging.
 type Collector struct {
-	events        []Event
-	mu            sync.Mutex
-	controlPlane  string
-	batchInterval time.Duration
-	quit          chan struct{}
-	wg            sync.WaitGroup
-	httpClient    *http.Client
-	stopOnce      sync.Once
+	events   []Event
+	mu       sync.Mutex
+	reporter *usageclient.ReporterClient
+	stopOnce sync.Once
 }
 
 // maskAPIKey masks an API key for safe logging
@@ -55,27 +53,29 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:3] + strings.Repeat("*", len(apiKey)-7) + apiKey[len(apiKey)-4:]
 }
 
-// NewCollector creates a new billing event collector
-func NewCollector(controlPlaneURL string) *Collector {
-	c := &Collector{
-		events:        make([]Event, 0),
-		controlPlane:  controlPlaneURL,
-		batchInterval: 2 * time.Second, // Match tfshim's interval
-		quit:          make(chan struct{}),
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
-
-	// Only start batch processing if control plane URL is provided
+// NewCollector creates a new billing event collector.
+//
+// Events are delivered to the signed /api/internal/usage-reports ingestion
+// endpoint. The legacy [DEPRECATED] /api/shim/collect-shadow path must never
+// be used from the router: it is unauthenticated and scheduled for removal
+// once tfshim is migrated off it.
+func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector {
+	endpoint := ""
 	if controlPlaneURL != "" {
-		c.wg.Add(1)
-		go c.processBatch()
-		log.Infof("Billing collector started with control plane: %s", controlPlaneURL)
-	} else {
-		log.Info("Billing collector started in log-only mode (no control plane URL)")
+		endpoint = strings.TrimRight(controlPlaneURL, "/") + "/api/internal/usage-reports"
 	}
 
+	c := &Collector{
+		events: make([]Event, 0, maxRetainedEvents),
+		reporter: usageclient.New(usageclient.Config{
+			Endpoint: endpoint,
+			Reporter: contract.Reporter{
+				ID:      reporterID,
+				Service: "router",
+			},
+			Secret: reporterSecret,
+		}),
+	}
 	return c
 }
 
@@ -84,7 +84,7 @@ func (c *Collector) AddEvent(event Event) {
 	// Create a safe version for logging with masked API key
 	safeEvent := event
 	safeEvent.APIKey = maskAPIKey(event.APIKey)
-	
+
 	// Perform JSON marshalling outside the critical section
 	eventJSON, err := json.Marshal(safeEvent)
 	if err != nil {
@@ -93,8 +93,35 @@ func (c *Collector) AddEvent(event Event) {
 	}
 
 	c.mu.Lock()
+	if len(c.events) >= maxRetainedEvents {
+		copy(c.events, c.events[len(c.events)-maxRetainedEvents+1:])
+		c.events = c.events[:maxRetainedEvents-1]
+	}
 	c.events = append(c.events, event)
 	c.mu.Unlock()
+
+	if c.reporter != nil {
+		c.reporter.AddEvent(contract.Event{
+			RequestID:  event.RequestID,
+			OccurredAt: event.Timestamp,
+			APIKey:     event.APIKey,
+			Operation: contract.Operation{
+				Service: "router",
+				Name:    "model_request",
+			},
+			Meters: []contract.Meter{
+				{Name: "input_tokens", Quantity: int64(event.PromptTokens)},
+				{Name: "output_tokens", Quantity: int64(event.CompletionTokens)},
+				{Name: "requests", Quantity: 1},
+			},
+			Attributes: map[string]string{
+				"model":     event.Model,
+				"route":     event.RequestPath,
+				"streaming": fmt.Sprintf("%t", event.Streaming),
+				"enclave":   event.Enclave,
+			},
+		})
+	}
 
 	log.WithFields(log.Fields{
 		"type": "billing_event",
@@ -123,80 +150,8 @@ func (c *Collector) Clear() {
 // Stop gracefully shuts down the collector
 func (c *Collector) Stop() {
 	c.stopOnce.Do(func() {
-		close(c.quit)
-		c.wg.Wait()
-	})
-}
-
-// processBatch runs in a goroutine and periodically sends batched events
-func (c *Collector) processBatch() {
-	defer c.wg.Done()
-
-	ticker := time.NewTicker(c.batchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			c.sendBatch()
-		case <-c.quit:
-			// Send any remaining events before shutting down
-			c.sendBatch()
-			return
+		if c.reporter != nil {
+			_ = c.reporter.Stop(context.Background())
 		}
-	}
-}
-
-// sendBatch sends the current batch of events to the control plane
-func (c *Collector) sendBatch() {
-	c.mu.Lock()
-	if len(c.events) == 0 {
-		c.mu.Unlock()
-		return
-	}
-
-	// Copy events and clear the queue
-	batch := make([]Event, len(c.events))
-	copy(batch, c.events)
-	c.events = c.events[:0]
-	c.mu.Unlock()
-
-	// Create the request payload
-	payload := ShadowBillingRequest{
-		Events: batch,
-		Source: "proxy",
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		log.WithError(err).Error("Failed to marshal billing batch")
-		return
-	}
-
-	// Send to control plane
-	url := fmt.Sprintf("%s/api/shim/collect-shadow", c.controlPlane)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.WithError(err).Error("Failed to create billing request")
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		log.WithError(err).WithField("url", url).Error("Failed to send billing batch")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.WithFields(log.Fields{
-			"status": resp.StatusCode,
-			"url":    url,
-		}).Error("Billing batch submission failed")
-		return
-	}
-
-	log.WithField("event_count", len(batch)).Debug("Successfully sent billing batch")
+	})
 }

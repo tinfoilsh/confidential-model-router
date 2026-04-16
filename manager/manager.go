@@ -5,10 +5,10 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -57,6 +57,19 @@ type EnclaveManager struct {
 	errors               []string
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
+	debug                bool
+}
+
+// SetDebugMode enables debug-only behaviors such as honoring the
+// LOCAL_WEBSEARCH_MCP_ENDPOINT env var, which points the tool runtime at a
+// local, non-attested MCP server. MUST NOT be enabled in production enclaves.
+func (em *EnclaveManager) SetDebugMode(enabled bool) {
+	em.debug = enabled
+}
+
+// DebugMode reports whether debug-only overrides are active.
+func (em *EnclaveManager) DebugMode() bool {
+	return em.debug
 }
 
 // ModelExists checks if a model exists
@@ -77,6 +90,12 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 // RequestTracker returns the shared request tracker for rate limiting.
 func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
 	return em.requestTracker
+}
+
+func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
+	if em.billingCollector != nil {
+		em.billingCollector.AddEvent(event)
+	}
 }
 
 // GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
@@ -199,7 +218,6 @@ func (em *EnclaveManager) Ready() bool {
 	defer em.stateMu.Unlock()
 	return !em.lastSuccessfulUpdate.IsZero()
 }
-
 
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
@@ -355,7 +373,7 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
 	}
@@ -381,7 +399,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
-		billingCollector: billing.NewCollector(controlPlaneURL),
+		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		requestTracker:   ratelimit.NewRequestTracker(),
 		refreshInterval:  refreshInterval,
 	}
