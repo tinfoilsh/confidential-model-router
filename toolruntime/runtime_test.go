@@ -75,3 +75,48 @@ func TestParseResponsesToolCalls(t *testing.T) {
 		t.Fatalf("unexpected arguments: %#v", calls[0].arguments)
 	}
 }
+
+func TestSplitToolCalls(t *testing.T) {
+	routerCalls, clientCalls := splitToolCalls(map[string]struct{}{
+		"search": {},
+		"fetch":  {},
+	}, []toolCall{
+		{id: "call_1", name: "search"},
+		{id: "call_2", name: "client_lookup"},
+		{id: "call_3", name: "fetch"},
+	})
+
+	if len(routerCalls) != 2 {
+		t.Fatalf("expected 2 router calls, got %d", len(routerCalls))
+	}
+	if len(clientCalls) != 1 {
+		t.Fatalf("expected 1 client call, got %d", len(clientCalls))
+	}
+	if clientCalls[0].name != "client_lookup" {
+		t.Fatalf("unexpected client call: %#v", clientCalls[0])
+	}
+}
+
+func TestFilterChatToolCalls(t *testing.T) {
+	message := map[string]any{
+		"role": "assistant",
+		"tool_calls": []any{
+			map[string]any{"id": "call_1", "function": map[string]any{"name": "search"}},
+			map[string]any{"id": "call_2", "function": map[string]any{"name": "client_lookup"}},
+		},
+	}
+
+	filtered := filterChatToolCalls(message, []toolCall{{id: "call_1", name: "search"}})
+	if filtered == nil {
+		t.Fatal("expected filtered message")
+	}
+
+	rawCalls, _ := filtered["tool_calls"].([]any)
+	if len(rawCalls) != 1 {
+		t.Fatalf("expected 1 filtered tool call, got %d", len(rawCalls))
+	}
+	callMap, _ := rawCalls[0].(map[string]any)
+	if callMap["id"] != "call_1" {
+		t.Fatalf("unexpected filtered call: %#v", callMap)
+	}
+}

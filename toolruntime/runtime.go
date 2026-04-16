@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -54,24 +53,27 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	if err != nil {
 		return err
 	}
+	ownedTools := ownedToolNames(toolsResult.Tools)
 
 	switch r.URL.Path {
 	case "/v1/chat/completions":
-		response, err := runChatLoop(ctx, em, session, body, modelName, authHeader, promptResult, toolsResult.Tools)
+		reqBody, response, err := runChatLoop(ctx, em, session, body, modelName, authHeader, promptResult, toolsResult.Tools, ownedTools)
 		if err != nil {
 			return err
 		}
 		if isStream(body) {
-			return streamChatCompletion(w, r, response)
+			reqBody["stream"] = true
+			return streamModelResponse(ctx, w, em, modelName, r.URL.Path, reqBody, authHeader)
 		}
 		return writeJSON(w, response)
 	case "/v1/responses":
-		response, err := runResponsesLoop(ctx, em, session, body, modelName, authHeader, promptResult, toolsResult.Tools)
+		reqBody, response, err := runResponsesLoop(ctx, em, session, body, modelName, authHeader, promptResult, toolsResult.Tools, ownedTools)
 		if err != nil {
 			return err
 		}
 		if isStream(body) {
-			return streamResponses(w, response)
+			reqBody["stream"] = true
+			return streamModelResponse(ctx, w, em, modelName, r.URL.Path, reqBody, authHeader)
 		}
 		return writeJSON(w, response)
 	default:
@@ -110,7 +112,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	}, nil)
 }
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, authHeader string, prompt *mcp.GetPromptResult, tools []*mcp.Tool) (map[string]any, error) {
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, authHeader string, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (map[string]any, map[string]any, error) {
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	reqBody["stream"] = false
@@ -121,17 +123,20 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 	for i := 0; i < maxToolIterations; i++ {
 		response, err := postJSON(ctx, em, modelName, "/v1/chat/completions", reqBody, authHeader)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		message, toolCalls := parseChatToolCalls(response)
-		if len(toolCalls) == 0 {
-			return response, nil
+		routerToolCalls, _ := splitToolCalls(ownedTools, toolCalls)
+		if len(routerToolCalls) == 0 {
+			return reqBody, response, nil
 		}
 
 		messages, _ := reqBody["messages"].([]any)
-		messages = append(messages, message)
-		for _, toolCall := range toolCalls {
+		if filteredMessage := filterChatToolCalls(message, routerToolCalls); filteredMessage != nil {
+			messages = append(messages, filteredMessage)
+		}
+		for _, toolCall := range routerToolCalls {
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments)
 			if err != nil {
 				output = err.Error()
@@ -145,10 +150,10 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		reqBody["messages"] = messages
 	}
 
-	return nil, fmt.Errorf("tool loop exceeded max iterations")
+	return nil, nil, fmt.Errorf("tool loop exceeded max iterations")
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, authHeader string, prompt *mcp.GetPromptResult, tools []*mcp.Tool) (map[string]any, error) {
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, authHeader string, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (map[string]any, map[string]any, error) {
 	base := cloneJSONMap(body)
 	base["stream"] = false
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
@@ -158,16 +163,16 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 	for i := 0; i < maxToolIterations; i++ {
 		response, err := postJSON(ctx, em, modelName, "/v1/responses", reqBody, authHeader)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		toolCalls := parseResponsesToolCalls(response)
-		if len(toolCalls) == 0 {
-			return response, nil
+		routerToolCalls, _ := splitToolCalls(ownedTools, parseResponsesToolCalls(response))
+		if len(routerToolCalls) == 0 {
+			return reqBody, response, nil
 		}
 
-		toolOutputs := make([]map[string]any, 0, len(toolCalls))
-		for _, toolCall := range toolCalls {
+		toolOutputs := make([]map[string]any, 0, len(routerToolCalls))
+		for _, toolCall := range routerToolCalls {
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments)
 			if err != nil {
 				output = err.Error()
@@ -187,7 +192,7 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 		}
 	}
 
-	return nil, fmt.Errorf("tool loop exceeded max iterations")
+	return nil, nil, fmt.Errorf("tool loop exceeded max iterations")
 }
 
 func postJSON(ctx context.Context, em *manager.EnclaveManager, modelName, path string, body map[string]any, authHeader string) (map[string]any, error) {
@@ -312,6 +317,60 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 		}
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+func ownedToolNames(tools []*mcp.Tool) map[string]struct{} {
+	result := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if tool == nil || tool.Name == "" {
+			continue
+		}
+		result[tool.Name] = struct{}{}
+	}
+	return result
+}
+
+func splitToolCalls(ownedTools map[string]struct{}, toolCalls []toolCall) ([]toolCall, []toolCall) {
+	routerToolCalls := make([]toolCall, 0, len(toolCalls))
+	clientToolCalls := make([]toolCall, 0, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		if _, ok := ownedTools[toolCall.name]; ok {
+			routerToolCalls = append(routerToolCalls, toolCall)
+			continue
+		}
+		clientToolCalls = append(clientToolCalls, toolCall)
+	}
+	return routerToolCalls, clientToolCalls
+}
+
+func filterChatToolCalls(message map[string]any, allowed []toolCall) map[string]any {
+	if message == nil || len(allowed) == 0 {
+		return nil
+	}
+
+	allowedIDs := make(map[string]struct{}, len(allowed))
+	for _, toolCall := range allowed {
+		allowedIDs[toolCall.id] = struct{}{}
+	}
+
+	rawCalls, _ := message["tool_calls"].([]any)
+	filteredCalls := make([]any, 0, len(allowed))
+	for _, rawCall := range rawCalls {
+		callMap, _ := rawCall.(map[string]any)
+		if _, ok := allowedIDs[stringValue(callMap["id"])]; ok {
+			filteredCalls = append(filteredCalls, rawCall)
+		}
+	}
+	if len(filteredCalls) == 0 {
+		return nil
+	}
+
+	filteredMessage := make(map[string]any, len(message))
+	for key, value := range message {
+		filteredMessage[key] = value
+	}
+	filteredMessage["tool_calls"] = filteredCalls
+	return filteredMessage
 }
 
 func existingTools(raw any) []any {
@@ -451,138 +510,75 @@ func writeJSON(w http.ResponseWriter, body map[string]any) error {
 	return err
 }
 
-func streamChatCompletion(w http.ResponseWriter, r *http.Request, response map[string]any) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("streaming not supported")
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	id := stringValue(response["id"])
-	created := int64(numberValue(response["created"]))
-	model := stringValue(response["model"])
-	content := finalChatContent(response)
-	usage := response["usage"]
-
-	chunk := map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index": 0,
-				"delta": map[string]any{
-					"role":    "assistant",
-					"content": content,
-				},
-			},
-		},
-	}
-	if err := sseData(w, chunk); err != nil {
+func streamModelResponse(ctx context.Context, w http.ResponseWriter, em *manager.EnclaveManager, modelName, path string, body map[string]any, authHeader string) error {
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
 		return err
 	}
-	doneChunk := map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index":         0,
-				"delta":         map[string]any{},
-				"finish_reason": "stop",
-			},
-		},
+
+	reqHeaders := make(http.Header)
+	reqHeaders.Set("Content-Type", "application/json")
+	if authHeader != "" {
+		reqHeaders.Set("Authorization", authHeader)
 	}
-	if err := sseData(w, doneChunk); err != nil {
+
+	resp, err := em.DoModelRequest(ctx, modelName, path, bodyBytes, reqHeaders)
+	if err != nil {
 		return err
 	}
-	if r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true" && usage != nil {
-		if err := sseData(w, map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-			"choices": []any{},
-			"usage":   usage,
-		}); err != nil {
-			return err
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return readErr
+		}
+		return fmt.Errorf("upstream returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	copyResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return writeErr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
 		}
 	}
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
 }
 
-func streamResponses(w http.ResponseWriter, response map[string]any) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("streaming not supported")
+func copyResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		if shouldSkipResponseHeader(key) {
+			continue
+		}
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	created := time.Now().Unix()
-	id := stringValue(response["id"])
-	if id == "" {
-		id = "resp_" + uuid.NewString()
-		response["id"] = id
-	}
-	if err := sseEvent(w, "response.created", map[string]any{
-		"type": "response.created",
-		"response": map[string]any{
-			"id":         id,
-			"object":     "response",
-			"created_at": created,
-			"status":     "in_progress",
-			"model":      stringValue(response["model"]),
-			"output":     []any{},
-		},
-	}); err != nil {
-		return err
-	}
-	if err := sseEvent(w, "response.completed", map[string]any{
-		"type":     "response.completed",
-		"response": response,
-	}); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
 }
 
-func sseData(w http.ResponseWriter, body map[string]any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
+func shouldSkipResponseHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	default:
+		return false
 	}
-	_, err = fmt.Fprintf(w, "data: %s\n\n", data)
-	return err
-}
-
-func sseEvent(w http.ResponseWriter, event string, body map[string]any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
-	return err
-}
-
-func finalChatContent(response map[string]any) string {
-	choices, _ := response["choices"].([]any)
-	if len(choices) == 0 {
-		return ""
-	}
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	return stringValue(message["content"])
 }
 
 func cloneJSONMap(in map[string]any) map[string]any {
@@ -595,9 +591,4 @@ func cloneJSONMap(in map[string]any) map[string]any {
 func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
-}
-
-func numberValue(v any) float64 {
-	f, _ := v.(float64)
-	return f
 }
