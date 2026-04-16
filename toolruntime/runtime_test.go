@@ -1,6 +1,13 @@
 package toolruntime
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
+)
 
 func TestReplaceResponsesWebSearchTools(t *testing.T) {
 	replaced := replaceResponsesWebSearchTools([]any{
@@ -97,26 +104,124 @@ func TestSplitToolCalls(t *testing.T) {
 	}
 }
 
-func TestFilterChatToolCalls(t *testing.T) {
-	message := map[string]any{
-		"role": "assistant",
-		"tool_calls": []any{
-			map[string]any{"id": "call_1", "function": map[string]any{"name": "search"}},
-			map[string]any{"id": "call_2", "function": map[string]any{"name": "client_lookup"}},
+func TestModelRequestHeaders(t *testing.T) {
+	source := make(http.Header)
+	source.Set("Authorization", "Bearer secret")
+	source.Set(manager.UsageMetricsRequestHeader, "true")
+	source.Set("X-Tinfoil-Client-Requested-Usage", "true")
+
+	headers := modelRequestHeaders(source)
+	if headers.Get("Authorization") != "Bearer secret" {
+		t.Fatalf("unexpected authorization header: %#v", headers)
+	}
+	if headers.Get(manager.UsageMetricsRequestHeader) != "true" {
+		t.Fatalf("missing usage metrics header: %#v", headers)
+	}
+	if headers.Get("X-Tinfoil-Client-Requested-Usage") != "true" {
+		t.Fatalf("missing client requested usage header: %#v", headers)
+	}
+}
+
+func TestStreamChatCompletionIncludesToolCallsAndUsage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
+
+	response := &upstreamJSONResponse{
+		statusCode: http.StatusOK,
+		header:     http.Header{"Tinfoil-Enclave": []string{"enc-1"}},
+		body: map[string]any{
+			"id":      "chatcmpl_1",
+			"created": float64(123),
+			"model":   "gpt-oss-120b",
+			"choices": []any{
+				map[string]any{
+					"finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{
+							map[string]any{
+								"id":   "call_1",
+								"type": "function",
+								"function": map[string]any{
+									"name":      "client_lookup",
+									"arguments": "{}",
+								},
+							},
+						},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     float64(1),
+				"completion_tokens": float64(0),
+				"total_tokens":      float64(1),
+			},
 		},
 	}
 
-	filtered := filterChatToolCalls(message, []toolCall{{id: "call_1", name: "search"}})
-	if filtered == nil {
-		t.Fatal("expected filtered message")
+	if err := streamChatCompletion(rec, req, response); err != nil {
+		t.Fatalf("streamChatCompletion returned error: %v", err)
 	}
 
-	rawCalls, _ := filtered["tool_calls"].([]any)
-	if len(rawCalls) != 1 {
-		t.Fatalf("expected 1 filtered tool call, got %d", len(rawCalls))
+	body := rec.Body.String()
+	if !strings.Contains(body, "\"tool_calls\"") {
+		t.Fatalf("expected stream to contain tool calls, got %s", body)
 	}
-	callMap, _ := rawCalls[0].(map[string]any)
-	if callMap["id"] != "call_1" {
-		t.Fatalf("unexpected filtered call: %#v", callMap)
+	if !strings.Contains(body, "\"usage\"") {
+		t.Fatalf("expected stream to contain usage chunk, got %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected stream terminator, got %s", body)
+	}
+	if rec.Header().Get("Tinfoil-Enclave") != "enc-1" {
+		t.Fatalf("expected upstream headers to be preserved, got %#v", rec.Header())
+	}
+}
+
+func TestStreamResponsesIncludesOutputEvents(t *testing.T) {
+	rec := httptest.NewRecorder()
+	response := &upstreamJSONResponse{
+		statusCode: http.StatusOK,
+		header:     make(http.Header),
+		body: map[string]any{
+			"id":         "resp_1",
+			"created_at": float64(123),
+			"model":      "gpt-oss-120b",
+			"output": []any{
+				map[string]any{
+					"id":   "msg_1",
+					"type": "message",
+					"content": []any{
+						map[string]any{
+							"type": "output_text",
+							"text": "Hello",
+						},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens":  float64(1),
+				"output_tokens": float64(1),
+				"total_tokens":  float64(2),
+			},
+		},
+	}
+
+	if err := streamResponses(rec, response); err != nil {
+		t.Fatalf("streamResponses returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	for _, fragment := range []string{
+		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.output_text.delta",
+		"event: response.output_item.done",
+		"event: response.completed",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected stream to contain %q, got %s", fragment, body)
+		}
 	}
 }
