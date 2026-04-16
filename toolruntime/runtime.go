@@ -36,7 +36,11 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			}
 		}
 	}
-	return t.base.RoundTrip(cloned)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(cloned)
 }
 
 func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profile toolprofile.Profile, body map[string]any, modelName string) error {

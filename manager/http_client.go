@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
@@ -61,6 +62,12 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 }
 
 func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {
+	if modelName == "websearch" {
+		if endpoint := os.Getenv("LOCAL_WEBSEARCH_MCP_ENDPOINT"); endpoint != "" {
+			return endpoint, &http.Client{Timeout: 10 * time.Minute}, nil
+		}
+	}
+
 	baseURL, client, err := em.boundHTTPClientForModel(modelName)
 	if err != nil {
 		return "", nil, err
