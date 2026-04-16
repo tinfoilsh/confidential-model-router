@@ -63,11 +63,6 @@ models:
     enclaves:
       - qwen3-vl-30b.tinfoil.containers.tinfoil.dev
 
-  kimi-k2-thinking:
-    repo: tinfoilsh/confidential-kimi-k2-thinking
-    enclaves:
-      - kimi-k2-thinking.tinfoil.containers.tinfoil.dev
-
   kimi-k2-5:
     repo: tinfoilsh/confidential-kimi-k2-5
     enclaves:
