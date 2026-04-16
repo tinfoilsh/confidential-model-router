@@ -127,6 +127,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (*upstreamJSONResponse, error) {
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
+	delete(reqBody, "stream_options")
 	reqBody["stream"] = false
 	reqBody["parallel_tool_calls"] = false
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
@@ -170,9 +171,11 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 	base := cloneJSONMap(body)
 	base["stream"] = false
 	base["parallel_tool_calls"] = false
+	delete(base, "stream_options")
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 	usageTotals := usageAccumulator{}
+	accumulatedInput, _ := base["input"].([]any)
 
 	reqBody := base
 	for i := 0; i < maxToolIterations; i++ {
@@ -188,7 +191,8 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 			return response, nil
 		}
 
-		toolOutputs := make([]map[string]any, 0, len(routerToolCalls))
+		outputItems, _ := response.body["output"].([]any)
+		toolOutputs := make([]any, 0, len(routerToolCalls))
 		for _, toolCall := range routerToolCalls {
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments)
 			if err != nil {
@@ -201,12 +205,11 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 			})
 		}
 
-		reqBody = map[string]any{
-			"model":                modelName,
-			"previous_response_id": stringValue(response.body["id"]),
-			"input":                toolOutputs,
-			"tools":                base["tools"],
-		}
+		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(outputItems)...)
+		accumulatedInput = append(accumulatedInput, toolOutputs...)
+
+		reqBody = cloneJSONMap(base)
+		reqBody["input"] = accumulatedInput
 	}
 
 	return nil, fmt.Errorf("tool loop exceeded max iterations")
@@ -488,15 +491,62 @@ func prependChatPrompt(prompt *mcp.GetPromptResult, raw any) []any {
 }
 
 func prependResponsesPrompt(prompt *mcp.GetPromptResult, raw any) any {
-	items, ok := raw.([]any)
-	if !ok {
-		items = []any{raw}
-	}
+	items := normalizeResponsesInput(raw)
 	promptItems := promptInputItems(prompt)
 	if len(promptItems) == 0 {
 		return items
 	}
 	return append(promptItems, items...)
+}
+
+func normalizeResponsesInput(raw any) []any {
+	switch value := raw.(type) {
+	case nil:
+		return []any{}
+	case []any:
+		return value
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return []any{}
+		}
+		return []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "input_text",
+						"text": value,
+					},
+				},
+			},
+		}
+	default:
+		return []any{raw}
+	}
+}
+
+func normalizeResponsesOutputItems(items []any) []any {
+	normalized := make([]any, 0, len(items))
+	for _, rawItem := range items {
+		item, _ := rawItem.(map[string]any)
+		if item == nil {
+			continue
+		}
+
+		if stringValue(item["type"]) != "mcp_call" {
+			normalized = append(normalized, rawItem)
+			continue
+		}
+
+		normalized = append(normalized, map[string]any{
+			"type":      "function_call",
+			"call_id":   firstNonEmptyString(item["call_id"], item["id"]),
+			"name":      item["name"],
+			"arguments": item["arguments"],
+		})
+	}
+	return normalized
 }
 
 func promptMessages(prompt *mcp.GetPromptResult) []any {
@@ -1061,6 +1111,15 @@ func cloneJSONMap(in map[string]any) map[string]any {
 func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if s := stringValue(value); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func numberValue(v any) float64 {

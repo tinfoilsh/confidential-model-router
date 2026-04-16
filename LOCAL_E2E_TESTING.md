@@ -22,7 +22,7 @@ go run .
 
 ## 2. Create a small router config
 
-Create a temporary config with only the model you want to exercise:
+Create a temporary config with the models you want to exercise:
 
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'
@@ -31,6 +31,10 @@ models:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
       - gemma4-31b.inf9.tinfoil.sh
+  gpt-oss-120b:
+    repo: tinfoilsh/confidential-gpt-oss-120b
+    enclaves:
+      - gpt-oss-120b-0.inf9.tinfoil.sh
 EOF
 ```
 
@@ -55,7 +59,28 @@ go run .
 
 `LOCAL_WEBSEARCH_MCP_ENDPOINT` makes router-owned web search tool calls hit the local MCP server instead of the attested `websearch` deployment.
 
-## 4. Run a local end-to-end query
+## 4. Verified model matrix
+
+These combinations were validated locally:
+
+- `gemma4-31b`
+  - `/v1/chat/completions`
+  - non-streaming and streaming
+- `gpt-oss-120b`
+  - `/v1/chat/completions`
+  - non-streaming and streaming
+  - `/v1/responses`
+  - non-streaming and streaming
+
+For the `gpt-oss-120b` Responses API path, the most stable local settings were:
+
+- `"temperature": 0`
+- `"max_output_tokens": 120` for non-streaming
+- `"max_output_tokens": 400` for streaming
+
+`qwen3-vl-30b` was not added to the recommended local matrix because attestation fetches for its current enclave were failing during this test run.
+
+## 5. Run local end-to-end queries
 
 Use your normal API key against the local router:
 
@@ -107,7 +132,85 @@ Expected answer:
 According to the Neighborhood Cat Gazette, the cats in the sunroom prefer saffron cushions because they stay warm in the afternoon light.
 ```
 
-## 5. What local test mode does
+### Responses API probes
+
+Non-streaming Responses:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "input": "Search the web once and answer this question in one sentence: According to the Neighborhood Cat Gazette, which cushions do the cats in the sunroom prefer?",
+    "stream": false,
+    "temperature": 0,
+    "max_output_tokens": 120,
+    "tools": [{"type": "web_search"}]
+  }'
+```
+
+Streaming Responses:
+
+```bash
+curl -sS -N -X POST http://127.0.0.1:8090/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "input": "Search the web once and answer this question in one sentence: According to the Local Cat Almanac 2026, what does Nimbus do after breakfast?",
+    "stream": true,
+    "temperature": 0,
+    "max_output_tokens": 400,
+    "tools": [{"type": "web_search"}]
+  }'
+```
+
+### Chat Completions probes
+
+Non-streaming Chat Completions:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "web_search_options": {},
+    "stream": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Search the web once and answer this question in one sentence: According to the Neighborhood Cat Gazette, which cushions do the cats in the sunroom prefer?"
+      }
+    ],
+    "max_tokens": 120
+  }'
+```
+
+Streaming Chat Completions:
+
+```bash
+curl -sS -N -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gemma4-31b",
+    "web_search_options": {},
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Search the web once and answer this question in one sentence: According to the Local Cat Almanac 2026, what does Nimbus do after breakfast?"
+      }
+    ],
+    "max_tokens": 120
+  }'
+```
+
+The old matrix driver in `websearch/evals/run_websearch_eval.sh` is still a useful reference for request shapes, but it is not yet wired for this local router+MCP flow or authenticated local runs.
+
+## 6. What local test mode does
 
 When `LOCAL_TEST_MODE=1` is enabled in websearch:
 
@@ -121,7 +224,7 @@ The current fixture URLs are:
 - `https://local.test/cats/almanac`
 - `https://local.test/cats/gazette`
 
-## 6. Cleanup
+## 7. Cleanup
 
 If you launched both processes in interactive shells, `Ctrl+C` in each is enough.
 

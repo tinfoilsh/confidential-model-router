@@ -1,11 +1,13 @@
 package toolruntime
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
@@ -264,5 +266,65 @@ func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
 	}
 	if usage.PromptTokens != 7 || usage.CompletionTokens != 11 || usage.TotalTokens != 18 {
 		t.Fatalf("unexpected aggregated usage: %#v", usage)
+	}
+}
+
+func TestNormalizeResponsesInputWrapsStringPrompt(t *testing.T) {
+	items := normalizeResponsesInput("hello world")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+
+	item, _ := items[0].(map[string]any)
+	if item["type"] != "message" || item["role"] != "user" {
+		t.Fatalf("unexpected message wrapper: %#v", item)
+	}
+
+	content, _ := item["content"].([]map[string]any)
+	if len(content) != 1 || content[0]["text"] != "hello world" {
+		t.Fatalf("unexpected content: %#v", item["content"])
+	}
+}
+
+func TestPrependResponsesPromptPreservesPromptItems(t *testing.T) {
+	prompt := &mcp.GetPromptResult{
+		Messages: []*mcp.PromptMessage{
+			{
+				Role:    "system",
+				Content: &mcp.TextContent{Text: "system prompt"},
+			},
+		},
+	}
+
+	items := prependResponsesPrompt(prompt, "user question")
+	list, _ := items.([]any)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(list))
+	}
+
+	first, _ := list[0].(map[string]any)
+	second, _ := list[1].(map[string]any)
+	if fmt.Sprint(first["role"]) != "system" || fmt.Sprint(second["role"]) != "user" {
+		t.Fatalf("unexpected prompt ordering: %#v", list)
+	}
+}
+
+func TestNormalizeResponsesOutputItemsConvertsMCPCalls(t *testing.T) {
+	items := normalizeResponsesOutputItems([]any{
+		map[string]any{
+			"type":      "mcp_call",
+			"id":        "call_1",
+			"name":      "search",
+			"arguments": "{\"query\":\"cats\"}",
+		},
+	})
+
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+
+	item, _ := items[0].(map[string]any)
+	if item["type"] != "function_call" || item["call_id"] != "call_1" {
+		t.Fatalf("unexpected normalized item: %#v", item)
 	}
 }
