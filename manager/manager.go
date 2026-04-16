@@ -5,10 +5,10 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -200,7 +200,6 @@ func (em *EnclaveManager) Ready() bool {
 	return !em.lastSuccessfulUpdate.IsZero()
 }
 
-
 // Status returns the status of the enclave manager to be JSON encoded
 func (em *EnclaveManager) Status() map[string]any {
 	em.stateMu.Lock()
@@ -355,7 +354,7 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
 	}
@@ -381,7 +380,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, initConfigURL 
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
 		sigstoreClient:   sigstoreClient,
-		billingCollector: billing.NewCollector(controlPlaneURL),
+		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		requestTracker:   ratelimit.NewRequestTracker(),
 		refreshInterval:  refreshInterval,
 	}

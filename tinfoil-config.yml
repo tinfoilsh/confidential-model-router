@@ -9,6 +9,10 @@ containers:
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
+      - USAGE_REPORTER_ID: "model-router"
+      - CONTROL_PLANE_URL: "https://api.tinfoil.sh"
+    secrets:
+      - USAGE_REPORTER_SECRET
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s

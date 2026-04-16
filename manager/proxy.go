@@ -38,8 +38,6 @@ const (
 	UsageMetricsResponseHeader = "X-Tinfoil-Usage-Metrics"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
-	// websearchModel is charged per-request in addition to per-token.
-	websearchModel = "websearch"
 )
 
 // classifyProxyError maps a transport-level error to a bounded set of reason
@@ -262,28 +260,20 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 			// Add billing event
 			if billingCollector != nil {
-				if modelName == websearchModel {
-					// Only emit the per-request websearch fee. Skip the
-					// token-based event because the websearch service's
-					// responder call goes through the proxy with the
-					// user's API key and gets billed there directly.
-					emitZeroTokenEvent()
-				} else {
-					event := billing.Event{
-						Timestamp:        time.Now(),
-						UserID:           userID,
-						APIKey:           apiKey,
-						Model:            modelName,
-						PromptTokens:     usage.PromptTokens,
-						CompletionTokens: usage.CompletionTokens,
-						TotalTokens:      usage.TotalTokens,
-						RequestID:        requestID,
-						Enclave:          host,
-						RequestPath:      requestPath,
-						Streaming:        streaming,
-					}
-					billingCollector.AddEvent(event)
+				event := billing.Event{
+					Timestamp:        time.Now(),
+					UserID:           userID,
+					APIKey:           apiKey,
+					Model:            modelName,
+					PromptTokens:     usage.PromptTokens,
+					CompletionTokens: usage.CompletionTokens,
+					TotalTokens:      usage.TotalTokens,
+					RequestID:        requestID,
+					Enclave:          host,
+					RequestPath:      requestPath,
+					Streaming:        streaming,
 				}
+				billingCollector.AddEvent(event)
 			}
 		}
 
