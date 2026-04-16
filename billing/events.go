@@ -29,7 +29,13 @@ type Event struct {
 	APIKey           string    `json:"api_key"`
 }
 
-// Collector collects billing events in memory and sends them to the control plane
+// maxRetainedEvents bounds the in-memory event buffer exposed for tests and
+// debugging. The authoritative event sink is the usage-reporting client; this
+// local buffer is a best-effort tail that must not grow without bound.
+const maxRetainedEvents = 1024
+
+// Collector ships billing events to the control plane via the usage reporter
+// and retains the most recent events in memory for tests and debugging.
 type Collector struct {
 	events   []Event
 	mu       sync.Mutex
@@ -55,7 +61,7 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 	}
 
 	c := &Collector{
-		events: make([]Event, 0),
+		events: make([]Event, 0, maxRetainedEvents),
 		reporter: usageclient.New(usageclient.Config{
 			Endpoint: endpoint,
 			Reporter: contract.Reporter{
@@ -82,6 +88,10 @@ func (c *Collector) AddEvent(event Event) {
 	}
 
 	c.mu.Lock()
+	if len(c.events) >= maxRetainedEvents {
+		copy(c.events, c.events[len(c.events)-maxRetainedEvents+1:])
+		c.events = c.events[:maxRetainedEvents-1]
+	}
 	c.events = append(c.events, event)
 	c.mu.Unlock()
 

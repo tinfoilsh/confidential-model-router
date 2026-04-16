@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
@@ -39,6 +42,7 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profile toolprofile.Profile, body map[string]any, modelName string) error {
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
+	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	session, err := connectToolSession(ctx, em, profile, r, modelName, body)
 	if err != nil {
 		return err
@@ -61,8 +65,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		if isStream(body) {
-			return streamChatCompletion(w, r, response)
+		streaming := isStream(body)
+		applyUsageMetrics(response, usageMetricsRequested && !streaming)
+		emitBillingEvent(em, r, response, modelName, streaming)
+		if streaming {
+			return streamChatCompletion(w, r, response, usageMetricsRequested)
 		}
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
@@ -70,8 +77,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		if isStream(body) {
-			return streamResponses(w, response)
+		streaming := isStream(body)
+		applyUsageMetrics(response, usageMetricsRequested && !streaming)
+		emitBillingEvent(em, r, response, modelName, streaming)
+		if streaming {
+			return streamResponses(w, response, usageMetricsRequested)
 		}
 		return writeJSONResponse(w, response)
 	default:
@@ -117,16 +127,19 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 	reqBody["parallel_tool_calls"] = false
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
+	usageTotals := usageAccumulator{}
 
 	for i := 0; i < maxToolIterations; i++ {
 		response, err := postJSON(ctx, em, modelName, "/v1/chat/completions", reqBody, requestHeaders)
 		if err != nil {
 			return nil, err
 		}
+		usageTotals.Add(response)
 
 		message, toolCalls := parseChatToolCalls(response.body)
 		routerToolCalls, _ := splitToolCalls(ownedTools, toolCalls)
 		if len(routerToolCalls) == 0 {
+			applyAggregatedUsage(response, "/v1/chat/completions", usageTotals.Usage())
 			return response, nil
 		}
 
@@ -155,6 +168,7 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 	base["parallel_tool_calls"] = false
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
+	usageTotals := usageAccumulator{}
 
 	reqBody := base
 	for i := 0; i < maxToolIterations; i++ {
@@ -162,9 +176,11 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 		if err != nil {
 			return nil, err
 		}
+		usageTotals.Add(response)
 
 		routerToolCalls, _ := splitToolCalls(ownedTools, parseResponsesToolCalls(response.body))
 		if len(routerToolCalls) == 0 {
+			applyAggregatedUsage(response, "/v1/responses", usageTotals.Usage())
 			return response, nil
 		}
 
@@ -206,6 +222,46 @@ type upstreamError struct {
 
 func (e *upstreamError) Error() string {
 	return fmt.Sprintf("upstream returned status %d: %s", e.statusCode, strings.TrimSpace(string(e.body)))
+}
+
+type usageAccumulator struct {
+	promptTokens     int
+	completionTokens int
+	totalTokens      int
+}
+
+func (a *usageAccumulator) Add(response *upstreamJSONResponse) {
+	usage := usageFromRaw(response.body["usage"])
+	if usage == nil {
+		return
+	}
+
+	a.promptTokens += usage.PromptTokens
+	a.completionTokens += usage.CompletionTokens
+	if usage.TotalTokens > 0 {
+		a.totalTokens += usage.TotalTokens
+		return
+	}
+	a.totalTokens += usage.PromptTokens + usage.CompletionTokens
+}
+
+func (a *usageAccumulator) Usage() *tokencount.Usage {
+	if a.promptTokens == 0 && a.completionTokens == 0 && a.totalTokens == 0 {
+		return nil
+	}
+
+	totalTokens := a.totalTokens
+	if totalTokens == 0 {
+		totalTokens = a.promptTokens + a.completionTokens
+	}
+
+	return &tokencount.Usage{
+		PromptTokens:     a.promptTokens,
+		CompletionTokens: a.completionTokens,
+		TotalTokens:      totalTokens,
+		InputTokens:      a.promptTokens,
+		OutputTokens:     a.completionTokens,
+	}
 }
 
 func postJSON(ctx context.Context, em *manager.EnclaveManager, modelName, path string, body map[string]any, requestHeaders http.Header) (*upstreamJSONResponse, error) {
@@ -488,12 +544,25 @@ func isStream(body map[string]any) bool {
 
 func modelRequestHeaders(source http.Header) http.Header {
 	headers := make(http.Header)
-	for _, key := range []string{"Authorization", manager.UsageMetricsRequestHeader, "X-Tinfoil-Client-Requested-Usage"} {
-		for _, value := range source.Values(key) {
-			headers.Add(key, value)
+	for key, values := range source {
+		if shouldSkipRequestHeader(key) {
+			continue
 		}
+		copied := make([]string, len(values))
+		copy(copied, values)
+		headers[key] = copied
 	}
 	return headers
+}
+
+func shouldSkipRequestHeader(key string) bool {
+	canonical := http.CanonicalHeaderKey(key)
+	switch canonical {
+	case "Accept-Encoding", "Connection", "Content-Length", "Content-Type", "Host", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	}
+	return canonical == http.CanonicalHeaderKey(manager.UsageMetricsRequestHeader) ||
+		canonical == http.CanonicalHeaderKey("X-Tinfoil-Client-Requested-Usage")
 }
 
 func cloneHeaders(source http.Header) http.Header {
@@ -504,6 +573,125 @@ func cloneHeaders(source http.Header) http.Header {
 		headers[key] = copied
 	}
 	return headers
+}
+
+func applyAggregatedUsage(response *upstreamJSONResponse, path string, usage *tokencount.Usage) {
+	if response == nil || response.body == nil || usage == nil {
+		return
+	}
+
+	switch path {
+	case "/v1/responses":
+		response.body["usage"] = map[string]any{
+			"input_tokens":  usage.PromptTokens,
+			"output_tokens": usage.CompletionTokens,
+			"total_tokens":  usage.TotalTokens,
+		}
+	default:
+		response.body["usage"] = map[string]any{
+			"prompt_tokens":     usage.PromptTokens,
+			"completion_tokens": usage.CompletionTokens,
+			"total_tokens":      usage.TotalTokens,
+		}
+	}
+}
+
+func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool) {
+	if response == nil {
+		return
+	}
+
+	response.header.Del(manager.UsageMetricsResponseHeader)
+	if !usageMetricsRequested {
+		return
+	}
+
+	usage := usageFromRaw(response.body["usage"])
+	if usage == nil {
+		return
+	}
+	response.header.Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
+}
+
+func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return
+	}
+
+	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+	if apiKey == "" {
+		return
+	}
+
+	usage := usageFromRaw(response.body["usage"])
+	promptTokens := 0
+	completionTokens := 0
+	totalTokens := 0
+	if usage != nil {
+		promptTokens = usage.PromptTokens
+		completionTokens = usage.CompletionTokens
+		totalTokens = usage.TotalTokens
+	}
+
+	em.AddBillingEvent(billing.Event{
+		Timestamp:        time.Now(),
+		UserID:           "authenticated_user",
+		APIKey:           apiKey,
+		Model:            modelName,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+		RequestID:        responseRequestID(response.header, r.Header),
+		Enclave:          response.header.Get("Tinfoil-Enclave"),
+		RequestPath:      r.URL.Path,
+		Streaming:        streaming,
+	})
+}
+
+func usageFromRaw(raw any) *tokencount.Usage {
+	if raw == nil {
+		return nil
+	}
+
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+
+	var usage tokencount.Usage
+	if err := json.Unmarshal(data, &usage); err != nil {
+		return nil
+	}
+	usage.Normalize()
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		return nil
+	}
+	return &usage
+}
+
+func responseRequestID(headers ...http.Header) string {
+	for _, header := range headers {
+		if header == nil {
+			continue
+		}
+		if requestID := header.Get("X-Request-Id"); requestID != "" {
+			return requestID
+		}
+		if requestID := header.Get("X-Request-ID"); requestID != "" {
+			return requestID
+		}
+	}
+	return ""
+}
+
+func formatUsageHeader(usage *tokencount.Usage) string {
+	return "prompt=" + strconv.Itoa(usage.PromptTokens) +
+		",completion=" + strconv.Itoa(usage.CompletionTokens) +
+		",total=" + strconv.Itoa(usage.TotalTokens)
 }
 
 func writeUpstreamError(w http.ResponseWriter, err error) error {
@@ -536,7 +724,7 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 	return err
 }
 
-func streamChatCompletion(w http.ResponseWriter, r *http.Request, response *upstreamJSONResponse) error {
+func streamChatCompletion(w http.ResponseWriter, r *http.Request, response *upstreamJSONResponse, usageMetricsRequested bool) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -547,6 +735,11 @@ func streamChatCompletion(w http.ResponseWriter, r *http.Request, response *upst
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	if usageMetricsRequested {
+		if usage := usageFromRaw(response.body["usage"]); usage != nil {
+			addTrailerHeader(w.Header(), manager.UsageMetricsResponseHeader)
+		}
+	}
 	w.WriteHeader(response.statusCode)
 
 	choices, _ := response.body["choices"].([]any)
@@ -660,11 +853,16 @@ func streamChatCompletion(w http.ResponseWriter, r *http.Request, response *upst
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return err
 	}
+	if usageMetricsRequested {
+		if usage := usageFromRaw(response.body["usage"]); usage != nil {
+			w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
+		}
+	}
 	flusher.Flush()
 	return nil
 }
 
-func streamResponses(w http.ResponseWriter, response *upstreamJSONResponse) error {
+func streamResponses(w http.ResponseWriter, response *upstreamJSONResponse, usageMetricsRequested bool) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -675,6 +873,11 @@ func streamResponses(w http.ResponseWriter, response *upstreamJSONResponse) erro
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	if usageMetricsRequested {
+		if usage := usageFromRaw(response.body["usage"]); usage != nil {
+			addTrailerHeader(w.Header(), manager.UsageMetricsResponseHeader)
+		}
+	}
 	w.WriteHeader(response.statusCode)
 
 	responseBody := cloneJSONMap(response.body)
@@ -732,6 +935,11 @@ func streamResponses(w http.ResponseWriter, response *upstreamJSONResponse) erro
 		return err
 	}
 
+	if usageMetricsRequested {
+		if usage := usageFromRaw(response.body["usage"]); usage != nil {
+			w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
+		}
+	}
 	flusher.Flush()
 	return nil
 }
@@ -798,6 +1006,24 @@ func sseEvent(w http.ResponseWriter, event string, body map[string]any) error {
 	}
 	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 	return err
+}
+
+func addTrailerHeader(h http.Header, name string) {
+	existing := h.Values("Trailer")
+	for _, value := range existing {
+		for _, part := range strings.Split(value, ",") {
+			if http.CanonicalHeaderKey(strings.TrimSpace(part)) == http.CanonicalHeaderKey(name) {
+				return
+			}
+		}
+	}
+
+	if len(existing) == 0 {
+		h.Set("Trailer", name)
+		return
+	}
+
+	h.Set("Trailer", strings.Join(append(existing, name), ", "))
 }
 
 func copyResponseHeaders(dst, src http.Header) {

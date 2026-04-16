@@ -79,6 +79,12 @@ func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
 	return em.requestTracker
 }
 
+func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
+	if em.billingCollector != nil {
+		em.billingCollector.AddEvent(event)
+	}
+}
+
 // GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
 func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimitConfig {
 	model, found := em.GetModel(modelName)

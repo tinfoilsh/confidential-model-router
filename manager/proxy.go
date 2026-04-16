@@ -210,6 +210,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 		emitZeroTokenEvent := func() {
+			if billingCollector == nil || apiKey == "" {
+				return
+			}
 			billingCollector.AddEvent(billing.Event{
 				Timestamp:   time.Now(),
 				UserID:      userID,
@@ -226,9 +229,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// connections and copy bidirectionally after this callback returns.
 		// We must not touch the body or wrap it, but still emit a billing event.
 		if resp.StatusCode == http.StatusSwitchingProtocols {
-			if billingCollector != nil && apiKey != "" {
-				emitZeroTokenEvent()
-			}
+			emitZeroTokenEvent()
 			return nil
 		}
 

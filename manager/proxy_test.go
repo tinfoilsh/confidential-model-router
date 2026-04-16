@@ -164,6 +164,30 @@ func TestProxyBilling_WebsearchUsageEmitsTokenEvent(t *testing.T) {
 	}
 }
 
+func TestProxyBilling_ClientHeaderCannotBypassBilling(t *testing.T) {
+	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
+	}))
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req.Header.Set("X-Tinfoil-Internal-Tool-Loop", "true")
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	events := collector.GetEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 billing event even with legacy internal header, got %d", len(events))
+	}
+	if events[0].PromptTokens != 5 || events[0].CompletionTokens != 15 {
+		t.Errorf("expected token event preserved, got prompt=%d completion=%d",
+			events[0].PromptTokens, events[0].CompletionTokens)
+	}
+}
+
 // --- Circuit breaker tests ---
 
 func TestCircuitBreaker_StartsClosed(t *testing.T) {

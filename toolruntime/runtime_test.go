@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 func TestReplaceResponsesWebSearchTools(t *testing.T) {
@@ -107,6 +108,7 @@ func TestSplitToolCalls(t *testing.T) {
 func TestModelRequestHeaders(t *testing.T) {
 	source := make(http.Header)
 	source.Set("Authorization", "Bearer secret")
+	source.Set("OpenAI-Organization", "org_123")
 	source.Set(manager.UsageMetricsRequestHeader, "true")
 	source.Set("X-Tinfoil-Client-Requested-Usage", "true")
 
@@ -114,11 +116,17 @@ func TestModelRequestHeaders(t *testing.T) {
 	if headers.Get("Authorization") != "Bearer secret" {
 		t.Fatalf("unexpected authorization header: %#v", headers)
 	}
-	if headers.Get(manager.UsageMetricsRequestHeader) != "true" {
-		t.Fatalf("missing usage metrics header: %#v", headers)
+	if headers.Get("OpenAI-Organization") != "org_123" {
+		t.Fatalf("expected passthrough header, got %#v", headers)
 	}
-	if headers.Get("X-Tinfoil-Client-Requested-Usage") != "true" {
-		t.Fatalf("missing client requested usage header: %#v", headers)
+	if headers.Get(manager.UsageMetricsRequestHeader) != "" {
+		t.Fatalf("expected usage metrics header to be stripped, got %#v", headers)
+	}
+	if headers.Get("X-Tinfoil-Client-Requested-Usage") != "" {
+		t.Fatalf("expected client usage header to be stripped, got %#v", headers)
+	}
+	if headers.Get("X-Tinfoil-Internal-Tool-Loop") != "" {
+		t.Fatalf("expected no internal tool loop header on forwarded request, got %#v", headers)
 	}
 }
 
@@ -160,7 +168,7 @@ func TestStreamChatCompletionIncludesToolCallsAndUsage(t *testing.T) {
 		},
 	}
 
-	if err := streamChatCompletion(rec, req, response); err != nil {
+	if err := streamChatCompletion(rec, req, response, true); err != nil {
 		t.Fatalf("streamChatCompletion returned error: %v", err)
 	}
 
@@ -176,6 +184,9 @@ func TestStreamChatCompletionIncludesToolCallsAndUsage(t *testing.T) {
 	}
 	if rec.Header().Get("Tinfoil-Enclave") != "enc-1" {
 		t.Fatalf("expected upstream headers to be preserved, got %#v", rec.Header())
+	}
+	if rec.Result().Trailer.Get(manager.UsageMetricsResponseHeader) != "prompt=1,completion=0,total=1" {
+		t.Fatalf("expected usage trailer, got %#v", rec.Result().Trailer)
 	}
 }
 
@@ -208,7 +219,7 @@ func TestStreamResponsesIncludesOutputEvents(t *testing.T) {
 		},
 	}
 
-	if err := streamResponses(rec, response); err != nil {
+	if err := streamResponses(rec, response, true); err != nil {
 		t.Fatalf("streamResponses returned error: %v", err)
 	}
 
@@ -223,5 +234,35 @@ func TestStreamResponsesIncludesOutputEvents(t *testing.T) {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected stream to contain %q, got %s", fragment, body)
 		}
+	}
+	if rec.Result().Trailer.Get(manager.UsageMetricsResponseHeader) != "prompt=1,completion=1,total=2" {
+		t.Fatalf("expected usage trailer, got %#v", rec.Result().Trailer)
+	}
+}
+
+func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
+	response := &upstreamJSONResponse{
+		body: map[string]any{
+			"usage": map[string]any{
+				"input_tokens":  float64(2),
+				"output_tokens": float64(3),
+				"total_tokens":  float64(5),
+			},
+		},
+		header: make(http.Header),
+	}
+
+	applyAggregatedUsage(response, "/v1/responses", &tokencount.Usage{
+		PromptTokens:     7,
+		CompletionTokens: 11,
+		TotalTokens:      18,
+	})
+
+	usage := usageFromRaw(response.body["usage"])
+	if usage == nil {
+		t.Fatal("expected aggregated usage")
+	}
+	if usage.PromptTokens != 7 || usage.CompletionTokens != 11 || usage.TotalTokens != 18 {
+		t.Fatalf("unexpected aggregated usage: %#v", usage)
 	}
 }

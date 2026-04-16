@@ -487,7 +487,11 @@ func main() {
 
 				if useWebsearch {
 					if err := toolruntime.Handle(w, r, em, toolprofile.WebSearch, body, modelName); err != nil {
-						jsonError(w, err.Error(), manager.ErrTypeServer, http.StatusBadGateway)
+						log.WithError(err).WithFields(log.Fields{
+							"model": modelName,
+							"path":  r.URL.Path,
+						}).Error("tool runtime failed")
+						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 					}
 					return
 				}
