@@ -36,7 +36,7 @@ models:
   glm-5-1:
     repo: tinfoilsh/confidential-glm5-1
     enclaves:
-      - glm-5-1-inf10.tinfoil.containers.tinfoil.dev
+      - glm-5-1.tinfoil.containers.tinfoil.dev
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
