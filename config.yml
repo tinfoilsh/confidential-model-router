@@ -80,5 +80,5 @@ models:
     enclaves:
       - gemma4-31b.inf9.tinfoil.sh
     overload:
-      max_requests_waiting: 8
+      max_requests_waiting: 16
       retry_after_minutes: 1
