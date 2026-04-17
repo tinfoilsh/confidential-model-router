@@ -1,4 +1,5 @@
 .idea/
+.env 
 confidential-model-router
 proxy
 proxyctl
