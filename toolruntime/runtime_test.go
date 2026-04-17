@@ -298,14 +298,88 @@ func TestPrependResponsesPromptPreservesPromptItems(t *testing.T) {
 
 	items := prependResponsesPrompt(prompt, "user question")
 	list, _ := items.([]any)
-	if len(list) != 2 {
-		t.Fatalf("expected 2 items, got %d", len(list))
+	if len(list) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(list))
 	}
 
 	first, _ := list[0].(map[string]any)
 	second, _ := list[1].(map[string]any)
-	if fmt.Sprint(first["role"]) != "system" || fmt.Sprint(second["role"]) != "user" {
+	third, _ := list[2].(map[string]any)
+	if fmt.Sprint(first["role"]) != "system" || fmt.Sprint(second["role"]) != "system" || fmt.Sprint(third["role"]) != "user" {
 		t.Fatalf("unexpected prompt ordering: %#v", list)
+	}
+	if !strings.Contains(fmt.Sprint(first["content"]), "Current date and time:") {
+		t.Fatalf("expected context message first, got %#v", first)
+	}
+}
+
+func TestPrependChatPromptAddsCurrentDateContext(t *testing.T) {
+	prompt := &mcp.GetPromptResult{
+		Messages: []*mcp.PromptMessage{
+			{
+				Role:    "system",
+				Content: &mcp.TextContent{Text: "system prompt"},
+			},
+		},
+	}
+
+	messages := prependChatPrompt(prompt, []any{
+		map[string]any{"role": "user", "content": "user question"},
+	})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+
+	first, _ := messages[0].(map[string]any)
+	second, _ := messages[1].(map[string]any)
+	if fmt.Sprint(first["role"]) != "system" || !strings.Contains(fmt.Sprint(first["content"]), "Current date and time:") {
+		t.Fatalf("unexpected context message: %#v", first)
+	}
+	if fmt.Sprint(second["role"]) != "system" || fmt.Sprint(second["content"]) != "system prompt" {
+		t.Fatalf("unexpected prompt message ordering: %#v", messages)
+	}
+}
+
+func TestFormatStructuredToolOutputUsesNumberedSearchMarkers(t *testing.T) {
+	state := &citationState{nextIndex: 1}
+	formatted := formatStructuredToolOutput("search", map[string]any{
+		"results": []any{
+			map[string]any{
+				"title":          "Result A",
+				"url":            "https://example.com/a",
+				"content":        "Alpha",
+				"published_date": "2026-04-17",
+			},
+			map[string]any{
+				"title":   "Result B",
+				"url":     "https://example.com/b",
+				"content": "Beta",
+			},
+		},
+	}, state)
+
+	for _, fragment := range []string{"【1】Result A", "URL: https://example.com/a", "Published: 2026-04-17", "【2】Result B"} {
+		if !strings.Contains(formatted, fragment) {
+			t.Fatalf("expected %q in formatted output, got %q", fragment, formatted)
+		}
+	}
+}
+
+func TestFormatStructuredToolOutputUsesNumberedFetchMarkers(t *testing.T) {
+	state := &citationState{nextIndex: 3}
+	formatted := formatStructuredToolOutput("fetch", map[string]any{
+		"pages": []any{
+			map[string]any{
+				"url":     "https://example.com/page",
+				"content": "Page body",
+			},
+		},
+	}, state)
+
+	for _, fragment := range []string{"【3】Fetched page", "URL: https://example.com/page", "Page body"} {
+		if !strings.Contains(formatted, fragment) {
+			t.Fatalf("expected %q in formatted output, got %q", fragment, formatted)
+		}
 	}
 }
 
