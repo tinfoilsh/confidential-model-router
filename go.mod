@@ -9,7 +9,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
 	github.com/tinfoilsh/tinfoil-go v0.12.7
-	github.com/tinfoilsh/usage-reporting-go v0.0.1
+	github.com/tinfoilsh/usage-reporting-go v0.0.2
 	gopkg.in/yaml.v2 v2.4.0
 )
 
