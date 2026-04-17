@@ -71,6 +71,10 @@ var (
 	updateConfigURL     = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
 	domain              = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
 	refreshInterval     = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	// debug enables non-production behaviors such as honoring
+	// LOCAL_WEBSEARCH_MCP_ENDPOINT to bypass attested TLS pinning for the
+	// websearch MCP server. MUST NOT be enabled in deployed enclaves.
+	debug = flag.Bool("debug", getEnvBool("DEBUG"), "enable debug-only overrides for local development (env: DEBUG)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -224,6 +228,10 @@ func main() {
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
 		log.Fatal(err)
+	}
+	em.SetDebugMode(*debug)
+	if *debug {
+		log.Warn("debug mode enabled: local development overrides are active; do not use in production")
 	}
 	defer em.Shutdown()
 	go em.StartWorker()

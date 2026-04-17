@@ -62,7 +62,12 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 }
 
 func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {
-	if modelName == "websearch" {
+	// LOCAL_WEBSEARCH_MCP_ENDPOINT bypasses attested TLS pinning and connects
+	// to an arbitrary URL (typically http://127.0.0.1). It is only honored when
+	// debug mode is explicitly enabled via the --debug flag or DEBUG env var,
+	// so a misconfigured production deployment cannot silently downgrade the
+	// trust boundary for the websearch MCP server.
+	if em.debug && modelName == "websearch" {
 		if endpoint := os.Getenv("LOCAL_WEBSEARCH_MCP_ENDPOINT"); endpoint != "" {
 			return endpoint, &http.Client{Timeout: 10 * time.Minute}, nil
 		}

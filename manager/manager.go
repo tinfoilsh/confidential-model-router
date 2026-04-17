@@ -57,6 +57,19 @@ type EnclaveManager struct {
 	errors               []string
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
+	debug                bool
+}
+
+// SetDebugMode enables debug-only behaviors such as honoring the
+// LOCAL_WEBSEARCH_MCP_ENDPOINT env var, which points the tool runtime at a
+// local, non-attested MCP server. MUST NOT be enabled in production enclaves.
+func (em *EnclaveManager) SetDebugMode(enabled bool) {
+	em.debug = enabled
+}
+
+// DebugMode reports whether debug-only overrides are active.
+func (em *EnclaveManager) DebugMode() bool {
+	return em.debug
 }
 
 // ModelExists checks if a model exists
