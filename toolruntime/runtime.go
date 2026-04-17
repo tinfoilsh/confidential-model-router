@@ -20,7 +20,10 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
-const maxToolIterations = 5
+const (
+	maxToolIterations          = 10
+	finalAnswerInstructionText = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best possible answer using only the information already gathered."
+)
 
 type headerRoundTripper struct {
 	base    http.RoundTripper
@@ -164,7 +167,7 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		reqBody["messages"] = messages
 	}
 
-	return nil, fmt.Errorf("tool loop exceeded max iterations")
+	return postJSON(ctx, em, modelName, "/v1/chat/completions", forcedFinalChatRequest(reqBody), requestHeaders)
 }
 
 func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (*upstreamJSONResponse, error) {
@@ -212,7 +215,7 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 		reqBody["input"] = accumulatedInput
 	}
 
-	return nil, fmt.Errorf("tool loop exceeded max iterations")
+	return postJSON(ctx, em, modelName, "/v1/responses", forcedFinalResponsesRequest(reqBody), requestHeaders)
 }
 
 type upstreamJSONResponse struct {
@@ -499,12 +502,75 @@ func prependResponsesPrompt(prompt *mcp.GetPromptResult, raw any) any {
 	return append(promptItems, items...)
 }
 
+func forcedFinalChatRequest(reqBody map[string]any) map[string]any {
+	finalBody := cloneJSONMap(reqBody)
+	messages, _ := finalBody["messages"].([]any)
+	finalBody["messages"] = append(messages, map[string]any{
+		"role":    "system",
+		"content": finalAnswerInstructionText,
+	})
+	delete(finalBody, "tools")
+	finalBody["parallel_tool_calls"] = false
+	return finalBody
+}
+
+func forcedFinalResponsesRequest(reqBody map[string]any) map[string]any {
+	finalBody := cloneJSONMap(reqBody)
+	finalBody["input"] = append(forcedFinalResponseInput(finalBody["input"]), map[string]any{
+		"type": "message",
+		"role": "system",
+		"content": []map[string]any{
+			{
+				"type": "input_text",
+				"text": finalAnswerInstructionText,
+			},
+		},
+	})
+	delete(finalBody, "tools")
+	finalBody["parallel_tool_calls"] = false
+	return finalBody
+}
+
+func forcedFinalResponseInput(raw any) []any {
+	input := normalizeResponsesInput(raw)
+	finalInput := make([]any, 0, len(input))
+	for _, rawItem := range input {
+		item, _ := rawItem.(map[string]any)
+		if item == nil {
+			continue
+		}
+
+		switch stringValue(item["type"]) {
+		case "message":
+			finalInput = append(finalInput, rawItem)
+		case "function_call_output":
+			finalInput = append(finalInput, map[string]any{
+				"type": "message",
+				"role": "system",
+				"content": []map[string]any{
+					{
+						"type": "input_text",
+						"text": "Tool result:\n" + fmt.Sprint(item["output"]),
+					},
+				},
+			})
+		}
+	}
+	return finalInput
+}
+
 func normalizeResponsesInput(raw any) []any {
 	switch value := raw.(type) {
 	case nil:
 		return []any{}
 	case []any:
 		return value
+	case []map[string]any:
+		items := make([]any, 0, len(value))
+		for _, item := range value {
+			items = append(items, item)
+		}
+		return items
 	case string:
 		if strings.TrimSpace(value) == "" {
 			return []any{}

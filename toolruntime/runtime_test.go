@@ -328,3 +328,64 @@ func TestNormalizeResponsesOutputItemsConvertsMCPCalls(t *testing.T) {
 		t.Fatalf("unexpected normalized item: %#v", item)
 	}
 }
+
+func TestForcedFinalChatRequestRemovesToolsAndAppendsInstruction(t *testing.T) {
+	reqBody := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function"},
+		},
+	}
+
+	finalBody := forcedFinalChatRequest(reqBody)
+	if _, ok := finalBody["tools"]; ok {
+		t.Fatalf("expected tools to be removed, got %#v", finalBody["tools"])
+	}
+
+	messages, _ := finalBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	last, _ := messages[1].(map[string]any)
+	if last["role"] != "system" || last["content"] != finalAnswerInstructionText {
+		t.Fatalf("unexpected final instruction: %#v", last)
+	}
+}
+
+func TestForcedFinalResponsesRequestRemovesToolsAndAppendsInstruction(t *testing.T) {
+	reqBody := map[string]any{
+		"input": []map[string]any{
+			{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "done",
+			},
+		},
+		"tools": []any{
+			map[string]any{"type": "function"},
+		},
+	}
+
+	finalBody := forcedFinalResponsesRequest(reqBody)
+	if _, ok := finalBody["tools"]; ok {
+		t.Fatalf("expected tools to be removed, got %#v", finalBody["tools"])
+	}
+
+	input, _ := finalBody["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("expected 2 input items, got %d", len(input))
+	}
+
+	first, _ := input[0].(map[string]any)
+	if first["type"] != "message" || first["role"] != "system" {
+		t.Fatalf("unexpected converted tool result: %#v", first)
+	}
+
+	last, _ := input[1].(map[string]any)
+	if last["type"] != "message" || last["role"] != "system" || fmt.Sprint(last["content"]) == "" {
+		t.Fatalf("unexpected final input item: %#v", last)
+	}
+}
