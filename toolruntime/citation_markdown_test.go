@@ -166,9 +166,6 @@ func TestAttachChatCitationsNormalizesContent(t *testing.T) {
 	}
 
 	attachChatCitations(body, state)
-	// Drop the stashed extras that attachChatCitations sets when it emits
-	// annotations so the body is a plain JSON-shaped map again.
-	takeRouterChatExtras(body)
 
 	choice := body["choices"].([]any)[0].(map[string]any)
 	message := choice["message"].(map[string]any)

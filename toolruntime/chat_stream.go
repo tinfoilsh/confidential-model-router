@@ -1,0 +1,947 @@
+package toolruntime
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
+)
+
+// runChatStreaming is the streaming entry point for the Chat Completions
+// route. It drives the same tool loop as runChatLoop but consumes the
+// upstream model's stream incrementally so that assistant content deltas,
+// citation annotations, and web_search_call events are forwarded to the
+// client live rather than synthesized at the end of the turn.
+//
+// The function assumes isStream(body) is already true. Non-streaming callers
+// continue to go through runChatLoop so existing behavior is preserved for
+// SDKs that do not want SSE back.
+func runChatStreaming(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	em *manager.EnclaveManager,
+	session *mcp.ClientSession,
+	body map[string]any,
+	modelName string,
+	requestHeaders http.Header,
+	prompt *mcp.GetPromptResult,
+	tools []*mcp.Tool,
+	ownedTools map[string]struct{},
+) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("streaming not supported")
+	}
+
+	searchOpts := parseChatWebSearchOptions(body)
+	reqBody := cloneJSONMap(body)
+	delete(reqBody, "web_search_options")
+	delete(reqBody, "filters")
+	delete(reqBody, "pii_check_options")
+	delete(reqBody, "prompt_injection_check_options")
+	reqBody["stream"] = true
+	reqBody["stream_options"] = map[string]any{"include_usage": true}
+	reqBody["parallel_tool_calls"] = false
+	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
+	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
+
+	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
+	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
+
+	streamer := &chatStreamer{
+		w:                     w,
+		flusher:               flusher,
+		usageMetricsRequested: usageMetricsRequested,
+		clientRequestedUsage:  clientRequestedUsage,
+		citations:             &citationState{nextIndex: 1},
+		emitter:               nil,
+		usageTotals:           &usageAccumulator{},
+	}
+	streamer.emitter = newCitationEmitter(streamer.citations)
+
+	for i := 0; i < maxToolIterations; i++ {
+		result, err := streamer.runIteration(ctx, em, modelName, reqBody, requestHeaders)
+		if err != nil {
+			return streamer.terminateWithError(r, em, modelName, err)
+		}
+		// If the client has disconnected, stop before spending another
+		// round of MCP tool calls and upstream tokens on work nobody is
+		// listening for.
+		if streamer.writeErr != nil {
+			streamer.emitBillingEvent(r, em, modelName, streamer.finalUsage())
+			return nil
+		}
+
+		// Mid-turn client tool_calls are intentionally dropped; only the
+		// final turn (no router tool calls to resolve) forwards them to
+		// the client. This preserves parity with runChatLoop.
+		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
+		if len(routerToolCalls) == 0 {
+			return streamer.finalize(r, em, modelName, result, clientToolCalls)
+		}
+
+		messages, _ := reqBody["messages"].([]any)
+		messages = append(messages, result.assistantMessage())
+		for _, call := range routerToolCalls {
+			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
+			output, toolErr := streamer.executeTool(ctx, session, call)
+			record := toolCallRecord{
+				name:      call.name,
+				arguments: call.arguments,
+			}
+			if toolErr != nil {
+				output = toolErr.Error()
+				record.errorReason = publicToolErrorReason(call.name, toolErr)
+			} else {
+				record.resultURLs = extractToolOutputURLs(output)
+			}
+			streamer.citations.recordToolCall(record)
+			messages = append(messages, map[string]any{
+				"role":         "tool",
+				"tool_call_id": call.id,
+				"content":      output,
+			})
+		}
+		reqBody["messages"] = messages
+	}
+
+	// Exhausted the tool budget; force a final-answer turn with tools removed
+	// and stream it to the client directly.
+	finalBody := forcedFinalChatRequest(reqBody)
+	finalBody["stream"] = true
+	finalBody["stream_options"] = map[string]any{"include_usage": true}
+	result, err := streamer.runIteration(ctx, em, modelName, finalBody, requestHeaders)
+	if err != nil {
+		return streamer.terminateWithError(r, em, modelName, err)
+	}
+	return streamer.finalize(r, em, modelName, result, nil)
+}
+
+// chatStreamer owns the single logical chat.completion.chunk stream that
+// goes back to the client across however many tool iterations the model
+// needs. It keeps id/created/model pinned to the values the first upstream
+// chunk reports so downstream SDKs see one continuous logical response.
+type chatStreamer struct {
+	w                     http.ResponseWriter
+	flusher               http.Flusher
+	usageMetricsRequested bool
+	clientRequestedUsage  bool
+	citations             *citationState
+	emitter               *citationEmitter
+
+	// headersWritten is true once the SSE headers have been emitted.
+	// After that any upstream error is surfaced as an SSE error chunk
+	// rather than a plain JSON error response.
+	headersWritten bool
+
+	// roleEmitted is true after the initial assistant role-delta chunk has
+	// been sent. The role chunk is deferred until the first upstream frame
+	// is available so it can carry the upstream-provided id/created/model
+	// rather than router-synthesized placeholders.
+	roleEmitted bool
+
+	// id, created and model are captured from the first upstream chunk we
+	// see and pinned for the rest of the logical stream. Subsequent
+	// upstream turns keep re-sending fresh values; we ignore them so the
+	// client sees one coherent chat.completion. The fallback* fields are
+	// used only if the upstream never sent a given value by the time we
+	// need to emit a chunk (defensive — in practice every compliant SSE
+	// producer sends id/created/model on the very first frame).
+	id             string
+	created        int64
+	model          string
+	fallbackModel  string
+	identityPinned bool
+
+	// upstreamHeaders holds the most recent upstream response headers so
+	// the billing event can surface the Tinfoil-Enclave attribution and
+	// the request id in the same shape as the non-streaming path.
+	upstreamHeaders http.Header
+
+	usageTotals *usageAccumulator
+
+	// writeErr latches the first error observed while writing to the
+	// client SSE stream (typically io.ErrClosedPipe after a client
+	// disconnect). Once set, every subsequent emit call is a no-op and
+	// the outer loop aborts so the router does not keep running
+	// upstream turns or MCP tool calls on behalf of a caller that has
+	// gone away.
+	writeErr error
+}
+
+// chatIterationResult summarizes one upstream stream's payload once the
+// stream terminated: accumulated content, any parsed tool calls, and the
+// finish reason the upstream reported. Callers use this to decide whether
+// to loop (router-owned tool calls present) or finalize (no tool calls or
+// only client-owned tool calls remain).
+type chatIterationResult struct {
+	content      string
+	toolCalls    []toolCall
+	rawToolCalls []any
+	finishReason string
+	usage        map[string]any
+}
+
+// assistantMessage builds the OpenAI-shaped assistant message that the
+// router appends to the messages array between iterations so the next
+// upstream call sees the tool_calls the model just emitted. We preserve
+// the exact raw tool_calls from the stream so serialization round-trips
+// byte-for-byte; the parsed form is only used for loop control.
+func (r *chatIterationResult) assistantMessage() map[string]any {
+	message := map[string]any{
+		"role":    "assistant",
+		"content": r.content,
+	}
+	if len(r.rawToolCalls) > 0 {
+		message["tool_calls"] = r.rawToolCalls
+	}
+	return message
+}
+
+// runIteration posts one upstream streaming call and drives the SSE pump
+// until the upstream signals done. Content deltas flow through the citation
+// emitter and out to the client immediately. Tool-call deltas accumulate
+// without being forwarded to the client until we know whether they are
+// router-owned or client-owned.
+func (s *chatStreamer) runIteration(
+	ctx context.Context,
+	em *manager.EnclaveManager,
+	modelName string,
+	reqBody map[string]any,
+	requestHeaders http.Header,
+) (chatIterationResult, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return chatIterationResult{}, err
+	}
+	hdrs := cloneHeaders(requestHeaders)
+	hdrs.Set("Content-Type", "application/json")
+	hdrs.Set("Accept", "text/event-stream")
+
+	resp, err := em.DoModelRequest(ctx, modelName, "/v1/chat/completions", bodyBytes, hdrs)
+	if err != nil {
+		return chatIterationResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(resp.Body)
+		return chatIterationResult{}, &upstreamError{
+			statusCode: resp.StatusCode,
+			header:     resp.Header.Clone(),
+			body:       errBody,
+		}
+	}
+	s.upstreamHeaders = resp.Header
+	if !s.headersWritten {
+		s.writeSSEHeaders(resp.Header, modelName)
+	}
+
+	return s.pumpUpstream(newSSEReader(resp.Body))
+}
+
+// pumpUpstream reads every SSE frame from upstream for the current
+// iteration, forwards assistant content (through the citation emitter) and
+// finish metadata to the client, and accumulates tool-call deltas plus
+// usage for loop control. It returns when the upstream sends `[DONE]` or
+// otherwise ends the SSE stream. A bare EOF before `[DONE]` is treated as
+// an abrupt upstream disconnect and surfaced to the caller as an error so
+// the client sees a terminating error frame rather than a silently
+// truncated completion.
+func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, error) {
+	builder := &chatToolCallBuilder{}
+	result := chatIterationResult{}
+	doneSeen := false
+	for {
+		if s.writeErr != nil {
+			return result, s.writeErr
+		}
+		frame, err := reader.next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return result, err
+		}
+		if frame.data == "[DONE]" {
+			doneSeen = true
+			break
+		}
+		if frame.data == "" {
+			continue
+		}
+
+		var chunk map[string]any
+		if jsonErr := json.Unmarshal([]byte(frame.data), &chunk); jsonErr != nil {
+			// Non-streaming postJSON hard-fails on invalid JSON;
+			// streaming must do the same so silently lost chunks
+			// (and therefore lost content / tool calls / usage) are
+			// surfaced to the client as a terminating error instead
+			// of a truncated success.
+			return result, &upstreamError{
+				statusCode: http.StatusBadGateway,
+				header:     http.Header{"Content-Type": []string{"application/json"}},
+				body: mustMarshal(map[string]any{
+					"error": map[string]any{
+						"message": "upstream emitted malformed SSE JSON: " + jsonErr.Error(),
+						"type":    "upstream_error",
+					},
+				}),
+			}
+		}
+		// Upstream can emit a standalone error object mid-stream (for
+		// example, context-length exceeded part-way through decoding).
+		// Surface it as an upstream error the loop will translate into
+		// a client-facing terminating error rather than silently hiding
+		// the failure and continuing to consume frames.
+		if errObj, ok := chunk["error"].(map[string]any); ok {
+			return result, &upstreamError{
+				statusCode: http.StatusBadGateway,
+				header:     http.Header{"Content-Type": []string{"application/json"}},
+				body:       mustMarshal(map[string]any{"error": errObj}),
+			}
+		}
+		s.ensureStreamIdentity(chunk)
+		// The assistant role-delta chunk is deferred until we have read
+		// one upstream chunk so it can carry upstream's id/created/model
+		// instead of router-synthesized placeholders. We still fire it
+		// exactly once across the whole logical stream.
+		s.ensureRoleEmitted()
+
+		if usage, ok := chunk["usage"].(map[string]any); ok {
+			result.usage = usage
+		}
+
+		choices, _ := chunk["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		choice, _ := choices[0].(map[string]any)
+		if choice == nil {
+			continue
+		}
+		if reason := stringValue(choice["finish_reason"]); reason != "" {
+			result.finishReason = reason
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			continue
+		}
+		if content := stringValue(delta["content"]); content != "" {
+			result.content += content
+			s.emitContentDelta(content)
+		}
+		if rawCalls, ok := delta["tool_calls"].([]any); ok {
+			builder.ingest(rawCalls)
+		}
+	}
+
+	result.toolCalls = builder.toolCalls()
+	result.rawToolCalls = builder.raw()
+	if result.usage != nil {
+		s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": result.usage}})
+	}
+	if !doneSeen {
+		return result, &upstreamError{
+			statusCode: http.StatusBadGateway,
+			header:     http.Header{"Content-Type": []string{"application/json"}},
+			body: mustMarshal(map[string]any{
+				"error": map[string]any{
+					"message": "upstream stream ended without a terminal [DONE] marker",
+					"type":    "upstream_error",
+				},
+			}),
+		}
+	}
+	return result, nil
+}
+
+// ensureStreamIdentity pins the id/created/model to the first upstream
+// chunk's values exactly once and ignores every subsequent chunk so the
+// client sees one coherent chat completion across an arbitrary number of
+// internal tool iterations. Each field is captured independently because
+// some upstreams emit id/created on the very first frame and model on a
+// later frame (or vice-versa). identityPinned flips to true once ALL
+// three have been populated, after which further upstream values are
+// simply ignored.
+func (s *chatStreamer) ensureStreamIdentity(chunk map[string]any) {
+	if s.identityPinned {
+		return
+	}
+	if s.id == "" {
+		if id := stringValue(chunk["id"]); id != "" {
+			s.id = id
+		}
+	}
+	if s.created == 0 {
+		if created := int64(numberValue(chunk["created"])); created > 0 {
+			s.created = created
+		}
+	}
+	if s.model == "" {
+		if model := stringValue(chunk["model"]); model != "" {
+			s.model = model
+		}
+	}
+	if s.id != "" && s.created != 0 && s.model != "" {
+		s.identityPinned = true
+	}
+}
+
+// streamID returns the stable id for the current logical chat completion,
+// falling back to a router-minted one if upstream never sent one by the
+// time we need to emit a chunk. The fallback is remembered so subsequent
+// chunks keep the same id.
+func (s *chatStreamer) streamID() string {
+	if s.id == "" {
+		s.id = "chatcmpl-" + uuid.NewString()
+	}
+	return s.id
+}
+
+// streamCreated returns the stable creation timestamp for the current
+// logical chat completion, falling back to the router's wall clock if
+// upstream never sent one by the time we need to emit a chunk.
+func (s *chatStreamer) streamCreated() int64 {
+	if s.created == 0 {
+		s.created = time.Now().Unix()
+	}
+	return s.created
+}
+
+// streamModel returns the stable model name for the current logical chat
+// completion, falling back to the caller-requested label only if upstream
+// never sent a model field.
+func (s *chatStreamer) streamModel() string {
+	if s.model == "" {
+		s.model = s.fallbackModel
+	}
+	return s.model
+}
+
+// writeSSEHeaders sets up the SSE response to the client. Called exactly
+// once per logical stream, the first time upstream returns a 2xx status.
+// Identity fields are NOT pre-populated here: we wait until we have read
+// at least one upstream chunk so the role-delta and every subsequent
+// chunk carries the upstream-provided id/created/model. The upstream
+// usage-metrics header is stripped unconditionally because we own the
+// authoritative aggregated-usage trailer for the full logical stream.
+func (s *chatStreamer) writeSSEHeaders(upstreamHeaders http.Header, fallbackModel string) {
+	copyResponseHeaders(s.w.Header(), upstreamHeaders)
+	s.w.Header().Del("Content-Length")
+	s.w.Header().Del(manager.UsageMetricsResponseHeader)
+	s.w.Header().Set("Content-Type", "text/event-stream")
+	s.w.Header().Set("Cache-Control", "no-cache")
+	s.w.Header().Set("Connection", "keep-alive")
+	if s.usageMetricsRequested {
+		addTrailerHeader(s.w.Header(), manager.UsageMetricsResponseHeader)
+	}
+	s.w.WriteHeader(http.StatusOK)
+	s.headersWritten = true
+	s.fallbackModel = fallbackModel
+}
+
+// ensureRoleEmitted writes the initial assistant role-delta chunk exactly
+// once, deferred until the first upstream frame has been observed so the
+// chunk carries the upstream-provided id/created/model instead of a
+// router-synthesized placeholder.
+func (s *chatStreamer) ensureRoleEmitted() {
+	if s.roleEmitted {
+		return
+	}
+	s.roleEmitted = true
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{"role": "assistant"},
+			},
+		},
+	})
+}
+
+// emitContentDelta feeds the incoming content fragment through the citation
+// emitter and writes whatever the emitter releases to the client as a
+// content delta plus any annotation chunks for links that just resolved.
+func (s *chatStreamer) emitContentDelta(fragment string) {
+	contentChunk, annotations := s.emitter.push(fragment)
+	if contentChunk != "" {
+		s.writeChunk(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{"content": contentChunk},
+				},
+			},
+		})
+	}
+	if len(annotations) > 0 {
+		s.writeChunk(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{"annotations": nestedAnnotationsFromMatches(annotations)},
+				},
+			},
+		})
+	}
+}
+
+// flushCitations drains any trailing content still held back by the
+// emitter at end-of-stream so the user sees every rune the model produced.
+func (s *chatStreamer) flushCitations() {
+	contentChunk, annotations := s.emitter.flush()
+	if contentChunk != "" {
+		s.writeChunk(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{"content": contentChunk},
+				},
+			},
+		})
+	}
+	if len(annotations) > 0 {
+		s.writeChunk(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{"annotations": nestedAnnotationsFromMatches(annotations)},
+				},
+			},
+		})
+	}
+}
+
+// executeTool runs a single MCP tool call and emits web_search_call events
+// wrapping the call. Failures are surfaced as web_search_call "failed"
+// events and returned to the caller so the tool output carries the error
+// text, matching the non-streaming path that serializes err.Error() into
+// the tool-result message.
+func (s *chatStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
+	switch call.name {
+	case "search":
+		id := "ws_" + uuid.NewString()
+		s.emitWebSearchCall(id, "in_progress", map[string]any{
+			"type":  "search",
+			"query": stringValue(call.arguments["query"]),
+		}, "")
+		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
+		if err != nil {
+			s.emitWebSearchCall(id, "failed", map[string]any{
+				"type":  "search",
+				"query": stringValue(call.arguments["query"]),
+			}, publicToolErrorReason(call.name, err))
+			return "", err
+		}
+		completed := map[string]any{
+			"type":  "search",
+			"query": stringValue(call.arguments["query"]),
+		}
+		if urls := extractToolOutputURLs(output); len(urls) > 0 {
+			completed["sources"] = urls
+		}
+		s.emitWebSearchCall(id, "completed", completed, "")
+		return output, nil
+	case "fetch":
+		urls := fetchArgumentURLs(call.arguments)
+		if len(urls) == 0 {
+			output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
+			return output, err
+		}
+		// Pair one stable id per URL so clients can correlate in_progress
+		// with the matching completed or failed event, mirroring how the
+		// non-streaming shape surfaces fetch_calls.
+		fetchIDs := make([]string, len(urls))
+		for i, url := range urls {
+			fetchIDs[i] = "ws_" + uuid.NewString()
+			s.emitWebSearchCall(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
+		}
+		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
+		if err != nil {
+			reason := publicToolErrorReason(call.name, err)
+			for i, url := range urls {
+				s.emitWebSearchCall(fetchIDs[i], "failed", map[string]any{"type": "open_page", "url": url}, reason)
+			}
+			return "", err
+		}
+		for i, url := range urls {
+			s.emitWebSearchCall(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
+		}
+		return output, nil
+	default:
+		return callTool(ctx, session, call.name, call.arguments, s.citations)
+	}
+}
+
+// emitWebSearchCall serializes a single web_search_call event into the SSE
+// stream in the shape tinfoil-go's WebSearchStream parser and the webapp
+// streaming processor already consume on the non-streaming path.
+func (s *chatStreamer) emitWebSearchCall(id, status string, action map[string]any, reason string) {
+	s.emitData(webSearchCallEvent(id, status, action, reason))
+}
+
+// writeChunk serializes a single chat.completion.chunk to the client,
+// filling in the stable id/created/model fields captured from upstream.
+// Accessors lazily fall back to router-minted defaults if upstream never
+// sent a given field by the time the chunk is emitted; in practice every
+// compliant SSE producer sends them on the very first frame.
+func (s *chatStreamer) writeChunk(partial map[string]any) {
+	chunk := map[string]any{
+		"id":      s.streamID(),
+		"object":  "chat.completion.chunk",
+		"created": s.streamCreated(),
+		"model":   s.streamModel(),
+	}
+	for key, value := range partial {
+		chunk[key] = value
+	}
+	s.emitData(chunk)
+}
+
+// emitData writes one `data:` SSE frame to the client and flushes. The
+// first write error (typically io.ErrClosedPipe once a client hangs up)
+// is captured into s.writeErr; every subsequent emitData/emitEvent call
+// is a no-op so the pump and outer loop can notice the disconnect and
+// abort without spending more upstream tokens or MCP tool calls on a
+// caller that is no longer listening.
+func (s *chatStreamer) emitData(body map[string]any) {
+	if s.writeErr != nil {
+		return
+	}
+	if err := sseData(s.w, body); err != nil {
+		s.writeErr = err
+		return
+	}
+	s.flusher.Flush()
+}
+
+// finalize emits any remaining buffered citations, forwards client-owned
+// tool_calls the model asked the user to execute, writes the finish-reason
+// chunk and final usage chunk, fires the billing event, and closes the
+// stream with `[DONE]`.
+func (s *chatStreamer) finalize(
+	r *http.Request,
+	em *manager.EnclaveManager,
+	modelName string,
+	result chatIterationResult,
+	clientToolCalls []toolCall,
+) error {
+	// Defensive: in the degenerate case where upstream never emitted a
+	// single chunk before signaling done (and the pump therefore never
+	// ran ensureRoleEmitted), the finish chunk below would be the
+	// client's first visible delta; still emit role first to keep the
+	// protocol contract.
+	s.ensureRoleEmitted()
+	s.flushCitations()
+
+	if len(clientToolCalls) > 0 {
+		raw := rawToolCallsFromParsed(clientToolCalls, result.rawToolCalls)
+		s.writeChunk(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"index": 0,
+					"delta": map[string]any{"tool_calls": raw},
+				},
+			},
+		})
+	}
+
+	finishReason := result.finishReason
+	if finishReason == "" {
+		if len(clientToolCalls) > 0 {
+			finishReason = "tool_calls"
+		} else {
+			finishReason = "stop"
+		}
+	}
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": finishReason,
+			},
+		},
+	})
+
+	finalUsage := s.finalUsage()
+	if s.clientRequestedUsage && finalUsage != nil {
+		s.writeChunk(map[string]any{
+			"choices": []any{},
+			"usage":   finalUsage,
+		})
+	}
+
+	if s.writeErr == nil {
+		if _, err := io.WriteString(s.w, "data: [DONE]\n\n"); err != nil {
+			s.writeErr = err
+		} else {
+			s.flusher.Flush()
+		}
+	}
+
+	if s.usageMetricsRequested && finalUsage != nil {
+		s.w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usageFromRawMap(finalUsage)))
+	}
+	s.emitBillingEvent(r, em, modelName, finalUsage)
+	return s.writeErr
+}
+
+// finalUsage assembles the aggregated usage block across every upstream
+// iteration in the OpenAI Chat Completions shape. The underlying
+// accumulator already handles turns where upstream omitted the usage block
+// entirely by falling back to zero.
+func (s *chatStreamer) finalUsage() map[string]any {
+	usage := s.usageTotals.Usage()
+	if usage == nil {
+		return nil
+	}
+	return map[string]any{
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+	}
+}
+
+// emitBillingEvent delegates to the shared billing emitter used by the
+// non-streaming path so streaming and non-streaming requests produce the
+// same billing-event shape, including Tinfoil-Enclave attribution and
+// request-id resolution from upstream headers.
+func (s *chatStreamer) emitBillingEvent(r *http.Request, em *manager.EnclaveManager, modelName string, usage map[string]any) {
+	if em == nil {
+		return
+	}
+	header := s.upstreamHeaders
+	if header == nil {
+		header = http.Header{}
+	}
+	response := &upstreamJSONResponse{
+		header: header,
+		body:   map[string]any{"usage": usage},
+	}
+	emitBillingEvent(em, r, response, modelName, true)
+}
+
+// terminateWithError is the single point at which a mid-stream upstream
+// failure is surfaced to the client. If no SSE has started yet we return
+// the upstream error to the caller so Handle turns it into a plain JSON
+// error response; otherwise we emit a top-level error data frame in the
+// shape OpenAI SDKs recognize mid-stream, followed by `[DONE]` so SDKs can
+// close their streams cleanly.
+func (s *chatStreamer) terminateWithError(r *http.Request, em *manager.EnclaveManager, modelName string, err error) error {
+	if !s.headersWritten {
+		return err
+	}
+	s.flushCitations()
+	s.emitData(map[string]any{"error": upstreamErrorPayload(err)})
+	if s.writeErr == nil {
+		if _, werr := io.WriteString(s.w, "data: [DONE]\n\n"); werr != nil {
+			s.writeErr = werr
+		} else {
+			s.flusher.Flush()
+		}
+	}
+	s.emitBillingEvent(r, em, modelName, s.finalUsage())
+	return nil
+}
+
+// upstreamErrorPayload extracts the most informative structured error
+// object we can show the client. If the underlying error is an
+// *upstreamError whose body is JSON with an `error` field, we return that
+// object verbatim (preserving the upstream's own `code`, `type`, `param`,
+// etc.). Otherwise we fall back to a minimal `{message, type}` envelope.
+func upstreamErrorPayload(err error) map[string]any {
+	if upErr, ok := err.(*upstreamError); ok && len(upErr.body) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(upErr.body, &parsed) == nil {
+			if inner, ok := parsed["error"].(map[string]any); ok {
+				return inner
+			}
+		}
+	}
+	return map[string]any{
+		"message": err.Error(),
+		"type":    "upstream_error",
+	}
+}
+
+// chatToolCallBuilder assembles OpenAI streaming tool_call deltas into the
+// final tool_call objects. OpenAI emits each function's name and id on
+// the first delta for a given index, and the arguments JSON in incremental
+// string fragments; we replay that protocol byte-for-byte.
+type chatToolCallBuilder struct {
+	entries []*chatToolCallEntry
+}
+
+type chatToolCallEntry struct {
+	index        int
+	id           string
+	toolType     string
+	functionName string
+	arguments    []byte
+}
+
+// ingest merges one tool_call delta list into the builder's running state.
+// It preserves the original wire-format fragment in s.raw so the assistant
+// message emitted on the next iteration carries bytewise-identical tool
+// calls to whatever upstream produced.
+func (b *chatToolCallBuilder) ingest(rawCalls []any) {
+	for _, item := range rawCalls {
+		m, _ := item.(map[string]any)
+		if m == nil {
+			continue
+		}
+		idx := int(numberValue(m["index"]))
+		for len(b.entries) <= idx {
+			b.entries = append(b.entries, &chatToolCallEntry{index: len(b.entries)})
+		}
+		entry := b.entries[idx]
+		if id := stringValue(m["id"]); id != "" {
+			entry.id = id
+		}
+		if t := stringValue(m["type"]); t != "" {
+			entry.toolType = t
+		}
+		if fn, ok := m["function"].(map[string]any); ok {
+			if name := stringValue(fn["name"]); name != "" {
+				entry.functionName = name
+			}
+			if args, ok := fn["arguments"].(string); ok && args != "" {
+				entry.arguments = append(entry.arguments, args...)
+			}
+		}
+	}
+}
+
+// toolCalls returns the assembled tool_call objects as the parsed router
+// type. Arguments are JSON-decoded when possible; malformed arguments are
+// preserved as an empty map so the loop can still surface the tool call
+// rather than silently drop it.
+func (b *chatToolCallBuilder) toolCalls() []toolCall {
+	out := make([]toolCall, 0, len(b.entries))
+	for _, entry := range b.entries {
+		if entry == nil || entry.functionName == "" {
+			continue
+		}
+		args := map[string]any{}
+		if len(entry.arguments) > 0 {
+			_ = json.Unmarshal(entry.arguments, &args)
+		}
+		out = append(out, toolCall{
+			id:        entry.id,
+			name:      entry.functionName,
+			arguments: args,
+		})
+	}
+	return out
+}
+
+// raw returns the tool_calls array in the wire shape OpenAI uses for
+// non-streaming completions. Used to rehydrate the assistant message we
+// prepend to the next iteration's messages array.
+func (b *chatToolCallBuilder) raw() []any {
+	calls := make([]any, 0, len(b.entries))
+	for _, entry := range b.entries {
+		if entry == nil || entry.functionName == "" {
+			continue
+		}
+		calls = append(calls, map[string]any{
+			"id":   entry.id,
+			"type": nonEmptyString(entry.toolType, "function"),
+			"function": map[string]any{
+				"name":      entry.functionName,
+				"arguments": string(entry.arguments),
+			},
+		})
+	}
+	return calls
+}
+
+// rawToolCallsFromParsed filters the streamed raw tool_calls down to the
+// client-owned ones and re-indexes them starting at zero so the final
+// stream chunk emits a delta.tool_calls array in the shape clients expect:
+// contiguous `index` values identifying positions in the client-visible
+// tool_calls list. The `id`, `type`, and `function` fields are preserved
+// byte-for-byte from what upstream produced.
+func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
+	allowed := make(map[string]struct{}, len(parsed))
+	for _, call := range parsed {
+		allowed[call.id] = struct{}{}
+	}
+	filtered := make([]any, 0, len(parsed))
+	for _, item := range raw {
+		source, _ := item.(map[string]any)
+		if _, ok := allowed[stringValue(source["id"])]; !ok {
+			continue
+		}
+		reindexed := map[string]any{
+			"index":    len(filtered),
+			"id":       source["id"],
+			"type":     source["type"],
+			"function": source["function"],
+		}
+		filtered = append(filtered, reindexed)
+	}
+	return filtered
+}
+
+// nestedAnnotationsFromMatches converts the internal citationAnnotation
+// slice into the nested url_citation shape documented by OpenAI for Chat
+// Completions responses so SDKs and UIs that already consume the final
+// non-streaming annotation format keep working unchanged.
+func nestedAnnotationsFromMatches(matches []citationAnnotation) []any {
+	out := make([]any, 0, len(matches))
+	for _, match := range matches {
+		citation := map[string]any{
+			"url":         match.source.url,
+			"start_index": match.startIndex,
+			"end_index":   match.endIndex,
+		}
+		if match.source.title != "" {
+			citation["title"] = match.source.title
+		}
+		out = append(out, map[string]any{
+			"type":         "url_citation",
+			"url_citation": citation,
+		})
+	}
+	return out
+}
+
+// usageFromRawMap is a thin wrapper around usageFromRaw that accepts the
+// already-typed map form used by the streaming assembler.
+func usageFromRawMap(usage map[string]any) *tokencount.Usage {
+	if usage == nil {
+		return nil
+	}
+	return usageFromRaw(any(usage))
+}
+
+// mustMarshal serializes the given value to JSON, returning an empty byte
+// slice on failure. Used by error-surfacing helpers where failure to
+// marshal is already a lost cause; returning empty body preserves the
+// status-code signal on the upstream error.
+func mustMarshal(value any) []byte {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func nonEmptyString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}

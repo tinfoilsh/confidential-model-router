@@ -1,9 +1,12 @@
 package toolruntime
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -132,116 +135,6 @@ func TestModelRequestHeaders(t *testing.T) {
 	}
 }
 
-func TestStreamChatCompletionIncludesToolCallsAndUsage(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	req.Header.Set("X-Tinfoil-Client-Requested-Usage", "true")
-
-	response := &upstreamJSONResponse{
-		statusCode: http.StatusOK,
-		header:     http.Header{"Tinfoil-Enclave": []string{"enc-1"}},
-		body: map[string]any{
-			"id":      "chatcmpl_1",
-			"created": float64(123),
-			"model":   "gpt-oss-120b",
-			"choices": []any{
-				map[string]any{
-					"finish_reason": "tool_calls",
-					"message": map[string]any{
-						"role": "assistant",
-						"tool_calls": []any{
-							map[string]any{
-								"id":   "call_1",
-								"type": "function",
-								"function": map[string]any{
-									"name":      "client_lookup",
-									"arguments": "{}",
-								},
-							},
-						},
-					},
-				},
-			},
-			"usage": map[string]any{
-				"prompt_tokens":     float64(1),
-				"completion_tokens": float64(0),
-				"total_tokens":      float64(1),
-			},
-		},
-	}
-
-	if err := streamChatCompletion(rec, req, response, true); err != nil {
-		t.Fatalf("streamChatCompletion returned error: %v", err)
-	}
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "\"tool_calls\"") {
-		t.Fatalf("expected stream to contain tool calls, got %s", body)
-	}
-	if !strings.Contains(body, "\"usage\"") {
-		t.Fatalf("expected stream to contain usage chunk, got %s", body)
-	}
-	if !strings.Contains(body, "data: [DONE]") {
-		t.Fatalf("expected stream terminator, got %s", body)
-	}
-	if rec.Header().Get("Tinfoil-Enclave") != "enc-1" {
-		t.Fatalf("expected upstream headers to be preserved, got %#v", rec.Header())
-	}
-	if rec.Result().Trailer.Get(manager.UsageMetricsResponseHeader) != "prompt=1,completion=0,total=1" {
-		t.Fatalf("expected usage trailer, got %#v", rec.Result().Trailer)
-	}
-}
-
-func TestStreamResponsesIncludesOutputEvents(t *testing.T) {
-	rec := httptest.NewRecorder()
-	response := &upstreamJSONResponse{
-		statusCode: http.StatusOK,
-		header:     make(http.Header),
-		body: map[string]any{
-			"id":         "resp_1",
-			"created_at": float64(123),
-			"model":      "gpt-oss-120b",
-			"output": []any{
-				map[string]any{
-					"id":   "msg_1",
-					"type": "message",
-					"content": []any{
-						map[string]any{
-							"type": "output_text",
-							"text": "Hello",
-						},
-					},
-				},
-			},
-			"usage": map[string]any{
-				"input_tokens":  float64(1),
-				"output_tokens": float64(1),
-				"total_tokens":  float64(2),
-			},
-		},
-	}
-
-	if err := streamResponses(rec, response, true); err != nil {
-		t.Fatalf("streamResponses returned error: %v", err)
-	}
-
-	body := rec.Body.String()
-	for _, fragment := range []string{
-		"event: response.created",
-		"event: response.output_item.added",
-		"event: response.output_text.delta",
-		"event: response.output_item.done",
-		"event: response.completed",
-	} {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("expected stream to contain %q, got %s", fragment, body)
-		}
-	}
-	if rec.Result().Trailer.Get(manager.UsageMetricsResponseHeader) != "prompt=1,completion=1,total=2" {
-		t.Fatalf("expected usage trailer, got %#v", rec.Result().Trailer)
-	}
-}
-
 func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{
@@ -309,11 +202,6 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
 	}
 	if usage.PromptTokens != 7 || usage.CompletionTokens != 11 || usage.TotalTokens != 18 {
 		t.Fatalf("unexpected aggregated usage: %#v", usage)
-	}
-
-	extras, _ := response.body[routerChatExtrasKey].(*routerChatExtras)
-	if extras == nil || len(extras.toolCalls) != 1 {
-		t.Fatalf("expected chat citation extras to be attached, got %#v", response.body[routerChatExtrasKey])
 	}
 }
 
@@ -583,5 +471,99 @@ func TestForcedFinalResponsesRequestRemovesToolsAndAppendsInstruction(t *testing
 	last, _ := input[1].(map[string]any)
 	if last["type"] != "message" || last["role"] != "system" || fmt.Sprint(last["content"]) == "" {
 		t.Fatalf("unexpected final input item: %#v", last)
+	}
+}
+
+// TestForcedFinalChatRequestStripsToolSelection pins that tool_choice
+// and function_call are removed alongside tools, so the fallback
+// request cannot carry a protocol-level instruction to call a tool
+// that no longer exists on the request.
+func TestForcedFinalChatRequestStripsToolSelection(t *testing.T) {
+	reqBody := map[string]any{
+		"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+		"tools":         []any{map[string]any{"type": "function"}},
+		"tool_choice":   "required",
+		"function_call": "auto",
+	}
+	finalBody := forcedFinalChatRequest(reqBody)
+	for _, field := range []string{"tools", "tool_choice", "function_call"} {
+		if _, ok := finalBody[field]; ok {
+			t.Fatalf("expected %s to be stripped, got %#v", field, finalBody[field])
+		}
+	}
+}
+
+// TestForcedFinalResponsesRequestStripsToolSelection is the Responses
+// API counterpart; tool_choice must be removed alongside tools.
+func TestForcedFinalResponsesRequestStripsToolSelection(t *testing.T) {
+	reqBody := map[string]any{
+		"input":       []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"tools":       []any{map[string]any{"type": "function"}},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "search"}},
+	}
+	finalBody := forcedFinalResponsesRequest(reqBody)
+	for _, field := range []string{"tools", "tool_choice"} {
+		if _, ok := finalBody[field]; ok {
+			t.Fatalf("expected %s to be stripped, got %#v", field, finalBody[field])
+		}
+	}
+}
+
+// TestBuildWebSearchCallOutputItemsMarksFailedCalls pins that a tool
+// record with a non-empty errorReason surfaces as a web_search_call
+// output item with status:"failed" (not "completed"), so the terminal
+// Responses snapshot is honest about what actually happened.
+func TestBuildWebSearchCallOutputItemsMarksFailedCalls(t *testing.T) {
+	records := []toolCallRecord{
+		{
+			name:        "search",
+			arguments:   map[string]any{"query": "latest news"},
+			errorReason: "upstream timeout",
+		},
+		{
+			name:      "search",
+			arguments: map[string]any{"query": "ok"},
+		},
+	}
+	items := buildWebSearchCallOutputItems(records)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	failed, _ := items[0].(map[string]any)
+	if got := stringValue(failed["status"]); got != "failed" {
+		t.Fatalf("expected failed status on errored call, got %q", got)
+	}
+	completed, _ := items[1].(map[string]any)
+	if got := stringValue(completed["status"]); got != "completed" {
+		t.Fatalf("expected completed status on successful call, got %q", got)
+	}
+}
+
+// TestPublicToolErrorReasonStripsInternalDetail pins that the helper
+// used at every client-facing error boundary returns a short constant
+// and NEVER the raw error text. This is the invariant that prevents
+// internal hostnames, gRPC error bodies, context-cancellation traces,
+// or other implementation details from leaking into web_search_call
+// `reason` fields that clients render verbatim.
+func TestPublicToolErrorReasonStripsInternalDetail(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	cases := []error{
+		errors.New("dial tcp 10.0.0.5:8443: connect: connection refused"),
+		errors.New("rpc error: code = Unavailable desc = envoy upstream connect error"),
+		errors.New("context deadline exceeded"),
+		fmt.Errorf("internal stack trace: %s", "goroutine 42 [select]:"),
+	}
+	for _, err := range cases {
+		got := publicToolErrorReason("search", err)
+		if got != publicToolErrorReasonString {
+			t.Fatalf("publicToolErrorReason(%q) = %q, want constant %q", err, got, publicToolErrorReasonString)
+		}
+		if strings.Contains(got, "tcp") || strings.Contains(got, "envoy") || strings.Contains(got, "goroutine") {
+			t.Fatalf("public reason leaked internal detail: %q", got)
+		}
+	}
+	if got := publicToolErrorReason("search", nil); got != "" {
+		t.Fatalf("nil err should return empty string, got %q", got)
 	}
 }
