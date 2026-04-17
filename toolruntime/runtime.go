@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -300,30 +301,35 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	promptResult := buildRouterPrompt()
 	ownedTools := ownedToolNames(toolsResult.Tools)
 
+	streaming := isStream(body)
 	switch r.URL.Path {
 	case "/v1/chat/completions":
+		if streaming {
+			if err := runChatStreaming(ctx, w, r, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools); err != nil {
+				return writeUpstreamError(w, err)
+			}
+			return nil
+		}
 		response, err := runChatLoop(ctx, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		streaming := isStream(body)
-		applyUsageMetrics(response, usageMetricsRequested && !streaming)
-		emitBillingEvent(em, r, response, modelName, streaming)
-		if streaming {
-			return streamChatCompletion(w, r, response, usageMetricsRequested)
-		}
+		applyUsageMetrics(response, usageMetricsRequested)
+		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
+		if streaming {
+			if err := runResponsesStreaming(ctx, w, r, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools); err != nil {
+				return writeUpstreamError(w, err)
+			}
+			return nil
+		}
 		response, err := runResponsesLoop(ctx, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		streaming := isStream(body)
-		applyUsageMetrics(response, usageMetricsRequested && !streaming)
-		emitBillingEvent(em, r, response, modelName, streaming)
-		if streaming {
-			return streamResponses(w, response, usageMetricsRequested)
-		}
+		applyUsageMetrics(response, usageMetricsRequested)
+		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	default:
 		return fmt.Errorf("unsupported tool runtime route: %s", r.URL.Path)
@@ -402,14 +408,17 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		for _, toolCall := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
+			record := toolCallRecord{
+				name:      toolCall.name,
+				arguments: toolCall.arguments,
+			}
 			if err != nil {
 				output = err.Error()
+				record.errorReason = publicToolErrorReason(toolCall.name, err)
+			} else {
+				record.resultURLs = extractToolOutputURLs(output)
 			}
-			citations.recordToolCall(toolCallRecord{
-				name:       toolCall.name,
-				arguments:  toolCall.arguments,
-				resultURLs: extractToolOutputURLs(output),
-			})
+			citations.recordToolCall(record)
 			messages = append(messages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": toolCall.id,
@@ -423,6 +432,11 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 	if err != nil {
 		return nil, err
 	}
+	// The forced-final turn consumes tokens too; feed them into the
+	// accumulator before finalize overwrites response.body["usage"] with
+	// the aggregated totals. Without this, callers billed for the tool
+	// budget would undercount by exactly the final-answer turn.
+	usageTotals.Add(finalResponse)
 	finalizeToolLoopResponse(finalResponse, "/v1/chat/completions", usageTotals.Usage(), &citations)
 	return finalResponse, nil
 }
@@ -461,14 +475,17 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 		for _, toolCall := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
+			record := toolCallRecord{
+				name:      toolCall.name,
+				arguments: toolCall.arguments,
+			}
 			if err != nil {
 				output = err.Error()
+				record.errorReason = publicToolErrorReason(toolCall.name, err)
+			} else {
+				record.resultURLs = extractToolOutputURLs(output)
 			}
-			citations.recordToolCall(toolCallRecord{
-				name:       toolCall.name,
-				arguments:  toolCall.arguments,
-				resultURLs: extractToolOutputURLs(output),
-			})
+			citations.recordToolCall(record)
 			toolOutputs = append(toolOutputs, map[string]any{
 				"type":    "function_call_output",
 				"call_id": toolCall.id,
@@ -487,6 +504,11 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 	if err != nil {
 		return nil, err
 	}
+	// See the matching comment in runChatLoop: without feeding the
+	// forced-final turn into the accumulator, the aggregated totals
+	// finalize writes back would undercount billing and the
+	// X-Tinfoil-Usage-Metrics header would under-report.
+	usageTotals.Add(finalResponse)
 	finalizeToolLoopResponse(finalResponse, "/v1/responses", usageTotals.Usage(), &citations)
 	return finalResponse, nil
 }
@@ -671,11 +693,15 @@ type citationSource struct {
 }
 
 // toolCallRecord captures a tool call the router made on the user's behalf,
-// used to surface web_search_call progress items to clients.
+// used to surface web_search_call progress items to clients. errorReason
+// carries the tool-side error message when the call failed so terminal
+// web_search_call items can honestly report status:"failed" instead of
+// silently claiming completion on a request that never returned results.
 type toolCallRecord struct {
-	name       string
-	arguments  map[string]any
-	resultURLs []string
+	name        string
+	arguments   map[string]any
+	resultURLs  []string
+	errorReason string
 }
 
 type citationState struct {
@@ -836,9 +862,9 @@ func (c *citationState) matchesFor(text string) []annotationMatch {
 // a given string. It caches the last lookup so sequential calls, as produced
 // by a left-to-right scan of regex matches, stay linear in the source length.
 type byteToRuneIndex struct {
-	text      string
-	lastByte  int
-	lastRune  int
+	text     string
+	lastByte int
+	lastRune int
 }
 
 func newByteToRuneIndex(text string) *byteToRuneIndex {
@@ -912,6 +938,21 @@ func (c *citationState) flatAnnotationsFor(text string) []any {
 		annotations = append(annotations, annotation)
 	}
 	return annotations
+}
+
+// publicToolErrorReason returns a short, opaque status string safe to
+// ship to clients via `web_search_call.reason`. The raw error text is
+// recorded to the server log so operators can still diagnose failures
+// without having to surface internal hostnames, gRPC error bodies, or
+// other implementation details to end users.
+const publicToolErrorReasonString = "tool_error"
+
+func publicToolErrorReason(toolName string, err error) string {
+	if err == nil {
+		return ""
+	}
+	log.Printf("toolruntime: %s tool call failed: %v", toolName, err)
+	return publicToolErrorReasonString
 }
 
 func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, citations *citationState) (string, error) {
@@ -1056,17 +1097,6 @@ func formatFetchFailures(raw any) string {
 	return strings.Join(lines, "\n")
 }
 
-// routerChatExtrasKey is a private key on the Chat Completions response body
-// used to hand recorded tool calls and pre-built annotation chunks from the
-// router loop down to the streaming emitter. It is stripped before anything
-// leaves the router to avoid leaking internal fields to clients.
-const routerChatExtrasKey = "__tinfoil_router_extras"
-
-type routerChatExtras struct {
-	toolCalls   []toolCallRecord
-	annotations []any
-}
-
 // attachChatCitations resolves the inline markdown links the model wrote into
 // each choice's content back to the URLs the router registered during the
 // tool loop and attaches them to message.annotations in the Chat Completions
@@ -1076,16 +1106,11 @@ type routerChatExtras struct {
 //
 // This matches OpenAI's documented Chat Completions response shape and is what
 // the tinfoil-go SDK and the webapp streaming processor expect to parse.
-//
-// It also stashes the recorded router tool calls plus the first choice's
-// annotations under routerChatExtrasKey so the streaming emitter can surface
-// them as web_search_call events and a delta.annotations chunk.
 func attachChatCitations(responseBody map[string]any, citations *citationState) {
 	if responseBody == nil || citations == nil {
 		return
 	}
 	choices, _ := responseBody["choices"].([]any)
-	var firstAnnotations []any
 	for _, rawChoice := range choices {
 		choice, _ := rawChoice.(map[string]any)
 		if choice == nil {
@@ -1105,29 +1130,7 @@ func attachChatCitations(responseBody map[string]any, citations *citationState) 
 			continue
 		}
 		message["annotations"] = annotations
-		if firstAnnotations == nil {
-			firstAnnotations = annotations
-		}
 	}
-
-	if len(citations.toolCalls) == 0 && len(firstAnnotations) == 0 {
-		return
-	}
-	responseBody[routerChatExtrasKey] = &routerChatExtras{
-		toolCalls:   citations.toolCalls,
-		annotations: firstAnnotations,
-	}
-}
-
-// takeRouterChatExtras pulls the stashed extras off the response body and
-// clears the key so subsequent JSON marshaling never exposes it.
-func takeRouterChatExtras(responseBody map[string]any) *routerChatExtras {
-	if responseBody == nil {
-		return nil
-	}
-	extras, _ := responseBody[routerChatExtrasKey].(*routerChatExtras)
-	delete(responseBody, routerChatExtrasKey)
-	return extras
 }
 
 // attachResponsesCitations resolves inline markdown links in each output_text
@@ -1188,6 +1191,10 @@ func attachResponsesCitations(responseBody map[string]any, citations *citationSt
 func buildWebSearchCallOutputItems(records []toolCallRecord) []any {
 	events := make([]any, 0, len(records))
 	for _, record := range records {
+		status := "completed"
+		if record.errorReason != "" {
+			status = "failed"
+		}
 		switch record.name {
 		case "search":
 			action := map[string]any{"type": "search"}
@@ -1197,11 +1204,11 @@ func buildWebSearchCallOutputItems(records []toolCallRecord) []any {
 			if len(record.resultURLs) > 0 {
 				action["sources"] = record.resultURLs
 			}
-			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), "completed", action, ""))
+			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, action, record.errorReason))
 		case "fetch":
 			for _, url := range fetchArgumentURLs(record.arguments) {
 				action := map[string]any{"type": "open_page", "url": url}
-				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), "completed", action, ""))
+				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, action, record.errorReason))
 			}
 		}
 	}
@@ -1223,49 +1230,6 @@ func webSearchCallEvent(id, status string, action map[string]any, reason string)
 		event["reason"] = reason
 	}
 	return event
-}
-
-// emitChatWebSearchCallEvents writes the staged web_search_call events for
-// the Chat Completions streaming path in the shape consumed by tinfoil-go's
-// WebSearchStream parser and the webapp streaming processor.
-//
-// Each tool call emits an in_progress event followed by a completed event so
-// UIs can render searching/fetching state transitions. Fetch calls with
-// multiple URLs expand into one open_page event per URL.
-func emitChatWebSearchCallEvents(w http.ResponseWriter, extras *routerChatExtras) error {
-	if extras == nil || len(extras.toolCalls) == 0 {
-		return nil
-	}
-	for _, record := range extras.toolCalls {
-		switch record.name {
-		case "search":
-			query := stringValue(record.arguments["query"])
-			id := "ws_" + uuid.NewString()
-			inProgress := map[string]any{"type": "search", "query": query}
-			if err := sseData(w, webSearchCallEvent(id, "in_progress", inProgress, "")); err != nil {
-				return err
-			}
-			completed := map[string]any{"type": "search", "query": query}
-			if len(record.resultURLs) > 0 {
-				completed["sources"] = record.resultURLs
-			}
-			if err := sseData(w, webSearchCallEvent(id, "completed", completed, "")); err != nil {
-				return err
-			}
-		case "fetch":
-			for _, url := range fetchArgumentURLs(record.arguments) {
-				id := "ws_" + uuid.NewString()
-				action := map[string]any{"type": "open_page", "url": url}
-				if err := sseData(w, webSearchCallEvent(id, "in_progress", action, "")); err != nil {
-					return err
-				}
-				if err := sseData(w, webSearchCallEvent(id, "completed", action, "")); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // fetchArgumentURLs extracts the string URLs the model handed the fetch tool.
@@ -1404,6 +1368,13 @@ func forcedFinalChatRequest(reqBody map[string]any) map[string]any {
 		"content": finalAnswerInstructionText,
 	})
 	delete(finalBody, "tools")
+	// Every field that could otherwise require or steer a tool call must
+	// be stripped too; leaving tool_choice:"required" on a request that
+	// carries no tools is a protocol-level contradiction that upstream
+	// will reject or loop on. function_call is the legacy Chat
+	// Completions equivalent and is removed for the same reason.
+	delete(finalBody, "tool_choice")
+	delete(finalBody, "function_call")
 	finalBody["parallel_tool_calls"] = false
 	return finalBody
 }
@@ -1421,6 +1392,7 @@ func forcedFinalResponsesRequest(reqBody map[string]any) map[string]any {
 		},
 	})
 	delete(finalBody, "tools")
+	delete(finalBody, "tool_choice")
 	finalBody["parallel_tool_calls"] = false
 	return finalBody
 }
@@ -1782,9 +1754,6 @@ func writeUpstreamError(w http.ResponseWriter, err error) error {
 }
 
 func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) error {
-	// Strip the internal router-extras key before serializing so it never
-	// leaves the router even on the non-streaming path.
-	delete(response.body, routerChatExtrasKey)
 	data, err := json.Marshal(response.body)
 	if err != nil {
 		return err
@@ -1796,297 +1765,6 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 	w.WriteHeader(response.statusCode)
 	_, err = w.Write(data)
 	return err
-}
-
-func streamChatCompletion(w http.ResponseWriter, r *http.Request, response *upstreamJSONResponse, usageMetricsRequested bool) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("streaming not supported")
-	}
-
-	extras := takeRouterChatExtras(response.body)
-
-	copyResponseHeaders(w.Header(), response.header)
-	w.Header().Del("Content-Length")
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if usageMetricsRequested {
-		if usage := usageFromRaw(response.body["usage"]); usage != nil {
-			addTrailerHeader(w.Header(), manager.UsageMetricsResponseHeader)
-		}
-	}
-	w.WriteHeader(response.statusCode)
-
-	if err := emitChatWebSearchCallEvents(w, extras); err != nil {
-		return err
-	}
-
-	choices, _ := response.body["choices"].([]any)
-	if len(choices) == 0 {
-		if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
-
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	id := stringValue(response.body["id"])
-	created := int64(numberValue(response.body["created"]))
-	model := stringValue(response.body["model"])
-
-	if err := sseData(w, map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index": 0,
-				"delta": map[string]any{
-					"role": "assistant",
-				},
-			},
-		},
-	}); err != nil {
-		return err
-	}
-
-	if extras != nil && len(extras.annotations) > 0 {
-		if err := sseData(w, map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-			"choices": []any{
-				map[string]any{
-					"index": 0,
-					"delta": map[string]any{
-						"annotations": extras.annotations,
-					},
-				},
-			},
-		}); err != nil {
-			return err
-		}
-	}
-
-	if content := stringValue(message["content"]); content != "" {
-		if err := sseData(w, map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-			"choices": []any{
-				map[string]any{
-					"index": 0,
-					"delta": map[string]any{
-						"content": content,
-					},
-				},
-			},
-		}); err != nil {
-			return err
-		}
-	}
-
-	if rawToolCalls, _ := message["tool_calls"].([]any); len(rawToolCalls) > 0 {
-		if err := sseData(w, map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-			"choices": []any{
-				map[string]any{
-					"index": 0,
-					"delta": map[string]any{
-						"tool_calls": rawToolCalls,
-					},
-				},
-			},
-		}); err != nil {
-			return err
-		}
-	}
-
-	finishReason := stringValue(choice["finish_reason"])
-	if finishReason == "" {
-		if rawToolCalls, _ := message["tool_calls"].([]any); len(rawToolCalls) > 0 {
-			finishReason = "tool_calls"
-		} else {
-			finishReason = "stop"
-		}
-	}
-
-	if err := sseData(w, map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
-		"choices": []any{
-			map[string]any{
-				"index":         0,
-				"delta":         map[string]any{},
-				"finish_reason": finishReason,
-			},
-		},
-	}); err != nil {
-		return err
-	}
-
-	if r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true" && response.body["usage"] != nil {
-		if err := sseData(w, map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-			"choices": []any{},
-			"usage":   response.body["usage"],
-		}); err != nil {
-			return err
-		}
-	}
-
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return err
-	}
-	if usageMetricsRequested {
-		if usage := usageFromRaw(response.body["usage"]); usage != nil {
-			w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
-		}
-	}
-	flusher.Flush()
-	return nil
-}
-
-func streamResponses(w http.ResponseWriter, response *upstreamJSONResponse, usageMetricsRequested bool) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("streaming not supported")
-	}
-
-	copyResponseHeaders(w.Header(), response.header)
-	w.Header().Del("Content-Length")
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if usageMetricsRequested {
-		if usage := usageFromRaw(response.body["usage"]); usage != nil {
-			addTrailerHeader(w.Header(), manager.UsageMetricsResponseHeader)
-		}
-	}
-	w.WriteHeader(response.statusCode)
-
-	responseBody := cloneJSONMap(response.body)
-	id := stringValue(responseBody["id"])
-	if id == "" {
-		id = "resp_" + uuid.NewString()
-		responseBody["id"] = id
-	}
-
-	createdAt := int64(numberValue(responseBody["created_at"]))
-	if createdAt == 0 {
-		createdAt = int64(numberValue(responseBody["created"]))
-	}
-
-	if err := sseEvent(w, "response.created", map[string]any{
-		"type": "response.created",
-		"response": map[string]any{
-			"id":         id,
-			"object":     "response",
-			"created_at": createdAt,
-			"status":     "in_progress",
-			"model":      stringValue(responseBody["model"]),
-			"output":     []any{},
-		},
-	}); err != nil {
-		return err
-	}
-
-	output, _ := responseBody["output"].([]any)
-	for index, item := range output {
-		itemMap, _ := item.(map[string]any)
-		if err := sseEvent(w, "response.output_item.added", map[string]any{
-			"type":         "response.output_item.added",
-			"output_index": index,
-			"item":         itemMap,
-		}); err != nil {
-			return err
-		}
-		if err := emitResponseContentEvents(w, itemMap, index); err != nil {
-			return err
-		}
-		if err := sseEvent(w, "response.output_item.done", map[string]any{
-			"type":         "response.output_item.done",
-			"output_index": index,
-			"item":         itemMap,
-		}); err != nil {
-			return err
-		}
-	}
-
-	if err := sseEvent(w, "response.completed", map[string]any{
-		"type":     "response.completed",
-		"response": responseBody,
-	}); err != nil {
-		return err
-	}
-
-	if usageMetricsRequested {
-		if usage := usageFromRaw(response.body["usage"]); usage != nil {
-			w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
-		}
-	}
-	flusher.Flush()
-	return nil
-}
-
-func emitResponseContentEvents(w http.ResponseWriter, item map[string]any, outputIndex int) error {
-	itemID := stringValue(item["id"])
-	contentItems, _ := item["content"].([]any)
-	for contentIndex, rawContent := range contentItems {
-		contentMap, _ := rawContent.(map[string]any)
-		text := stringValue(contentMap["text"])
-		if text == "" {
-			continue
-		}
-
-		eventType := responseContentDeltaEvent(contentMap)
-		if err := sseEvent(w, eventType, map[string]any{
-			"type":          eventType,
-			"output_index":  outputIndex,
-			"item_id":       itemID,
-			"content_index": contentIndex,
-			"delta":         text,
-		}); err != nil {
-			return err
-		}
-
-		if eventType == "response.output_text.delta" {
-			if err := sseEvent(w, "response.output_text.done", map[string]any{
-				"type":          "response.output_text.done",
-				"output_index":  outputIndex,
-				"item_id":       itemID,
-				"content_index": contentIndex,
-				"text":          text,
-			}); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func responseContentDeltaEvent(content map[string]any) string {
-	switch stringValue(content["type"]) {
-	case "reasoning_text":
-		return "response.reasoning_text.delta"
-	default:
-		return "response.output_text.delta"
-	}
 }
 
 func sseData(w http.ResponseWriter, body map[string]any) error {
