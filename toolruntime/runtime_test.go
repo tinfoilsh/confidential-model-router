@@ -269,6 +269,110 @@ func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
 	}
 }
 
+func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
+	response := &upstreamJSONResponse{
+		body: map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": "done",
+					},
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     float64(2),
+				"completion_tokens": float64(3),
+				"total_tokens":      float64(5),
+			},
+		},
+		header: make(http.Header),
+	}
+	citations := &citationState{
+		toolCalls: []toolCallRecord{
+			{
+				name:      "search",
+				arguments: map[string]any{"query": "cats"},
+			},
+		},
+	}
+
+	finalizeToolLoopResponse(response, "/v1/chat/completions", &tokencount.Usage{
+		PromptTokens:     7,
+		CompletionTokens: 11,
+		TotalTokens:      18,
+	}, citations)
+
+	usage := usageFromRaw(response.body["usage"])
+	if usage == nil {
+		t.Fatal("expected aggregated usage")
+	}
+	if usage.PromptTokens != 7 || usage.CompletionTokens != 11 || usage.TotalTokens != 18 {
+		t.Fatalf("unexpected aggregated usage: %#v", usage)
+	}
+
+	extras, _ := response.body[routerChatExtrasKey].(*routerChatExtras)
+	if extras == nil || len(extras.toolCalls) != 1 {
+		t.Fatalf("expected chat citation extras to be attached, got %#v", response.body[routerChatExtrasKey])
+	}
+}
+
+func TestFinalizeToolLoopResponseAggregatesForcedFinalResponsesUsage(t *testing.T) {
+	response := &upstreamJSONResponse{
+		body: map[string]any{
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{
+							"type": "output_text",
+							"text": "done",
+						},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens":  float64(2),
+				"output_tokens": float64(3),
+				"total_tokens":  float64(5),
+			},
+		},
+		header: make(http.Header),
+	}
+	citations := &citationState{
+		toolCalls: []toolCallRecord{
+			{
+				name:       "search",
+				arguments:  map[string]any{"query": "cats"},
+				resultURLs: []string{"https://example.com"},
+			},
+		},
+	}
+
+	finalizeToolLoopResponse(response, "/v1/responses", &tokencount.Usage{
+		PromptTokens:     7,
+		CompletionTokens: 11,
+		TotalTokens:      18,
+	}, citations)
+
+	usage := usageFromRaw(response.body["usage"])
+	if usage == nil {
+		t.Fatal("expected aggregated usage")
+	}
+	if usage.PromptTokens != 7 || usage.CompletionTokens != 11 || usage.TotalTokens != 18 {
+		t.Fatalf("unexpected aggregated usage: %#v", usage)
+	}
+
+	output, _ := response.body["output"].([]any)
+	if len(output) == 0 {
+		t.Fatal("expected response output")
+	}
+	first, _ := output[0].(map[string]any)
+	if first["type"] != "web_search_call" {
+		t.Fatalf("expected web search call output to be prepended, got %#v", output[0])
+	}
+}
+
 func TestNormalizeResponsesInputWrapsStringPrompt(t *testing.T) {
 	items := normalizeResponsesInput("hello world")
 	if len(items) != 1 {
@@ -340,7 +444,7 @@ func TestPrependChatPromptAddsCurrentDateContext(t *testing.T) {
 	}
 }
 
-func TestFormatStructuredToolOutputUsesNumberedSearchMarkers(t *testing.T) {
+func TestFormatStructuredToolOutputLabelsSearchResults(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	formatted := formatStructuredToolOutput("search", map[string]any{
 		"results": []any{
@@ -358,15 +462,27 @@ func TestFormatStructuredToolOutputUsesNumberedSearchMarkers(t *testing.T) {
 		},
 	}, state)
 
-	for _, fragment := range []string{"【1】Result A", "URL: https://example.com/a", "Published: 2026-04-17", "【2】Result B"} {
+	for _, fragment := range []string{
+		"Source: Result A",
+		"URL: https://example.com/a",
+		"Published: 2026-04-17",
+		"Source: Result B",
+		"URL: https://example.com/b",
+	} {
 		if !strings.Contains(formatted, fragment) {
 			t.Fatalf("expected %q in formatted output, got %q", fragment, formatted)
 		}
 	}
+	if strings.Contains(formatted, "【") {
+		t.Fatalf("tool output should not include numbered markers, got %q", formatted)
+	}
+	if len(state.sources) != 2 {
+		t.Fatalf("expected 2 recorded sources, got %d", len(state.sources))
+	}
 }
 
-func TestFormatStructuredToolOutputUsesNumberedFetchMarkers(t *testing.T) {
-	state := &citationState{nextIndex: 3}
+func TestFormatStructuredToolOutputLabelsFetchPages(t *testing.T) {
+	state := &citationState{nextIndex: 1}
 	formatted := formatStructuredToolOutput("fetch", map[string]any{
 		"pages": []any{
 			map[string]any{
@@ -376,10 +492,16 @@ func TestFormatStructuredToolOutputUsesNumberedFetchMarkers(t *testing.T) {
 		},
 	}, state)
 
-	for _, fragment := range []string{"【3】Fetched page", "URL: https://example.com/page", "Page body"} {
+	for _, fragment := range []string{"Source: Fetched page", "URL: https://example.com/page", "Page body"} {
 		if !strings.Contains(formatted, fragment) {
 			t.Fatalf("expected %q in formatted output, got %q", fragment, formatted)
 		}
+	}
+	if strings.Contains(formatted, "【") {
+		t.Fatalf("tool output should not include numbered markers, got %q", formatted)
+	}
+	if len(state.sources) != 1 {
+		t.Fatalf("expected 1 recorded source, got %d", len(state.sources))
 	}
 }
 
