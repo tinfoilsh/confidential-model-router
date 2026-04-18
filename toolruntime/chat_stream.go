@@ -43,6 +43,7 @@ func runChatStreaming(
 		return fmt.Errorf("streaming not supported")
 	}
 
+	tid := debugTraceID()
 	searchOpts := parseChatWebSearchOptions(body)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
@@ -58,6 +59,14 @@ func runChatStreaming(
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
 
+	if debugEnabled {
+		ownedNames := make([]string, 0, len(ownedTools))
+		for n := range ownedTools {
+			ownedNames = append(ownedNames, n)
+		}
+		debugLogf("toolruntime:%s chatstream.start model=%s search_ctx=%q ownedTools=%v", tid, modelName, searchOpts.searchContextSize, ownedNames)
+	}
+
 	streamer := &chatStreamer{
 		w:                     w,
 		flusher:               flusher,
@@ -70,14 +79,21 @@ func runChatStreaming(
 	streamer.emitter = newCitationEmitter(streamer.citations)
 
 	for i := 0; i < maxToolIterations; i++ {
+		if debugEnabled {
+			msgs, _ := reqBody["messages"].([]any)
+			debugLogf("toolruntime:%s chatstream.iter=%d upstream.request messages_n=%d history=%s", tid, i, len(msgs), debugMessagesSummary(msgs, 200))
+		}
+		iterStart := time.Now()
 		result, err := streamer.runIteration(ctx, em, modelName, reqBody, requestHeaders)
 		if err != nil {
+			debugLogf("toolruntime:%s chatstream.iter=%d upstream.error elapsed=%s err=%v", tid, i, time.Since(iterStart), err)
 			return streamer.terminateWithError(r, em, modelName, err)
 		}
 		// If the client has disconnected, stop before spending another
 		// round of MCP tool calls and upstream tokens on work nobody is
 		// listening for.
 		if streamer.writeErr != nil {
+			debugLogf("toolruntime:%s chatstream.client_disconnected at iter=%d", tid, i)
 			streamer.emitBillingEvent(r, em, modelName, streamer.finalUsage())
 			return nil
 		}
@@ -86,7 +102,16 @@ func runChatStreaming(
 		// final turn (no router tool calls to resolve) forwards them to
 		// the client. This preserves parity with runChatLoop.
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
+		if debugEnabled {
+			toolNames := make([]string, 0, len(result.toolCalls))
+			for _, c := range result.toolCalls {
+				toolNames = append(toolNames, c.name)
+			}
+			debugLogf("toolruntime:%s chatstream.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
+				tid, i, time.Since(iterStart), result.finishReason, len(result.toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(result.content, 240))
+		}
 		if len(routerToolCalls) == 0 {
+			debugLogf("toolruntime:%s chatstream.done iterations=%d (no router tool calls)", tid, i+1)
 			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 
@@ -94,16 +119,21 @@ func runChatStreaming(
 		messages = append(messages, result.assistantMessage())
 		for _, call := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
+			debugLogf("toolruntime:%s chatstream.iter=%d tool.call name=%s args=%s", tid, i, call.name, debugPreview(call.arguments, 400))
+			tstart := time.Now()
 			output, toolErr := streamer.executeTool(ctx, session, call)
 			record := toolCallRecord{
 				name:      call.name,
 				arguments: call.arguments,
 			}
 			if toolErr != nil {
+				debugLogf("toolruntime:%s chatstream.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, call.name, time.Since(tstart), toolErr)
 				output = toolErr.Error()
 				record.errorReason = publicToolErrorReason(call.name, toolErr)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)
+				debugLogf("toolruntime:%s chatstream.iter=%d tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
+					tid, i, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 			}
 			streamer.citations.recordToolCall(record)
 			messages = append(messages, map[string]any{
@@ -114,6 +144,7 @@ func runChatStreaming(
 		}
 		reqBody["messages"] = messages
 	}
+	debugLogf("toolruntime:%s chatstream.exhausted iterations=%d forcing final answer", tid, maxToolIterations)
 
 	// Exhausted the tool budget; force a final-answer turn with tools removed
 	// and stream it to the client directly.
