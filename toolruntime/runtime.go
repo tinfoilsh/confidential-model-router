@@ -686,6 +686,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (*upstreamJSONResponse, error) {
 	tid := debugTraceID()
 	searchOpts := parseChatWebSearchOptions(body)
+	toolSchemas := schemaLookup(tools)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	delete(reqBody, "filters")
@@ -704,10 +705,15 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		for n := range ownedTools {
 			ownedNames = append(ownedNames, n)
 		}
-		debugLogf("toolruntime:%s chat.start model=%s search_ctx=%q ownedTools=%v", tid, modelName, searchOpts.searchContextSize, ownedNames)
+		debugLogf("toolruntime:%s chat.start model=%s search_ctx=%q ownedTools=%v schemas=%d", tid, modelName, searchOpts.searchContextSize, ownedNames, len(toolSchemas))
 	}
 
 	for i := 0; i < maxToolIterations; i++ {
+		if msgs, ok := reqBody["messages"].([]any); ok {
+			if n := sanitizeAssistantToolCallsInMessages(msgs); n > 0 {
+				debugLogf("toolruntime:%s chat.iter=%d history_sanitized count=%d", tid, i, n)
+			}
+		}
 		if debugEnabled {
 			msgs, _ := reqBody["messages"].([]any)
 			debugLogf("toolruntime:%s chat.iter=%d upstream.request messages_n=%d history=%s", tid, i, len(msgs), debugMessagesSummary(msgs, 200))
@@ -751,6 +757,8 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		messages = append(messages, message)
 		for _, toolCall := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
+			sanitizeToolCallArguments(toolCall.name, toolCall.arguments)
+			coerceArgumentsToSchema(toolCall.name, toolCall.arguments, toolSchemas)
 			debugLogf("toolruntime:%s chat.iter=%d tool.call name=%s args=%s", tid, i, toolCall.name, debugPreview(toolCall.arguments, 400))
 			tstart := time.Now()
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
@@ -760,7 +768,7 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 			}
 			if err != nil {
 				debugLogf("toolruntime:%s chat.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, toolCall.name, time.Since(tstart), err)
-				output = err.Error()
+				output = humanizeToolArgError(toolCall.name, err, toolCall.arguments)
 				record.errorReason = publicToolErrorReason(toolCall.name, err)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)
@@ -793,6 +801,7 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 
 func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (*upstreamJSONResponse, error) {
 	searchOpts := parseResponsesWebSearchOptions(body)
+	toolSchemas := schemaLookup(tools)
 	base := cloneJSONMap(body)
 	base["stream"] = false
 	base["parallel_tool_calls"] = false
@@ -824,13 +833,15 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 		toolOutputs := make([]any, 0, len(routerToolCalls))
 		for _, toolCall := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
+			sanitizeToolCallArguments(toolCall.name, toolCall.arguments)
+			coerceArgumentsToSchema(toolCall.name, toolCall.arguments, toolSchemas)
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
 			record := toolCallRecord{
 				name:      toolCall.name,
 				arguments: toolCall.arguments,
 			}
 			if err != nil {
-				output = err.Error()
+				output = humanizeToolArgError(toolCall.name, err, toolCall.arguments)
 				record.errorReason = publicToolErrorReason(toolCall.name, err)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)
@@ -1027,7 +1038,8 @@ func parseArguments(raw any) map[string]any {
 	switch value := raw.(type) {
 	case string:
 		var parsed map[string]any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
+		raw, _ := sanitizeToolCallArgumentsJSON([]byte(value))
+		if json.Unmarshal(raw, &parsed) == nil {
 			return parsed
 		}
 	case map[string]any:
@@ -1096,14 +1108,18 @@ var markdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s)]+)\)
 // fullwidthBracketedLinkPattern matches the near-markdown shape that some
 // web-search tuned models emit when they slip from ASCII brackets into
 // fullwidth lenticular brackets: `【visible text】(https://example.com)`.
-// The router rewrites matches to canonical ASCII markdown before computing
-// citation spans so downstream renderers (the webapp, tinfoil-go, any
-// OpenAI-SDK client) see the documented shape.
-var fullwidthBracketedLinkPattern = regexp.MustCompile(`\x{3010}([^\x{3011}]+)\x{3011}\((https?://[^\s)]+)\)`)
+// It also accepts the mixed-bracket variant `【visible text](https://...)`
+// observed from gpt-oss when it improvises a citation outside the harmony
+// browser tool training distribution. The router rewrites matches to
+// canonical ASCII markdown before computing citation spans so downstream
+// renderers (the webapp, tinfoil-go, any OpenAI-SDK client) see the
+// documented shape.
+var fullwidthBracketedLinkPattern = regexp.MustCompile(`\x{3010}([^\x{3011}\]]+)[\x{3011}\]]\((https?://[^\s)]+)\)`)
 
-// normalizeCitationLinks rewrites `【label】(url)` occurrences in the model's
-// final content into ASCII markdown `[label](url)` so every consumer renders
-// a clickable link regardless of which bracket style the model produced.
+// normalizeCitationLinks rewrites `【label】(url)` (and the `【label](url)`
+// mixed-bracket shape) occurrences in the model's final content into ASCII
+// markdown `[label](url)` so every consumer renders a clickable link
+// regardless of which bracket style the model produced.
 func normalizeCitationLinks(text string) string {
 	if text == "" || !strings.ContainsRune(text, '\u3010') {
 		return text

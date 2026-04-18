@@ -45,6 +45,7 @@ func runChatStreaming(
 
 	tid := debugTraceID()
 	searchOpts := parseChatWebSearchOptions(body)
+	toolSchemas := schemaLookup(tools)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	delete(reqBody, "filters")
@@ -64,7 +65,7 @@ func runChatStreaming(
 		for n := range ownedTools {
 			ownedNames = append(ownedNames, n)
 		}
-		debugLogf("toolruntime:%s chatstream.start model=%s search_ctx=%q ownedTools=%v", tid, modelName, searchOpts.searchContextSize, ownedNames)
+		debugLogf("toolruntime:%s chatstream.start model=%s search_ctx=%q ownedTools=%v schemas=%d", tid, modelName, searchOpts.searchContextSize, ownedNames, len(toolSchemas))
 	}
 
 	streamer := &chatStreamer{
@@ -79,6 +80,11 @@ func runChatStreaming(
 	streamer.emitter = newCitationEmitter(streamer.citations)
 
 	for i := 0; i < maxToolIterations; i++ {
+		if msgs, ok := reqBody["messages"].([]any); ok {
+			if n := sanitizeAssistantToolCallsInMessages(msgs); n > 0 {
+				debugLogf("toolruntime:%s chatstream.iter=%d history_sanitized count=%d", tid, i, n)
+			}
+		}
 		if debugEnabled {
 			msgs, _ := reqBody["messages"].([]any)
 			debugLogf("toolruntime:%s chatstream.iter=%d upstream.request messages_n=%d history=%s", tid, i, len(msgs), debugMessagesSummary(msgs, 200))
@@ -119,6 +125,8 @@ func runChatStreaming(
 		messages = append(messages, result.assistantMessage())
 		for _, call := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
+			sanitizeToolCallArguments(call.name, call.arguments)
+			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
 			debugLogf("toolruntime:%s chatstream.iter=%d tool.call name=%s args=%s", tid, i, call.name, debugPreview(call.arguments, 400))
 			tstart := time.Now()
 			output, toolErr := streamer.executeTool(ctx, session, call)
@@ -128,7 +136,7 @@ func runChatStreaming(
 			}
 			if toolErr != nil {
 				debugLogf("toolruntime:%s chatstream.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, call.name, time.Since(tstart), toolErr)
-				output = toolErr.Error()
+				output = humanizeToolArgError(call.name, toolErr, call.arguments)
 				record.errorReason = publicToolErrorReason(call.name, toolErr)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)
@@ -866,7 +874,8 @@ func (b *chatToolCallBuilder) toolCalls() []toolCall {
 		}
 		args := map[string]any{}
 		if len(entry.arguments) > 0 {
-			_ = json.Unmarshal(entry.arguments, &args)
+			raw, _ := sanitizeToolCallArgumentsJSON(entry.arguments)
+			_ = json.Unmarshal(raw, &args)
 		}
 		out = append(out, toolCall{
 			id:        entry.id,
