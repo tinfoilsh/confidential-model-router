@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -32,15 +34,117 @@ const (
 	finalAnswerInstructionText = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best possible answer using only the information already gathered. " + citationInstructions
 )
 
-// Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`.
-// The mapping mirrors how OpenAI documents `search_context_size`: low leans on
-// a handful of results, medium is the typical default, high pulls a broader
-// sample when the caller explicitly asks for more depth.
+// Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`,
+// `content_mode`, and `max_content_chars`. The mapping mirrors how OpenAI
+// documents `search_context_size`: low leans on a handful of highlight
+// snippets, medium is the typical default, high pulls a broader sample and
+// asks for the full rendered page text.
 const (
-	searchContextResultsLow    = 3
-	searchContextResultsMedium = 8
-	searchContextResultsHigh   = 15
+	searchContextResultsLow    = 10
+	searchContextResultsMedium = 20
+	searchContextResultsHigh   = 30
+
+	searchContextCharsLow    = 500
+	searchContextCharsMedium = 700
+	searchContextCharsHigh   = 2000
+
+	contentModeHighlights = "highlights"
+	contentModeText       = "text"
 )
+
+// debugEnabled is true when TOOLRUNTIME_DEBUG is set to a truthy value.
+// It gates the high-volume tracing helpers below so production deploys stay
+// quiet unless the operator explicitly opts in.
+var debugEnabled = func() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOOLRUNTIME_DEBUG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
+var debugTraceCounter uint64
+
+// debugTraceID returns a short monotonically increasing id that callers embed
+// in log lines so a single request's iterations can be grepped out of an
+// interleaved log. The id only reflects ordering within this router process
+// and is not meant to correlate with any external trace system.
+func debugTraceID() string {
+	return fmt.Sprintf("t%04d", atomic.AddUint64(&debugTraceCounter, 1))
+}
+
+// debugLogf emits a tracing log line when TOOLRUNTIME_DEBUG is enabled.
+// Callers should stick to a `toolruntime:<tid> <area>:` prefix so operators
+// can filter an individual request out of interleaved logs.
+func debugLogf(format string, args ...any) {
+	if !debugEnabled {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// debugPreview returns a JSON-safe preview of v capped at max bytes, with
+// a trailing "...(N more)" marker when truncated. Intended for tracing log
+// lines where we want to see the shape of upstream bodies / tool outputs
+// without spilling the full payload into the log.
+func debugPreview(v any, max int) string {
+	if !debugEnabled {
+		return ""
+	}
+	var s string
+	switch value := v.(type) {
+	case string:
+		s = value
+	case []byte:
+		s = string(value)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			s = fmt.Sprintf("%+v", v)
+		} else {
+			s = string(b)
+		}
+	}
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("...(+%d bytes)", len(s)-max)
+}
+
+// debugMessagesSummary compresses a []any messages slice into a compact
+// role+preview list so we can see upstream turn history without logging a
+// whole prompt. Content is previewed to contentMax bytes per message.
+func debugMessagesSummary(messages []any, contentMax int) string {
+	if !debugEnabled {
+		return ""
+	}
+	parts := make([]string, 0, len(messages))
+	for i, raw := range messages {
+		m, _ := raw.(map[string]any)
+		role := stringValue(m["role"])
+		name := stringValue(m["name"])
+		content := m["content"]
+		toolCalls, _ := m["tool_calls"].([]any)
+		var summary string
+		if len(toolCalls) > 0 {
+			names := make([]string, 0, len(toolCalls))
+			for _, tc := range toolCalls {
+				tm, _ := tc.(map[string]any)
+				fn, _ := tm["function"].(map[string]any)
+				names = append(names, stringValue(fn["name"]))
+			}
+			summary = fmt.Sprintf("tool_calls=%v", names)
+		} else if content != nil {
+			summary = debugPreview(content, contentMax)
+		}
+		if name != "" {
+			parts = append(parts, fmt.Sprintf("[%d]%s(%s): %s", i, role, name, summary))
+		} else {
+			parts = append(parts, fmt.Sprintf("[%d]%s: %s", i, role, summary))
+		}
+	}
+	return strings.Join(parts, " | ")
+}
 
 // webSearchOptions is the parsed view of the OpenAI web_search_options /
 // Responses `web_search` tool-config surface that we forward to the MCP tools.
@@ -54,15 +158,28 @@ const (
 type webSearchOptions struct {
 	userLocationCountry string
 	allowedDomains      []string
+	excludedDomains     []string
 	searchContextSize   string
+	contentMode         string
+	maxContentChars     int
+	category            string
+	startPublishedDate  string
+	endPublishedDate    string
+	maxAgeHours         *int
 	piiCheck            *bool
 	injectionCheck      *bool
+}
+
+// normalizedContextSize returns search_context_size folded to its canonical
+// lowercase/trimmed form so tier lookups stay consistent across helpers.
+func (o webSearchOptions) normalizedContextSize() string {
+	return strings.ToLower(strings.TrimSpace(o.searchContextSize))
 }
 
 // maxResults returns the per-search result cap derived from search_context_size.
 // Zero means "let the MCP tool use its own default".
 func (o webSearchOptions) maxResults() int {
-	switch strings.ToLower(strings.TrimSpace(o.searchContextSize)) {
+	switch o.normalizedContextSize() {
 	case "low":
 		return searchContextResultsLow
 	case "medium":
@@ -72,6 +189,54 @@ func (o webSearchOptions) maxResults() int {
 	default:
 		return 0
 	}
+}
+
+// tierContentMode returns the content_mode implied by the search_context_size
+// tier. Low and medium favor query-relevant highlights to keep token use
+// predictable; high asks for the full rendered page text. An empty string
+// means "no tier preference, let the MCP server pick its default".
+func (o webSearchOptions) tierContentMode() string {
+	switch o.normalizedContextSize() {
+	case "low", "medium":
+		return contentModeHighlights
+	case "high":
+		return contentModeText
+	default:
+		return ""
+	}
+}
+
+// tierMaxContentChars returns the per-result character budget implied by the
+// tier. Zero means "no tier preference".
+func (o webSearchOptions) tierMaxContentChars() int {
+	switch o.normalizedContextSize() {
+	case "low":
+		return searchContextCharsLow
+	case "medium":
+		return searchContextCharsMedium
+	case "high":
+		return searchContextCharsHigh
+	default:
+		return 0
+	}
+}
+
+// effectiveContentMode picks the caller's explicit content_mode when set and
+// falls back to the tier-implied value otherwise.
+func (o webSearchOptions) effectiveContentMode() string {
+	if mode := strings.ToLower(strings.TrimSpace(o.contentMode)); mode != "" {
+		return mode
+	}
+	return o.tierContentMode()
+}
+
+// effectiveMaxContentChars prefers an explicit positive caller override and
+// falls back to the tier-implied budget.
+func (o webSearchOptions) effectiveMaxContentChars() int {
+	if o.maxContentChars > 0 {
+		return o.maxContentChars
+	}
+	return o.tierMaxContentChars()
 }
 
 // applyToSearchArgs merges forwarded options into a `search` tool-call
@@ -86,6 +251,16 @@ func (o webSearchOptions) applyToSearchArgs(arguments map[string]any) {
 			arguments["max_results"] = n
 		}
 	}
+	if _, set := arguments["content_mode"]; !set {
+		if mode := o.effectiveContentMode(); mode != "" {
+			arguments["content_mode"] = mode
+		}
+	}
+	if _, set := arguments["max_content_chars"]; !set {
+		if n := o.effectiveMaxContentChars(); n > 0 {
+			arguments["max_content_chars"] = n
+		}
+	}
 	if o.userLocationCountry != "" {
 		if _, set := arguments["user_location_country"]; !set {
 			arguments["user_location_country"] = o.userLocationCountry
@@ -96,11 +271,37 @@ func (o webSearchOptions) applyToSearchArgs(arguments map[string]any) {
 			arguments["allowed_domains"] = toAnySlice(o.allowedDomains)
 		}
 	}
+	if len(o.excludedDomains) > 0 {
+		if _, set := arguments["excluded_domains"]; !set {
+			arguments["excluded_domains"] = toAnySlice(o.excludedDomains)
+		}
+	}
+	if o.category != "" {
+		if _, set := arguments["category"]; !set {
+			arguments["category"] = o.category
+		}
+	}
+	if o.startPublishedDate != "" {
+		if _, set := arguments["start_published_date"]; !set {
+			arguments["start_published_date"] = o.startPublishedDate
+		}
+	}
+	if o.endPublishedDate != "" {
+		if _, set := arguments["end_published_date"]; !set {
+			arguments["end_published_date"] = o.endPublishedDate
+		}
+	}
+	if o.maxAgeHours != nil {
+		if _, set := arguments["max_age_hours"]; !set {
+			arguments["max_age_hours"] = *o.maxAgeHours
+		}
+	}
 }
 
 // applyToFetchArgs merges forwarded options into a `fetch` tool-call argument
-// map. search_context_size has no bearing on fetch so it is intentionally
-// skipped here.
+// map. Retrieval-depth, content-mode, category, and date-range knobs are
+// search-only so they are intentionally skipped here; only host-scoped filters
+// are meaningful for a URL-targeted fetch.
 func (o webSearchOptions) applyToFetchArgs(arguments map[string]any) {
 	if arguments == nil {
 		return
@@ -108,6 +309,11 @@ func (o webSearchOptions) applyToFetchArgs(arguments map[string]any) {
 	if len(o.allowedDomains) > 0 {
 		if _, set := arguments["allowed_domains"]; !set {
 			arguments["allowed_domains"] = toAnySlice(o.allowedDomains)
+		}
+	}
+	if len(o.excludedDomains) > 0 {
+		if _, set := arguments["excluded_domains"]; !set {
+			arguments["excluded_domains"] = toAnySlice(o.excludedDomains)
 		}
 	}
 }
@@ -122,9 +328,16 @@ func parseChatWebSearchOptions(body map[string]any) webSearchOptions {
 		opts.searchContextSize = stringValue(raw["search_context_size"])
 		opts.userLocationCountry = extractUserLocationCountry(raw["user_location"])
 		opts.allowedDomains = extractAllowedDomains(raw["filters"])
+		opts.excludedDomains = extractExcludedDomains(raw["filters"])
+		applyAdvancedSearchFields(&opts, raw)
 	}
-	if filters, ok := body["filters"].(map[string]any); ok && len(opts.allowedDomains) == 0 {
-		opts.allowedDomains = extractAllowedDomainsFromFilterMap(filters)
+	if filters, ok := body["filters"].(map[string]any); ok {
+		if len(opts.allowedDomains) == 0 {
+			opts.allowedDomains = extractDomainListFromFilterMap(filters, "allowed_domains")
+		}
+		if len(opts.excludedDomains) == 0 {
+			opts.excludedDomains = extractDomainListFromFilterMap(filters, "excluded_domains")
+		}
 	}
 	opts.piiCheck = parseSafetyOptIn(body["pii_check_options"])
 	opts.injectionCheck = parseSafetyOptIn(body["prompt_injection_check_options"])
@@ -149,6 +362,8 @@ func parseResponsesWebSearchOptions(body map[string]any) webSearchOptions {
 			userLocationCountry: extractUserLocationCountry(tool["user_location"]),
 		}
 		opts.allowedDomains = extractAllowedDomains(tool["filters"])
+		opts.excludedDomains = extractExcludedDomains(tool["filters"])
+		applyAdvancedSearchFields(&opts, tool)
 		opts.piiCheck = parseSafetyOptIn(body["pii_check_options"])
 		opts.injectionCheck = parseSafetyOptIn(body["prompt_injection_check_options"])
 		return opts
@@ -215,13 +430,30 @@ func extractAllowedDomains(raw any) []string {
 	if !ok {
 		return nil
 	}
-	return extractAllowedDomainsFromFilterMap(filters)
+	return extractDomainListFromFilterMap(filters, "allowed_domains")
 }
 
-// extractAllowedDomainsFromFilterMap is the inner helper that reads the
-// allowed_domains array once filters has been narrowed to a map.
+// extractExcludedDomains mirrors extractAllowedDomains for the
+// filters.excluded_domains list used to drop hosts from search results.
+func extractExcludedDomains(raw any) []string {
+	filters, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return extractDomainListFromFilterMap(filters, "excluded_domains")
+}
+
+// extractAllowedDomainsFromFilterMap is kept as a thin shim over the shared
+// domain-list helper so existing callers keep compiling; new code should call
+// extractDomainListFromFilterMap directly.
 func extractAllowedDomainsFromFilterMap(filters map[string]any) []string {
-	raw, ok := filters["allowed_domains"].([]any)
+	return extractDomainListFromFilterMap(filters, "allowed_domains")
+}
+
+// extractDomainListFromFilterMap reads an array of hostnames under `key` from
+// a filters map and returns it lowercased, trimmed, and deduplicated.
+func extractDomainListFromFilterMap(filters map[string]any, key string) []string {
+	raw, ok := filters[key].([]any)
 	if !ok {
 		return nil
 	}
@@ -239,6 +471,84 @@ func extractAllowedDomainsFromFilterMap(filters map[string]any) []string {
 		out = append(out, domain)
 	}
 	return out
+}
+
+// applyAdvancedSearchFields lifts the non-domain search knobs (content_mode,
+// max_content_chars, category, publish date range, max_age_hours) off a
+// caller-provided block into opts. Callers are responsible for the
+// surrounding domain/country parsing so this stays focused on the fields that
+// are identical across Chat and Responses surfaces.
+func applyAdvancedSearchFields(opts *webSearchOptions, raw map[string]any) {
+	if opts == nil || raw == nil {
+		return
+	}
+	if mode := strings.TrimSpace(stringValue(raw["content_mode"])); mode != "" {
+		opts.contentMode = mode
+	}
+	if n, ok := intValue(raw["max_content_chars"]); ok && n > 0 {
+		opts.maxContentChars = n
+	}
+	if cat := strings.TrimSpace(stringValue(raw["category"])); cat != "" {
+		opts.category = cat
+	}
+	if start := normalizePublishedDate(raw["start_published_date"]); start != "" {
+		opts.startPublishedDate = start
+	}
+	if end := normalizePublishedDate(raw["end_published_date"]); end != "" {
+		opts.endPublishedDate = end
+	}
+	if n, ok := intValue(raw["max_age_hours"]); ok {
+		v := n
+		opts.maxAgeHours = &v
+	}
+}
+
+// intValue coerces a JSON-decoded number or numeric string into an int. The
+// second return reports whether the input was a recognizable integer; callers
+// can use that to distinguish "unset" from "explicitly zero", which matters
+// for tri-state fields like max_age_hours.
+func intValue(raw any) (int, bool) {
+	switch v := raw.(type) {
+	case nil:
+		return 0, false
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n), true
+		}
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0, false
+		}
+		if n, err := strconv.Atoi(trimmed); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// normalizePublishedDate accepts `YYYY-MM-DD` or RFC 3339 strings and returns
+// the value as RFC 3339 in UTC. Empty or malformed input is dropped rather
+// than surfaced as an error so a single bad date does not fail the whole
+// request; the MCP server still gets a syntactically valid value or nothing.
+func normalizePublishedDate(raw any) string {
+	str := strings.TrimSpace(stringValue(raw))
+	if str == "" {
+		return ""
+	}
+	if t, err := time.Parse("2006-01-02", str); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	if t, err := time.Parse(time.RFC3339, str); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // applyWebSearchOptionsToToolCall dispatches to the per-tool merge helper so
@@ -374,6 +684,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 }
 
 func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) (*upstreamJSONResponse, error) {
+	tid := debugTraceID()
 	searchOpts := parseChatWebSearchOptions(body)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
@@ -388,16 +699,49 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 	usageTotals := usageAccumulator{}
 	citations := citationState{nextIndex: 1}
 
+	if debugEnabled {
+		ownedNames := make([]string, 0, len(ownedTools))
+		for n := range ownedTools {
+			ownedNames = append(ownedNames, n)
+		}
+		debugLogf("toolruntime:%s chat.start model=%s search_ctx=%q ownedTools=%v", tid, modelName, searchOpts.searchContextSize, ownedNames)
+	}
+
 	for i := 0; i < maxToolIterations; i++ {
+		if debugEnabled {
+			msgs, _ := reqBody["messages"].([]any)
+			debugLogf("toolruntime:%s chat.iter=%d upstream.request messages_n=%d history=%s", tid, i, len(msgs), debugMessagesSummary(msgs, 200))
+		}
+		start := time.Now()
 		response, err := postJSON(ctx, em, modelName, "/v1/chat/completions", reqBody, requestHeaders)
 		if err != nil {
+			debugLogf("toolruntime:%s chat.iter=%d upstream.error elapsed=%s err=%v", tid, i, time.Since(start), err)
 			return nil, err
 		}
 		usageTotals.Add(response)
 
 		message, toolCalls := parseChatToolCalls(response.body)
-		routerToolCalls, _ := splitToolCalls(ownedTools, toolCalls)
+		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, toolCalls)
+		if debugEnabled {
+			finishReason := ""
+			content := ""
+			if choices, _ := response.body["choices"].([]any); len(choices) > 0 {
+				if ch, _ := choices[0].(map[string]any); ch != nil {
+					finishReason = stringValue(ch["finish_reason"])
+					if msg, _ := ch["message"].(map[string]any); msg != nil {
+						content = stringValue(msg["content"])
+					}
+				}
+			}
+			toolNames := make([]string, 0, len(toolCalls))
+			for _, c := range toolCalls {
+				toolNames = append(toolNames, c.name)
+			}
+			debugLogf("toolruntime:%s chat.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
+				tid, i, time.Since(start), finishReason, len(toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(content, 240))
+		}
 		if len(routerToolCalls) == 0 {
+			debugLogf("toolruntime:%s chat.done iterations=%d (no router tool calls this turn)", tid, i+1)
 			applyAggregatedUsage(response, "/v1/chat/completions", usageTotals.Usage())
 			attachChatCitations(response.body, &citations)
 			return response, nil
@@ -407,16 +751,21 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		messages = append(messages, message)
 		for _, toolCall := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
+			debugLogf("toolruntime:%s chat.iter=%d tool.call name=%s args=%s", tid, i, toolCall.name, debugPreview(toolCall.arguments, 400))
+			tstart := time.Now()
 			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
 			record := toolCallRecord{
 				name:      toolCall.name,
 				arguments: toolCall.arguments,
 			}
 			if err != nil {
+				debugLogf("toolruntime:%s chat.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, toolCall.name, time.Since(tstart), err)
 				output = err.Error()
 				record.errorReason = publicToolErrorReason(toolCall.name, err)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)
+				debugLogf("toolruntime:%s chat.iter=%d tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
+					tid, i, toolCall.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 			}
 			citations.recordToolCall(record)
 			messages = append(messages, map[string]any{
@@ -427,6 +776,7 @@ func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.C
 		}
 		reqBody["messages"] = messages
 	}
+	debugLogf("toolruntime:%s chat.exhausted iterations=%d forcing final answer", tid, maxToolIterations)
 
 	finalResponse, err := postJSON(ctx, em, modelName, "/v1/chat/completions", forcedFinalChatRequest(reqBody), requestHeaders)
 	if err != nil {
@@ -956,12 +1306,25 @@ func publicToolErrorReason(toolName string, err error) string {
 }
 
 func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, citations *citationState) (string, error) {
+	start := time.Now()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      name,
 		Arguments: arguments,
 	})
 	if err != nil {
+		debugLogf("toolruntime:mcp.error tool=%s elapsed=%s args=%s err=%v", name, time.Since(start), debugPreview(arguments, 400), err)
 		return "", err
+	}
+	if debugEnabled {
+		hasStructured := result.StructuredContent != nil
+		textParts := 0
+		for _, content := range result.Content {
+			if _, ok := content.(*mcp.TextContent); ok {
+				textParts++
+			}
+		}
+		debugLogf("toolruntime:mcp.ok tool=%s elapsed=%s structured=%t text_parts=%d structured_preview=%s",
+			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
 	}
 	if result.StructuredContent != nil {
 		if formatted := formatStructuredToolOutput(name, result.StructuredContent, citations); formatted != "" {
