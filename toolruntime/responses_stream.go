@@ -40,6 +40,7 @@ func runResponsesStreaming(
 	}
 
 	searchOpts := parseResponsesWebSearchOptions(body)
+	toolSchemas := schemaLookup(tools)
 	base := cloneJSONMap(body)
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
@@ -87,13 +88,15 @@ func runResponsesStreaming(
 		toolOutputs := make([]any, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
 			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
+			sanitizeToolCallArguments(call.name, call.arguments)
+			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
 			output, toolErr := streamer.executeTool(ctx, session, call)
 			record := toolCallRecord{
 				name:      call.name,
 				arguments: call.arguments,
 			}
 			if toolErr != nil {
-				output = toolErr.Error()
+				output = humanizeToolArgError(call.name, toolErr, call.arguments)
 				record.errorReason = publicToolErrorReason(call.name, toolErr)
 			} else {
 				record.resultURLs = extractToolOutputURLs(output)

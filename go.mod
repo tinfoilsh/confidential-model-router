@@ -3,6 +3,7 @@ module github.com/tinfoilsh/confidential-model-router
 go 1.25.5
 
 require (
+	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/prometheus/client_golang v1.23.2
@@ -50,7 +51,6 @@ require (
 	github.com/google/go-containerregistry v0.20.7 // indirect
 	github.com/google/go-sev-guest v0.14.1 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/logger v1.1.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 // indirect
 	github.com/in-toto/attestation v1.1.2 // indirect

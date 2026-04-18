@@ -92,6 +92,37 @@ func TestCitationEmitter_FullwidthBracketsNormalized(t *testing.T) {
 	}
 }
 
+// gpt-oss has been observed emitting a mixed-bracket shape where the opening
+// lenticular fullwidth bracket is paired with an ASCII close bracket, for
+// example `【Example](https://example.com/p)`. Verify the emitter recovers
+// the citation in both mixed permutations so the annotation count matches
+// what the user visually sees.
+func TestCitationEmitter_MixedBracketsNormalized(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"open fullwidth close ascii", "see \u3010Example](https://example.com/p) ok"},
+		{"open ascii close fullwidth", "see [Example\u3011(https://example.com/p) ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			emitter, _ := newTestEmitter(citationSource{url: "https://example.com/p", title: "P"})
+			content, annotations := emitter.push(tc.input)
+			want := "see [Example](https://example.com/p) ok"
+			if content != want {
+				t.Fatalf("content = %q, want %q", content, want)
+			}
+			if len(annotations) != 1 {
+				t.Fatalf("want exactly one annotation, got %v", annotations)
+			}
+			if annotations[0].startIndex != runeLen("see [") || annotations[0].endIndex != runeLen("see [Example") {
+				t.Fatalf("annotation span = (%d,%d)", annotations[0].startIndex, annotations[0].endIndex)
+			}
+		})
+	}
+}
+
 func TestCitationEmitter_SplitAcrossManyChunks(t *testing.T) {
 	emitter, _ := newTestEmitter(citationSource{url: "https://example.com/a", title: "A"})
 
@@ -261,6 +292,8 @@ func TestMatchMarkdownLink(t *testing.T) {
 	}{
 		{"complete ascii", "[foo](https://example.com)", 0, linkMatch, 26, 1, 4, "https://example.com"},
 		{"complete fullwidth", "\u3010foo\u3011(https://example.com)", 0, linkMatch, 26, 1, 4, "https://example.com"},
+		{"complete mixed open-fullwidth close-ascii", "\u3010foo](https://example.com)", 0, linkMatch, 26, 1, 4, "https://example.com"},
+		{"complete mixed open-ascii close-fullwidth", "[foo\u3011(https://example.com)", 0, linkMatch, 26, 1, 4, "https://example.com"},
 		{"incomplete no close bracket", "[foo", 0, linkIncomplete, 0, 0, 0, ""},
 		{"incomplete no open paren", "[foo]", 0, linkIncomplete, 0, 0, 0, ""},
 		{"incomplete no close paren", "[foo](https://example.com", 0, linkIncomplete, 0, 0, 0, ""},

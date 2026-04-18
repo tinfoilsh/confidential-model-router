@@ -189,20 +189,20 @@ func matchMarkdownLink(text []rune, start int) (outcome linkMatchOutcome, end, l
 		return linkIncomplete, 0, 0, 0, ""
 	}
 	open := text[start]
-	var closeRune rune
 	switch open {
-	case '[':
-		closeRune = ']'
-	case '\u3010':
-		closeRune = '\u3011'
+	case '[', '\u3010':
 	default:
 		return linkInvalid, 0, 0, 0, ""
 	}
 
+	// Accept either ASCII ']' or fullwidth '\u3011' as the closer regardless
+	// of which opener the model produced. gpt-oss observed in the wild emits
+	// mixed-bracket spans such as `【label](url)` when improvising a citation
+	// format outside the harmony browser tool training distribution.
 	labelStart = start + 1
 	labelEnd = -1
 	for i := labelStart; i < len(text); i++ {
-		if text[i] == closeRune {
+		if text[i] == ']' || text[i] == '\u3011' {
 			labelEnd = i
 			break
 		}

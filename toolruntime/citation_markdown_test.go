@@ -146,6 +146,19 @@ func TestNormalizeCitationLinksRewritesFullwidthBrackets(t *testing.T) {
 	}
 }
 
+// TestNormalizeCitationLinksRewritesMixedBrackets covers the gpt-oss shape
+// where the opening lenticular fullwidth bracket pairs with an ASCII close
+// bracket, for example `【Example page](https://example.com/page)`. Without
+// this rewrite the content contains a visible near-link the client cannot
+// resolve to an annotation.
+func TestNormalizeCitationLinksRewritesMixedBrackets(t *testing.T) {
+	input := "A claim 【Example page](https://example.com/page) stands."
+	want := "A claim [Example page](https://example.com/page) stands."
+	if got := normalizeCitationLinks(input); got != want {
+		t.Errorf("normalizeCitationLinks(%q) = %q, want %q", input, got, want)
+	}
+}
+
 // TestAttachChatCitationsNormalizesContent exercises the end-to-end pathway:
 // when attachChatCitations runs, any fullwidth-bracketed links in the
 // assistant message content are rewritten into ASCII markdown and surfaced
