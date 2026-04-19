@@ -18,9 +18,14 @@ import (
 
 // runChatStreaming is the streaming entry point for the Chat Completions
 // route. It drives the same tool loop as runChatLoop but consumes the
-// upstream model's stream incrementally so that assistant content deltas,
-// citation annotations, and web_search_call events are forwarded to the
-// client live rather than synthesized at the end of the turn.
+// upstream model's stream incrementally so that assistant content deltas
+// and citation annotations are forwarded to the client live rather than
+// synthesized at the end of the turn. When the client opted into the
+// router-owned `X-Tinfoil-Events: web_search` marker stream, router-owned
+// web_search tool-call progress is surfaced inline via
+// `<tinfoil-event>...</tinfoil-event>` markers carried inside the normal
+// `delta.content` text. Clients that did not opt in see a pristine
+// spec-conformant chat.completion.chunk stream with no markers.
 //
 // The function assumes isStream(body) is already true. Non-streaming callers
 // continue to go through runChatLoop so existing behavior is preserved for
@@ -51,6 +56,7 @@ func runChatStreaming(
 	delete(reqBody, "filters")
 	delete(reqBody, "pii_check_options")
 	delete(reqBody, "prompt_injection_check_options")
+	stripRouterOwnedIncludes(reqBody)
 	reqBody["stream"] = true
 	reqBody["stream_options"] = map[string]any{"include_usage": true}
 	reqBody["parallel_tool_calls"] = false
@@ -59,6 +65,7 @@ func runChatStreaming(
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
+	eventsEnabled := tinfoilEventsEnabled(r.Header)
 
 	if debugEnabled {
 		ownedNames := make([]string, 0, len(ownedTools))
@@ -73,6 +80,7 @@ func runChatStreaming(
 		flusher:               flusher,
 		usageMetricsRequested: usageMetricsRequested,
 		clientRequestedUsage:  clientRequestedUsage,
+		eventsEnabled:         eventsEnabled,
 		citations:             &citationState{nextIndex: 1},
 		emitter:               nil,
 		usageTotals:           &usageAccumulator{},
@@ -175,8 +183,13 @@ type chatStreamer struct {
 	flusher               http.Flusher
 	usageMetricsRequested bool
 	clientRequestedUsage  bool
-	citations             *citationState
-	emitter               *citationEmitter
+	// eventsEnabled is true when the caller opted into the
+	// `X-Tinfoil-Events: web_search` marker stream. When false the
+	// streamer emits only pure spec chat.completion.chunk frames; when
+	// true it interleaves `<tinfoil-event>` markers inside delta.content.
+	eventsEnabled bool
+	citations     *citationState
+	emitter       *citationEmitter
 
 	// headersWritten is true once the SSE headers have been emitted.
 	// After that any upstream error is surfaced as an SSE error chunk
@@ -379,6 +392,11 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 			result.content += content
 			s.emitContentDelta(content)
 		}
+		// Reasoning deltas (reasoning_content / reasoning) never carry
+		// citations so they bypass the citation emitter. They must still
+		// flow through to the client as-is so reasoning models keep
+		// driving the live thinking UI when web search is enabled.
+		s.emitReasoningDelta(delta)
 		if rawCalls, ok := delta["tool_calls"].([]any); ok {
 			builder.ingest(rawCalls)
 		}
@@ -535,6 +553,36 @@ func (s *chatStreamer) emitContentDelta(fragment string) {
 	}
 }
 
+// emitReasoningDelta forwards upstream `reasoning_content` and `reasoning`
+// delta fields to the client unmodified so reasoning models keep
+// streaming their thinking tokens when the web-search tool loop is
+// active. Both keys can appear on the same delta; preserve whichever the
+// upstream sent so clients that only recognize one of the two still see
+// something.
+func (s *chatStreamer) emitReasoningDelta(delta map[string]any) {
+	if delta == nil {
+		return
+	}
+	reasoningDelta := map[string]any{}
+	if reasoning := stringValue(delta["reasoning_content"]); reasoning != "" {
+		reasoningDelta["reasoning_content"] = reasoning
+	}
+	if reasoning := stringValue(delta["reasoning"]); reasoning != "" {
+		reasoningDelta["reasoning"] = reasoning
+	}
+	if len(reasoningDelta) == 0 {
+		return
+	}
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": reasoningDelta,
+			},
+		},
+	})
+}
+
 // flushCitations drains any trailing content still held back by the
 // emitter at end-of-stream so the user sees every rune the model produced.
 func (s *chatStreamer) flushCitations() {
@@ -561,60 +609,53 @@ func (s *chatStreamer) flushCitations() {
 	}
 }
 
-// executeTool runs a single MCP tool call and emits web_search_call events
-// wrapping the call. Failures are surfaced as web_search_call "failed"
-// events and returned to the caller so the tool output carries the error
-// text, matching the non-streaming path that serializes err.Error() into
-// the tool-result message.
+// executeTool runs a single MCP tool call and, when the caller opted
+// into the router-owned marker stream via `X-Tinfoil-Events: web_search`,
+// emits `<tinfoil-event>` progress markers inside the assistant content
+// delta stream. Markers are spec-invisible to OpenAI SDKs that do not
+// opt in: because the payload rides inside a regular chat.completion.chunk
+// `delta.content` string, strict decoders simply render them as text.
+// Opt-in clients strip them with a single regex before rendering.
+// Failures are still returned to the caller so the tool output carries
+// the raw error text (matching the non-streaming path that serializes
+// err.Error() into the tool-result message).
 func (s *chatStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
 	switch call.name {
 	case "search":
 		id := "ws_" + uuid.NewString()
-		s.emitWebSearchCall(id, "in_progress", map[string]any{
-			"type":  "search",
-			"query": stringValue(call.arguments["query"]),
-		}, "")
+		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
+		s.emitTinfoilEventMarker(id, "in_progress", action, "")
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
-			s.emitWebSearchCall(id, "failed", map[string]any{
-				"type":  "search",
-				"query": stringValue(call.arguments["query"]),
-			}, publicToolErrorReason(call.name, err))
+			s.emitTinfoilEventMarker(id, failureStatusFor(err), action, publicToolErrorReason(call.name, err))
 			return "", err
 		}
-		completed := map[string]any{
-			"type":  "search",
-			"query": stringValue(call.arguments["query"]),
-		}
-		if urls := extractToolOutputURLs(output); len(urls) > 0 {
-			completed["sources"] = urls
-		}
-		s.emitWebSearchCall(id, "completed", completed, "")
+		s.emitTinfoilEventMarker(id, "completed", action, "")
 		return output, nil
 	case "fetch":
 		urls := fetchArgumentURLs(call.arguments)
 		if len(urls) == 0 {
-			output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
-			return output, err
+			return callTool(ctx, session, call.name, call.arguments, s.citations)
 		}
-		// Pair one stable id per URL so clients can correlate in_progress
-		// with the matching completed or failed event, mirroring how the
-		// non-streaming shape surfaces fetch_calls.
+		// Pair one stable id per URL so opt-in clients can correlate
+		// the in_progress marker with its matching terminal marker,
+		// mirroring how the non-streaming shape surfaces fetches.
 		fetchIDs := make([]string, len(urls))
 		for i, url := range urls {
 			fetchIDs[i] = "ws_" + uuid.NewString()
-			s.emitWebSearchCall(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
+			s.emitTinfoilEventMarker(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
 		}
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
+			status := failureStatusFor(err)
 			for i, url := range urls {
-				s.emitWebSearchCall(fetchIDs[i], "failed", map[string]any{"type": "open_page", "url": url}, reason)
+				s.emitTinfoilEventMarker(fetchIDs[i], status, map[string]any{"type": "open_page", "url": url}, reason)
 			}
 			return "", err
 		}
 		for i, url := range urls {
-			s.emitWebSearchCall(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
+			s.emitTinfoilEventMarker(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
 		}
 		return output, nil
 	default:
@@ -622,11 +663,23 @@ func (s *chatStreamer) executeTool(ctx context.Context, session *mcp.ClientSessi
 	}
 }
 
-// emitWebSearchCall serializes a single web_search_call event into the SSE
-// stream in the shape tinfoil-go's WebSearchStream parser and the webapp
-// streaming processor already consume on the non-streaming path.
-func (s *chatStreamer) emitWebSearchCall(id, status string, action map[string]any, reason string) {
-	s.emitData(webSearchCallEvent(id, status, action, reason))
+// emitTinfoilEventMarker writes a single `<tinfoil-event>` marker as the
+// `delta.content` of a chat.completion.chunk frame. When the caller did
+// not opt into the marker stream, this is a no-op so strict SDKs see a
+// pristine spec-conformant stream.
+func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string) {
+	if !s.eventsEnabled {
+		return
+	}
+	marker := tinfoilEventMarker(id, status, action, reason)
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{"content": marker},
+			},
+		},
+	})
 }
 
 // writeChunk serializes a single chat.completion.chunk to the client,

@@ -426,3 +426,31 @@ func TestChatStreamerPumpResolvesMarkdownAnnotations(t *testing.T) {
 		t.Fatalf("expected annotation url in streamed body, got %s", body)
 	}
 }
+
+// TestChatStreamerPumpForwardsReasoningDelta pins that reasoning_content
+// and reasoning delta fields produced by upstream reasoning models pass
+// through the router to the client unchanged so the live "thinking" UI
+// keeps updating while the web search tool loop is active.
+func TestChatStreamerPumpForwardsReasoningDelta(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning_content":"let me think..."}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning":"consider both"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":"answer"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	reader := newSSEReader(strings.NewReader(upstream))
+
+	if _, err := streamer.pumpUpstream(reader); err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"reasoning_content":"let me think..."`) {
+		t.Fatalf("expected reasoning_content forwarded to client, got %s", body)
+	}
+	if !strings.Contains(body, `"reasoning":"consider both"`) {
+		t.Fatalf("expected reasoning forwarded to client, got %s", body)
+	}
+}

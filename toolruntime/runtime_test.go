@@ -194,7 +194,7 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
 		PromptTokens:     7,
 		CompletionTokens: 11,
 		TotalTokens:      18,
-	}, citations)
+	}, citations, false, false)
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -241,7 +241,7 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalResponsesUsage(t *testing.
 		PromptTokens:     7,
 		CompletionTokens: 11,
 		TotalTokens:      18,
-	}, citations)
+	}, citations, true, false)
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -525,7 +525,7 @@ func TestBuildWebSearchCallOutputItemsMarksFailedCalls(t *testing.T) {
 			arguments: map[string]any{"query": "ok"},
 		},
 	}
-	items := buildWebSearchCallOutputItems(records)
+	items := buildWebSearchCallOutputItems(records, false)
 	if len(items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(items))
 	}
@@ -565,5 +565,197 @@ func TestPublicToolErrorReasonStripsInternalDetail(t *testing.T) {
 	}
 	if got := publicToolErrorReason("search", nil); got != "" {
 		t.Fatalf("nil err should return empty string, got %q", got)
+	}
+}
+
+// TestPublicToolErrorReasonMarksSafetyBlocked pins that safety-blocked
+// errors (PII or prompt-injection filter trips) surface the dedicated
+// `blocked_by_safety_filter` reason rather than collapsing into the
+// generic `tool_error` constant. This is what clients key off to render
+// the corresponding web_search_call status as "blocked".
+func TestPublicToolErrorReasonMarksSafetyBlocked(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	err := errors.New("query was blocked by safety filters: pii detected — rephrase and retry")
+	got := publicToolErrorReason("search", err)
+	if got != blockedToolErrorReason {
+		t.Fatalf("expected %q for safety-blocked error, got %q", blockedToolErrorReason, got)
+	}
+	if strings.Contains(got, "pii detected") {
+		t.Fatalf("public reason leaked detail: %q", got)
+	}
+}
+
+// TestFailureStatusForMapsSafetyBlock pins the web_search_call status
+// returned for each error class used on the streaming error paths.
+func TestFailureStatusForMapsSafetyBlock(t *testing.T) {
+	if got := failureStatusFor(errors.New("Query was blocked by safety filters: injection")); got != "blocked" {
+		t.Fatalf("expected blocked, got %q", got)
+	}
+	if got := failureStatusFor(errors.New("upstream timeout")); got != "failed" {
+		t.Fatalf("expected failed, got %q", got)
+	}
+}
+
+// TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed pins that a
+// recorded search whose errorReason is the safety-block constant
+// surfaces as status:"failed" on the spec-conformant web_search_call
+// output item (OpenAI's status enum has no "blocked" value). The
+// distinctive blocked signal is carried via tinfoil-event markers when
+// the caller opts in.
+func TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed(t *testing.T) {
+	records := []toolCallRecord{
+		{
+			name:        "search",
+			arguments:   map[string]any{"query": "sensitive"},
+			errorReason: blockedToolErrorReason,
+		},
+	}
+	items := buildWebSearchCallOutputItems(records, false)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	item, _ := items[0].(map[string]any)
+	if got := stringValue(item["status"]); got != "failed" {
+		t.Fatalf("expected failed status (blocked collapsed for spec compat), got %q", got)
+	}
+	if _, extra := item["reason"]; extra {
+		t.Fatalf("spec-conformant output item must not carry a reason field")
+	}
+}
+
+// TestWebSearchCallEventMatchesOpenAISpec pins that every synthesized
+// web_search_call output item carries exactly the fields OpenAI's
+// Responses API documents: type, id, status, action. In particular it
+// does NOT duplicate `item_id` onto the non-streaming output-item shape
+// (item_id is specced only on the streaming envelope), and it never
+// carries a non-spec `reason` field (the router's blocked / failed
+// detail is surfaced via tinfoil-event markers when the caller opts in).
+func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
+	event := webSearchCallEvent("ws_1", "in_progress", map[string]any{"type": "search"})
+	if got := stringValue(event["id"]); got != "ws_1" {
+		t.Fatalf("expected id=ws_1, got %q", got)
+	}
+	if got := stringValue(event["type"]); got != "web_search_call" {
+		t.Fatalf("expected type=web_search_call, got %q", got)
+	}
+	if _, extra := event["item_id"]; extra {
+		t.Fatalf("output item must not duplicate item_id onto the non-streaming shape")
+	}
+	if _, extra := event["reason"]; extra {
+		t.Fatalf("output item must not carry a non-spec reason field")
+	}
+}
+
+// TestWebSearchCallEventCollapsesBlockedToFailed pins that the spec-only
+// web_search_call output-item status set is preserved: OpenAI documents
+// in_progress / searching / completed / failed, with no `blocked`. The
+// router's internal blocked status is collapsed onto failed on the
+// output item; the distinctive signal rides the tinfoil-event marker.
+func TestWebSearchCallEventCollapsesBlockedToFailed(t *testing.T) {
+	event := webSearchCallEvent("ws_1", "blocked", map[string]any{"type": "search"})
+	if got := stringValue(event["status"]); got != "failed" {
+		t.Fatalf("expected blocked to collapse onto failed on the output item, got %q", got)
+	}
+}
+
+// TestBuildWebSearchCallOutputItemsGatesActionSources pins the include
+// opt-in: without `web_search_call.action.sources` the field is
+// omitted entirely; with it, the URLs are shipped in OpenAI's
+// documented `[{type:"url", url:"..."}]` shape.
+func TestBuildWebSearchCallOutputItemsGatesActionSources(t *testing.T) {
+	records := []toolCallRecord{
+		{
+			name:       "search",
+			arguments:  map[string]any{"query": "cats"},
+			resultURLs: []string{"https://a.test", "https://b.test"},
+		},
+	}
+
+	withoutInclude := buildWebSearchCallOutputItems(records, false)
+	item, _ := withoutInclude[0].(map[string]any)
+	action, _ := item["action"].(map[string]any)
+	if _, present := action["sources"]; present {
+		t.Fatalf("expected sources omitted when include flag is false, got %#v", action)
+	}
+
+	withInclude := buildWebSearchCallOutputItems(records, true)
+	item, _ = withInclude[0].(map[string]any)
+	action, _ = item["action"].(map[string]any)
+	sources, _ := action["sources"].([]any)
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 sources, got %#v", sources)
+	}
+	first, _ := sources[0].(map[string]any)
+	if stringValue(first["type"]) != "url" {
+		t.Fatalf("expected source type=url, got %#v", first)
+	}
+	if stringValue(first["url"]) != "https://a.test" {
+		t.Fatalf("expected first source url=https://a.test, got %#v", first)
+	}
+}
+
+// TestParseIncludeActionSourcesReadsRequestFlag pins the request body
+// parser for OpenAI's documented `include: ["..."]` opt-in list.
+func TestParseIncludeActionSourcesReadsRequestFlag(t *testing.T) {
+	body := map[string]any{"include": []any{"web_search_call.action.sources"}}
+	if !parseIncludeActionSources(body) {
+		t.Fatal("expected flag to parse as true")
+	}
+	if parseIncludeActionSources(map[string]any{"include": []any{"something.else"}}) {
+		t.Fatal("unrelated include entries must not trigger the flag")
+	}
+	if parseIncludeActionSources(map[string]any{}) {
+		t.Fatal("empty body must parse as false")
+	}
+}
+
+// TestToolResultErrorMessageExtractsHandlerText pins that handler
+// errors packed into CallToolResult.Content (MCP's convention for tool
+// errors vs protocol errors) are surfaced as a single joined string the
+// router can feed into failureStatusFor / isToolCallBlocked.
+func TestToolResultErrorMessageExtractsHandlerText(t *testing.T) {
+	result := &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: "query was blocked by safety filters: PII detected"},
+		},
+	}
+	if got := toolResultErrorMessage(result); !strings.Contains(got, "blocked by safety filters") {
+		t.Fatalf("expected blocked message, got %q", got)
+	}
+
+	empty := &mcp.CallToolResult{IsError: true}
+	if got := toolResultErrorMessage(empty); got != "" {
+		t.Fatalf("expected empty string for no content, got %q", got)
+	}
+
+	if got := toolResultErrorMessage(nil); got != "" {
+		t.Fatalf("expected empty string for nil result, got %q", got)
+	}
+}
+
+// TestStripRouterOwnedIncludesFiltersActionSources pins that the
+// router-only `web_search_call.action.sources` include entry is removed
+// from the body forwarded upstream (inference servers reject unknown
+// include values) while unrelated entries are preserved.
+func TestStripRouterOwnedIncludesFiltersActionSources(t *testing.T) {
+	body := map[string]any{"include": []any{"web_search_call.action.sources", "reasoning.encrypted_content"}}
+	stripRouterOwnedIncludes(body)
+	got, _ := body["include"].([]any)
+	if len(got) != 1 || stringValue(got[0]) != "reasoning.encrypted_content" {
+		t.Fatalf("expected only upstream-known include to remain, got %#v", got)
+	}
+
+	onlyRouter := map[string]any{"include": []any{"web_search_call.action.sources"}}
+	stripRouterOwnedIncludes(onlyRouter)
+	if _, present := onlyRouter["include"]; present {
+		t.Fatalf("expected include to be dropped entirely when the only entry was router-owned, got %#v", onlyRouter)
+	}
+
+	empty := map[string]any{}
+	stripRouterOwnedIncludes(empty)
+	if _, present := empty["include"]; present {
+		t.Fatal("stripRouterOwnedIncludes must not invent an include key")
 	}
 }
