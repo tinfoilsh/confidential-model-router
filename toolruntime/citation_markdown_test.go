@@ -178,7 +178,7 @@ func TestAttachChatCitationsNormalizesContent(t *testing.T) {
 		},
 	}
 
-	attachChatCitations(body, state)
+	attachChatCitations(body, state, false)
 
 	choice := body["choices"].([]any)[0].(map[string]any)
 	message := choice["message"].(map[string]any)

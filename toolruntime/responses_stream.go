@@ -19,8 +19,15 @@ import (
 // runResponsesStreaming is the streaming entry point for the Responses
 // route. It owns the same tool loop as runResponsesLoop but consumes the
 // upstream model's event stream incrementally and forwards output text
-// deltas, annotations, and web_search_call events to the client live
-// rather than synthesizing a single bundle at the end of the turn.
+// deltas and annotations to the client live rather than synthesizing a
+// single bundle at the end of the turn. When the client opted in via
+// `X-Tinfoil-Events: web_search`, router-owned web_search tool-call
+// progress is surfaced inline using `<tinfoil-event>...</tinfoil-event>`
+// markers carried inside synthetic `response.output_text.delta` events.
+// The synthetic carrier keeps the entire stream spec-conformant: OpenAI
+// SDKs that do not recognize the marker format simply render the tagged
+// JSON as assistant text; opt-in clients strip it with a single regex
+// before rendering.
 func runResponsesStreaming(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -44,23 +51,27 @@ func runResponsesStreaming(
 	base := cloneJSONMap(body)
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
+	stripRouterOwnedIncludes(base)
 	base["stream"] = true
 	base["parallel_tool_calls"] = false
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
+	eventsEnabled := tinfoilEventsEnabled(r.Header)
 
 	streamer := &responsesStreamer{
 		w:                     w,
 		flusher:               flusher,
 		usageMetricsRequested: usageMetricsRequested,
+		eventsEnabled:         eventsEnabled,
 		citations:             &citationState{nextIndex: 1},
 		usageTotals:           &usageAccumulator{},
 		emitters:              map[itemContentKey]*citationEmitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            ownedTools,
+		includeActionSources:  searchOpts.includeActionSources,
 	}
 
 	accumulatedInput, _ := base["input"].([]any)
@@ -134,8 +145,14 @@ type responsesStreamer struct {
 	w                     http.ResponseWriter
 	flusher               http.Flusher
 	usageMetricsRequested bool
-	citations             *citationState
-	usageTotals           *usageAccumulator
+	// eventsEnabled is true when the caller opted into the
+	// `X-Tinfoil-Events: web_search` marker stream. When false the
+	// streamer emits only pure spec Responses events; when true it
+	// additionally opens synthetic assistant-message items carrying
+	// `<tinfoil-event>` markers inside output_text deltas.
+	eventsEnabled bool
+	citations     *citationState
+	usageTotals   *usageAccumulator
 
 	headersWritten bool
 	// upstreamIDCaptured is true once we have adopted the first
@@ -162,6 +179,12 @@ type responsesStreamer struct {
 	// items that we forward. Upstream resets to 0 on every iteration; we
 	// offset so the client sees a monotonically increasing sequence.
 	outputIndex int
+
+	// sequenceNumber is the monotonically increasing counter OpenAI's spec
+	// requires on every streaming envelope so clients can detect dropped
+	// frames and order events across the whole response. It increments once
+	// per emitted event across the entire streamed response.
+	sequenceNumber int
 
 	// outputIndexMap rewrites upstream output_index values on a given
 	// iteration to the client-facing offset. Cleared between iterations.
@@ -205,6 +228,13 @@ type responsesStreamer struct {
 	// suppressed from the client stream and resolved internally, while
 	// function_calls naming client-owned tools are forwarded live.
 	ownedTools map[string]struct{}
+
+	// includeActionSources mirrors the request's opt-in for
+	// `web_search_call.action.sources`. Propagated to
+	// attachResponsesCitations when building the terminal
+	// response.completed snapshot so the final output item carries the
+	// sources array only when the caller asked for it.
+	includeActionSources bool
 
 	// writeErr latches the first error observed while writing to the
 	// client SSE stream. Once set, emit* methods are no-ops and the
@@ -346,6 +376,16 @@ func (s *responsesStreamer) streamModel() string {
 func (s *responsesStreamer) emitEvent(eventType string, body map[string]any) {
 	if s.writeErr != nil {
 		return
+	}
+	if body != nil {
+		// Always replace the sequence_number with a streamer-scoped counter.
+		// Upstream enclaves reset their counter at the start of every
+		// iteration of the tool loop, which would break the client-facing
+		// invariant that sequence_number increases monotonically across the
+		// whole response. Stamping our own counter here preserves that
+		// guarantee even when we forward upstream events unchanged.
+		body["sequence_number"] = s.sequenceNumber
+		s.sequenceNumber++
 	}
 	if err := sseEvent(s.w, eventType, body); err != nil {
 		s.writeErr = err
@@ -820,25 +860,27 @@ func (s *responsesStreamer) forwardEvent(eventType string, event map[string]any)
 	s.emitEvent(eventType, event)
 }
 
-// executeTool invokes the MCP session and wraps the call in the
-// web_search_call event pair so the client sees search and fetch progress
-// in real time, symmetric to the chat streamer.
+// executeTool invokes the MCP session and, when the caller opted into
+// the router-owned marker stream via `X-Tinfoil-Events: web_search`,
+// surfaces search / fetch progress as `<tinfoil-event>` markers carried
+// inside synthetic assistant-message output items. Strict OpenAI SDKs
+// see only spec-conformant events (a message item opens, emits a text
+// delta, and closes); opt-in clients parse the marker out of that text.
+// When events are not enabled this method is a no-op wrapper around
+// callTool, preserving the pristine spec-conformant stream expected by
+// callers that did not set the header.
 func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
 	switch call.name {
 	case "search":
 		id := "ws_" + uuid.NewString()
 		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		s.emitWebSearchCall(id, "in_progress", action, "")
+		s.emitTinfoilEventMarker(id, "in_progress", action, "")
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
-			s.emitWebSearchCall(id, "failed", action, publicToolErrorReason(call.name, err))
+			s.emitTinfoilEventMarker(id, failureStatusFor(err), action, publicToolErrorReason(call.name, err))
 			return "", err
 		}
-		completedAction := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		if urls := extractToolOutputURLs(output); len(urls) > 0 {
-			completedAction["sources"] = urls
-		}
-		s.emitWebSearchCall(id, "completed", completedAction, "")
+		s.emitTinfoilEventMarker(id, "completed", action, "")
 		return output, nil
 	case "fetch":
 		urls := fetchArgumentURLs(call.arguments)
@@ -848,18 +890,19 @@ func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.Client
 		fetchIDs := make([]string, len(urls))
 		for i, url := range urls {
 			fetchIDs[i] = "ws_" + uuid.NewString()
-			s.emitWebSearchCall(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
+			s.emitTinfoilEventMarker(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
 		}
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
+			status := failureStatusFor(err)
 			for i, url := range urls {
-				s.emitWebSearchCall(fetchIDs[i], "failed", map[string]any{"type": "open_page", "url": url}, reason)
+				s.emitTinfoilEventMarker(fetchIDs[i], status, map[string]any{"type": "open_page", "url": url}, reason)
 			}
 			return "", err
 		}
 		for i, url := range urls {
-			s.emitWebSearchCall(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
+			s.emitTinfoilEventMarker(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
 		}
 		return output, nil
 	default:
@@ -867,15 +910,82 @@ func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.Client
 	}
 }
 
-// emitWebSearchCall serializes a web_search_call progress event in the
-// Responses API's documented shape: the event name is
-// `response.web_search_call.<status>` and the body is the same
-// web_search_call object the non-streaming path attaches to the response.
-// Status values are in_progress, completed, or failed, matching the
-// transitions UIs already render on this route today.
-func (s *responsesStreamer) emitWebSearchCall(id, status string, action map[string]any, reason string) {
-	event := webSearchCallEvent(id, status, action, reason)
-	s.emitEvent("response.web_search_call."+status, event)
+// emitTinfoilEventMarker writes one `<tinfoil-event>` marker to the
+// client by opening a synthetic assistant-message output item, emitting
+// its text delta, and closing the item. The five-event burst is
+// spec-conformant on every frame — opt-out clients see a tiny assistant
+// message whose text happens to contain `<tinfoil-event>...</tinfoil-event>`
+// which they will simply render as-is. Opt-in clients strip the tags
+// before rendering. When the caller did not opt in this is a no-op so
+// strict clients see no extra frames at all.
+//
+// The synthetic item participates in the streamer's normal output_index
+// bookkeeping so any subsequent real items keep a monotonically
+// increasing index sequence. The item is NOT accumulated into finalOutput
+// because the terminal `response.completed` snapshot uses web_search_call
+// output items as the canonical progress surface (via
+// attachResponsesCitations).
+func (s *responsesStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string) {
+	if !s.eventsEnabled {
+		return
+	}
+	marker := tinfoilEventMarker(id, status, action, reason)
+	itemID := "msg_tf_" + uuid.NewString()
+	outputIndex := s.outputIndex
+	s.outputIndex++
+
+	item := map[string]any{
+		"id":     itemID,
+		"type":   "message",
+		"role":   "assistant",
+		"status": "in_progress",
+		"content": []any{
+			map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		},
+	}
+	s.emitEvent("response.output_item.added", map[string]any{
+		"type":         "response.output_item.added",
+		"output_index": outputIndex,
+		"item":         item,
+	})
+	s.emitEvent("response.content_part.added", map[string]any{
+		"type":          "response.content_part.added",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": 0,
+		"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+	})
+	s.emitEvent("response.output_text.delta", map[string]any{
+		"type":          "response.output_text.delta",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": 0,
+		"delta":         marker,
+	})
+	s.emitEvent("response.output_text.done", map[string]any{
+		"type":          "response.output_text.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": 0,
+		"text":          marker,
+	})
+	s.emitEvent("response.content_part.done", map[string]any{
+		"type":          "response.content_part.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": 0,
+		"part":          map[string]any{"type": "output_text", "text": marker, "annotations": []any{}},
+	})
+	completedItem := cloneJSONMap(item)
+	completedItem["status"] = "completed"
+	completedItem["content"] = []any{
+		map[string]any{"type": "output_text", "text": marker, "annotations": []any{}},
+	}
+	s.emitEvent("response.output_item.done", map[string]any{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item":         completedItem,
+	})
 }
 
 // finalize writes the aggregated `response.completed` event with every
@@ -916,7 +1026,12 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	// terminal payload that is byte-for-byte comparable to the
 	// non-streaming response.
 	completedBody := map[string]any{"output": append([]any{}, s.finalOutput...)}
-	attachResponsesCitations(completedBody, s.citations)
+	// Streaming already fired tinfoil-event markers live via synthetic
+	// output_text deltas, so the terminal snapshot must NOT prepend
+	// them again (the client would otherwise see a duplicate rendering
+	// in `response.completed.output`). Pass eventsEnabled=false here
+	// regardless of header opt-in.
+	attachResponsesCitations(completedBody, s.citations, s.includeActionSources, false)
 	finalOutput, _ := completedBody["output"].([]any)
 	completed := map[string]any{
 		"id":         s.streamResponseID(),
