@@ -114,6 +114,27 @@ func (s *streamBase) validateStreamModel(fieldPath string) string {
 	return s.model
 }
 
+// newUpstreamJSONError builds a 502 *upstreamError carrying an OpenAI-shape
+// {"error": errObj} body with a JSON Content-Type header, used by both
+// streamers to surface malformed / truncated upstream frames.
+func newUpstreamJSONError(errObj map[string]any) *upstreamError {
+	return &upstreamError{
+		statusCode: http.StatusBadGateway,
+		header:     http.Header{"Content-Type": []string{"application/json"}},
+		body:       mustMarshal(map[string]any{"error": errObj}),
+	}
+}
+
+// newUpstreamStreamError is newUpstreamJSONError specialized to the
+// {message, type:"upstream_error"} shape produced for protocol-level
+// stream failures (malformed JSON, missing terminal marker).
+func newUpstreamStreamError(message string) *upstreamError {
+	return newUpstreamJSONError(map[string]any{
+		"message": message,
+		"type":    "upstream_error",
+	})
+}
+
 // openUpstreamSSE posts the JSON-encoded reqBody to the enclave path and
 // returns the SSE response body ready for sseReader consumption. On
 // success it also captures the upstream headers and writes the

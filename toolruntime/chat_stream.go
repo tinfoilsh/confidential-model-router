@@ -298,16 +298,7 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 			// (and therefore lost content / tool calls / usage) are
 			// surfaced to the client as a terminating error instead
 			// of a truncated success.
-			return result, &upstreamError{
-				statusCode: http.StatusBadGateway,
-				header:     http.Header{"Content-Type": []string{"application/json"}},
-				body: mustMarshal(map[string]any{
-					"error": map[string]any{
-						"message": "upstream emitted malformed SSE JSON: " + jsonErr.Error(),
-						"type":    "upstream_error",
-					},
-				}),
-			}
+			return result, newUpstreamStreamError("upstream emitted malformed SSE JSON: " + jsonErr.Error())
 		}
 		// Upstream can emit a standalone error object mid-stream (for
 		// example, context-length exceeded part-way through decoding).
@@ -315,11 +306,7 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		// a client-facing terminating error rather than silently hiding
 		// the failure and continuing to consume frames.
 		if errObj, ok := chunk["error"].(map[string]any); ok {
-			return result, &upstreamError{
-				statusCode: http.StatusBadGateway,
-				header:     http.Header{"Content-Type": []string{"application/json"}},
-				body:       mustMarshal(map[string]any{"error": errObj}),
-			}
+			return result, newUpstreamJSONError(errObj)
 		}
 		s.ensureStreamIdentity(chunk)
 		// The assistant role-delta chunk is deferred until we have read
@@ -367,16 +354,7 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": result.usage}})
 	}
 	if !doneSeen {
-		return result, &upstreamError{
-			statusCode: http.StatusBadGateway,
-			header:     http.Header{"Content-Type": []string{"application/json"}},
-			body: mustMarshal(map[string]any{
-				"error": map[string]any{
-					"message": "upstream stream ended without a terminal [DONE] marker",
-					"type":    "upstream_error",
-				},
-			}),
-		}
+		return result, newUpstreamStreamError("upstream stream ended without a terminal [DONE] marker")
 	}
 	return result, nil
 }
