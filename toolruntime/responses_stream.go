@@ -32,13 +32,11 @@ func runResponsesStreaming(
 	w http.ResponseWriter,
 	r *http.Request,
 	em *manager.EnclaveManager,
-	session *mcp.ClientSession,
+	registry *sessionRegistry,
 	body map[string]any,
 	modelName string,
 	requestHeaders http.Header,
 	prompt *mcp.GetPromptResult,
-	tools []*mcp.Tool,
-	ownedTools map[string]struct{},
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -46,6 +44,8 @@ func runResponsesStreaming(
 	}
 
 	searchOpts := parseResponsesWebSearchOptions(body)
+	tools := registry.allTools()
+	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
 	base := cloneJSONMap(body)
 	delete(base, "pii_check_options")
@@ -100,7 +100,7 @@ func runResponsesStreaming(
 			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
 			sanitizeToolCallArguments(call.name, call.arguments)
 			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
-			output, toolErr := streamer.executeTool(ctx, session, call)
+			output, toolErr := streamer.executeTool(ctx, registry, call)
 			record := toolCallRecord{
 				name:      call.name,
 				arguments: call.arguments,

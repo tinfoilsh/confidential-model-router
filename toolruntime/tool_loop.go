@@ -92,10 +92,9 @@ type toolOutput struct {
 func runToolLoop(
 	ctx context.Context,
 	em *manager.EnclaveManager,
-	session *mcp.ClientSession,
+	registry *sessionRegistry,
 	modelName string,
 	requestHeaders http.Header,
-	ownedTools map[string]struct{},
 	adapter toolLoopAdapter,
 	eventsEnabled bool,
 ) (*upstreamJSONResponse, error) {
@@ -138,7 +137,7 @@ func runToolLoop(
 
 		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
-			output := executeRouterToolCall(ctx, session, call, opts, toolSchemas, &citations, adapter.tracePhase(i), adapter.traceID())
+			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, adapter.tracePhase(i), adapter.traceID())
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
 				name:   call.name,

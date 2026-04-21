@@ -35,13 +35,11 @@ func runChatStreaming(
 	w http.ResponseWriter,
 	r *http.Request,
 	em *manager.EnclaveManager,
-	session *mcp.ClientSession,
+	registry *sessionRegistry,
 	body map[string]any,
 	modelName string,
 	requestHeaders http.Header,
 	prompt *mcp.GetPromptResult,
-	tools []*mcp.Tool,
-	ownedTools map[string]struct{},
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -50,6 +48,8 @@ func runChatStreaming(
 
 	tid := debugTraceID()
 	searchOpts := parseChatWebSearchOptions(body)
+	tools := registry.allTools()
+	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
@@ -72,7 +72,8 @@ func runChatStreaming(
 		for n := range ownedTools {
 			ownedNames = append(ownedNames, n)
 		}
-		debugLogf("toolruntime:%s chatstream.start model=%s search_ctx=%q ownedTools=%v schemas=%d", tid, modelName, searchOpts.searchContextSize, ownedNames, len(toolSchemas))
+		debugLogf("toolruntime:%s chatstream.start model=%s search_ctx=%q profiles=%v ownedTools=%v schemas=%d",
+			tid, modelName, searchOpts.searchContextSize, registry.profileNames(), ownedNames, len(toolSchemas))
 	}
 
 	streamer := &chatStreamer{
@@ -139,7 +140,7 @@ func runChatStreaming(
 			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
 			debugLogf("toolruntime:%s chatstream.iter=%d tool.call name=%s args=%s", tid, i, call.name, debugPreview(call.arguments, 400))
 			tstart := time.Now()
-			output, toolErr := streamer.executeTool(ctx, session, call)
+			output, toolErr := streamer.executeTool(ctx, registry, call)
 			record := toolCallRecord{
 				name:      call.name,
 				arguments: call.arguments,
@@ -576,7 +577,11 @@ func (s *chatStreamer) flushCitations() {
 // Failures are still returned to the caller so the tool output carries
 // the raw error text (matching the non-streaming path that serializes
 // err.Error() into the tool-result message).
-func (s *chatStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
+func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
+	session, ok := registry.sessionFor(call.name)
+	if !ok {
+		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
+	}
 	switch call.name {
 	case "search":
 		id := "ws_" + uuid.NewString()
