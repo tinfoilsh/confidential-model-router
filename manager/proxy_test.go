@@ -140,7 +140,15 @@ func TestProxyBilling_ErrorResponseNoEvent(t *testing.T) {
 	}
 }
 
-func TestProxyBilling_WebsearchUsageEmitsTokenEvent(t *testing.T) {
+// TestProxyBilling_WebsearchEmitsPerRequestFeeEvent pins the
+// double-billing guard for the `websearch` model: the websearch service
+// proxies its own upstream calls through this same proxy under the
+// user's API key, so those calls get token-billed there directly.
+// Emitting a usage-based billing event at THIS layer too would
+// double-charge the user, so the websearch model is special-cased to
+// emit only a per-request fee event (all token fields zero) even when
+// the backend returned real usage numbers.
+func TestProxyBilling_WebsearchEmitsPerRequestFeeEvent(t *testing.T) {
 	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -158,8 +166,8 @@ func TestProxyBilling_WebsearchUsageEmitsTokenEvent(t *testing.T) {
 		t.Fatalf("expected 1 billing event for websearch, got %d", len(events))
 	}
 
-	if events[0].PromptTokens != 5 || events[0].CompletionTokens != 15 || events[0].TotalTokens != 20 {
-		t.Errorf("expected token event, got prompt=%d completion=%d total=%d",
+	if events[0].PromptTokens != 0 || events[0].CompletionTokens != 0 || events[0].TotalTokens != 0 {
+		t.Errorf("websearch model must emit zero-token fee event to avoid double-billing, got prompt=%d completion=%d total=%d",
 			events[0].PromptTokens, events[0].CompletionTokens, events[0].TotalTokens)
 	}
 	if events[0].Model != "websearch" {
