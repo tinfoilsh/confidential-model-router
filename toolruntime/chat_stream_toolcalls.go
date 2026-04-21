@@ -29,6 +29,14 @@ func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 			continue
 		}
 		idx := int(numberValue(m["index"]))
+		if idx < 0 {
+			// OpenAI's streaming tool_call protocol uses a 0-based
+			// index; a negative value is either a protocol bug or
+			// a hostile/malformed upstream frame. Dropping the
+			// delta is safer than indexing into b.entries with a
+			// negative int, which would panic the streamer.
+			continue
+		}
 		for len(b.entries) <= idx {
 			b.entries = append(b.entries, &chatToolCallEntry{index: len(b.entries)})
 		}
