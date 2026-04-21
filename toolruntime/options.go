@@ -2,6 +2,7 @@ package toolruntime
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -424,7 +425,9 @@ func applyAdvancedSearchFields(opts *webSearchOptions, raw map[string]any) {
 // intValue coerces a JSON-decoded number or numeric string into an int. The
 // second return reports whether the input was a recognizable integer; callers
 // can use that to distinguish "unset" from "explicitly zero", which matters
-// for tri-state fields like max_age_hours.
+// for tri-state fields like max_age_hours. Fractional, NaN, and infinite
+// floats are rejected rather than silently truncated so a caller that sends
+// `1.5` does not have it quietly coerced to `1`.
 func intValue(raw any) (int, bool) {
 	switch v := raw.(type) {
 	case nil:
@@ -434,6 +437,15 @@ func intValue(raw any) (int, bool) {
 	case int64:
 		return int(v), true
 	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, false
+		}
+		if v != math.Trunc(v) {
+			return 0, false
+		}
+		if v < math.MinInt || v > math.MaxInt {
+			return 0, false
+		}
 		return int(v), true
 	case json.Number:
 		if n, err := v.Int64(); err == nil {
