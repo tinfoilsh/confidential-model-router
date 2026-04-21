@@ -74,7 +74,7 @@ func (s *chatStreamer) finalize(
 	}
 
 	if s.usageMetricsRequested && finalUsage != nil {
-		s.w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usageFromRawMap(finalUsage)))
+		s.w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usageFromRaw(finalUsage)))
 	}
 	s.emitBillingEvent(r, em, modelName, finalUsage)
 	return s.writeErr
