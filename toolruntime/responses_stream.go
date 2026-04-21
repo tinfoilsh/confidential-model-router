@@ -274,16 +274,42 @@ func (s *responsesStreamer) runIteration(
 		s.writeSSEHeaders(resp.Header)
 	}
 
+	s.resetPerIterationState()
+	return s.pumpUpstream(newSSEReader(resp.Body), isFirst)
+}
+
+// resetPerIterationState clears the fields whose scope is ONE upstream
+// iteration, not the whole logical response. Upstream resets its own
+// output_index counter at the top of every tool-loop turn, so the
+// router's upstream->client index rewrite table and the suppression
+// set must also be cleared before each iteration or mappings from the
+// previous turn would collide with fresh upstream indices.
+//
+// Scope boundaries (fields intentionally NOT touched here):
+//   - outputIndex / sequenceNumber: advance across iterations because
+//     they address the CLIENT-facing stream, which is one logical
+//     response spanning every upstream turn.
+//   - citations / emitters / annotationCounts: accumulate across
+//     iterations so citation numbering is stable end-to-end.
+//   - usageTotals / aggregatedUsage: aggregate across iterations so
+//     finalize emits one authoritative usage block.
+//   - responseID / createdAt / model / upstreamIDCaptured: captured
+//     from the first upstream turn and pinned; every client-facing
+//     frame must reference the same identity.
+//   - headersWritten / responseCreatedEmitted: once-per-stream gates.
+//   - functionCallArguments: keyed by upstream index and deleted on
+//     item-done, so stale entries cannot accumulate across iterations.
+//
+// Resetting the final-output snapshot is part of this same boundary:
+// response.completed must reflect only the items the terminal turn
+// emitted, matching the non-streaming runResponsesLoop semantics;
+// intermediate iterations already streamed their items to the client
+// live and must not leak into the terminal snapshot a client might
+// replay as the canonical response.
+func (s *responsesStreamer) resetPerIterationState() {
 	s.outputIndexMap = map[int]int{}
 	s.suppressedItems = map[int]struct{}{}
-	// Reset the terminal snapshot at the top of every iteration so the
-	// final response.completed.output reflects ONLY what the last turn
-	// emitted, matching the non-streaming runResponsesLoop semantics.
-	// Intermediate iterations already streamed their items to the client
-	// live; those items must not leak into the terminal snapshot a
-	// client might use as the canonical final response.
 	s.finalOutput = nil
-	return s.pumpUpstream(newSSEReader(resp.Body), isFirst)
 }
 
 // streamResponseID returns the pinned response id, materializing a
