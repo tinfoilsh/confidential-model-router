@@ -96,13 +96,6 @@ func (s *streamBase) writeSSEHeaders(upstreamHeaders http.Header) {
 	s.headersWritten = true
 }
 
-// pinUpstreamHeaders captures the most recent upstream response
-// headers. It is called once per upstream iteration so billing and
-// passthrough reflect the actual backend that served the final turn.
-func (s *streamBase) pinUpstreamHeaders(h http.Header) {
-	s.upstreamHeaders = h
-}
-
 // validateStreamModel latches a writeErr if upstream never surfaced a
 // model name by the time the streamer is about to emit a
 // model-stamped frame. The field-path argument (e.g. "chunk.model" or
