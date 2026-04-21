@@ -12,10 +12,7 @@ import (
 // sessionRegistry holds the set of MCP sessions a single request has
 // opened, one per active toolprofile.Profile, and routes each
 // router-owned tool call to the session whose server advertised that
-// tool. It is the replacement for passing a bare *mcp.ClientSession
-// through the tool loop and streamers: as soon as a request activates
-// two or more profiles a single session pointer no longer uniquely
-// identifies "the MCP server that will service this call".
+// tool.
 //
 // Invariants the registry enforces at construction time:
 //   - Every session corresponds to exactly one profile.

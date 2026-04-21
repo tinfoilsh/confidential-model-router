@@ -4,8 +4,8 @@ import "encoding/json"
 
 // chatToolCallBuilder assembles OpenAI streaming tool_call deltas into the
 // final tool_call objects. OpenAI emits each function's name and id on
-// the first delta for a given index, and the arguments JSON in incremental
-// string fragments; we replay that protocol byte-for-byte.
+// the first delta for a given index, and the arguments JSON in
+// incremental string fragments.
 type chatToolCallBuilder struct {
 	entries []*chatToolCallEntry
 }
