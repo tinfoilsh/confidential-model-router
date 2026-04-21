@@ -7,14 +7,14 @@ import (
 )
 
 // TestChatAndResponsesParityOnSameToolCalls pins that a canonical set of
-// recorded router tool calls produces the same user-observable
-// information on both API surfaces: the same marker sequence, the same
-// citation URLs, the same web_search_call statuses, and the same
-// public text body. The shapes differ (chat carries annotations nested
-// under `url_citation`; responses puts them flat on the annotation, and
-// only responses surfaces spec-level `web_search_call` output items) but
-// the semantic content must stay aligned so clients that render one
-// surface do not miss information the other surface exposes.
+// recorded router tool calls surfaces aligned information on both API
+// surfaces despite differing carriers. Chat uses the opt-in tinfoil-event
+// marker stream for live progress (since chat has no spec slot for
+// web_search_call); Responses uses the spec-defined web_search_call
+// output items. The assertion here is that the terminal status set on
+// each surface matches one-for-one (with chat's `blocked` collapsed onto
+// the spec-valid `failed` for comparison), and that citation URLs and
+// visible text are identical across surfaces.
 func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -43,7 +43,8 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 		return c
 	}
 
-	// Chat surface.
+	// Chat surface: tinfoil-event markers are injected into the
+	// assistant content when the caller opted in via the header.
 	chatCitations := buildCitationState()
 	chatBody := map[string]any{
 		"choices": []any{
@@ -54,7 +55,8 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 	}
 	attachChatCitations(chatBody, chatCitations, true)
 
-	// Responses surface, with include=["web_search_call.action.sources"].
+	// Responses surface: the spec-conformant web_search_call output
+	// items carry progress, no tinfoil markers ride on this path.
 	respCitations := buildCitationState()
 	respBody := map[string]any{
 		"output": []any{
@@ -67,7 +69,7 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 			},
 		},
 	}
-	attachResponsesCitations(respBody, respCitations, true, true)
+	attachResponsesCitations(respBody, respCitations, true)
 
 	// Citation URL set must match exactly across surfaces.
 	chatURLs := extractChatCitationURLs(t, chatBody)
@@ -79,34 +81,26 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 		t.Fatal("expected at least one url_citation annotation on both surfaces")
 	}
 
-	// Marker sequences (in_progress + terminal status pairs) must be
-	// semantically identical. We compare only the status sequence; the
-	// payload id is a UUID so it cannot be asserted byte-for-byte.
+	// Visible assistant text on both surfaces must be identical once
+	// chat's tinfoil-event markers are stripped (Responses never
+	// carries markers at all so its visible text equals the raw text).
 	chatContent := firstChatContent(t, chatBody)
 	respContent := firstResponsesOutputText(t, respBody)
-	chatStatuses := extractMarkerStatuses(t, chatContent)
-	respStatuses := extractMarkerStatuses(t, respContent)
-	if !stringSliceEqual(chatStatuses, respStatuses) {
-		t.Fatalf("marker status sequences differ:\n chat:     %v\n responses:%v", chatStatuses, respStatuses)
-	}
-
-	// Visible text (after stripping markers) must be identical.
 	chatVisible := stripMarkers(chatContent)
-	respVisible := stripMarkers(respContent)
+	respVisible := strings.TrimSpace(respContent)
 	if chatVisible != respVisible {
-		t.Fatalf("visible text differs after marker strip:\nchat:      %q\nresponses: %q", chatVisible, respVisible)
+		t.Fatalf("visible text differs across surfaces:\nchat:      %q\nresponses: %q", chatVisible, respVisible)
 	}
 
-	// The Responses surface additionally carries spec-level
-	// web_search_call output items. Their statuses must match the
-	// marker statuses one-for-one (with the router's `blocked` status
-	// collapsed onto the spec-valid `failed`), which we pin here so a
-	// drift between buildWebSearchCallOutputItems and
-	// tinfoilEventMarkersForRecords would fail the suite.
+	// Terminal status alignment: the chat marker sequence's terminal
+	// statuses must match the Responses spec web_search_call statuses
+	// one-for-one, with chat's router-specific `blocked` status
+	// collapsed onto the spec-valid `failed` (OpenAI's
+	// web_search_call.status enum has no dedicated blocked slot).
+	chatTerminals := collapseBlockedTerminalStatuses(extractMarkerStatuses(t, chatContent))
 	specStatuses := extractSpecStatuses(t, respBody)
-	expectedSpec := collapseBlockedTerminalStatuses(respStatuses)
-	if !stringSliceEqual(specStatuses, expectedSpec) {
-		t.Fatalf("web_search_call spec statuses drifted from marker sequence:\n spec:   %v\n events: %v\n expect: %v", specStatuses, respStatuses, expectedSpec)
+	if !stringSliceEqual(chatTerminals, specStatuses) {
+		t.Fatalf("terminal status set differs:\n chat terminals (blocked->failed): %v\n responses spec statuses:          %v", chatTerminals, specStatuses)
 	}
 }
 

@@ -629,10 +629,11 @@ func TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed(t *testing.T) {
 // Responses API documents: type, id, status, action. In particular it
 // does NOT duplicate `item_id` onto the non-streaming output-item shape
 // (item_id is specced only on the streaming envelope), and it never
-// carries a non-spec `reason` field (the router's blocked / failed
-// detail is surfaced via tinfoil-event markers when the caller opts in).
+// carries a non-spec `reason` field. The tinfoil-specific detail (raw
+// router status + error code) rides on a `_tinfoil` sidecar that is
+// omitted entirely on the happy path.
 func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
-	event := webSearchCallEvent("ws_1", "in_progress", map[string]any{"type": "search"})
+	event := webSearchCallEvent("ws_1", "in_progress", "", map[string]any{"type": "search"})
 	if got := stringValue(event["id"]); got != "ws_1" {
 		t.Fatalf("expected id=ws_1, got %q", got)
 	}
@@ -645,17 +646,63 @@ func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
 	if _, extra := event["reason"]; extra {
 		t.Fatalf("output item must not carry a non-spec reason field")
 	}
+	if _, extra := event["_tinfoil"]; extra {
+		t.Fatalf("happy-path output item must not carry a _tinfoil sidecar")
+	}
 }
 
 // TestWebSearchCallEventCollapsesBlockedToFailed pins that the spec-only
 // web_search_call output-item status set is preserved: OpenAI documents
 // in_progress / searching / completed / failed, with no `blocked`. The
 // router's internal blocked status is collapsed onto failed on the
-// output item; the distinctive signal rides the tinfoil-event marker.
+// envelope, and the unfiltered `blocked` string rides on the `_tinfoil`
+// vendor-extension field alongside the opaque error code. Strict SDKs
+// ignore `_tinfoil`; Tinfoil-aware clients read it directly off the
+// item to distinguish safety blocks from generic failures.
 func TestWebSearchCallEventCollapsesBlockedToFailed(t *testing.T) {
-	event := webSearchCallEvent("ws_1", "blocked", map[string]any{"type": "search"})
+	event := webSearchCallEvent("ws_1", "blocked", blockedToolErrorReason, map[string]any{"type": "search"})
 	if got := stringValue(event["status"]); got != "failed" {
 		t.Fatalf("expected blocked to collapse onto failed on the output item, got %q", got)
+	}
+	sidecar, ok := event["_tinfoil"].(map[string]any)
+	if !ok {
+		t.Fatalf("blocked tool call must carry a _tinfoil sidecar, got %#v", event["_tinfoil"])
+	}
+	if got := stringValue(sidecar["status"]); got != "blocked" {
+		t.Fatalf("_tinfoil.status must carry the unfiltered blocked string, got %q", got)
+	}
+	errObj, _ := sidecar["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("_tinfoil sidecar must include an error object for errored calls: %#v", sidecar)
+	}
+	if got := stringValue(errObj["code"]); got != blockedToolErrorReason {
+		t.Fatalf("_tinfoil.error.code must carry the router error code, got %q", got)
+	}
+}
+
+// TestWebSearchCallEventGenericFailureCarriesErrorCode pins that a
+// non-blocked failure still produces a `_tinfoil.error.code` field so
+// clients can branch UI on the specific failure reason, but omits the
+// `_tinfoil.status` field because the envelope `status: failed` is the
+// truthful carrier of that signal.
+func TestWebSearchCallEventGenericFailureCarriesErrorCode(t *testing.T) {
+	event := webSearchCallEvent("ws_1", "failed", "upstream_timeout", map[string]any{"type": "search"})
+	if got := stringValue(event["status"]); got != "failed" {
+		t.Fatalf("expected envelope status=failed, got %q", got)
+	}
+	sidecar, ok := event["_tinfoil"].(map[string]any)
+	if !ok {
+		t.Fatalf("errored tool call must carry a _tinfoil sidecar, got %#v", event["_tinfoil"])
+	}
+	if _, present := sidecar["status"]; present {
+		t.Fatalf("_tinfoil.status must be omitted when envelope status already carries the signal: %#v", sidecar)
+	}
+	errObj, _ := sidecar["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("_tinfoil sidecar must include an error object: %#v", sidecar)
+	}
+	if got := stringValue(errObj["code"]); got != "upstream_timeout" {
+		t.Fatalf("_tinfoil.error.code = %q, want upstream_timeout", got)
 	}
 }
 

@@ -20,14 +20,13 @@ import (
 // route. It owns the same tool loop as runResponsesLoop but consumes the
 // upstream model's event stream incrementally and forwards output text
 // deltas and annotations to the client live rather than synthesizing a
-// single bundle at the end of the turn. When the client opted in via
-// `X-Tinfoil-Events: web_search`, router-owned web_search tool-call
-// progress is surfaced inline using `<tinfoil-event>...</tinfoil-event>`
-// markers carried inside synthetic `response.output_text.delta` events.
-// The synthetic carrier keeps the entire stream spec-conformant: OpenAI
-// SDKs that do not recognize the marker format simply render the tagged
-// JSON as assistant text; opt-in clients strip it with a single regex
-// before rendering.
+// single bundle at the end of the turn. Router-owned web_search tool
+// progress is surfaced via the spec-defined streaming events OpenAI
+// documents for the Responses API: response.output_item.added carrying
+// a web_search_call item, followed by response.web_search_call.*
+// progress envelopes and a terminal response.output_item.done. No
+// tinfoil-specific channel rides on this route -- the Responses stream
+// is always fully OpenAI-spec-conformant.
 func runResponsesStreaming(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -58,13 +57,11 @@ func runResponsesStreaming(
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
-	eventsEnabled := tinfoilEventsEnabled(r.Header)
 
 	streamer := &responsesStreamer{
 		w:                     w,
 		flusher:               flusher,
 		usageMetricsRequested: usageMetricsRequested,
-		eventsEnabled:         eventsEnabled,
 		citations:             &citationState{nextIndex: 1},
 		usageTotals:           &usageAccumulator{},
 		emitters:              map[itemContentKey]*citationEmitter{},
@@ -145,14 +142,8 @@ type responsesStreamer struct {
 	w                     http.ResponseWriter
 	flusher               http.Flusher
 	usageMetricsRequested bool
-	// eventsEnabled is true when the caller opted into the
-	// `X-Tinfoil-Events: web_search` marker stream. When false the
-	// streamer emits only pure spec Responses events; when true it
-	// additionally opens synthetic assistant-message items carrying
-	// `<tinfoil-event>` markers inside output_text deltas.
-	eventsEnabled bool
-	citations     *citationState
-	usageTotals   *usageAccumulator
+	citations             *citationState
+	usageTotals           *usageAccumulator
 
 	headersWritten bool
 	// upstreamIDCaptured is true once we have adopted the first
@@ -860,27 +851,42 @@ func (s *responsesStreamer) forwardEvent(eventType string, event map[string]any)
 	s.emitEvent(eventType, event)
 }
 
-// executeTool invokes the MCP session and, when the caller opted into
-// the router-owned marker stream via `X-Tinfoil-Events: web_search`,
-// surfaces search / fetch progress as `<tinfoil-event>` markers carried
-// inside synthetic assistant-message output items. Strict OpenAI SDKs
-// see only spec-conformant events (a message item opens, emits a text
-// delta, and closes); opt-in clients parse the marker out of that text.
-// When events are not enabled this method is a no-op wrapper around
-// callTool, preserving the pristine spec-conformant stream expected by
-// callers that did not set the header.
+// executeTool invokes the MCP session and surfaces router-owned web
+// search progress as the spec-conformant Responses streaming events
+// documented by OpenAI:
+//
+//   - response.output_item.added (item type web_search_call, status in_progress)
+//   - response.web_search_call.in_progress
+//   - response.web_search_call.searching (search only; fetch omits this phase)
+//   - response.web_search_call.completed (on success) OR no dedicated event on failure
+//   - response.output_item.done (terminal status completed or failed)
+//
+// The stream is always fully spec-conformant on the Responses path; no
+// opt-in marker channel is used. Clients that want to distinguish a
+// safety-filter block from a generic failure can inspect the non-spec
+// `status` strings on the terminal `web_search_call` output item carried
+// in `response.completed.output`, which is collapsed onto `failed` at
+// the envelope level but preserved on the record for tooling.
 func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
 	switch call.name {
 	case "search":
 		id := "ws_" + uuid.NewString()
 		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		s.emitTinfoilEventMarker(id, "in_progress", action, "")
+		outputIndex := s.openWebSearchCallItem(id, action)
+		s.emitWebSearchCallPhase("response.web_search_call.in_progress", id, outputIndex)
+		s.emitWebSearchCallPhase("response.web_search_call.searching", id, outputIndex)
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
-			s.emitTinfoilEventMarker(id, failureStatusFor(err), action, publicToolErrorReason(call.name, err))
+			reason := publicToolErrorReason(call.name, err)
+			status := "failed"
+			if reason == blockedToolErrorReason {
+				status = "blocked"
+			}
+			s.closeWebSearchCallItem(id, outputIndex, action, status, reason)
 			return "", err
 		}
-		s.emitTinfoilEventMarker(id, "completed", action, "")
+		s.emitWebSearchCallPhase("response.web_search_call.completed", id, outputIndex)
+		s.closeWebSearchCallItem(id, outputIndex, action, "completed", "")
 		return output, nil
 	case "fetch":
 		urls := fetchArgumentURLs(call.arguments)
@@ -888,21 +894,29 @@ func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.Client
 			return callTool(ctx, session, call.name, call.arguments, s.citations)
 		}
 		fetchIDs := make([]string, len(urls))
+		fetchIndices := make([]int, len(urls))
+		fetchActions := make([]map[string]any, len(urls))
 		for i, url := range urls {
 			fetchIDs[i] = "ws_" + uuid.NewString()
-			s.emitTinfoilEventMarker(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
+			fetchActions[i] = map[string]any{"type": "open_page", "url": url}
+			fetchIndices[i] = s.openWebSearchCallItem(fetchIDs[i], fetchActions[i])
+			s.emitWebSearchCallPhase("response.web_search_call.in_progress", fetchIDs[i], fetchIndices[i])
 		}
 		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
-			status := failureStatusFor(err)
-			for i, url := range urls {
-				s.emitTinfoilEventMarker(fetchIDs[i], status, map[string]any{"type": "open_page", "url": url}, reason)
+			status := "failed"
+			if reason == blockedToolErrorReason {
+				status = "blocked"
+			}
+			for i := range urls {
+				s.closeWebSearchCallItem(fetchIDs[i], fetchIndices[i], fetchActions[i], status, reason)
 			}
 			return "", err
 		}
-		for i, url := range urls {
-			s.emitTinfoilEventMarker(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
+		for i := range urls {
+			s.emitWebSearchCallPhase("response.web_search_call.completed", fetchIDs[i], fetchIndices[i])
+			s.closeWebSearchCallItem(fetchIDs[i], fetchIndices[i], fetchActions[i], "completed", "")
 		}
 		return output, nil
 	default:
@@ -910,81 +924,54 @@ func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.Client
 	}
 }
 
-// emitTinfoilEventMarker writes one `<tinfoil-event>` marker to the
-// client by opening a synthetic assistant-message output item, emitting
-// its text delta, and closing the item. The five-event burst is
-// spec-conformant on every frame — opt-out clients see a tiny assistant
-// message whose text happens to contain `<tinfoil-event>...</tinfoil-event>`
-// which they will simply render as-is. Opt-in clients strip the tags
-// before rendering. When the caller did not opt in this is a no-op so
-// strict clients see no extra frames at all.
-//
-// The synthetic item participates in the streamer's normal output_index
-// bookkeeping so any subsequent real items keep a monotonically
-// increasing index sequence. The item is NOT accumulated into finalOutput
-// because the terminal `response.completed` snapshot uses web_search_call
-// output items as the canonical progress surface (via
-// attachResponsesCitations).
-func (s *responsesStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string) {
-	if !s.eventsEnabled {
-		return
-	}
-	marker := tinfoilEventMarker(id, status, action, reason)
-	itemID := "msg_tf_" + uuid.NewString()
+// openWebSearchCallItem emits response.output_item.added for a
+// router-owned web_search_call item and returns the output_index the
+// client will see for it. The item is NOT recorded into s.finalOutput
+// because attachResponsesCitations rebuilds the terminal snapshot from
+// citations.toolCalls; the live event here is solely for the client's
+// progress UI.
+func (s *responsesStreamer) openWebSearchCallItem(id string, action map[string]any) int {
 	outputIndex := s.outputIndex
 	s.outputIndex++
-
-	item := map[string]any{
-		"id":     itemID,
-		"type":   "message",
-		"role":   "assistant",
-		"status": "in_progress",
-		"content": []any{
-			map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
-		},
-	}
 	s.emitEvent("response.output_item.added", map[string]any{
 		"type":         "response.output_item.added",
 		"output_index": outputIndex,
-		"item":         item,
+		"item": map[string]any{
+			"id":     id,
+			"type":   "web_search_call",
+			"status": "in_progress",
+			"action": action,
+		},
 	})
-	s.emitEvent("response.content_part.added", map[string]any{
-		"type":          "response.content_part.added",
-		"item_id":       itemID,
-		"output_index":  outputIndex,
-		"content_index": 0,
-		"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+	return outputIndex
+}
+
+// emitWebSearchCallPhase emits a progress envelope for a web_search_call
+// item in the shape OpenAI's spec defines: {item_id, output_index,
+// sequence_number, type}. Only response.web_search_call.{in_progress,
+// searching, completed} are spec-defined phase events; failures surface
+// solely through the terminal response.output_item.done envelope.
+func (s *responsesStreamer) emitWebSearchCallPhase(eventType, itemID string, outputIndex int) {
+	s.emitEvent(eventType, map[string]any{
+		"type":         eventType,
+		"item_id":      itemID,
+		"output_index": outputIndex,
 	})
-	s.emitEvent("response.output_text.delta", map[string]any{
-		"type":          "response.output_text.delta",
-		"item_id":       itemID,
-		"output_index":  outputIndex,
-		"content_index": 0,
-		"delta":         marker,
-	})
-	s.emitEvent("response.output_text.done", map[string]any{
-		"type":          "response.output_text.done",
-		"item_id":       itemID,
-		"output_index":  outputIndex,
-		"content_index": 0,
-		"text":          marker,
-	})
-	s.emitEvent("response.content_part.done", map[string]any{
-		"type":          "response.content_part.done",
-		"item_id":       itemID,
-		"output_index":  outputIndex,
-		"content_index": 0,
-		"part":          map[string]any{"type": "output_text", "text": marker, "annotations": []any{}},
-	})
-	completedItem := cloneJSONMap(item)
-	completedItem["status"] = "completed"
-	completedItem["content"] = []any{
-		map[string]any{"type": "output_text", "text": marker, "annotations": []any{}},
-	}
+}
+
+// closeWebSearchCallItem emits response.output_item.done for a
+// router-owned web_search_call item with the given terminal status. The
+// spec defines the envelope status enum as {in_progress, searching,
+// completed, failed}, so any internal `blocked` value is collapsed
+// inside webSearchCallEvent and the unfiltered router status (plus any
+// error code) rides on the `_tinfoil` sidecar for clients that want to
+// render a distinct affordance for safety-filter blocks.
+func (s *responsesStreamer) closeWebSearchCallItem(id string, outputIndex int, action map[string]any, status, errorCode string) {
+	item := webSearchCallEvent(id, status, errorCode, action)
 	s.emitEvent("response.output_item.done", map[string]any{
 		"type":         "response.output_item.done",
 		"output_index": outputIndex,
-		"item":         completedItem,
+		"item":         item,
 	})
 }
 
@@ -1026,12 +1013,13 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	// terminal payload that is byte-for-byte comparable to the
 	// non-streaming response.
 	completedBody := map[string]any{"output": append([]any{}, s.finalOutput...)}
-	// Streaming already fired tinfoil-event markers live via synthetic
-	// output_text deltas, so the terminal snapshot must NOT prepend
-	// them again (the client would otherwise see a duplicate rendering
-	// in `response.completed.output`). Pass eventsEnabled=false here
-	// regardless of header opt-in.
-	attachResponsesCitations(completedBody, s.citations, s.includeActionSources, false)
+	// The Responses streaming path surfaces web_search progress via the
+	// spec-defined `response.web_search_call.*` events fired live from
+	// executeTool and via the prepended `web_search_call` output items
+	// attachResponsesCitations injects here. No tinfoil-event marker
+	// channel rides on this path -- the Responses stream is always
+	// fully OpenAI-spec-conformant.
+	attachResponsesCitations(completedBody, s.citations, s.includeActionSources)
 	finalOutput, _ := completedBody["output"].([]any)
 	completed := map[string]any{
 		"id":         s.streamResponseID(),

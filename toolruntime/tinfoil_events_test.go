@@ -238,11 +238,12 @@ func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestAttachResponsesCitationsInjectsMarkersIntoFirstText pins the
-// Responses non-streaming contract: markers are prepended to the first
-// output_text block on the existing assistant message and flat
-// url_citation annotation indices are rune-shifted accordingly.
-func TestAttachResponsesCitationsInjectsMarkersIntoFirstText(t *testing.T) {
+// TestAttachResponsesCitationsNeverInjectsMarkers pins that the
+// Responses path is always fully spec-conformant: no tinfoil-event
+// markers ride on the assistant output_text even for recorded
+// router-owned tool calls, and the spec web_search_call output items
+// carry all progress information for the client.
+func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.record("https://example.com/page", "Example page")
 	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
@@ -260,11 +261,11 @@ func TestAttachResponsesCitationsInjectsMarkersIntoFirstText(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false, true)
+	attachResponsesCitations(body, state, false)
 
 	items := body["output"].([]any)
-	// One web_search_call item is prepended for the recorded search,
-	// then the assistant message with markers injected.
+	// A web_search_call item is prepended, then the assistant message
+	// is left pristine (no tinfoil-event markers on the Responses path).
 	var messageItem map[string]any
 	for _, raw := range items {
 		item := raw.(map[string]any)
@@ -279,34 +280,32 @@ func TestAttachResponsesCitationsInjectsMarkersIntoFirstText(t *testing.T) {
 	contentList := messageItem["content"].([]any)
 	first := contentList[0].(map[string]any)
 	text := first["text"].(string)
-	if !strings.HasPrefix(text, "\n"+tinfoilEventOpenTag) {
-		t.Fatalf("first output_text must start with a marker: %q", text)
+	if strings.Contains(text, tinfoilEventOpenTag) {
+		t.Fatalf("Responses output_text must never contain tinfoil markers: %q", text)
 	}
-	if !strings.HasSuffix(text, original) {
-		t.Fatalf("first output_text must preserve original text after markers: %q", text)
+	if text == "" {
+		t.Fatalf("Responses output_text must preserve the original assistant text: %q", text)
 	}
 	annotations := first["annotations"].([]any)
 	if len(annotations) != 1 {
-		t.Fatalf("expected 1 annotation, got %d", len(annotations))
+		t.Fatalf("expected 1 annotation on pristine text, got %d", len(annotations))
 	}
 	ann := annotations[0].(map[string]any)
-	prefix := strings.TrimSuffix(text, original)
-	// See TestAttachChatCitationsInjectsMarkersWhenEnabled for the rune
-	// accounting: the label "Example page" starts at rune index 9 in
-	// the pristine text.
-	wantStart := 9 + countRunes(prefix)
-	if got := ann["start_index"].(int); got != wantStart {
-		t.Fatalf("annotation start_index = %d, want %d", got, wantStart)
+	// "Example page" starts at rune index 9 in the original text; with
+	// no prefix injected the annotation should point exactly there.
+	if got := ann["start_index"].(int); got != 9 {
+		t.Fatalf("annotation start_index = %d, want 9 (pristine text)", got)
 	}
 }
 
-// TestAttachResponsesCitationsSynthesizesMessageWhenMissing pins that an
-// assistant turn that produced no natural output_text (e.g., one that
-// ended entirely in a router-owned search failure) still reaches the
-// client with the progress markers when events are enabled. The router
-// synthesizes a minimal assistant message item carrying the marker
-// payload so opt-in clients see the full progress timeline.
-func TestAttachResponsesCitationsSynthesizesMessageWhenMissing(t *testing.T) {
+// TestAttachResponsesCitationsPrependsWebSearchCallItem pins the spec
+// carrier for router-owned tool-call progress on the Responses path: a
+// web_search_call output item is prepended for every recorded call, no
+// synthetic tinfoil-event marker message is produced, and a blocked
+// tool call surfaces the unfiltered router status on the `_tinfoil`
+// vendor-extension sidecar so Tinfoil-aware clients can distinguish a
+// safety-filter block from a generic failure.
+func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.recordToolCall(toolCallRecord{
 		name:        "search",
@@ -318,34 +317,71 @@ func TestAttachResponsesCitationsSynthesizesMessageWhenMissing(t *testing.T) {
 		"output": []any{},
 	}
 
-	attachResponsesCitations(body, state, false, true)
+	attachResponsesCitations(body, state, false)
 
 	items := body["output"].([]any)
-	var synthetic map[string]any
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 output item (the web_search_call), got %d: %#v", len(items), items)
+	}
+	first := items[0].(map[string]any)
+	if first["type"] != "web_search_call" {
+		t.Fatalf("expected first item to be web_search_call, got %v", first["type"])
+	}
+	// OpenAI's spec has no `blocked` slot on the web_search_call.status
+	// enum, so the envelope collapses onto the spec-valid `failed`.
+	if first["status"] != "failed" {
+		t.Fatalf("expected blocked tool call to collapse onto status=failed, got %v", first["status"])
+	}
+	// _tinfoil sidecar preserves the unfiltered router signal for
+	// Tinfoil-aware clients. Strict OpenAI SDKs ignore this field.
+	sidecar, ok := first["_tinfoil"].(map[string]any)
+	if !ok {
+		t.Fatalf("blocked item must carry _tinfoil sidecar, got %#v", first["_tinfoil"])
+	}
+	if sidecar["status"] != "blocked" {
+		t.Fatalf("_tinfoil.status = %v, want blocked", sidecar["status"])
+	}
+	errObj, _ := sidecar["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != blockedToolErrorReason {
+		t.Fatalf("_tinfoil.error.code = %v, want %q", errObj, blockedToolErrorReason)
+	}
+	// No synthetic tinfoil-event marker message should be injected.
 	for _, raw := range items {
 		item := raw.(map[string]any)
 		if item["type"] == "message" {
-			synthetic = item
-			break
+			t.Fatalf("Responses path must not synthesize a tinfoil-event marker message: %#v", item)
 		}
-	}
-	if synthetic == nil {
-		t.Fatalf("expected a synthetic assistant message when no natural output_text existed: %#v", items)
-	}
-	contentList := synthetic["content"].([]any)
-	text := contentList[0].(map[string]any)["text"].(string)
-	if !strings.Contains(text, tinfoilEventOpenTag) {
-		t.Fatalf("synthetic message must carry the marker: %q", text)
-	}
-	if !strings.Contains(text, `"status":"blocked"`) {
-		t.Fatalf("synthetic message must carry the blocked marker status: %q", text)
 	}
 }
 
-// TestAttachResponsesCitationsLeavesPristineWhenDisabled pins the opt-out
-// path for Responses non-streaming: no markers, no synthetic message,
-// even when router-owned tool calls were recorded.
-func TestAttachResponsesCitationsLeavesPristineWhenDisabled(t *testing.T) {
+// TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar pins
+// that the non-streaming final snapshot keeps successful web_search_call
+// items minimal: no `_tinfoil` field when there is nothing worth
+// surfacing beyond the spec envelope.
+func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T) {
+	state := &citationState{nextIndex: 1}
+	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+
+	body := map[string]any{"output": []any{}}
+	attachResponsesCitations(body, state, false)
+
+	items := body["output"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 web_search_call item, got %d: %#v", len(items), items)
+	}
+	first := items[0].(map[string]any)
+	if first["status"] != "completed" {
+		t.Fatalf("expected status=completed, got %v", first["status"])
+	}
+	if _, present := first["_tinfoil"]; present {
+		t.Fatalf("successful call must omit _tinfoil sidecar: %#v", first)
+	}
+}
+
+// TestAttachResponsesCitationsLeavesPristineText pins that the assistant
+// output_text is never mutated with tinfoil-event markers on the
+// Responses path, regardless of recorded tool calls.
+func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
@@ -361,7 +397,7 @@ func TestAttachResponsesCitationsLeavesPristineWhenDisabled(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false, false)
+	attachResponsesCitations(body, state, false)
 
 	items := body["output"].([]any)
 	for _, raw := range items {
@@ -371,10 +407,10 @@ func TestAttachResponsesCitationsLeavesPristineWhenDisabled(t *testing.T) {
 		}
 		text := item["content"].([]any)[0].(map[string]any)["text"].(string)
 		if strings.Contains(text, tinfoilEventOpenTag) {
-			t.Fatalf("markers must be absent when events are not enabled: %q", text)
+			t.Fatalf("Responses output_text must never contain tinfoil markers: %q", text)
 		}
 		if text != "Answer" {
-			t.Fatalf("text must be pristine when events are not enabled: %q", text)
+			t.Fatalf("Responses output_text must be pristine: %q", text)
 		}
 	}
 }

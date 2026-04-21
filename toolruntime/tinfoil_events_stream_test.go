@@ -7,17 +7,16 @@ import (
 	"testing"
 )
 
-// newTestResponsesStreamerForEvents is a minimal factory mirroring
-// newTestResponsesStreamer from responses_stream_test.go but exposes the
-// eventsEnabled knob directly so marker tests can flip it per case.
-func newTestResponsesStreamerForEvents(t *testing.T, eventsEnabled bool) (*responsesStreamer, *httptest.ResponseRecorder) {
+// newTestResponsesStreamerForSpecEvents is a minimal factory mirroring
+// newTestResponsesStreamer from responses_stream_test.go, used by the
+// web_search_call spec event tests on this file.
+func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *httptest.ResponseRecorder) {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	streamer := &responsesStreamer{
 		w:                     rec,
 		flusher:               rec,
 		usageMetricsRequested: true,
-		eventsEnabled:         eventsEnabled,
 		citations:             &citationState{nextIndex: 1},
 		usageTotals:           &usageAccumulator{},
 		emitters:              map[itemContentKey]*citationEmitter{},
@@ -94,25 +93,28 @@ func TestChatStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamerEmitTinfoilEventMarkerEmitsItemBurst pins the
-// Responses streaming contract: a single marker becomes a
-// spec-conformant message-item burst (added -> content_part.added ->
-// output_text.delta -> output_text.done -> content_part.done ->
-// output_item.done) so strict SDKs render it as a tiny assistant
-// message while opt-in clients can strip the tags.
-func TestResponsesStreamerEmitTinfoilEventMarkerEmitsItemBurst(t *testing.T) {
-	streamer, rec := newTestResponsesStreamerForEvents(t, true)
+// TestResponsesStreamerEmitsSpecWebSearchCallEvents pins the Responses
+// streaming contract for router-owned web_search tool calls: the router
+// MUST emit the spec-defined event sequence documented by OpenAI
+// (output_item.added + web_search_call.in_progress + web_search_call.searching
+// for search + output_item.done on terminal status). No tinfoil-event
+// marker frames ride on this surface.
+func TestResponsesStreamerEmitsSpecWebSearchCallEvents(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "")
+	action := map[string]any{"type": "search", "query": "q"}
+	idx := streamer.openWebSearchCallItem("ws_1", action)
+	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.emitWebSearchCallPhase("response.web_search_call.searching", "ws_1", idx)
+	streamer.emitWebSearchCallPhase("response.web_search_call.completed", "ws_1", idx)
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "")
 
 	body := rec.Body.String()
-	// Verify each of the six events fires exactly once and in order.
 	wantOrder := []string{
 		"event: response.output_item.added",
-		"event: response.content_part.added",
-		"event: response.output_text.delta",
-		"event: response.output_text.done",
-		"event: response.content_part.done",
+		"event: response.web_search_call.in_progress",
+		"event: response.web_search_call.searching",
+		"event: response.web_search_call.completed",
 		"event: response.output_item.done",
 	}
 	cursor := 0
@@ -124,11 +126,15 @@ func TestResponsesStreamerEmitTinfoilEventMarkerEmitsItemBurst(t *testing.T) {
 		cursor += idx + len(want)
 	}
 
-	// Locate the output_text.delta frame, decode it, and assert the
-	// marker round-trips intact via `delta`. Substring checks over the
-	// raw wire would be fooled by json.Marshal's HTML-escaping of the
-	// `<` / `>` characters in the open/close tags.
-	deltaFrame := ""
+	// No tinfoil-event marker frames should appear on the Responses
+	// path. Substring scan is enough because the payload is never
+	// emitted live on this surface.
+	if strings.Contains(body, tinfoilEventOpenTag) {
+		t.Fatalf("Responses stream must not contain tinfoil-event markers: %q", body)
+	}
+
+	// Inspect the terminal output_item.done frame: item must carry
+	// status=completed and the original action.
 	for _, line := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(line, "data: {") {
 			continue
@@ -138,45 +144,159 @@ func TestResponsesStreamerEmitTinfoilEventMarkerEmitsItemBurst(t *testing.T) {
 		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
 			t.Fatalf("response stream frame must be valid JSON: %v (%q)", err, payload)
 		}
-		if decoded["type"] == "response.output_text.delta" {
-			deltaFrame = payload
-			delta, _ := decoded["delta"].(string)
-			if !strings.Contains(delta, tinfoilEventOpenTag) || !strings.Contains(delta, tinfoilEventCloseTag) {
-				t.Fatalf("response.output_text.delta missing tinfoil-event tags: %q", delta)
-			}
+		if decoded["type"] != "response.output_item.done" {
+			continue
+		}
+		item, _ := decoded["item"].(map[string]any)
+		if item == nil {
+			t.Fatalf("response.output_item.done missing item: %q", payload)
+		}
+		if item["type"] != "web_search_call" {
+			t.Fatalf("terminal item type = %v, want web_search_call", item["type"])
+		}
+		if item["status"] != "completed" {
+			t.Fatalf("terminal item status = %v, want completed", item["status"])
+		}
+		if item["id"] != "ws_1" {
+			t.Fatalf("terminal item id = %v, want ws_1", item["id"])
 		}
 	}
-	if deltaFrame == "" {
-		t.Fatalf("response stream did not include a response.output_text.delta frame")
+}
+
+// TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent pins the
+// failure path: the OpenAI spec only defines .in_progress, .searching,
+// and .completed envelopes for web_search_call; failures surface solely
+// through the terminal output_item.done with status=failed.
+func TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
+
+	action := map[string]any{"type": "search", "query": "q"}
+	idx := streamer.openWebSearchCallItem("ws_1", action)
+	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "failed", "upstream_timeout")
+
+	body := rec.Body.String()
+	if strings.Contains(body, "response.web_search_call.completed") {
+		t.Fatalf("failed web_search_call must not emit .completed: %q", body)
+	}
+	if !strings.Contains(body, "response.output_item.done") {
+		t.Fatalf("failed web_search_call must still emit terminal output_item.done: %q", body)
+	}
+	// Inspect the terminal frame's status.
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatalf("frame must be valid JSON: %v", err)
+		}
+		if decoded["type"] != "response.output_item.done" {
+			continue
+		}
+		item := decoded["item"].(map[string]any)
+		if item["status"] != "failed" {
+			t.Fatalf("terminal item status = %v, want failed", item["status"])
+		}
 	}
 }
 
-// TestResponsesStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled pins the
-// opt-out path for Responses streaming: without the header the helper
-// writes nothing, so strict Responses SDKs see only the events OpenAI
-// documents.
-func TestResponsesStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
-	streamer, rec := newTestResponsesStreamerForEvents(t, false)
+// TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar pins
+// that a safety-filter block on a router-owned web_search tool call
+// surfaces on the live stream as:
+//   - envelope `status: "failed"` (spec-conformant; OpenAI's
+//     web_search_call.status enum has no `blocked` slot)
+//   - vendor-extension `_tinfoil: {status: "blocked", error: {code: ...}}`
+//     carrying the unfiltered router signal for Tinfoil-aware clients
+//
+// Strict OpenAI SDKs ignore `_tinfoil`; clients that want the richer
+// UX read it off the terminal `output_item.done.item` directly.
+func TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "")
+	action := map[string]any{"type": "search", "query": "sensitive"}
+	idx := streamer.openWebSearchCallItem("ws_1", action)
+	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "blocked", blockedToolErrorReason)
 
-	if body := rec.Body.String(); body != "" {
-		t.Fatalf("expected empty stream when events are disabled, got %q", body)
+	body := rec.Body.String()
+	var terminalItem map[string]any
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &decoded); err != nil {
+			t.Fatalf("frame must be valid JSON: %v", err)
+		}
+		if decoded["type"] == "response.output_item.done" {
+			terminalItem = decoded["item"].(map[string]any)
+			break
+		}
+	}
+	if terminalItem == nil {
+		t.Fatalf("expected a terminal response.output_item.done frame: %q", body)
+	}
+	if terminalItem["status"] != "failed" {
+		t.Fatalf("envelope status must collapse onto failed, got %v", terminalItem["status"])
+	}
+	sidecar, ok := terminalItem["_tinfoil"].(map[string]any)
+	if !ok {
+		t.Fatalf("blocked terminal frame must carry a _tinfoil sidecar, got %#v", terminalItem["_tinfoil"])
+	}
+	if sidecar["status"] != "blocked" {
+		t.Fatalf("_tinfoil.status must be the unfiltered router status, got %v", sidecar["status"])
+	}
+	errObj, _ := sidecar["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != blockedToolErrorReason {
+		t.Fatalf("_tinfoil.error.code = %v, want %q", errObj, blockedToolErrorReason)
 	}
 }
 
-// TestResponsesStreamerMarkerOutputIndexIsMonotonic pins that synthetic
-// marker items consume and advance the streamer's output_index counter,
-// so any real items emitted after a marker keep a monotonically
-// increasing index the client can use for UI bookkeeping.
-func TestResponsesStreamerMarkerOutputIndexIsMonotonic(t *testing.T) {
-	streamer, _ := newTestResponsesStreamerForEvents(t, true)
+// TestResponsesStreamerSuccessfulWebSearchCallOmitsTinfoilSidecar pins
+// that the happy-path terminal frame stays minimal: a successful search
+// never carries a _tinfoil field on the item because the spec envelope
+// fully describes the signal. This keeps bytes off the wire for the
+// common case and keeps the JSON surface easy to audit.
+func TestResponsesStreamerSuccessfulWebSearchCallOmitsTinfoilSidecar(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
+
+	action := map[string]any{"type": "search", "query": "q"}
+	idx := streamer.openWebSearchCallItem("ws_1", action)
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "")
+
+	body := rec.Body.String()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &decoded); err != nil {
+			t.Fatalf("frame must be valid JSON: %v", err)
+		}
+		if decoded["type"] != "response.output_item.done" {
+			continue
+		}
+		item := decoded["item"].(map[string]any)
+		if _, present := item["_tinfoil"]; present {
+			t.Fatalf("successful terminal frame must omit _tinfoil sidecar, got %#v", item)
+		}
+	}
+}
+
+// TestResponsesStreamerWebSearchCallOutputIndexIsMonotonic pins that
+// every spec-event burst consumes exactly one output_index slot so
+// subsequent real output items keep a monotonically increasing
+// client-facing index.
+func TestResponsesStreamerWebSearchCallOutputIndexIsMonotonic(t *testing.T) {
+	streamer, _ := newTestResponsesStreamerForSpecEvents(t)
 	before := streamer.outputIndex
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "")
-	streamer.emitTinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search"}, "")
+	_ = streamer.openWebSearchCallItem("ws_1", map[string]any{"type": "search"})
+	_ = streamer.openWebSearchCallItem("ws_2", map[string]any{"type": "search"})
 
 	if streamer.outputIndex != before+2 {
-		t.Fatalf("expected output_index to advance by 2 after two markers (before=%d, after=%d)", before, streamer.outputIndex)
+		t.Fatalf("expected output_index to advance by 2 after two web_search_call items (before=%d, after=%d)", before, streamer.outputIndex)
 	}
 }

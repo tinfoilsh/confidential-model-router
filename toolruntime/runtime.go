@@ -324,7 +324,7 @@ func finalizeToolLoopResponse(response *upstreamJSONResponse, path string, usage
 
 	switch path {
 	case "/v1/responses":
-		attachResponsesCitations(response.body, citations, includeActionSources, eventsEnabled)
+		attachResponsesCitations(response.body, citations, includeActionSources)
 	default:
 		attachChatCitations(response.body, citations, eventsEnabled)
 	}

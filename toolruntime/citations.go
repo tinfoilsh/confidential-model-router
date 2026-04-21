@@ -638,23 +638,14 @@ func shiftFlatAnnotationIndices(annotations []any, offset int) {
 // call in the shape OpenAI documents for the Responses API, surfaced to
 // clients as response.output_item.added events.
 //
-// When `eventsEnabled` is true, `<tinfoil-event>` progress markers for
-// every recorded router tool call are prepended to the first assistant
-// output_text content block so non-streaming clients that opted into the
-// marker stream see the same in_progress -> terminal progression they
-// get over the streaming carrier. url_citation `start_index` /
-// `end_index` are shifted by the marker prefix length so spans keep
-// pointing at the correct bytes in the new content.
-func attachResponsesCitations(responseBody map[string]any, citations *citationState, includeActionSources, eventsEnabled bool) {
+// The Responses path is always fully spec-conformant: router-specific
+// progress information rides on the spec-defined web_search_call items
+// and streaming envelopes, never on an opt-in marker channel.
+func attachResponsesCitations(responseBody map[string]any, citations *citationState, includeActionSources bool) {
 	if responseBody == nil || citations == nil {
 		return
 	}
 	outputItems, _ := responseBody["output"].([]any)
-	markerPrefix := ""
-	if eventsEnabled {
-		markerPrefix = tinfoilEventMarkersForRecords(citations.toolCalls)
-	}
-	markerInjected := false
 	for _, rawItem := range outputItems {
 		item, _ := rawItem.(map[string]any)
 		if item == nil || stringValue(item["type"]) != "message" {
@@ -672,35 +663,10 @@ func attachResponsesCitations(responseBody map[string]any, citations *citationSt
 				text = normalized
 			}
 			annotations := citations.flatAnnotationsFor(text)
-			if !markerInjected && markerPrefix != "" {
-				text = markerPrefix + text
-				contentMap["text"] = text
-				shiftFlatAnnotationIndices(annotations, utf8.RuneCountInString(markerPrefix))
-				markerInjected = true
-			}
 			if len(annotations) > 0 {
 				contentMap["annotations"] = annotations
 			}
 		}
-	}
-
-	// If events were requested but no assistant message carried an
-	// output_text to prefix onto, synthesize a minimal message item so
-	// the marker still reaches the client. This keeps parity with the
-	// chat non-streaming path, which always has a `content` string to
-	// prepend to.
-	if !markerInjected && markerPrefix != "" {
-		synthetic := map[string]any{
-			"id":     "msg_tf_" + uuid.NewString(),
-			"type":   "message",
-			"role":   "assistant",
-			"status": "completed",
-			"content": []any{
-				map[string]any{"type": "output_text", "text": markerPrefix, "annotations": []any{}},
-			},
-		}
-		outputItems = append([]any{synthetic}, outputItems...)
-		responseBody["output"] = outputItems
 	}
 
 	if len(citations.toolCalls) == 0 {
@@ -736,11 +702,11 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 					action["sources"] = sources
 				}
 			}
-			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, action))
+			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
 		case "fetch":
 			for _, url := range fetchArgumentURLs(record.arguments) {
 				action := map[string]any{"type": "open_page", "url": url}
-				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, action))
+				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
 			}
 		}
 	}
