@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -462,6 +463,31 @@ func TestIntValue_TriState(t *testing.T) {
 	}
 	if n, ok := intValue("42"); !ok || n != 42 {
 		t.Errorf("intValue(\"42\") = (%d, %v), want (42, true)", n, ok)
+	}
+}
+
+func TestIntValue_RejectsFractionalAndNonFinite(t *testing.T) {
+	// Fractional floats must be rejected rather than silently truncated.
+	// A caller sending `1.5` for max_age_hours has not expressed "1 hour";
+	// they have sent something we cannot honor, so we surface "not set"
+	// and let the downstream default apply.
+	fractional := []float64{1.5, -0.5, 0.1, 1e-9}
+	for _, v := range fractional {
+		if n, ok := intValue(v); ok {
+			t.Errorf("intValue(%v) = (%d, true), want (_, false) for fractional input", v, n)
+		}
+	}
+	// NaN and infinities are never valid integer counts.
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if n, ok := intValue(v); ok {
+			t.Errorf("intValue(%v) = (%d, true), want (_, false) for non-finite input", v, n)
+		}
+	}
+	// Whole-number floats keep working: encoding/json decodes every
+	// JSON number into float64 by default, so we must accept values
+	// like 42.0 as the integer 42.
+	if n, ok := intValue(float64(42)); !ok || n != 42 {
+		t.Errorf("intValue(42.0) = (%d, %v), want (42, true)", n, ok)
 	}
 }
 func TestParseResponsesWebSearchOptions_SafetyOptIns(t *testing.T) {
