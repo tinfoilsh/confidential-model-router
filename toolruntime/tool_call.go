@@ -110,6 +110,9 @@ func existingTools(raw any) []any {
 func chatTools(tools []*mcp.Tool) []any {
 	result := make([]any, 0, len(tools))
 	for _, tool := range tools {
+		if tool == nil || tool.Name == "" {
+			continue
+		}
 		result = append(result, map[string]any{
 			"type": "function",
 			"function": map[string]any{
@@ -125,6 +128,9 @@ func chatTools(tools []*mcp.Tool) []any {
 func responseTools(tools []*mcp.Tool) []any {
 	result := make([]any, 0, len(tools))
 	for _, tool := range tools {
+		if tool == nil || tool.Name == "" {
+			continue
+		}
 		result = append(result, map[string]any{
 			"type":        "function",
 			"name":        tool.Name,
