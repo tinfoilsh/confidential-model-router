@@ -135,7 +135,7 @@ func TestModelRequestHeaders(t *testing.T) {
 	}
 }
 
-func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
+func TestResponsesAdapterApplyUsageReplacesResponsesTotals(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{
 			"usage": map[string]any{
@@ -147,7 +147,8 @@ func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
 		header: make(http.Header),
 	}
 
-	applyAggregatedUsage(response, "/v1/responses", &tokencount.Usage{
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
 		TotalTokens:      18,
@@ -162,7 +163,7 @@ func TestApplyAggregatedUsageReplacesResponsesTotals(t *testing.T) {
 	}
 }
 
-func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
+func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{
 			"choices": []any{
@@ -190,11 +191,13 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
 		},
 	}
 
-	finalizeToolLoopResponse(response, "/v1/chat/completions", &tokencount.Usage{
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
 		TotalTokens:      18,
-	}, citations, false, false)
+	})
+	adapter.attachCitations(response.body, citations, false)
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -205,7 +208,7 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalChatUsage(t *testing.T) {
 	}
 }
 
-func TestFinalizeToolLoopResponseAggregatesForcedFinalResponsesUsage(t *testing.T) {
+func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{
 			"output": []any{
@@ -237,11 +240,15 @@ func TestFinalizeToolLoopResponseAggregatesForcedFinalResponsesUsage(t *testing.
 		},
 	}
 
-	finalizeToolLoopResponse(response, "/v1/responses", &tokencount.Usage{
+	adapter := newResponsesLoopAdapter(map[string]any{
+		"include": []any{includeActionSourcesFlag},
+	}, nil, nil, nil)
+	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
 		TotalTokens:      18,
-	}, citations, true, false)
+	})
+	adapter.attachCitations(response.body, citations, false)
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {

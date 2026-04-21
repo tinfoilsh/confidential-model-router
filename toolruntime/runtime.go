@@ -339,17 +339,6 @@ func executeRouterToolCall(
 	return output
 }
 
-func finalizeToolLoopResponse(response *upstreamJSONResponse, path string, usage *tokencount.Usage, citations *citationState, includeActionSources, eventsEnabled bool) {
-	applyAggregatedUsage(response, path, usage)
-
-	switch path {
-	case "/v1/responses":
-		attachResponsesCitations(response.body, citations, includeActionSources)
-	default:
-		attachChatCitations(response.body, citations, eventsEnabled)
-	}
-}
-
 type upstreamJSONResponse struct {
 	body       map[string]any
 	header     http.Header
@@ -482,27 +471,6 @@ func cloneHeaders(source http.Header) http.Header {
 		headers[key] = copied
 	}
 	return headers
-}
-
-func applyAggregatedUsage(response *upstreamJSONResponse, path string, usage *tokencount.Usage) {
-	if response == nil || response.body == nil || usage == nil {
-		return
-	}
-
-	switch path {
-	case "/v1/responses":
-		response.body["usage"] = map[string]any{
-			"input_tokens":  usage.PromptTokens,
-			"output_tokens": usage.CompletionTokens,
-			"total_tokens":  usage.TotalTokens,
-		}
-	default:
-		response.body["usage"] = map[string]any{
-			"prompt_tokens":     usage.PromptTokens,
-			"completion_tokens": usage.CompletionTokens,
-			"total_tokens":      usage.TotalTokens,
-		}
-	}
 }
 
 func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool) {

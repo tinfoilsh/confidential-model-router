@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
@@ -52,6 +53,15 @@ type toolLoopAdapter interface {
 	// forcedFinalRequest builds the forced-final-answer request body used
 	// when the iteration budget is exhausted without the model settling.
 	forcedFinalRequest(reqBody map[string]any) map[string]any
+
+	// applyUsage writes the surface-specific usage shape onto
+	// response.body. Chat uses prompt_tokens/completion_tokens/total_tokens;
+	// Responses uses input_tokens/output_tokens/total_tokens.
+	applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage)
+
+	// attachCitations resolves inline markdown links and surfaces
+	// router-owned tool progress in the surface-specific shape.
+	attachCitations(body map[string]any, citations *citationState, eventsEnabled bool)
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
@@ -113,8 +123,8 @@ func runToolLoop(
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s done iterations=%d (no router tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
 			}
-			applyAggregatedUsage(response, path, usageTotals.Usage())
-			finalizeAttachCitations(response.body, path, &citations, adapter.includeActionSources(), eventsEnabled)
+			adapter.applyUsage(response, usageTotals.Usage())
+			adapter.attachCitations(response.body, &citations, eventsEnabled)
 			return response, nil
 		}
 
@@ -142,22 +152,9 @@ func runToolLoop(
 	// the aggregated totals. Without this, callers billed for the tool
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
-	finalizeToolLoopResponse(finalResponse, path, usageTotals.Usage(), &citations, adapter.includeActionSources(), eventsEnabled)
+	adapter.applyUsage(finalResponse, usageTotals.Usage())
+	adapter.attachCitations(finalResponse.body, &citations, eventsEnabled)
 	return finalResponse, nil
-}
-
-// finalizeAttachCitations is the early-return citation-attach helper: when
-// the upstream model produces a complete turn with no router tool calls we
-// have already accumulated every source we are going to see, so this single
-// call is all that stands between the raw upstream response and the shape
-// the driver returns to the HTTP handler.
-func finalizeAttachCitations(body map[string]any, path string, citations *citationState, includeActionSources, eventsEnabled bool) {
-	switch path {
-	case "/v1/responses":
-		attachResponsesCitations(body, citations, includeActionSources)
-	default:
-		attachChatCitations(body, citations, eventsEnabled)
-	}
 }
 
 // chatLoopAdapter drives /v1/chat/completions: it owns the OpenAI-compatible
@@ -198,6 +195,21 @@ func (a *chatLoopAdapter) includeActionSources() bool { return false }
 func (a *chatLoopAdapter) options() webSearchOptions  { return a.opts }
 func (a *chatLoopAdapter) schemas() map[string]*jsonschema.Schema {
 	return a.toolSchemas
+}
+
+func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
+	if response == nil || response.body == nil || usage == nil {
+		return
+	}
+	response.body["usage"] = map[string]any{
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+	}
+}
+
+func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, eventsEnabled bool) {
+	attachChatCitations(body, citations, eventsEnabled)
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
@@ -301,13 +313,28 @@ func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, t
 	}
 }
 
-func (a *responsesLoopAdapter) upstreamPath() string                    { return "/v1/responses" }
-func (a *responsesLoopAdapter) traceID() string                         { return "" }
-func (a *responsesLoopAdapter) tracePhase(iteration int) string         { return fmt.Sprintf("responses.iter=%d", iteration) }
-func (a *responsesLoopAdapter) includeActionSources() bool              { return a.opts.includeActionSources }
-func (a *responsesLoopAdapter) options() webSearchOptions               { return a.opts }
-func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema  { return a.toolSchemas }
-func (a *responsesLoopAdapter) preIteration(map[string]any, int)        {}
+func (a *responsesLoopAdapter) upstreamPath() string                   { return "/v1/responses" }
+func (a *responsesLoopAdapter) traceID() string                        { return "" }
+func (a *responsesLoopAdapter) tracePhase(iteration int) string        { return fmt.Sprintf("responses.iter=%d", iteration) }
+func (a *responsesLoopAdapter) includeActionSources() bool             { return a.opts.includeActionSources }
+func (a *responsesLoopAdapter) options() webSearchOptions              { return a.opts }
+func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema { return a.toolSchemas }
+func (a *responsesLoopAdapter) preIteration(map[string]any, int)       {}
+
+func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
+	if response == nil || response.body == nil || usage == nil {
+		return
+	}
+	response.body["usage"] = map[string]any{
+		"input_tokens":  usage.PromptTokens,
+		"output_tokens": usage.CompletionTokens,
+		"total_tokens":  usage.TotalTokens,
+	}
+}
+
+func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, _ bool) {
+	attachResponsesCitations(body, citations, a.opts.includeActionSources)
+}
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	base := cloneJSONMap(a.body)
