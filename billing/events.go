@@ -29,16 +29,8 @@ type Event struct {
 	APIKey           string    `json:"api_key"`
 }
 
-// maxRetainedEvents bounds the in-memory event buffer exposed for tests and
-// debugging. The authoritative event sink is the usage-reporting client; this
-// local buffer is a best-effort tail that must not grow without bound.
-const maxRetainedEvents = 1024
-
-// Collector ships billing events to the control plane via the usage reporter
-// and retains the most recent events in memory for tests and debugging.
+// Collector ships billing events to the control plane via the usage reporter.
 type Collector struct {
-	events   []Event
-	mu       sync.Mutex
 	reporter *usageclient.ReporterClient
 	stopOnce sync.Once
 }
@@ -66,7 +58,6 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 	}
 
 	c := &Collector{
-		events: make([]Event, 0, maxRetainedEvents),
 		reporter: usageclient.New(usageclient.Config{
 			Endpoint: endpoint,
 			Reporter: contract.Reporter{
@@ -79,26 +70,18 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 	return c
 }
 
-// AddEvent adds a billing event and logs it
+// AddEvent forwards a billing event to the usage reporter and writes a
+// masked log line for local observability.
 func (c *Collector) AddEvent(event Event) {
 	// Create a safe version for logging with masked API key
 	safeEvent := event
 	safeEvent.APIKey = maskAPIKey(event.APIKey)
 
-	// Perform JSON marshalling outside the critical section
 	eventJSON, err := json.Marshal(safeEvent)
 	if err != nil {
 		log.WithError(err).Error("Failed to marshal billing event")
 		return
 	}
-
-	c.mu.Lock()
-	if len(c.events) >= maxRetainedEvents {
-		copy(c.events, c.events[len(c.events)-maxRetainedEvents+1:])
-		c.events = c.events[:maxRetainedEvents-1]
-	}
-	c.events = append(c.events, event)
-	c.mu.Unlock()
 
 	if c.reporter != nil {
 		c.reporter.AddEvent(contract.Event{
@@ -127,24 +110,6 @@ func (c *Collector) AddEvent(event Event) {
 		"type": "billing_event",
 		"data": string(eventJSON),
 	}).Info("Billing event collected")
-}
-
-// GetEvents returns all collected events (for testing/debugging)
-func (c *Collector) GetEvents() []Event {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Return a copy to avoid race conditions
-	eventsCopy := make([]Event, len(c.events))
-	copy(eventsCopy, c.events)
-	return eventsCopy
-}
-
-// Clear removes all events (for testing)
-func (c *Collector) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.events = c.events[:0]
 }
 
 // Stop gracefully shuts down the collector
