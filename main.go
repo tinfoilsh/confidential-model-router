@@ -495,7 +495,7 @@ func main() {
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				if useWebsearch {
-					if err := toolruntime.Handle(w, r, em, toolprofile.WebSearch, body, modelName); err != nil {
+					if err := toolruntime.Handle(w, r, em, []toolprofile.Profile{toolprofile.WebSearch}, body, modelName); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,

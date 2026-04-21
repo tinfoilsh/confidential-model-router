@@ -166,35 +166,41 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return base.RoundTrip(cloned)
 }
 
-func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profile toolprofile.Profile, body map[string]any, modelName string) error {
+// Handle routes a request through the shared MCP tool loop against
+// one or more active tool profiles. Every profile in the slice is
+// dialed once, its tools are merged into a sessionRegistry, and
+// router-owned tool calls are dispatched by tool name to the
+// session that advertised them. Passing multiple profiles is the
+// path for requests that activate more than one built-in tool at
+// once.
+func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string) error {
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventsEnabled := tinfoilEventsEnabled(r.Header)
 	safetyOpts := parseSafetyOptIns(body)
-	session, err := connectToolSession(ctx, em, profile, r, modelName, body, safetyOpts)
-	if err != nil {
-		return err
-	}
-	defer session.Close()
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
+		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
+	}
+	registry, err := buildSessionRegistry(ctx, profiles, dial)
 	if err != nil {
 		return err
 	}
+	defer registry.CloseAll()
+
 	promptResult := buildRouterPrompt()
-	ownedTools := ownedToolNames(toolsResult.Tools)
 
 	streaming := isStream(body)
 	switch r.URL.Path {
 	case "/v1/chat/completions":
 		if streaming {
-			if err := runChatStreaming(ctx, w, r, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools); err != nil {
+			if err := runChatStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools, eventsEnabled)
+		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventsEnabled)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -203,12 +209,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
 		if streaming {
-			if err := runResponsesStreaming(ctx, w, r, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools); err != nil {
+			if err := runResponsesStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, session, body, modelName, requestHeaders, promptResult, toolsResult.Tools, ownedTools, eventsEnabled)
+		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventsEnabled)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -220,6 +226,9 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 }
 
+// connectToolSession opens one attested MCP session for a single
+// profile. buildSessionRegistry invokes it once per active profile
+// and aggregates the results into the per-request routing table.
 func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
 	if err != nil {
@@ -257,14 +266,14 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	}, nil)
 }
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, eventsEnabled bool) (*upstreamJSONResponse, error) {
-	adapter := newChatLoopAdapter(body, prompt, tools, ownedTools, modelName, requestHeaders)
-	return runToolLoop(ctx, em, session, modelName, requestHeaders, ownedTools, adapter, eventsEnabled)
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventsEnabled bool) (*upstreamJSONResponse, error) {
+	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventsEnabled)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, eventsEnabled bool) (*upstreamJSONResponse, error) {
-	adapter := newResponsesLoopAdapter(body, prompt, tools, ownedTools)
-	return runToolLoop(ctx, em, session, modelName, requestHeaders, ownedTools, adapter, eventsEnabled)
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventsEnabled bool) (*upstreamJSONResponse, error) {
+	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools())
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventsEnabled)
 }
 
 // executeRouterToolCall runs one router-owned tool call on behalf of
@@ -282,7 +291,7 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *
 // caller does not emit the same logs.
 func executeRouterToolCall(
 	ctx context.Context,
-	session *mcp.ClientSession,
+	registry *sessionRegistry,
 	call toolCall,
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
@@ -295,6 +304,17 @@ func executeRouterToolCall(
 
 	if traceID != "" {
 		debugLogf("toolruntime:%s %s tool.call name=%s args=%s", traceID, tracePhase, call.name, debugPreview(call.arguments, 400))
+	}
+	session, ok := registry.sessionFor(call.name)
+	if !ok {
+		// Programming error: splitToolCalls classified this as
+		// router-owned against the same owned-set the registry
+		// built, so any mismatch is a router bug. Humanize it
+		// rather than panicking so the upstream model sees a
+		// deterministic error string.
+		output := humanizeToolArgError(call.name, fmt.Errorf("no MCP session registered for tool %q", call.name), call.arguments)
+		citations.recordToolCall(toolCallRecord{name: call.name, arguments: call.arguments, errorReason: "tool_error"})
+		return output
 	}
 	tstart := time.Now()
 	output, err := callTool(ctx, session, call.name, call.arguments, citations)

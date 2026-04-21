@@ -2,10 +2,10 @@ package toolruntime
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -26,7 +26,11 @@ import (
 // `status` strings on the terminal `web_search_call` output item carried
 // in `response.completed.output`, which is collapsed onto `failed` at
 // the envelope level but preserved on the record for tooling.
-func (s *responsesStreamer) executeTool(ctx context.Context, session *mcp.ClientSession, call toolCall) (string, error) {
+func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
+	session, ok := registry.sessionFor(call.name)
+	if !ok {
+		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
+	}
 	switch call.name {
 	case "search":
 		id := "ws_" + uuid.NewString()
