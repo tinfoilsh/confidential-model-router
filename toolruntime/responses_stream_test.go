@@ -349,7 +349,6 @@ func TestResponsesStreamerAdoptsUpstreamCreatedAt(t *testing.T) {
 	streamer.responseID = ""
 	streamer.createdAt = 0
 	streamer.model = ""
-	streamer.fallbackModel = "tinfoil/gpt-oss-120b"
 	streamer.responseCreatedEmitted = false
 
 	frames := []string{
