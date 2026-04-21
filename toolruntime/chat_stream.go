@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -437,20 +438,27 @@ func (s *chatStreamer) ensureStreamIdentity(chunk map[string]any) {
 // streamID returns the stable id for the current logical chat completion,
 // falling back to a router-minted one if upstream never sent one by the
 // time we need to emit a chunk. The fallback is remembered so subsequent
-// chunks keep the same id.
+// chunks keep the same id. Every OpenAI-compatible inference server
+// (vLLM, TGI, llama.cpp) emits `id` on the very first chunk; hitting
+// this fallback indicates an upstream regression and is logged once per
+// affected stream so operators can spot fleet drift.
 func (s *chatStreamer) streamID() string {
 	if s.id == "" {
 		s.id = "chatcmpl-" + uuid.NewString()
+		log.Printf("toolruntime: upstream omitted chat.completion.chunk id, router minted fallback %s model=%s", s.id, s.model)
 	}
 	return s.id
 }
 
 // streamCreated returns the stable creation timestamp for the current
 // logical chat completion, falling back to the router's wall clock if
-// upstream never sent one by the time we need to emit a chunk.
+// upstream never sent one by the time we need to emit a chunk. A missing
+// `created` field is an OpenAI-spec violation from upstream; we heal the
+// stream rather than fail it but log once per affected stream.
 func (s *chatStreamer) streamCreated() int64 {
 	if s.created == 0 {
 		s.created = time.Now().Unix()
+		log.Printf("toolruntime: upstream omitted chat.completion.chunk created, router stamped fallback %d model=%s", s.created, s.model)
 	}
 	return s.created
 }
