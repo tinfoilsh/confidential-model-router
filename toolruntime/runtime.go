@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -257,198 +258,65 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 }
 
 func runChatLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, eventsEnabled bool) (*upstreamJSONResponse, error) {
-	tid := debugTraceID()
-	searchOpts := parseChatWebSearchOptions(body)
-	toolSchemas := schemaLookup(tools)
-	reqBody := cloneJSONMap(body)
-	delete(reqBody, "web_search_options")
-	delete(reqBody, "filters")
-	delete(reqBody, "stream_options")
-	delete(reqBody, "pii_check_options")
-	delete(reqBody, "prompt_injection_check_options")
-	stripRouterOwnedIncludes(reqBody)
-	reqBody["stream"] = false
-	reqBody["parallel_tool_calls"] = false
-	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
-	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
-	usageTotals := usageAccumulator{}
-	citations := citationState{nextIndex: 1}
-
-	if debugEnabled {
-		ownedNames := make([]string, 0, len(ownedTools))
-		for n := range ownedTools {
-			ownedNames = append(ownedNames, n)
-		}
-		debugLogf("toolruntime:%s chat.start model=%s search_ctx=%q ownedTools=%v schemas=%d", tid, modelName, searchOpts.searchContextSize, ownedNames, len(toolSchemas))
-	}
-
-	for i := 0; i < maxToolIterations; i++ {
-		if msgs, ok := reqBody["messages"].([]any); ok {
-			if n := sanitizeAssistantToolCallsInMessages(msgs); n > 0 {
-				debugLogf("toolruntime:%s chat.iter=%d history_sanitized count=%d", tid, i, n)
-			}
-		}
-		if debugEnabled {
-			msgs, _ := reqBody["messages"].([]any)
-			debugLogf("toolruntime:%s chat.iter=%d upstream.request messages_n=%d history=%s", tid, i, len(msgs), debugMessagesSummary(msgs, 200))
-		}
-		start := time.Now()
-		response, err := postJSON(ctx, em, modelName, "/v1/chat/completions", reqBody, requestHeaders)
-		if err != nil {
-			debugLogf("toolruntime:%s chat.iter=%d upstream.error elapsed=%s err=%v", tid, i, time.Since(start), err)
-			return nil, err
-		}
-		usageTotals.Add(response)
-
-		message, toolCalls := parseChatToolCalls(response.body)
-		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, toolCalls)
-		if debugEnabled {
-			finishReason := ""
-			content := ""
-			if choices, _ := response.body["choices"].([]any); len(choices) > 0 {
-				if ch, _ := choices[0].(map[string]any); ch != nil {
-					finishReason = stringValue(ch["finish_reason"])
-					if msg, _ := ch["message"].(map[string]any); msg != nil {
-						content = stringValue(msg["content"])
-					}
-				}
-			}
-			toolNames := make([]string, 0, len(toolCalls))
-			for _, c := range toolCalls {
-				toolNames = append(toolNames, c.name)
-			}
-			debugLogf("toolruntime:%s chat.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
-				tid, i, time.Since(start), finishReason, len(toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(content, 240))
-		}
-		if len(routerToolCalls) == 0 {
-			debugLogf("toolruntime:%s chat.done iterations=%d (no router tool calls this turn)", tid, i+1)
-			applyAggregatedUsage(response, "/v1/chat/completions", usageTotals.Usage())
-			attachChatCitations(response.body, &citations, eventsEnabled)
-			return response, nil
-		}
-
-		messages, _ := reqBody["messages"].([]any)
-		messages = append(messages, message)
-		for _, toolCall := range routerToolCalls {
-			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
-			sanitizeToolCallArguments(toolCall.name, toolCall.arguments)
-			coerceArgumentsToSchema(toolCall.name, toolCall.arguments, toolSchemas)
-			debugLogf("toolruntime:%s chat.iter=%d tool.call name=%s args=%s", tid, i, toolCall.name, debugPreview(toolCall.arguments, 400))
-			tstart := time.Now()
-			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
-			record := toolCallRecord{
-				name:      toolCall.name,
-				arguments: toolCall.arguments,
-			}
-			if err != nil {
-				debugLogf("toolruntime:%s chat.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, toolCall.name, time.Since(tstart), err)
-				output = humanizeToolArgError(toolCall.name, err, toolCall.arguments)
-				record.errorReason = publicToolErrorReason(toolCall.name, err)
-			} else {
-				record.resultURLs = extractToolOutputURLs(output)
-				debugLogf("toolruntime:%s chat.iter=%d tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
-					tid, i, toolCall.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
-			}
-			citations.recordToolCall(record)
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": toolCall.id,
-				"content":      output,
-			})
-		}
-		reqBody["messages"] = messages
-	}
-	debugLogf("toolruntime:%s chat.exhausted iterations=%d forcing final answer", tid, maxToolIterations)
-
-	finalResponse, err := postJSON(ctx, em, modelName, "/v1/chat/completions", forcedFinalChatRequest(reqBody), requestHeaders)
-	if err != nil {
-		return nil, err
-	}
-	// The forced-final turn consumes tokens too; feed them into the
-	// accumulator before finalize overwrites response.body["usage"] with
-	// the aggregated totals. Without this, callers billed for the tool
-	// budget would undercount by exactly the final-answer turn.
-	usageTotals.Add(finalResponse)
-	// Chat Completions has no spec for web_search_call output items, so
-	// action.sources has no canonical carrier there; always pass false.
-	finalizeToolLoopResponse(finalResponse, "/v1/chat/completions", usageTotals.Usage(), &citations, false, eventsEnabled)
-	return finalResponse, nil
+	adapter := newChatLoopAdapter(body, prompt, tools, ownedTools, modelName, requestHeaders)
+	return runToolLoop(ctx, em, session, modelName, requestHeaders, ownedTools, adapter, eventsEnabled)
 }
 
 func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, session *mcp.ClientSession, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, eventsEnabled bool) (*upstreamJSONResponse, error) {
-	searchOpts := parseResponsesWebSearchOptions(body)
-	toolSchemas := schemaLookup(tools)
-	base := cloneJSONMap(body)
-	base["stream"] = false
-	base["parallel_tool_calls"] = false
-	delete(base, "stream_options")
-	delete(base, "pii_check_options")
-	delete(base, "prompt_injection_check_options")
-	stripRouterOwnedIncludes(base)
-	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
-	base["input"] = prependResponsesPrompt(prompt, base["input"])
-	usageTotals := usageAccumulator{}
-	accumulatedInput, _ := base["input"].([]any)
-	citations := citationState{nextIndex: 1}
+	adapter := newResponsesLoopAdapter(body, prompt, tools, ownedTools)
+	return runToolLoop(ctx, em, session, modelName, requestHeaders, ownedTools, adapter, eventsEnabled)
+}
 
-	reqBody := base
-	for i := 0; i < maxToolIterations; i++ {
-		response, err := postJSON(ctx, em, modelName, "/v1/responses", reqBody, requestHeaders)
-		if err != nil {
-			return nil, err
-		}
-		usageTotals.Add(response)
+// executeRouterToolCall runs one router-owned tool call on behalf of
+// the chat or responses loop. It mutates the call's arguments in place
+// with forwarded web-search options and per-schema coercion, invokes
+// the tool over the MCP session, and records the outcome on citations
+// so downstream annotation and web_search_call item emission has a
+// uniform record of what happened. The returned string is the text
+// payload to hand back to the upstream model: either the tool's output
+// on success or a humanized error message when the call failed.
+//
+// tracePhase is the short label debug logs use to identify the caller
+// (`chat.iter=N` or `responses.iter=N`); traceID is the per-request
+// trace id the chat loop threads through its logs, or empty when the
+// caller does not emit the same logs.
+func executeRouterToolCall(
+	ctx context.Context,
+	session *mcp.ClientSession,
+	call toolCall,
+	opts webSearchOptions,
+	toolSchemas map[string]*jsonschema.Schema,
+	citations *citationState,
+	tracePhase, traceID string,
+) string {
+	applyWebSearchOptionsToToolCall(call.name, call.arguments, opts)
+	sanitizeToolCallArguments(call.name, call.arguments)
+	coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
 
-		routerToolCalls, _ := splitToolCalls(ownedTools, parseResponsesToolCalls(response.body))
-		if len(routerToolCalls) == 0 {
-			applyAggregatedUsage(response, "/v1/responses", usageTotals.Usage())
-			attachResponsesCitations(response.body, &citations, searchOpts.includeActionSources, eventsEnabled)
-			return response, nil
-		}
-
-		outputItems, _ := response.body["output"].([]any)
-		toolOutputs := make([]any, 0, len(routerToolCalls))
-		for _, toolCall := range routerToolCalls {
-			applyWebSearchOptionsToToolCall(toolCall.name, toolCall.arguments, searchOpts)
-			sanitizeToolCallArguments(toolCall.name, toolCall.arguments)
-			coerceArgumentsToSchema(toolCall.name, toolCall.arguments, toolSchemas)
-			output, err := callTool(ctx, session, toolCall.name, toolCall.arguments, &citations)
-			record := toolCallRecord{
-				name:      toolCall.name,
-				arguments: toolCall.arguments,
-			}
-			if err != nil {
-				output = humanizeToolArgError(toolCall.name, err, toolCall.arguments)
-				record.errorReason = publicToolErrorReason(toolCall.name, err)
-			} else {
-				record.resultURLs = extractToolOutputURLs(output)
-			}
-			citations.recordToolCall(record)
-			toolOutputs = append(toolOutputs, map[string]any{
-				"type":    "function_call_output",
-				"call_id": toolCall.id,
-				"output":  output,
-			})
-		}
-
-		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(outputItems)...)
-		accumulatedInput = append(accumulatedInput, toolOutputs...)
-
-		reqBody = cloneJSONMap(base)
-		reqBody["input"] = accumulatedInput
+	if traceID != "" {
+		debugLogf("toolruntime:%s %s tool.call name=%s args=%s", traceID, tracePhase, call.name, debugPreview(call.arguments, 400))
 	}
-
-	finalResponse, err := postJSON(ctx, em, modelName, "/v1/responses", forcedFinalResponsesRequest(reqBody), requestHeaders)
+	tstart := time.Now()
+	output, err := callTool(ctx, session, call.name, call.arguments, citations)
+	record := toolCallRecord{
+		name:      call.name,
+		arguments: call.arguments,
+	}
 	if err != nil {
-		return nil, err
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.error name=%s elapsed=%s err=%v", traceID, tracePhase, call.name, time.Since(tstart), err)
+		}
+		output = humanizeToolArgError(call.name, err, call.arguments)
+		record.errorReason = publicToolErrorReason(call.name, err)
+	} else {
+		record.resultURLs = extractToolOutputURLs(output)
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
+				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
+		}
 	}
-	// See the matching comment in runChatLoop: without feeding the
-	// forced-final turn into the accumulator, the aggregated totals
-	// finalize writes back would undercount billing and the
-	// X-Tinfoil-Usage-Metrics header would under-report.
-	usageTotals.Add(finalResponse)
-	finalizeToolLoopResponse(finalResponse, "/v1/responses", usageTotals.Usage(), &citations, searchOpts.includeActionSources, eventsEnabled)
-	return finalResponse, nil
+	citations.recordToolCall(record)
+	return output
 }
 
 func finalizeToolLoopResponse(response *upstreamJSONResponse, path string, usage *tokencount.Usage, citations *citationState, includeActionSources, eventsEnabled bool) {
