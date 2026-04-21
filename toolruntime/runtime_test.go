@@ -443,6 +443,12 @@ func TestForcedFinalResponsesRequestRemovesToolsAndAppendsInstruction(t *testing
 	reqBody := map[string]any{
 		"input": []map[string]any{
 			{
+				"type":    "function_call",
+				"call_id": "call_1",
+				"name":    "search",
+				"args":    "{}",
+			},
+			{
 				"type":    "function_call_output",
 				"call_id": "call_1",
 				"output":  "done",
@@ -459,16 +465,29 @@ func TestForcedFinalResponsesRequestRemovesToolsAndAppendsInstruction(t *testing
 	}
 
 	input, _ := finalBody["input"].([]any)
-	if len(input) != 2 {
-		t.Fatalf("expected 2 input items, got %d", len(input))
+	// The two prior conversation items (function_call +
+	// function_call_output) must ride through untouched so the
+	// call_id binding upstream validates against still holds,
+	// followed by the single appended system-role instruction
+	// that forces a final answer.
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items, got %d", len(input))
 	}
 
-	first, _ := input[0].(map[string]any)
-	if first["type"] != "message" || first["role"] != "system" {
-		t.Fatalf("unexpected converted tool result: %#v", first)
+	// Tool-call items must NOT be rewritten into messages. In
+	// particular, function_call_output must stay typed so the
+	// scraped web content inside it keeps the router's trust
+	// boundary: tool output is data, not a system instruction.
+	fc, _ := input[0].(map[string]any)
+	if fc["type"] != "function_call" || fc["call_id"] != "call_1" {
+		t.Fatalf("expected function_call to pass through unchanged, got %#v", fc)
+	}
+	fco, _ := input[1].(map[string]any)
+	if fco["type"] != "function_call_output" || fco["call_id"] != "call_1" {
+		t.Fatalf("expected function_call_output to pass through unchanged, got %#v", fco)
 	}
 
-	last, _ := input[1].(map[string]any)
+	last, _ := input[2].(map[string]any)
 	if last["type"] != "message" || last["role"] != "system" || fmt.Sprint(last["content"]) == "" {
 		t.Fatalf("unexpected final input item: %#v", last)
 	}
