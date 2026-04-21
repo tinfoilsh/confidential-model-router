@@ -249,34 +249,14 @@ func (s *responsesStreamer) runIteration(
 	requestHeaders http.Header,
 	isFirst bool,
 ) (responsesIterationResult, error) {
-	bodyBytes, err := json.Marshal(reqBody)
+	body, err := s.openUpstreamSSE(ctx, em, modelName, "/v1/responses", reqBody, requestHeaders)
 	if err != nil {
 		return responsesIterationResult{}, err
 	}
-	hdrs := cloneHeaders(requestHeaders)
-	hdrs.Set("Content-Type", "application/json")
-	hdrs.Set("Accept", "text/event-stream")
-
-	resp, err := em.DoModelRequest(ctx, modelName, "/v1/responses", bodyBytes, hdrs)
-	if err != nil {
-		return responsesIterationResult{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errBody, _ := io.ReadAll(resp.Body)
-		return responsesIterationResult{}, &upstreamError{
-			statusCode: resp.StatusCode,
-			header:     resp.Header.Clone(),
-			body:       errBody,
-		}
-	}
-	s.upstreamHeaders = resp.Header
-	if !s.headersWritten {
-		s.writeSSEHeaders(resp.Header)
-	}
+	defer body.Close()
 
 	s.resetPerIterationState()
-	return s.pumpUpstream(newSSEReader(resp.Body), isFirst)
+	return s.pumpUpstream(newSSEReader(body), isFirst)
 }
 
 // resetPerIterationState clears the fields whose scope is ONE upstream

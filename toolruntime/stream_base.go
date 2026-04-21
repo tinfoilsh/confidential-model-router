@@ -1,7 +1,10 @@
 package toolruntime
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -109,6 +112,46 @@ func (s *streamBase) validateStreamModel(fieldPath string) string {
 		s.writeErr = fmt.Errorf("upstream stream missing %s field", fieldPath)
 	}
 	return s.model
+}
+
+// openUpstreamSSE posts the JSON-encoded reqBody to the enclave path and
+// returns the SSE response body ready for sseReader consumption. On
+// success it also captures the upstream headers and writes the
+// client-facing SSE response headers exactly once. Non-2xx responses
+// become *upstreamError so terminateWithError can surface them.
+func (s *streamBase) openUpstreamSSE(
+	ctx context.Context,
+	em *manager.EnclaveManager,
+	modelName, path string,
+	reqBody map[string]any,
+	requestHeaders http.Header,
+) (io.ReadCloser, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+	hdrs := cloneHeaders(requestHeaders)
+	hdrs.Set("Content-Type", "application/json")
+	hdrs.Set("Accept", "text/event-stream")
+
+	resp, err := em.DoModelRequest(ctx, modelName, path, bodyBytes, hdrs)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, &upstreamError{
+			statusCode: resp.StatusCode,
+			header:     resp.Header.Clone(),
+			body:       errBody,
+		}
+	}
+	s.upstreamHeaders = resp.Header
+	if !s.headersWritten {
+		s.writeSSEHeaders(resp.Header)
+	}
+	return resp.Body, nil
 }
 
 // emitBillingEvent delegates to the shared billing emitter used by the
