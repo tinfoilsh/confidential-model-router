@@ -96,25 +96,6 @@ func (s *chatStreamer) finalUsage() map[string]any {
 	}
 }
 
-// emitBillingEvent delegates to the shared billing emitter used by the
-// non-streaming path so streaming and non-streaming requests produce the
-// same billing-event shape, including Tinfoil-Enclave attribution and
-// request-id resolution from upstream headers.
-func (s *chatStreamer) emitBillingEvent(r *http.Request, em *manager.EnclaveManager, modelName string, usage map[string]any) {
-	if em == nil {
-		return
-	}
-	header := s.upstreamHeaders
-	if header == nil {
-		header = http.Header{}
-	}
-	response := &upstreamJSONResponse{
-		header: header,
-		body:   map[string]any{"usage": usage},
-	}
-	emitBillingEvent(em, r, response, modelName, true)
-}
-
 // terminateWithError is the single point at which a mid-stream upstream
 // failure is surfaced to the client. If no SSE has started yet we return
 // the upstream error to the caller so Handle turns it into a plain JSON
