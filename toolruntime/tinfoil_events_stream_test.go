@@ -14,11 +14,15 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 	t.Helper()
 	rec := httptest.NewRecorder()
 	streamer := &responsesStreamer{
-		w:                     rec,
-		flusher:               rec,
-		usageMetricsRequested: true,
-		citations:             &citationState{nextIndex: 1},
-		usageTotals:           &usageAccumulator{},
+		streamBase: streamBase{
+			w:                     rec,
+			flusher:               rec,
+			usageMetricsRequested: true,
+			citations:             &citationState{nextIndex: 1},
+			usageTotals:           &usageAccumulator{},
+			model:                 "gpt-oss-120b",
+			headersWritten:        true,
+		},
 		emitters:              map[itemContentKey]*citationEmitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
@@ -26,8 +30,6 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 		responseID:            "resp_test",
 		upstreamIDCaptured:    true,
 		createdAt:             1700000000,
-		model:                 "gpt-oss-120b",
-		headersWritten:        true,
 	}
 	return streamer, rec
 }

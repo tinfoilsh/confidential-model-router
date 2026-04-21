@@ -59,11 +59,13 @@ func runResponsesStreaming(
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 
 	streamer := &responsesStreamer{
-		w:                     w,
-		flusher:               flusher,
-		usageMetricsRequested: usageMetricsRequested,
-		citations:             &citationState{nextIndex: 1},
-		usageTotals:           &usageAccumulator{},
+		streamBase: streamBase{
+			w:                     w,
+			flusher:               flusher,
+			usageMetricsRequested: usageMetricsRequested,
+			citations:             &citationState{nextIndex: 1},
+			usageTotals:           &usageAccumulator{},
+		},
 		emitters:              map[itemContentKey]*citationEmitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
@@ -139,25 +141,18 @@ func runResponsesStreaming(
 // synchronously between iterations, and emits one aggregated
 // `response.completed` event at the very end.
 type responsesStreamer struct {
-	w                     http.ResponseWriter
-	flusher               http.Flusher
-	usageMetricsRequested bool
-	citations             *citationState
-	usageTotals           *usageAccumulator
+	// streamBase holds shared state (client writer, flusher, citations,
+	// usage totals, headers-written flag, upstream headers, pinned
+	// model name, latched writeErr) common to every SSE streamer. See
+	// stream_base.go for the full documentation.
+	streamBase
 
-	headersWritten bool
 	// upstreamIDCaptured is true once we have adopted the first
 	// upstream-provided response id. Subsequent upstream ids (from later
 	// tool iterations) are ignored so the client sees one stable id.
 	upstreamIDCaptured bool
 	responseID         string
 	createdAt          int64
-	model              string
-
-	// upstreamHeaders holds the most recent upstream response headers so
-	// the billing event can surface the Tinfoil-Enclave attribution in
-	// the same shape as the non-streaming path.
-	upstreamHeaders http.Header
 
 	// responseCreatedEmitted guards against duplicate response.created
 	// events across iterations, and against emitting the event at all
@@ -225,13 +220,6 @@ type responsesStreamer struct {
 	// response.completed snapshot so the final output item carries the
 	// sources array only when the caller asked for it.
 	includeActionSources bool
-
-	// writeErr latches the first error observed while writing to the
-	// client SSE stream. Once set, emit* methods are no-ops and the
-	// iteration / outer loops abort so the router does not keep running
-	// upstream turns or MCP tool calls on behalf of a caller that has
-	// already disconnected.
-	writeErr error
 }
 
 type itemContentKey struct {
@@ -298,27 +286,6 @@ func (s *responsesStreamer) runIteration(
 	return s.pumpUpstream(newSSEReader(resp.Body), isFirst)
 }
 
-// writeSSEHeaders sets up the SSE response to the client once, the first
-// time upstream returns a 2xx status. Identity fields are NOT
-// pre-populated here: we wait until the first upstream event arrives so
-// response.created and every subsequent event carry upstream's own
-// id/created_at/model. Missing id / created_at have safe router-owned
-// fallbacks on the identity accessors below; missing `model` is treated
-// as an upstream bug and surfaced as an error on emit.
-func (s *responsesStreamer) writeSSEHeaders(upstreamHeaders http.Header) {
-	copyResponseHeaders(s.w.Header(), upstreamHeaders)
-	s.w.Header().Del("Content-Length")
-	s.w.Header().Del(manager.UsageMetricsResponseHeader)
-	s.w.Header().Set("Content-Type", "text/event-stream")
-	s.w.Header().Set("Cache-Control", "no-cache")
-	s.w.Header().Set("Connection", "keep-alive")
-	if s.usageMetricsRequested {
-		addTrailerHeader(s.w.Header(), manager.UsageMetricsResponseHeader)
-	}
-	s.w.WriteHeader(http.StatusOK)
-	s.headersWritten = true
-}
-
 // streamResponseID returns the pinned response id, materializing a
 // router-minted fallback if upstream never sent one by the time it is
 // first needed. The fallback is stored so every subsequent event
@@ -342,13 +309,10 @@ func (s *responsesStreamer) streamCreatedAt() int64 {
 // streamModel returns the pinned model name captured from upstream.
 // Every OpenAI-compatible inference server echoes request.model on
 // response.created; a missing value indicates an upstream bug and is
-// surfaced as a loud stream error so we do not mask a fleet regression
-// behind a cached config label.
+// surfaced as a loud stream error via streamBase.validateStreamModel
+// so we do not mask a fleet regression behind a cached config label.
 func (s *responsesStreamer) streamModel() string {
-	if s.model == "" {
-		s.writeErr = fmt.Errorf("upstream stream missing response.model field")
-	}
-	return s.model
+	return s.validateStreamModel("response.model")
 }
 
 // pumpUpstream reads SSE events from upstream until the stream ends,

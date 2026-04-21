@@ -17,16 +17,18 @@ func newTestChatStreamer(t *testing.T) (*chatStreamer, *httptest.ResponseRecorde
 	t.Helper()
 	rec := httptest.NewRecorder()
 	streamer := &chatStreamer{
-		w:                     rec,
-		flusher:               rec,
-		usageMetricsRequested: true,
-		clientRequestedUsage:  true,
-		citations:             &citationState{nextIndex: 1},
-		usageTotals:           &usageAccumulator{},
-		id:                    "chatcmpl_test",
-		created:               1700000000,
-		model:                 "gpt-oss-120b",
-		headersWritten:        true,
+		streamBase: streamBase{
+			w:                     rec,
+			flusher:               rec,
+			usageMetricsRequested: true,
+			citations:             &citationState{nextIndex: 1},
+			usageTotals:           &usageAccumulator{},
+			model:                 "gpt-oss-120b",
+			headersWritten:        true,
+		},
+		clientRequestedUsage: true,
+		id:                   "chatcmpl_test",
+		created:              1700000000,
 	}
 	streamer.emitter = newCitationEmitter(streamer.citations)
 	return streamer, rec
@@ -360,14 +362,16 @@ func (f *failingFlushWriter) Flush()                      {}
 func TestChatStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 	w := &failingFlushWriter{}
 	streamer := &chatStreamer{
-		w:              w,
-		flusher:        w,
-		citations:      &citationState{nextIndex: 1},
-		usageTotals:    &usageAccumulator{},
-		headersWritten: true,
-		id:             "cmpl",
-		created:        1,
-		model:          "gpt-oss-120b",
+		streamBase: streamBase{
+			w:              w,
+			flusher:        w,
+			citations:      &citationState{nextIndex: 1},
+			usageTotals:    &usageAccumulator{},
+			headersWritten: true,
+			model:          "gpt-oss-120b",
+		},
+		id:      "cmpl",
+		created: 1,
 	}
 	streamer.emitter = newCitationEmitter(streamer.citations)
 

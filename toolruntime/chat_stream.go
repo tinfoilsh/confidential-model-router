@@ -76,14 +76,16 @@ func runChatStreaming(
 	}
 
 	streamer := &chatStreamer{
-		w:                     w,
-		flusher:               flusher,
-		usageMetricsRequested: usageMetricsRequested,
-		clientRequestedUsage:  clientRequestedUsage,
-		eventsEnabled:         eventsEnabled,
-		citations:             &citationState{nextIndex: 1},
-		emitter:               nil,
-		usageTotals:           &usageAccumulator{},
+		streamBase: streamBase{
+			w:                     w,
+			flusher:               flusher,
+			usageMetricsRequested: usageMetricsRequested,
+			citations:             &citationState{nextIndex: 1},
+			usageTotals:           &usageAccumulator{},
+		},
+		clientRequestedUsage: clientRequestedUsage,
+		eventsEnabled:        eventsEnabled,
+		emitter:              nil,
 	}
 	streamer.emitter = newCitationEmitter(streamer.citations)
 
@@ -179,22 +181,19 @@ func runChatStreaming(
 // needs. It keeps id/created/model pinned to the values the first upstream
 // chunk reports so downstream SDKs see one continuous logical response.
 type chatStreamer struct {
-	w                     http.ResponseWriter
-	flusher               http.Flusher
-	usageMetricsRequested bool
-	clientRequestedUsage  bool
+	// streamBase holds shared state (client writer, flusher, citations,
+	// usage totals, headers-written flag, upstream headers, pinned
+	// model name, latched writeErr) common to every SSE streamer. See
+	// stream_base.go for the full documentation.
+	streamBase
+
+	clientRequestedUsage bool
 	// eventsEnabled is true when the caller opted into the
 	// `X-Tinfoil-Events: web_search` marker stream. When false the
 	// streamer emits only pure spec chat.completion.chunk frames; when
 	// true it interleaves `<tinfoil-event>` markers inside delta.content.
 	eventsEnabled bool
-	citations     *citationState
 	emitter       *citationEmitter
-
-	// headersWritten is true once the SSE headers have been emitted.
-	// After that any upstream error is surfaced as an SSE error chunk
-	// rather than a plain JSON error response.
-	headersWritten bool
 
 	// roleEmitted is true after the initial assistant role-delta chunk has
 	// been sent. The role chunk is deferred until the first upstream frame
@@ -202,32 +201,13 @@ type chatStreamer struct {
 	// rather than router-synthesized placeholders.
 	roleEmitted bool
 
-	// id, created and model are captured from the first upstream chunk we
-	// see and pinned for the rest of the logical stream. Subsequent
-	// upstream turns keep re-sending fresh values; we ignore them so the
-	// client sees one coherent chat.completion. The fallback* fields are
-	// used only if the upstream never sent a given value by the time we
-	// need to emit a chunk (defensive — in practice every compliant SSE
-	// producer sends id/created/model on the very first frame).
+	// id and created are captured from the first upstream chunk we see
+	// and pinned for the rest of the logical stream. Subsequent
+	// upstream turns keep re-sending fresh values; we ignore them so
+	// the client sees one coherent chat.completion.
 	id             string
 	created        int64
-	model          string
 	identityPinned bool
-
-	// upstreamHeaders holds the most recent upstream response headers so
-	// the billing event can surface the Tinfoil-Enclave attribution and
-	// the request id in the same shape as the non-streaming path.
-	upstreamHeaders http.Header
-
-	usageTotals *usageAccumulator
-
-	// writeErr latches the first error observed while writing to the
-	// client SSE stream (typically io.ErrClosedPipe after a client
-	// disconnect). Once set, every subsequent emit call is a no-op and
-	// the outer loop aborts so the router does not keep running
-	// upstream turns or MCP tool calls on behalf of a caller that has
-	// gone away.
-	writeErr error
 }
 
 // chatIterationResult summarizes one upstream stream's payload once the
@@ -474,37 +454,14 @@ func (s *chatStreamer) streamCreated() int64 {
 	return s.created
 }
 
-// streamModel returns the stable model name for the current logical chat
-// completion. Every OpenAI-compatible inference server echoes
-// request.model on its streaming chunks; a missing value indicates an
-// upstream bug and is surfaced as a loud stream error so we do not mask
-// a fleet regression behind a cached config label.
+// streamModel returns the stable model name for the current logical
+// chat completion. Every OpenAI-compatible inference server echoes
+// request.model on its streaming chunks; a missing value indicates
+// an upstream bug and is surfaced as a loud stream error via
+// streamBase.validateStreamModel so we do not mask a fleet regression
+// behind a cached config label.
 func (s *chatStreamer) streamModel() string {
-	if s.model == "" {
-		s.writeErr = fmt.Errorf("upstream stream missing chunk.model field")
-	}
-	return s.model
-}
-
-// writeSSEHeaders sets up the SSE response to the client. Called exactly
-// once per logical stream, the first time upstream returns a 2xx status.
-// Identity fields are NOT pre-populated here: we wait until we have read
-// at least one upstream chunk so the role-delta and every subsequent
-// chunk carries the upstream-provided id/created/model. The upstream
-// usage-metrics header is stripped unconditionally because we own the
-// authoritative aggregated-usage trailer for the full logical stream.
-func (s *chatStreamer) writeSSEHeaders(upstreamHeaders http.Header) {
-	copyResponseHeaders(s.w.Header(), upstreamHeaders)
-	s.w.Header().Del("Content-Length")
-	s.w.Header().Del(manager.UsageMetricsResponseHeader)
-	s.w.Header().Set("Content-Type", "text/event-stream")
-	s.w.Header().Set("Cache-Control", "no-cache")
-	s.w.Header().Set("Connection", "keep-alive")
-	if s.usageMetricsRequested {
-		addTrailerHeader(s.w.Header(), manager.UsageMetricsResponseHeader)
-	}
-	s.w.WriteHeader(http.StatusOK)
-	s.headersWritten = true
+	return s.validateStreamModel("chunk.model")
 }
 
 // ensureRoleEmitted writes the initial assistant role-delta chunk exactly

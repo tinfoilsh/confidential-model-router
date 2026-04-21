@@ -20,17 +20,19 @@ func newTestResponsesStreamer(t *testing.T) (*responsesStreamer, *httptest.Respo
 	t.Helper()
 	rec := httptest.NewRecorder()
 	streamer := &responsesStreamer{
-		w:                     rec,
-		flusher:               rec,
-		usageMetricsRequested: true,
-		citations:             &citationState{nextIndex: 1},
-		usageTotals:           &usageAccumulator{},
+		streamBase: streamBase{
+			w:                     rec,
+			flusher:               rec,
+			usageMetricsRequested: true,
+			citations:             &citationState{nextIndex: 1},
+			usageTotals:           &usageAccumulator{},
+			model:                 "gpt-oss-120b",
+			headersWritten:        true,
+		},
 		emitters:              map[itemContentKey]*citationEmitter{},
 		functionCallArguments: map[int]*strings.Builder{},
 		responseID:            "resp_test",
 		createdAt:             1700000000,
-		model:                 "gpt-oss-120b",
-		headersWritten:        true,
 		outputIndexMap:        map[int]int{},
 		suppressedItems:       map[int]struct{}{},
 		ownedTools: map[string]struct{}{
@@ -598,10 +600,14 @@ func TestResponsesStreamerMalformedJSONFailsStream(t *testing.T) {
 func TestResponsesStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 	w := &failingFlushWriter{}
 	streamer := &responsesStreamer{
-		w:                     w,
-		flusher:               w,
-		citations:             &citationState{nextIndex: 1},
-		usageTotals:           &usageAccumulator{},
+		streamBase: streamBase{
+			w:              w,
+			flusher:        w,
+			citations:      &citationState{nextIndex: 1},
+			usageTotals:    &usageAccumulator{},
+			model:          "gpt-oss-120b",
+			headersWritten: true,
+		},
 		emitters:              map[itemContentKey]*citationEmitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
@@ -609,8 +615,6 @@ func TestResponsesStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 		suppressedItems:       map[int]struct{}{},
 		responseID:            "resp_test",
 		createdAt:             1,
-		model:                 "gpt-oss-120b",
-		headersWritten:        true,
 		ownedTools:            map[string]struct{}{"search": {}},
 	}
 
