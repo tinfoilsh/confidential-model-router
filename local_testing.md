@@ -74,7 +74,7 @@ From the `confidential-model-router` repo:
 
 ```bash
 DEBUG=1 \
-LOCAL_WEBSEARCH_MCP_ENDPOINT=http://127.0.0.1:8091/mcp \
+LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
 PORT=8090 \
 DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
@@ -82,7 +82,7 @@ UPDATE_CONFIG_URL=/tmp/model-router-local.yml \
 go run .
 ```
 
-`LOCAL_WEBSEARCH_MCP_ENDPOINT` makes router-owned web search tool calls hit the local MCP server instead of the attested `websearch` deployment. It is only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which prevents a misconfigured production deployment from silently downgrading to a non-attested HTTP endpoint.
+`LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP model hit a local MCP server instead of the attested deployment. The model name is upper-cased with non-alphanumeric characters replaced by underscores, so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which prevents a misconfigured production deployment from silently downgrading to a non-attested HTTP endpoint.
 
 ## 4. Run router-facing smoke tests
 

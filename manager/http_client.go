@@ -62,13 +62,15 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 }
 
 func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {
-	// LOCAL_WEBSEARCH_MCP_ENDPOINT bypasses attested TLS pinning and connects
-	// to an arbitrary URL (typically http://127.0.0.1). It is only honored when
-	// debug mode is explicitly enabled via the --debug flag or DEBUG env var,
-	// so a misconfigured production deployment cannot silently downgrade the
-	// trust boundary for the websearch MCP server.
-	if em.debug && modelName == "websearch" {
-		if endpoint := os.Getenv("LOCAL_WEBSEARCH_MCP_ENDPOINT"); endpoint != "" {
+	// LOCAL_MCP_ENDPOINT_<MODEL_NAME> bypasses attested TLS pinning
+	// and connects to an arbitrary URL (typically http://127.0.0.1).
+	// Honored only when --debug / DEBUG is explicitly enabled so a
+	// mis-configured production deployment cannot silently downgrade
+	// the trust boundary to a non-attested HTTP endpoint. The model
+	// name is upper-cased with non-alphanumeric characters replaced
+	// by underscores; see localMCPEndpointEnvVar.
+	if em.debug {
+		if endpoint := os.Getenv(localMCPEndpointEnvVar(modelName)); endpoint != "" {
 			return endpoint, &http.Client{Timeout: 10 * time.Minute}, nil
 		}
 	}
@@ -78,4 +80,22 @@ func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Cli
 		return "", nil, err
 	}
 	return baseURL + "/mcp", client, nil
+}
+
+// localMCPEndpointEnvVar returns the model-specific debug-bypass env
+// var name for a given MCP model. Example: "code-runner" ->
+// "LOCAL_MCP_ENDPOINT_CODE_RUNNER".
+func localMCPEndpointEnvVar(modelName string) string {
+	var b []byte
+	for _, r := range modelName {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b = append(b, byte(r-'a'+'A'))
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b = append(b, byte(r))
+		default:
+			b = append(b, '_')
+		}
+	}
+	return "LOCAL_MCP_ENDPOINT_" + string(b)
 }

@@ -72,8 +72,9 @@ var (
 	domain              = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
 	refreshInterval     = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 	// debug enables non-production behaviors such as honoring
-	// LOCAL_WEBSEARCH_MCP_ENDPOINT to bypass attested TLS pinning for the
-	// websearch MCP server. MUST NOT be enabled in deployed enclaves.
+	// LOCAL_MCP_ENDPOINT_<MODEL> env vars to bypass attested TLS
+	// pinning for MCP tool servers during local development. MUST
+	// NOT be enabled in deployed enclaves.
 	debug = flag.Bool("debug", getEnvBool("DEBUG"), "enable debug-only overrides for local development (env: DEBUG)")
 )
 
