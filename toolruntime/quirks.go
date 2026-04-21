@@ -1,28 +1,9 @@
 // Package-private router-side defenses against known upstream bugs in the
-// tool-calling streaming decoders of specific models and inference stacks
-// as of 2026-04. These repairs are deliberately isolated in one file so
-// they can be deleted wholesale once upstream fixes land:
-//
-//   - vLLM "Enforcer" (constrained decoding) reaches a stable release.
-//   - Moonshot / SGLang ship Kimi-K2 chat-template fixes that stop leaking
-//     <|tool_call_*|> control tokens into tool-call argument strings.
-//   - Gemma serving stops emitting <|"|...<|"|> wrappers around streamed
-//     URL fields on the tool-call delta path.
-//
-// Deletion steps (expected to take ~10 minutes):
-//
-//  1. Remove this file and quirks_test.go.
-//  2. `rg -n 'sanitize(ToolCall|AssistantTool|ToolCallArgumentsJSON)' toolruntime/`
-//     to find the call sites and delete each matching line.
-//  3. `go test ./toolruntime/` should stay green because every quirk test
-//     lives in quirks_test.go and no other test relies on quirks firing.
-//
-// References for the repairs implemented here:
-//   - MoonshotAI/kimi-cli#1171  history poisoning + _convert_message fix
-//   - pi-mono#952               JSON+reasoning bleed; extractFirstJsonObject
-//   - ollama/ollama#14360       Kimi template leaks <|tool_call_*|> tokens
-//   - OpenClaw PR #54448        non-incremental streaming argument loss
-//   - vllm.ai 2025-10-28 blog   Enforcer, schema-validation-error gap
+// Package-private router-side defenses against known upstream bugs in the
+// tool-calling streaming decoders of specific models and inference stacks.
+// Repairs are isolated in this file so the whole set can be removed once
+// upstream fixes (vLLM Enforcer, Kimi chat templates, Gemma URL wrapping)
+// ship broadly.
 
 package toolruntime
 
