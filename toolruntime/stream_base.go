@@ -105,7 +105,7 @@ func (s *streamBase) writeSSEHeaders(upstreamHeaders http.Header) {
 // Returns the pinned model name; callers that need to distinguish the
 // empty / missing case should check writeErr after calling this.
 func (s *streamBase) validateStreamModel(fieldPath string) string {
-	if s.model == "" {
+	if s.model == "" && s.writeErr == nil {
 		s.writeErr = fmt.Errorf("upstream stream missing %s field", fieldPath)
 	}
 	return s.model
