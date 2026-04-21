@@ -1,11 +1,14 @@
 package toolruntime
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -584,5 +587,59 @@ func TestChatStreamerThreeIterationStitching(t *testing.T) {
 	}
 	if !strings.Contains(body, `"content":"answer"`) {
 		t.Fatalf("expected final content 'answer' forwarded to client, got %s", body)
+	}
+}
+
+// TestChatStreamerFallbacksLogOnceWhenUpstreamOmitsIdentity pins that
+// the id and created fallbacks, which exist as defense in depth against
+// a misbehaving upstream, emit a single log line each when they actually
+// fire. Silent fallbacks hide fleet regressions; logging gives operators
+// a breadcrumb when an upstream starts dropping OpenAI-required fields.
+func TestChatStreamerFallbacksLogOnceWhenUpstreamOmitsIdentity(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	streamer, _ := newTestChatStreamer(t)
+	streamer.id = ""
+	streamer.created = 0
+
+	if got := streamer.streamID(); !strings.HasPrefix(got, "chatcmpl-") {
+		t.Fatalf("streamID fallback should be router-minted, got %q", got)
+	}
+	if got := streamer.streamCreated(); got <= 0 {
+		t.Fatalf("streamCreated fallback should be a positive unix time, got %d", got)
+	}
+	// Subsequent calls must NOT relog; the fallback is idempotent.
+	_ = streamer.streamID()
+	_ = streamer.streamCreated()
+
+	logged := buf.String()
+	if idHits := strings.Count(logged, "upstream omitted chat.completion.chunk id"); idHits != 1 {
+		t.Fatalf("expected exactly one id-fallback log line, got %d in %q", idHits, logged)
+	}
+	if createdHits := strings.Count(logged, "upstream omitted chat.completion.chunk created"); createdHits != 1 {
+		t.Fatalf("expected exactly one created-fallback log line, got %d in %q", createdHits, logged)
+	}
+}
+
+// TestChatStreamerDoesNotLogWhenUpstreamProvidesIdentity pins the
+// inverse: the happy path (vLLM always emits id/created) must produce
+// zero log noise. A chatty router on every request would bury real
+// signals.
+func TestChatStreamerDoesNotLogWhenUpstreamProvidesIdentity(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	streamer, _ := newTestChatStreamer(t)
+	// newTestChatStreamer pre-seeds id and created, mirroring a
+	// well-behaved upstream that populated them on the first chunk.
+	_ = streamer.streamID()
+	_ = streamer.streamCreated()
+	_ = streamer.streamID()
+
+	if logged := buf.String(); logged != "" {
+		t.Fatalf("happy path must not log; got %q", logged)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -315,19 +316,25 @@ func (s *responsesStreamer) resetPerIterationState() {
 // streamResponseID returns the pinned response id, materializing a
 // router-minted fallback if upstream never sent one by the time it is
 // first needed. The fallback is stored so every subsequent event
-// references the same id.
+// references the same id. vLLM's /responses implementation always emits
+// `id` on response.created, so hitting this fallback signals an upstream
+// regression and is logged once per affected stream.
 func (s *responsesStreamer) streamResponseID() string {
 	if s.responseID == "" {
 		s.responseID = "resp_" + uuid.NewString()
+		log.Printf("toolruntime: upstream omitted response id on response.created, router minted fallback %s model=%s", s.responseID, s.model)
 	}
 	return s.responseID
 }
 
 // streamCreatedAt returns the pinned created_at timestamp, falling back to
-// the router wall clock if upstream never sent a timestamp.
+// the router wall clock if upstream never sent a timestamp. Hitting this
+// fallback is an OpenAI-spec violation from upstream; we heal the stream
+// rather than fail it but log once per affected stream.
 func (s *responsesStreamer) streamCreatedAt() int64 {
 	if s.createdAt == 0 {
 		s.createdAt = time.Now().Unix()
+		log.Printf("toolruntime: upstream omitted response created_at, router stamped fallback %d model=%s", s.createdAt, s.model)
 	}
 	return s.createdAt
 }
