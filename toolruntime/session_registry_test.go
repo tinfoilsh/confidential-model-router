@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -181,15 +182,15 @@ func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 	if r != nil {
 		t.Errorf("expected nil registry on dial failure, got %+v", r)
 	}
-	// A second Close should be safe because CloseAll already ran;
-	// if the registry had leaked the session without closing it,
-	// this extra Close would be the only close and the test would
-	// not notice. Instead we assert the cleanup path explicitly:
-	// Close on an already-closed session returns nil (idempotent
-	// per the MCP client contract), so a second close is the
-	// positive signal the first one happened.
-	if err := firstSession.Close(); err != nil {
-		t.Errorf("second Close after buildSessionRegistry cleanup should be idempotent; got %v", err)
+	// Positive signal that buildSessionRegistry closed the first
+	// session on its way out: an RPC over a live session succeeds,
+	// an RPC over a closed session fails. Double-close on its own
+	// cannot distinguish "was closed by cleanup" from "was never
+	// closed at all", so we exercise the transport instead.
+	pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := firstSession.Ping(pingCtx, nil); err == nil {
+		t.Errorf("firstSession.Ping succeeded after buildSessionRegistry cleanup; expected session to be closed")
 	}
 }
 
