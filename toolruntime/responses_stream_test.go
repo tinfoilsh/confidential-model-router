@@ -189,13 +189,11 @@ func TestResponsesStreamerOutputIndexMonotonicAcrossIterations(t *testing.T) {
 	// First iteration fresh; second iteration also starts at upstream
 	// output_index 0 but client should see index 1 because the streamer
 	// keeps its own monotonic counter.
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn("msg_1"))), true); err != nil {
 		t.Fatalf("first pump err: %v", err)
 	}
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn("msg_2"))), false); err != nil {
 		t.Fatalf("second pump err: %v", err)
 	}
@@ -552,12 +550,11 @@ func TestResponsesStreamerFinalOutputResetsPerIteration(t *testing.T) {
 		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_final","type":"message"}}`,
 		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream"}}`,
 	}
-	// runIteration resets finalOutput before invoking pumpUpstream; we
-	// call the real runIteration path via the writeSSEHeaders-writing
-	// shortcut by asserting directly that pumpUpstream respects the
-	// reset done in runIteration. Here we inline the reset to exercise
-	// the invariant the production path guarantees.
-	streamer.finalOutput = nil
+	// runIteration calls resetPerIterationState before pumpUpstream;
+	// exercise the same production method here so this test pins the
+	// actual reset path rather than a parallel inline reset that could
+	// drift if the scope boundary ever changes.
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(strings.Join(frames, "\n\n")+"\n\n")), false); err != nil {
 		t.Fatalf("pump err: %v", err)
 	}
@@ -705,9 +702,7 @@ func TestResponsesStreamerTwoIterationStitching(t *testing.T) {
 	turn0 := responsesIterationTurn("resp_upstream", []any{
 		map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"go"}`},
 	})
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
-	streamer.finalOutput = nil
+	streamer.resetPerIterationState()
 	result0, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn0)), true)
 	if err != nil {
 		t.Fatalf("iter0 pump err: %v", err)
@@ -720,9 +715,7 @@ func TestResponsesStreamerTwoIterationStitching(t *testing.T) {
 	turn1 := responsesIterationTurn("resp_upstream", []any{
 		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
 	})
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
-	streamer.finalOutput = nil
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn1)), false); err != nil {
 		t.Fatalf("iter1 pump err: %v", err)
 	}
@@ -771,9 +764,7 @@ func TestResponsesStreamerThreeIterationStitching(t *testing.T) {
 	}
 
 	for i, turn := range turns {
-		streamer.outputIndexMap = map[int]int{}
-		streamer.suppressedItems = map[int]struct{}{}
-		streamer.finalOutput = nil
+		streamer.resetPerIterationState()
 		if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn)), i == 0); err != nil {
 			t.Fatalf("iter%d pump err: %v", i, err)
 		}
@@ -812,9 +803,7 @@ func TestResponsesStreamerOutputIndexAdvancesForClientOwnedToolCalls(t *testing.
 	turn0 := responsesIterationTurn("resp_upstream", []any{
 		map[string]any{"id": "fc_client", "type": "function_call", "name": "client_lookup", "call_id": "call_c", "arguments": `{"id":1}`},
 	})
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
-	streamer.finalOutput = nil
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn0)), true); err != nil {
 		t.Fatalf("iter0 pump err: %v", err)
 	}
@@ -826,9 +815,7 @@ func TestResponsesStreamerOutputIndexAdvancesForClientOwnedToolCalls(t *testing.
 	turn1 := responsesIterationTurn("resp_upstream", []any{
 		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
 	})
-	streamer.outputIndexMap = map[int]int{}
-	streamer.suppressedItems = map[int]struct{}{}
-	streamer.finalOutput = nil
+	streamer.resetPerIterationState()
 	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn1)), false); err != nil {
 		t.Fatalf("iter1 pump err: %v", err)
 	}
@@ -860,9 +847,7 @@ func TestResponsesStreamerSequenceNumberMonotonicAcrossIterations(t *testing.T) 
 		}),
 	}
 	for i, turn := range turns {
-		streamer.outputIndexMap = map[int]int{}
-		streamer.suppressedItems = map[int]struct{}{}
-		streamer.finalOutput = nil
+		streamer.resetPerIterationState()
 		if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn)), i == 0); err != nil {
 			t.Fatalf("iter%d pump err: %v", i, err)
 		}
