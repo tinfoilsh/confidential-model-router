@@ -172,7 +172,7 @@ func runToolLoop(
 func finalizeAttachCitations(body map[string]any, path string, citations *citationState, includeActionSources, eventsEnabled bool) {
 	switch path {
 	case "/v1/responses":
-		attachResponsesCitations(body, citations, includeActionSources, eventsEnabled)
+		attachResponsesCitations(body, citations, includeActionSources)
 	default:
 		attachChatCitations(body, citations, eventsEnabled)
 	}

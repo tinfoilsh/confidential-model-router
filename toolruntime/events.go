@@ -52,16 +52,53 @@ const (
 //     caller guarantees no future caller can accidentally ship a
 //     schema-invalid `blocked` status on an output item no matter which
 //     status-producing path it used.
-func webSearchCallEvent(id, status string, action map[string]any) map[string]any {
-	if status == "blocked" {
-		status = "failed"
-	}
-	return map[string]any{
+func webSearchCallEvent(id, status, errorCode string, action map[string]any) map[string]any {
+	item := map[string]any{
 		"type":   "web_search_call",
 		"id":     id,
 		"status": status,
 		"action": action,
 	}
+	if status == "blocked" {
+		item["status"] = "failed"
+	}
+	if sidecar := tinfoilSidecar(status, errorCode); sidecar != nil {
+		item["_tinfoil"] = sidecar
+	}
+	return item
+}
+
+// tinfoilSidecar builds the `_tinfoil` vendor-extension field that rides
+// alongside a web_search_call item on the Responses API. Strict OpenAI
+// SDKs ignore unknown object fields, so this is invisible to clients
+// that don't opt into reading it; clients that do (tinfoil-webapp,
+// tinfoil-ios, anyone building a richer error UI on top of Tinfoil) can
+// consume it directly off `item._tinfoil` with no additional opt-in.
+//
+// The sidecar carries ONLY information the spec cannot express:
+//   - `status`: the unfiltered router status, which may be `blocked`
+//     (distinct from the spec-valid `failed` that rides on the envelope
+//     `status` field). Present only when the router status differs from
+//     the envelope status, i.e., only on `blocked` today.
+//   - `error.code`: an opaque router error code (e.g.
+//     `blocked_by_safety_filter`) for clients that want to branch UI on
+//     the specific reason. Present only when the tool call errored.
+//
+// Returns nil when there is nothing worth surfacing (the default, happy
+// path) so the `_tinfoil` field is simply omitted from the item and the
+// serialized JSON stays minimal for successful searches.
+func tinfoilSidecar(rawStatus, errorCode string) map[string]any {
+	if rawStatus != "blocked" && errorCode == "" {
+		return nil
+	}
+	sidecar := map[string]any{}
+	if rawStatus == "blocked" {
+		sidecar["status"] = rawStatus
+	}
+	if errorCode != "" {
+		sidecar["error"] = map[string]any{"code": errorCode}
+	}
+	return sidecar
 }
 
 // tinfoilEventsEnabled reports whether the caller opted into the
