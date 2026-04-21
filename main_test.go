@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
 func TestExtractModelFromMultipart(t *testing.T) {
@@ -373,6 +375,81 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 			gotHeader := headers.Get("X-Tinfoil-Client-Requested-Usage") == "true"
 			if gotHeader != tt.wantClientUsageHeader {
 				t.Fatalf("client usage header = %v, want %v", gotHeader, tt.wantClientUsageHeader)
+			}
+		})
+	}
+}
+
+// TestDetectToolProfiles pins the contract between the request shape
+// and the set of MCP profiles the router activates. This test is the
+// single source of truth for "which requests enter the tool loop";
+// adding a new profile must come with a new case here.
+func TestDetectToolProfiles(t *testing.T) {
+	profileNames := func(ps []toolprofile.Profile) []string {
+		names := make([]string, 0, len(ps))
+		for _, p := range ps {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+
+	tests := []struct {
+		name string
+		path string
+		body map[string]any
+		want []string
+	}{
+		{
+			name: "chat completions with web_search_options",
+			path: "/v1/chat/completions",
+			body: map[string]any{"web_search_options": map[string]any{}},
+			want: []string{"web_search"},
+		},
+		{
+			name: "responses with web_search tool",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{map[string]any{"type": "web_search"}}},
+			want: []string{"web_search"},
+		},
+		{
+			name: "responses without any router-owned tool",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{map[string]any{"type": "function", "name": "foo"}}},
+			want: nil,
+		},
+		{
+			name: "responses with unknown tool type is ignored",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{map[string]any{"type": "some_future_tool"}}},
+			want: nil,
+		},
+		{
+			name: "chat completions without web_search_options",
+			path: "/v1/chat/completions",
+			body: map[string]any{"messages": []any{}},
+			want: nil,
+		},
+		{
+			name: "responses duplicates do not stack web_search",
+			path: "/v1/responses",
+			body: map[string]any{
+				"web_search_options": map[string]any{},
+				"tools":              []any{map[string]any{"type": "web_search"}},
+			},
+			want: []string{"web_search"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := profileNames(detectToolProfiles(tc.path, tc.body))
+			if len(got) != len(tc.want) {
+				t.Fatalf("detectToolProfiles(%s) = %v, want %v", tc.path, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("detectToolProfiles(%s)[%d] = %q, want %q", tc.path, i, got[i], tc.want[i])
+				}
 			}
 		})
 	}

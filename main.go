@@ -217,6 +217,48 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	}
 }
 
+// detectToolProfiles inspects an incoming request and returns the set
+// of built-in tool profiles that should be activated for it. The
+// returned slice is the multi-profile input to toolruntime.Handle:
+// every profile contributes its MCP session and advertised tools to
+// the single tool loop the router runs against the upstream model.
+//
+// A request "activates" a profile when it asks for that profile's
+// tools by name or, for web_search, via the legacy
+// web_search_options chat-completions shortcut. Unknown tool types
+// in the /responses tools array are ignored so forward-compat
+// requests from newer SDKs do not accidentally crash the router.
+func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile {
+	var profiles []toolprofile.Profile
+
+	// web_search_options is the legacy chat-completions shortcut for
+	// activating web_search.
+	if _, ok := body["web_search_options"]; ok {
+		profiles = append(profiles, toolprofile.WebSearch)
+	}
+
+	if path == "/v1/responses" {
+		if tools, ok := body["tools"].([]any); ok {
+			seenWebSearch := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
+				return p.Name == toolprofile.WebSearch.Name
+			})
+			for _, t := range tools {
+				m, _ := t.(map[string]any)
+				typeVal, _ := m["type"].(string)
+				switch typeVal {
+				case "web_search":
+					if !seenWebSearch {
+						profiles = append(profiles, toolprofile.WebSearch)
+						seenWebSearch = true
+					}
+				}
+			}
+		}
+	}
+
+	return profiles
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -395,20 +437,12 @@ func main() {
 					return
 				}
 
-				// Check if request uses web search so the router can run the
-				// tool loop locally against the configured tool server profile.
-				useWebsearch := false
-				if _, ok := body["web_search_options"]; ok {
-					useWebsearch = true
-				} else if r.URL.Path == "/v1/responses" {
-					if tools, ok := body["tools"].([]any); ok {
-						useWebsearch = slices.ContainsFunc(tools, func(t any) bool {
-							m, _ := t.(map[string]any)
-							typeVal, ok := m["type"].(string)
-							return ok && typeVal == "web_search"
-						})
-					}
-				}
+				// Detect which built-in tool profiles this request
+				// activates. The router runs the tool loop locally
+				// against one MCP session per active profile; zero
+				// profiles means no router-owned tools, so the
+				// request falls through to the plain proxy path.
+				activeProfiles := detectToolProfiles(r.URL.Path, body)
 				rateLimitModel := modelName
 
 				bodyModified := false
@@ -494,8 +528,8 @@ func main() {
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-				if useWebsearch {
-					if err := toolruntime.Handle(w, r, em, []toolprofile.Profile{toolprofile.WebSearch}, body, modelName); err != nil {
+				if len(activeProfiles) > 0 {
+					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,
