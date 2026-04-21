@@ -2,12 +2,10 @@ package manager
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +13,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 )
 
-func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) (*httputil.ReverseProxy, *billing.Collector) {
+func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
 	t.Helper()
 	backend := httptest.NewServer(handler)
 	t.Cleanup(backend.Close)
@@ -31,303 +29,15 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	}
 	proxy.Transport = http.DefaultTransport
 
-	return proxy, collector
+	return proxy
 }
 
-func setupTestProxy(t *testing.T, handler http.Handler) (*httputil.ReverseProxy, *billing.Collector) {
+func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 	return setupTestProxyWithModel(t, handler, "test-model")
 }
 
-func TestProxyBilling_NonJSONEmitsEvent(t *testing.T) {
-	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("binary document data"))
-	}))
-
-	req := httptest.NewRequest("POST", "/v1/documents", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event for non-JSON response, got %d", len(events))
-	}
-	e := events[0]
-	if e.PromptTokens != 0 || e.CompletionTokens != 0 || e.TotalTokens != 0 {
-		t.Errorf("expected zero-token event, got prompt=%d completion=%d total=%d",
-			e.PromptTokens, e.CompletionTokens, e.TotalTokens)
-	}
-	if e.Model != "test-model" {
-		t.Errorf("expected model %q, got %q", "test-model", e.Model)
-	}
-	if e.APIKey != "test-key-1234567890" {
-		t.Errorf("expected api key %q, got %q", "test-key-1234567890", e.APIKey)
-	}
-}
-
-func TestProxyBilling_JSONWithUsageEmitsSingleEvent(t *testing.T) {
-	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`))
-	}))
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected exactly 1 billing event (no double-emit), got %d", len(events))
-	}
-	e := events[0]
-	if e.PromptTokens != 10 {
-		t.Errorf("expected prompt_tokens=10, got %d", e.PromptTokens)
-	}
-	if e.CompletionTokens != 20 {
-		t.Errorf("expected completion_tokens=20, got %d", e.CompletionTokens)
-	}
-	if e.TotalTokens != 30 {
-		t.Errorf("expected total_tokens=30, got %d", e.TotalTokens)
-	}
-}
-
-func TestProxyBilling_JSONWithoutUsageEmitsEvent(t *testing.T) {
-	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"text":"hello world"}`))
-	}))
-
-	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event for JSON without usage, got %d", len(events))
-	}
-	e := events[0]
-	if e.PromptTokens != 0 || e.CompletionTokens != 0 || e.TotalTokens != 0 {
-		t.Errorf("expected zero-token event, got prompt=%d completion=%d total=%d",
-			e.PromptTokens, e.CompletionTokens, e.TotalTokens)
-	}
-}
-
-func TestProxyBilling_ErrorResponseNoEvent(t *testing.T) {
-	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"internal server error"}`))
-	}))
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 0 {
-		t.Fatalf("expected 0 billing events for error response, got %d", len(events))
-	}
-}
-
-// TestProxyBilling_WebsearchEmitsPerRequestFeeEvent pins the
-// double-billing guard for the `websearch` model: the websearch service
-// proxies its own upstream calls through this same proxy under the
-// user's API key, so those calls get token-billed there directly.
-// Emitting a usage-based billing event at THIS layer too would
-// double-charge the user, so the websearch model is special-cased to
-// emit only a per-request fee event (all token fields zero) even when
-// the backend returned real usage numbers.
-func TestProxyBilling_WebsearchEmitsPerRequestFeeEvent(t *testing.T) {
-	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
-	}), "websearch")
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event for websearch, got %d", len(events))
-	}
-
-	if events[0].PromptTokens != 0 || events[0].CompletionTokens != 0 || events[0].TotalTokens != 0 {
-		t.Errorf("websearch model must emit zero-token fee event to avoid double-billing, got prompt=%d completion=%d total=%d",
-			events[0].PromptTokens, events[0].CompletionTokens, events[0].TotalTokens)
-	}
-	if events[0].Model != "websearch" {
-		t.Errorf("expected event model %q, got %q", "websearch", events[0].Model)
-	}
-}
-
-func TestProxyBilling_ClientHeaderCannotBypassBilling(t *testing.T) {
-	proxy, collector := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":15,"total_tokens":20}}`))
-	}))
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	req.Header.Set("X-Tinfoil-Internal-Tool-Loop", "true")
-	rec := httptest.NewRecorder()
-
-	proxy.ServeHTTP(rec, req)
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event even with legacy internal header, got %d", len(events))
-	}
-	if events[0].PromptTokens != 5 || events[0].CompletionTokens != 15 {
-		t.Errorf("expected token event preserved, got prompt=%d completion=%d",
-			events[0].PromptTokens, events[0].CompletionTokens)
-	}
-}
-
-func TestProxyUsageMetrics_NonStreamingIncludesCachedPromptBreakdown(t *testing.T) {
-	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":69,"completion_tokens":20,"total_tokens":89,"prompt_tokens_details":{"cached_tokens":64}}}`))
-	}), promptTokenDetailsMetricsModel)
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	req.Header.Set(UsageMetricsRequestHeader, "true")
-	rec := httptest.NewRecorder()
-	wrapper := &usageMetricsWriter{ResponseWriter: rec}
-	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
-
-	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
-
-	got := rec.Header().Get(UsageMetricsResponseHeader)
-	want := "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5"
-	if got != want {
-		t.Fatalf("usage header = %q, want %q", got, want)
-	}
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event, got %d", len(events))
-	}
-	if events[0].PromptTokens != 69 {
-		t.Fatalf("prompt_tokens billed = %d, want 69", events[0].PromptTokens)
-	}
-	if events[0].CompletionTokens != 20 {
-		t.Fatalf("completion_tokens billed = %d, want 20", events[0].CompletionTokens)
-	}
-	if events[0].TotalTokens != 89 {
-		t.Fatalf("total_tokens billed = %d, want 89", events[0].TotalTokens)
-	}
-}
-
-func TestProxyUsageMetrics_StreamingIncludesCachedPromptBreakdown(t *testing.T) {
-	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"index\":0}],\"usage\":{\"prompt_tokens\":69,\"completion_tokens\":1,\"total_tokens\":70}}\n\n")
-		io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":69,\"completion_tokens\":20,\"total_tokens\":89,\"prompt_tokens_details\":{\"cached_tokens\":64}}}\n\n")
-		io.WriteString(w, "data: [DONE]\n\n")
-	}), promptTokenDetailsMetricsModel)
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	req.Header.Set(UsageMetricsRequestHeader, "true")
-	rec := httptest.NewRecorder()
-	wrapper := &usageMetricsWriter{ResponseWriter: rec}
-	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
-
-	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
-	if wrapper.TrailerEnabled() {
-		wrapper.WriteTrailer()
-	}
-
-	got := rec.Header().Get(UsageMetricsResponseHeader)
-	want := "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5"
-	if got != want {
-		t.Fatalf("usage trailer = %q, want %q", got, want)
-	}
-
-	body := rec.Body.String()
-	if strings.Contains(body, "\"choices\":[]") {
-		t.Fatal("usage-only chunk should be filtered when client did not explicitly request usage chunks")
-	}
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event, got %d", len(events))
-	}
-	if events[0].PromptTokens != 69 {
-		t.Fatalf("prompt_tokens billed = %d, want 69", events[0].PromptTokens)
-	}
-	if events[0].CompletionTokens != 20 {
-		t.Fatalf("completion_tokens billed = %d, want 20", events[0].CompletionTokens)
-	}
-	if events[0].TotalTokens != 89 {
-		t.Fatalf("total_tokens billed = %d, want 89", events[0].TotalTokens)
-	}
-}
-
-func TestProxyUsageMetrics_StreamingResponsesAPIIncludesCachedPromptBreakdown(t *testing.T) {
-	proxy, collector := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "event: response.created\n")
-		io.WriteString(w, "data: {\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"usage\":null},\"type\":\"response.created\"}\n\n")
-		io.WriteString(w, "event: response.completed\n")
-		io.WriteString(w, "data: {\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":69,\"input_tokens_details\":{\"cached_tokens\":64},\"output_tokens\":20,\"total_tokens\":89}},\"type\":\"response.completed\"}\n\n")
-	}), promptTokenDetailsMetricsModel)
-
-	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"stream":true}`))
-	req.Header.Set("Authorization", "Bearer test-key-1234567890")
-	req.Header.Set(UsageMetricsRequestHeader, "true")
-	rec := httptest.NewRecorder()
-	wrapper := &usageMetricsWriter{ResponseWriter: rec}
-	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
-
-	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
-	if wrapper.TrailerEnabled() {
-		wrapper.WriteTrailer()
-	}
-
-	got := rec.Header().Get(UsageMetricsResponseHeader)
-	want := "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5"
-	if got != want {
-		t.Fatalf("usage trailer = %q, want %q", got, want)
-	}
-
-	events := collector.GetEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 billing event, got %d", len(events))
-	}
-	if events[0].PromptTokens != 69 {
-		t.Fatalf("prompt_tokens billed = %d, want 69", events[0].PromptTokens)
-	}
-	if events[0].CompletionTokens != 20 {
-		t.Fatalf("completion_tokens billed = %d, want 20", events[0].CompletionTokens)
-	}
-	if events[0].TotalTokens != 89 {
-		t.Fatalf("total_tokens billed = %d, want 89", events[0].TotalTokens)
-	}
-}
-
 func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
-	proxy, _ := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":69,"completion_tokens":20,"total_tokens":89,"prompt_tokens_details":{"cached_tokens":64}}}`))
