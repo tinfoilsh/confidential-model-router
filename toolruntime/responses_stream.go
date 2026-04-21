@@ -388,16 +388,7 @@ func (s *responsesStreamer) pumpUpstream(reader *sseReader, isFirst bool) (respo
 			// indistinguishable from a correct empty turn. Surface it
 			// as an error rather than letting the client believe the
 			// truncated stream was complete.
-			return result, &upstreamError{
-				statusCode: http.StatusBadGateway,
-				header:     http.Header{"Content-Type": []string{"application/json"}},
-				body: mustMarshal(map[string]any{
-					"error": map[string]any{
-						"message": "upstream emitted malformed SSE JSON: " + jsonErr.Error(),
-						"type":    "upstream_error",
-					},
-				}),
-			}
+			return result, newUpstreamStreamError("upstream emitted malformed SSE JSON: " + jsonErr.Error())
 		}
 		eventType := stringValue(event["type"])
 		if eventType == "" {
@@ -463,26 +454,13 @@ func (s *responsesStreamer) pumpUpstream(reader *sseReader, isFirst bool) (respo
 			if message == "" {
 				message = "upstream response " + eventType
 			}
-			return result, &upstreamError{
-				statusCode: http.StatusBadGateway,
-				header:     http.Header{"Content-Type": []string{"application/json"}},
-				body:       mustMarshal(map[string]any{"error": map[string]any{"message": message}}),
-			}
+			return result, newUpstreamJSONError(map[string]any{"message": message})
 		default:
 			s.forwardEvent(eventType, event)
 		}
 	}
 	if !terminalSeen {
-		return result, &upstreamError{
-			statusCode: http.StatusBadGateway,
-			header:     http.Header{"Content-Type": []string{"application/json"}},
-			body: mustMarshal(map[string]any{
-				"error": map[string]any{
-					"message": "upstream stream ended without a terminal response event",
-					"type":    "upstream_error",
-				},
-			}),
-		}
+		return result, newUpstreamStreamError("upstream stream ended without a terminal response event")
 	}
 	return result, nil
 }
