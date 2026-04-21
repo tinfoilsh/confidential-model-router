@@ -1,7 +1,9 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -628,5 +630,261 @@ func TestResponsesStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 	}
 	if streamer.writeErr == nil {
 		t.Fatalf("expected streamer.writeErr to be latched")
+	}
+}
+
+// responsesIterationTurn builds an SSE frame sequence for one upstream
+// iteration of a /responses stream, used by the multi-iteration tests
+// below to stitch together 2- and 3-turn scenarios. Callers pass the
+// items the upstream model emits on this iteration in order; the helper
+// prepends response.created and appends response.completed so the pump
+// sees a well-formed turn. Each item is either a `message` (assistant
+// text) or a `function_call` (tool call the router will either execute
+// or forward). Upstream resets output_index to 0 at the top of every
+// turn, matching real upstream behavior.
+func responsesIterationTurn(responseID string, items []any) string {
+	var frames []string
+	frames = append(frames,
+		`event: response.created`+"\n"+
+			`data: {"type":"response.created","response":{"id":"`+responseID+`","model":"gpt-oss-120b","created_at":1700000001}}`,
+	)
+	for idx, raw := range items {
+		item, _ := raw.(map[string]any)
+		itemBytes, _ := json.Marshal(item)
+		frames = append(frames,
+			`event: response.output_item.added`+"\n"+
+				`data: {"type":"response.output_item.added","output_index":`+stringFromInt(idx)+`,"item":`+string(itemBytes)+`}`,
+		)
+		if stringValue(item["type"]) == "message" {
+			text := stringValue(item["text"])
+			if text == "" {
+				text = "hi"
+			}
+			frames = append(frames,
+				`event: response.output_text.delta`+"\n"+
+					`data: {"type":"response.output_text.delta","output_index":`+stringFromInt(idx)+`,"item_id":"`+stringValue(item["id"])+`","content_index":0,"delta":`+jsonString(text)+`}`,
+				`event: response.output_text.done`+"\n"+
+					`data: {"type":"response.output_text.done","output_index":`+stringFromInt(idx)+`,"item_id":"`+stringValue(item["id"])+`","content_index":0,"text":`+jsonString(text)+`}`,
+			)
+		}
+		frames = append(frames,
+			`event: response.output_item.done`+"\n"+
+				`data: {"type":"response.output_item.done","output_index":`+stringFromInt(idx)+`,"item":`+string(itemBytes)+`}`,
+		)
+	}
+	frames = append(frames,
+		`event: response.completed`+"\n"+
+			`data: {"type":"response.completed","response":{"id":"`+responseID+`","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	)
+	return strings.Join(frames, "\n\n") + "\n\n"
+}
+
+func stringFromInt(i int) string { return fmt.Sprintf("%d", i) }
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestResponsesStreamerTwoIterationStitching pins the N=2 multi-turn
+// invariants: the client sees exactly one response.created, zero
+// per-iteration response.completed frames (they are all swallowed; the
+// finalize step emits the router-aggregated one), the router-owned
+// function_call from iter0 is fully suppressed on the client stream,
+// and the final assistant message from iter1 flows through unchanged.
+func TestResponsesStreamerTwoIterationStitching(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+
+	// Iteration 0: upstream emits a function_call naming a router-owned
+	// tool. pump captures it, suppresses it from the wire, and the
+	// outer driver would run it and re-pump.
+	turn0 := responsesIterationTurn("resp_upstream", []any{
+		map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"go"}`},
+	})
+	streamer.outputIndexMap = map[int]int{}
+	streamer.suppressedItems = map[int]struct{}{}
+	streamer.finalOutput = nil
+	result0, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn0)), true)
+	if err != nil {
+		t.Fatalf("iter0 pump err: %v", err)
+	}
+	if len(result0.toolCalls) != 1 || result0.toolCalls[0].name != "search" {
+		t.Fatalf("iter0 expected 1 search tool call, got %+v", result0.toolCalls)
+	}
+
+	// Iteration 1: upstream emits the final assistant message.
+	turn1 := responsesIterationTurn("resp_upstream", []any{
+		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
+	})
+	streamer.outputIndexMap = map[int]int{}
+	streamer.suppressedItems = map[int]struct{}{}
+	streamer.finalOutput = nil
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn1)), false); err != nil {
+		t.Fatalf("iter1 pump err: %v", err)
+	}
+
+	body := rec.Body.String()
+	if n := strings.Count(body, "event: response.created"); n != 1 {
+		t.Fatalf("expected exactly 1 response.created frame across 2 iterations, got %d", n)
+	}
+	if n := strings.Count(body, "event: response.completed"); n != 0 {
+		t.Fatalf("response.completed must be swallowed by pump on all iterations (finalize emits one); got %d", n)
+	}
+	// The router-owned function_call from iter0 must be fully
+	// suppressed: no function_call output item, no fc_1 id leak.
+	if strings.Contains(body, `"id":"fc_1"`) {
+		t.Fatalf("router-owned function_call from iter0 must be suppressed, got %s", body)
+	}
+	if strings.Contains(body, `"function_call"`) {
+		t.Fatalf("router-owned function_call items must not surface on wire, got %s", body)
+	}
+	// The final message must land at output_index 0 on the client
+	// stream: the suppressed function_call consumed no client-facing
+	// slot, so iter1's first item maps to client output_index 0.
+	if !strings.Contains(body, `"item":{"id":"msg_final","text":"done","type":"message"},"output_index":0`) {
+		t.Fatalf("expected final message at client output_index 0 (iter0 suppressed), got %s", body)
+	}
+}
+
+// TestResponsesStreamerThreeIterationStitching pins the N=3 path: two
+// consecutive router-owned function_calls before a final message. Both
+// tool-call turns must be fully suppressed from the client stream, the
+// final message must flow through normally, and there must be exactly
+// one response.created across the whole logical stream.
+func TestResponsesStreamerThreeIterationStitching(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+
+	turns := []string{
+		responsesIterationTurn("resp_upstream", []any{
+			map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"q1"}`},
+		}),
+		responsesIterationTurn("resp_upstream", []any{
+			map[string]any{"id": "fc_2", "type": "function_call", "name": "search", "call_id": "call_b", "arguments": `{"query":"q2"}`},
+		}),
+		responsesIterationTurn("resp_upstream", []any{
+			map[string]any{"id": "msg_final", "type": "message", "text": "answer"},
+		}),
+	}
+
+	for i, turn := range turns {
+		streamer.outputIndexMap = map[int]int{}
+		streamer.suppressedItems = map[int]struct{}{}
+		streamer.finalOutput = nil
+		if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn)), i == 0); err != nil {
+			t.Fatalf("iter%d pump err: %v", i, err)
+		}
+	}
+
+	body := rec.Body.String()
+	if n := strings.Count(body, "event: response.created"); n != 1 {
+		t.Fatalf("expected 1 response.created across 3 iterations, got %d", n)
+	}
+	if n := strings.Count(body, "event: response.completed"); n != 0 {
+		t.Fatalf("response.completed must be swallowed by pump, got %d", n)
+	}
+	if strings.Contains(body, `"function_call"`) {
+		t.Fatalf("router-owned function_calls must not reach client across 3 iterations, got %s", body)
+	}
+	// The final message is the only client-visible output item across
+	// the three turns, so it lands at output_index 0.
+	if !strings.Contains(body, `"item":{"id":"msg_final","text":"answer","type":"message"},"output_index":0`) {
+		t.Fatalf("expected final message at client output_index 0, got %s", body)
+	}
+}
+
+// TestResponsesStreamerOutputIndexAdvancesForClientOwnedToolCalls pins
+// that a CLIENT-owned function_call (upstream asks the caller to run a
+// tool the router does not intercept) IS forwarded, and its forwarded
+// output item consumes a client-facing output_index slot. Combined
+// with a following final message, this proves the counter advances
+// across items that actually reach the client -- even across upstream
+// iteration boundaries that reset upstream's own counter.
+func TestResponsesStreamerOutputIndexAdvancesForClientOwnedToolCalls(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+
+	// Iteration 0: upstream emits a function_call for a tool the router
+	// does not own. It must be forwarded to the client, advancing the
+	// persistent output_index counter.
+	turn0 := responsesIterationTurn("resp_upstream", []any{
+		map[string]any{"id": "fc_client", "type": "function_call", "name": "client_lookup", "call_id": "call_c", "arguments": `{"id":1}`},
+	})
+	streamer.outputIndexMap = map[int]int{}
+	streamer.suppressedItems = map[int]struct{}{}
+	streamer.finalOutput = nil
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn0)), true); err != nil {
+		t.Fatalf("iter0 pump err: %v", err)
+	}
+
+	// Iteration 1: upstream emits the final message. Upstream resets
+	// its output_index to 0, but the streamer's persistent counter
+	// must assign client output_index 1 to this item because iter0's
+	// client_lookup already consumed slot 0.
+	turn1 := responsesIterationTurn("resp_upstream", []any{
+		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
+	})
+	streamer.outputIndexMap = map[int]int{}
+	streamer.suppressedItems = map[int]struct{}{}
+	streamer.finalOutput = nil
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn1)), false); err != nil {
+		t.Fatalf("iter1 pump err: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"id":"fc_client"`) {
+		t.Fatalf("client-owned function_call must be forwarded, got %s", body)
+	}
+	if !strings.Contains(body, `"item":{"id":"msg_final","text":"done","type":"message"},"output_index":1`) {
+		t.Fatalf("expected final message at client output_index 1 (iter0 consumed slot 0), got %s", body)
+	}
+}
+
+// TestResponsesStreamerSequenceNumberMonotonicAcrossIterations pins the
+// persistent sequence_number counter: upstream resets it per turn, but
+// every client-facing frame must carry a strictly increasing
+// sequence_number across the whole logical stream. This is the
+// invariant strict OpenAI SDKs rely on to order events when replaying
+// a captured stream.
+func TestResponsesStreamerSequenceNumberMonotonicAcrossIterations(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+
+	turns := []string{
+		responsesIterationTurn("resp_upstream", []any{
+			map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"q1"}`},
+		}),
+		responsesIterationTurn("resp_upstream", []any{
+			map[string]any{"id": "msg_final", "type": "message", "text": "answer"},
+		}),
+	}
+	for i, turn := range turns {
+		streamer.outputIndexMap = map[int]int{}
+		streamer.suppressedItems = map[int]struct{}{}
+		streamer.finalOutput = nil
+		if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn)), i == 0); err != nil {
+			t.Fatalf("iter%d pump err: %v", i, err)
+		}
+	}
+
+	// Extract sequence numbers from every `data:` frame and confirm the
+	// sequence is strictly monotonically increasing starting from 0.
+	var seqs []int
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &decoded); err != nil {
+			t.Fatalf("invalid JSON frame: %v", err)
+		}
+		if seq, ok := decoded["sequence_number"].(float64); ok {
+			seqs = append(seqs, int(seq))
+		}
+	}
+	if len(seqs) < 3 {
+		t.Fatalf("expected multiple sequenced frames, got %d", len(seqs))
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] != seqs[i-1]+1 {
+			t.Fatalf("sequence_number not strictly monotonic (upstream per-iteration reset leaked): seqs=%v", seqs)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -451,5 +452,133 @@ func TestChatStreamerPumpForwardsReasoningDelta(t *testing.T) {
 	}
 	if !strings.Contains(body, `"reasoning":"consider both"`) {
 		t.Fatalf("expected reasoning forwarded to client, got %s", body)
+	}
+}
+
+// chatToolCallTurn builds an SSE chunk sequence for one iteration where
+// the upstream model emits a tool call and finishes with
+// finish_reason:"tool_calls". Used by multi-iteration tests to simulate
+// the router's tool loop pumping multiple upstream turns through a
+// single client stream.
+func chatToolCallTurn(upstreamID, callID, toolName, args string) string {
+	return strings.Join([]string{
+		`data: {"id":"` + upstreamID + `","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"` + upstreamID + `","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"` + callID + `","type":"function","function":{"name":"` + toolName + `","arguments":` + jsonStringChat(args) + `}}]}}]}`,
+		`data: {"id":"` + upstreamID + `","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+}
+
+// chatFinalTextTurn builds an SSE chunk sequence for the terminal
+// iteration where the upstream model emits assistant text and finishes
+// with finish_reason:"stop".
+func chatFinalTextTurn(upstreamID, text string) string {
+	return strings.Join([]string{
+		`data: {"id":"` + upstreamID + `","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"` + upstreamID + `","choices":[{"index":0,"delta":{"content":` + jsonStringChat(text) + `}}]}`,
+		`data: {"id":"` + upstreamID + `","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+}
+
+func jsonStringChat(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestChatStreamerTwoIterationStitching pins the N=2 chat multi-turn
+// invariants: the client sees exactly one role-delta chunk, identity
+// (id / created / model) stays pinned to the first upstream turn's
+// values across both iterations, and tool_calls frames are buffered
+// into the iteration result rather than forwarded live (the outer loop
+// classifies them as router-owned or client-owned after the pump).
+func TestChatStreamerTwoIterationStitching(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.id = ""
+	streamer.created = 0
+	streamer.model = ""
+	streamer.roleEmitted = false
+
+	// Iteration 0: upstream emits a tool call. The pump buffers it
+	// into result.toolCalls and does NOT forward it to the client.
+	result0, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(
+		chatToolCallTurn("up_iter0", "call_a", "search", `{"query":"go"}`),
+	)))
+	if err != nil {
+		t.Fatalf("iter0 pump err: %v", err)
+	}
+	if len(result0.toolCalls) != 1 || result0.toolCalls[0].name != "search" {
+		t.Fatalf("iter0 expected 1 tool call buffered, got %+v", result0.toolCalls)
+	}
+
+	// Iteration 1: upstream emits the final answer. Identity must stay
+	// pinned to iter0's id / created / model.
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(
+		chatFinalTextTurn("up_iter1", "done"),
+	))); err != nil {
+		t.Fatalf("iter1 pump err: %v", err)
+	}
+
+	body := rec.Body.String()
+	if n := strings.Count(body, `"delta":{"role":"assistant"}`); n != 1 {
+		t.Fatalf("expected exactly 1 role-delta chunk across 2 iterations, got %d", n)
+	}
+	if strings.Contains(body, `"id":"up_iter1"`) {
+		t.Fatalf("iter1 upstream id leaked to client: %s", body)
+	}
+	if !strings.Contains(body, `"id":"up_iter0"`) {
+		t.Fatalf("expected up_iter0 id pinned across iterations, got %s", body)
+	}
+	// Pump buffers all tool_calls; none should appear on the client
+	// stream within these two pump invocations.
+	if strings.Contains(body, `"tool_calls"`) {
+		t.Fatalf("pump must buffer tool_calls, got %s", body)
+	}
+	if !strings.Contains(body, `"content":"done"`) {
+		t.Fatalf("expected final content 'done' forwarded to client, got %s", body)
+	}
+}
+
+// TestChatStreamerThreeIterationStitching pins the N=3 chat path: two
+// consecutive tool-call turns before a final message. Identity stays
+// pinned to iter0 across all three turns, client sees exactly one
+// role chunk, and no tool_calls frames leak out of the pump.
+func TestChatStreamerThreeIterationStitching(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.id = ""
+	streamer.created = 0
+	streamer.model = ""
+	streamer.roleEmitted = false
+
+	turns := []string{
+		chatToolCallTurn("up_iter0", "call_a", "search", `{"query":"q1"}`),
+		chatToolCallTurn("up_iter1", "call_b", "search", `{"query":"q2"}`),
+		chatFinalTextTurn("up_iter2", "answer"),
+	}
+	for i, turn := range turns {
+		if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn))); err != nil {
+			t.Fatalf("iter%d pump err: %v", i, err)
+		}
+	}
+
+	body := rec.Body.String()
+	if n := strings.Count(body, `"delta":{"role":"assistant"}`); n != 1 {
+		t.Fatalf("expected 1 role-delta chunk across 3 iterations, got %d", n)
+	}
+	if !strings.Contains(body, `"id":"up_iter0"`) {
+		t.Fatalf("iter0 id must be pinned across all iterations")
+	}
+	for _, leaked := range []string{`"id":"up_iter1"`, `"id":"up_iter2"`} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("later upstream id leaked to client: %s in %s", leaked, body)
+		}
+	}
+	if strings.Contains(body, `"tool_calls"`) {
+		t.Fatalf("pump must buffer all tool_calls across 3 iterations")
+	}
+	if !strings.Contains(body, `"content":"answer"`) {
+		t.Fatalf("expected final content 'answer' forwarded to client, got %s", body)
 	}
 }
