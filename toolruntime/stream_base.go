@@ -24,58 +24,35 @@ import (
 // the concrete streamer types; only fields whose semantics are
 // identical across both APIs live here.
 type streamBase struct {
-	// w is the client-facing response writer. All client-bound SSE
-	// frames flow through it, and its underlying connection is what
-	// client disconnect / writeErr latching protects.
-	w http.ResponseWriter
-
-	// flusher flushes the response after every frame so clients see
-	// deltas as soon as upstream produces them rather than waiting for
-	// Go's default response buffering.
+	w       http.ResponseWriter
 	flusher http.Flusher
 
-	// usageMetricsRequested reflects the UsageMetricsRequestHeader the
-	// upstream proxy forwarded: when true the streamer announces a
-	// usage-metrics trailer and sets it on close.
+	// usageMetricsRequested reflects the UsageMetricsRequestHeader; when
+	// true the streamer announces a usage-metrics trailer and sets it on
+	// close.
 	usageMetricsRequested bool
 
-	// citations holds the per-request citation state (numbering,
-	// resolved URL metadata). It is shared with the tool runtime so
-	// web-search tool calls and streamed text annotations see the same
-	// citation cursor.
-	citations *citationState
-
-	// usageTotals aggregates usage across every upstream iteration of
-	// the logical stream. Finalize uses it to emit a single authoritative
-	// usage block that reflects the whole response, not just the last
-	// turn.
+	citations   *citationState
 	usageTotals *usageAccumulator
 
-	// headersWritten is true once the SSE response headers have been
-	// emitted. After that, upstream errors surface as SSE error frames
-	// rather than plain JSON error bodies.
+	// headersWritten is flipped on the first 2xx from upstream; after
+	// that point, errors surface as SSE error frames instead of plain
+	// JSON error bodies.
 	headersWritten bool
 
-	// upstreamHeaders holds the most recent upstream response headers
-	// so the billing event and any passthrough headers (enclave
-	// attribution, request ids) match what the non-streaming path
-	// surfaces.
+	// upstreamHeaders holds the most recent upstream response headers so
+	// billing attribution matches what the non-streaming path surfaces.
 	upstreamHeaders http.Header
 
 	// model is the pinned upstream-reported model name captured on the
 	// first upstream frame and reused on every subsequent client-facing
-	// frame. It is stored here because both streamers validate it the
-	// same way (missing -> upstream bug, latch writeErr) even though
-	// the upstream frames that carry it are structured differently.
+	// frame. A missing value latches writeErr via validateStreamModel.
 	model string
 
-	// writeErr latches the first error observed while writing to the
-	// client SSE stream (typically io.ErrClosedPipe after a client
-	// disconnect, or an upstream-bug sentinel from streamModel when
-	// the model field is missing). Once set, every subsequent emit
-	// call is a no-op so the pump and outer loop can notice the
-	// failure and abort without spending more upstream tokens or MCP
-	// tool calls on a caller that has gone away.
+	// writeErr latches the first client-write failure (typically
+	// io.ErrClosedPipe after a client disconnect). Once set, every
+	// subsequent emit call is a no-op so the pump and outer loop can
+	// abort without spending more upstream tokens or MCP tool calls.
 	writeErr error
 }
 

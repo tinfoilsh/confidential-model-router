@@ -22,55 +22,38 @@ import (
 //   - the per-surface `includeActionSources` decision (Chat never, Responses
 //     by caller opt-in) so the shared finalize path stays uniform.
 type toolLoopAdapter interface {
-	// upstreamPath is the HTTP path postJSON targets for this surface.
 	upstreamPath() string
 
 	// buildInitialRequest produces the first-turn request body with the
-	// router's prompt prefix applied, options forwarded, and streaming
-	// disabled. The returned map is mutated across iterations.
+	// router's prompt prefix applied and streaming disabled. The returned
+	// map is mutated across iterations.
 	buildInitialRequest() map[string]any
 
 	// includeActionSources reports whether finalize should synthesize the
 	// spec-only `action.sources` array on web_search_call output items.
 	includeActionSources() bool
 
-	// tracePhase names the current iteration for debug logs
-	// (`chat.iter=N` vs `responses.iter=N`).
 	tracePhase(iteration int) string
-
-	// traceID is the per-request debug trace id the adapter emits on rich
-	// log lines, or the empty string to suppress those logs on surfaces
-	// that do not log the full upstream request/response envelope.
 	traceID() string
 
 	// preIteration runs surface-specific housekeeping before each upstream
-	// POST (e.g. Chat sanitizes assistant tool_calls in the accumulated
-	// message history so replay stays protocol-valid).
+	// POST (e.g. Chat sanitizes assistant tool_calls in accumulated
+	// history so replay stays protocol-valid).
 	preIteration(reqBody map[string]any, iteration int)
 
-	// onUpstreamResponse returns the router-owned tool calls the upstream
-	// model asked for in this turn, along with any surface-specific state
-	// (Chat needs the assistant message to append back into history;
-	// Responses needs the raw output[] items for forced-final input).
-	// elapsed is the upstream call's wall time so adapters can include
-	// it in debug logs without re-measuring.
+	// onUpstreamResponse extracts router-owned tool calls plus any
+	// surface-specific state (Chat: assistant message; Responses: raw
+	// output items) that applyToolOutputs will fold back into the next
+	// request body. elapsed is the upstream call's wall time.
 	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, state any)
 
-	// applyToolOutputs folds the router's tool outputs back into the
-	// next-iteration request body alongside the surface-specific state
-	// returned by onUpstreamResponse.
 	applyToolOutputs(reqBody map[string]any, state any, outputs []toolOutput) map[string]any
 
 	// forcedFinalRequest builds the forced-final-answer request body used
 	// when the iteration budget is exhausted without the model settling.
 	forcedFinalRequest(reqBody map[string]any) map[string]any
 
-	// options surfaces the parsed web-search options so the shared driver
-	// can apply them on each tool call without the adapter re-parsing.
 	options() webSearchOptions
-
-	// schemas returns the per-tool JSON schema lookup used for argument
-	// coercion.
 	schemas() map[string]*jsonschema.Schema
 }
 
