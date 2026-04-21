@@ -148,78 +148,65 @@ type responsesStreamer struct {
 	// stream_base.go for the full documentation.
 	streamBase
 
-	// upstreamIDCaptured is true once we have adopted the first
-	// upstream-provided response id. Subsequent upstream ids (from later
-	// tool iterations) are ignored so the client sees one stable id.
+	// upstreamIDCaptured is true once the first upstream response id
+	// has been adopted; later ids are ignored to keep the client's id
+	// stable across iterations.
 	upstreamIDCaptured bool
 	responseID         string
 	createdAt          int64
 
-	// responseCreatedEmitted guards against duplicate response.created
-	// events across iterations, and against emitting the event at all
-	// when upstream never sends one (finalize synthesizes it in that
-	// case so the client always sees exactly one).
+	// responseCreatedEmitted ensures exactly one response.created per
+	// logical stream (finalize synthesizes one if upstream never did).
 	responseCreatedEmitted bool
 
-	// outputIndex tracks the next output_index to assign to upstream output
-	// items that we forward. Upstream resets to 0 on every iteration; we
-	// offset so the client sees a monotonically increasing sequence.
+	// outputIndex is the next client-facing output_index. Upstream resets
+	// its counter each iteration; the streamer re-bases so the client
+	// sees a single monotonic sequence.
 	outputIndex int
 
-	// sequenceNumber is the monotonically increasing counter OpenAI's spec
-	// requires on every streaming envelope so clients can detect dropped
-	// frames and order events across the whole response. It increments once
-	// per emitted event across the entire streamed response.
+	// sequenceNumber is the streamer-scoped monotonic counter OpenAI's
+	// spec requires on every envelope.
 	sequenceNumber int
 
-	// outputIndexMap rewrites upstream output_index values on a given
-	// iteration to the client-facing offset. Cleared between iterations.
+	// outputIndexMap rewrites upstream output_index to the client-facing
+	// offset. Cleared between iterations.
 	outputIndexMap map[int]int
 
-	// suppressedItems holds the set of upstream output_index values whose
-	// corresponding item is a router-owned function_call that we intend to
-	// resolve internally. Events bearing those indices are dropped.
+	// suppressedItems is the set of upstream output_index values whose
+	// items are router-owned function_calls resolved internally; their
+	// events are dropped.
 	suppressedItems map[int]struct{}
 
-	// functionCallArguments buffers streamed function_call arguments keyed
-	// by upstream output_index so we can reassemble the full JSON string
-	// even when `response.output_item.done` arrives without embedded
-	// arguments (some servers emit them only via the delta stream).
+	// functionCallArguments buffers streamed function_call argument
+	// fragments per upstream output_index. Some upstreams ship arguments
+	// only via delta frames and deliver the item with an empty arguments
+	// string, so the buffer is used to reassemble the full JSON.
 	functionCallArguments map[int]*strings.Builder
 
-	// emitters holds one citationEmitter per (item_id, content_index) tuple
-	// so citation spans are indexed against the right text stream when
-	// upstream interleaves multiple content parts (for example reasoning
-	// text followed by final answer text).
+	// emitters is one citationEmitter per (item_id, content_index)
+	// tuple, so interleaved content parts index citations against the
+	// correct text stream.
 	emitters map[itemContentKey]*citationEmitter
 
-	// annotationCounts tracks the next `annotation_index` to assign per
-	// (item_id, content_index) stream so indexes are monotonic across
-	// every emission batch, not just within a single delta's resolved
-	// links. The Responses event contract specifies annotation_index as
-	// a monotonic cursor per text stream.
+	// annotationCounts is the next `annotation_index` per
+	// (item_id, content_index) stream; the Responses event contract
+	// requires annotation_index to be monotonic per text stream.
 	annotationCounts map[itemContentKey]int
 
-	// finalOutput accumulates the assistant output items upstream emitted
-	// on the final iteration so we can echo them in the synthesized
-	// response.completed event.
+	// finalOutput accumulates the assistant output items from the final
+	// iteration for echoing in the synthesized response.completed event.
 	finalOutput []any
 
-	// aggregatedUsage is the last non-nil usage block we observed, used by
-	// response.completed and the billing event.
+	// aggregatedUsage is the last non-nil usage block observed.
 	aggregatedUsage map[string]any
 
-	// ownedTools is the set of tool names the router will execute itself;
-	// any function_call / mcp_call output item naming one of these is
-	// suppressed from the client stream and resolved internally, while
-	// function_calls naming client-owned tools are forwarded live.
+	// ownedTools names the tools the router will execute itself; matching
+	// function_call / mcp_call output items are suppressed from the
+	// client stream. Client-owned tool calls are forwarded live.
 	ownedTools map[string]struct{}
 
 	// includeActionSources mirrors the request's opt-in for
-	// `web_search_call.action.sources`. Propagated to
-	// attachResponsesCitations when building the terminal
-	// response.completed snapshot so the final output item carries the
-	// sources array only when the caller asked for it.
+	// `web_search_call.action.sources` on the terminal snapshot.
 	includeActionSources bool
 }
 
@@ -297,11 +284,8 @@ func (s *responsesStreamer) streamCreatedAt() int64 {
 	return s.createdAt
 }
 
-// streamModel returns the pinned model name captured from upstream.
-// Every OpenAI-compatible inference server echoes request.model on
-// response.created; a missing value indicates an upstream bug and is
-// surfaced as a loud stream error via streamBase.validateStreamModel
-// so we do not mask a fleet regression behind a cached config label.
+// streamModel returns the pinned model name captured from upstream;
+// see chatStreamer.streamModel for the shared rationale.
 func (s *responsesStreamer) streamModel() string {
 	return s.validateStreamModel("response.model")
 }
@@ -316,21 +300,15 @@ func (s *responsesStreamer) streamModel() string {
 // treated as an upstream disconnect and surfaced as an error so clients do
 // not interpret a truncated turn as a successful answer.
 // emitEvent writes one `event:`/`data:` SSE frame to the client and
-// flushes. The first write error is captured into s.writeErr and every
-// subsequent emitEvent call is a no-op so pumpUpstream and the outer
-// loop notice the disconnect and stop spending tokens / MCP tool calls
-// on a caller that has gone away.
+// flushes. Latches the first write error into s.writeErr; see
+// streamBase.writeErr. The sequence_number is always overwritten with
+// the streamer's monotonic counter so upstream per-iteration resets
+// cannot break the client-facing monotonicity invariant.
 func (s *responsesStreamer) emitEvent(eventType string, body map[string]any) {
 	if s.writeErr != nil {
 		return
 	}
 	if body != nil {
-		// Always replace the sequence_number with a streamer-scoped counter.
-		// Upstream enclaves reset their counter at the start of every
-		// iteration of the tool loop, which would break the client-facing
-		// invariant that sequence_number increases monotonically across the
-		// whole response. Stamping our own counter here preserves that
-		// guarantee even when we forward upstream events unchanged.
 		body["sequence_number"] = s.sequenceNumber
 		s.sequenceNumber++
 	}
@@ -360,12 +338,6 @@ func (s *responsesStreamer) pumpUpstream(reader *sseReader, isFirst bool) (respo
 		}
 		var event map[string]any
 		if jsonErr := json.Unmarshal([]byte(frame.data), &event); jsonErr != nil {
-			// Mirror the chat streamer's hard-fail policy: malformed
-			// upstream JSON means we have silently lost at least one
-			// output item, delta, or usage block, which is
-			// indistinguishable from a correct empty turn. Surface it
-			// as an error rather than letting the client believe the
-			// truncated stream was complete.
 			return result, newUpstreamStreamError("upstream emitted malformed SSE JSON: " + jsonErr.Error())
 		}
 		eventType := stringValue(event["type"])

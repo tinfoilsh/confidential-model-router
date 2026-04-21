@@ -177,29 +177,20 @@ func runChatStreaming(
 	return streamer.finalize(r, em, modelName, result, nil)
 }
 
-// chatStreamer owns the single logical chat.completion.chunk stream that
-// goes back to the client across however many tool iterations the model
-// needs. It keeps id/created/model pinned to the values the first upstream
-// chunk reports so downstream SDKs see one continuous logical response.
+// chatStreamer owns one logical chat.completion.chunk stream across
+// every tool iteration, keeping id/created/model pinned to the first
+// upstream chunk's values.
 type chatStreamer struct {
-	// streamBase holds shared state (client writer, flusher, citations,
-	// usage totals, headers-written flag, upstream headers, pinned
-	// model name, latched writeErr) common to every SSE streamer. See
-	// stream_base.go for the full documentation.
 	streamBase
 
 	clientRequestedUsage bool
 	// eventsEnabled is true when the caller opted into the
-	// `X-Tinfoil-Events: web_search` marker stream. When false the
-	// streamer emits only pure spec chat.completion.chunk frames; when
-	// true it interleaves `<tinfoil-event>` markers inside delta.content.
+	// `X-Tinfoil-Events: web_search` marker stream.
 	eventsEnabled bool
 	emitter       *citationEmitter
 
-	// roleEmitted is true after the initial assistant role-delta chunk has
-	// been sent. The role chunk is deferred until the first upstream frame
-	// is available so it can carry the upstream-provided id/created/model
-	// rather than router-synthesized placeholders.
+	// roleEmitted defers the initial assistant role-delta chunk until
+	// the first upstream frame, so it can carry upstream's identity.
 	roleEmitted bool
 
 	// id and created are captured from the first upstream chunk we see
@@ -293,18 +284,10 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 
 		var chunk map[string]any
 		if jsonErr := json.Unmarshal([]byte(frame.data), &chunk); jsonErr != nil {
-			// Non-streaming postJSON hard-fails on invalid JSON;
-			// streaming must do the same so silently lost chunks
-			// (and therefore lost content / tool calls / usage) are
-			// surfaced to the client as a terminating error instead
-			// of a truncated success.
 			return result, newUpstreamStreamError("upstream emitted malformed SSE JSON: " + jsonErr.Error())
 		}
-		// Upstream can emit a standalone error object mid-stream (for
-		// example, context-length exceeded part-way through decoding).
-		// Surface it as an upstream error the loop will translate into
-		// a client-facing terminating error rather than silently hiding
-		// the failure and continuing to consume frames.
+		// Standalone mid-stream error object (e.g. context-length
+		// exceeded): surface it as a terminating error.
 		if errObj, ok := chunk["error"].(map[string]any); ok {
 			return result, newUpstreamJSONError(errObj)
 		}
@@ -626,12 +609,8 @@ func (s *chatStreamer) writeChunk(partial map[string]any) {
 	s.emitData(chunk)
 }
 
-// emitData writes one `data:` SSE frame to the client and flushes. The
-// first write error (typically io.ErrClosedPipe once a client hangs up)
-// is captured into s.writeErr; every subsequent emitData/emitEvent call
-// is a no-op so the pump and outer loop can notice the disconnect and
-// abort without spending more upstream tokens or MCP tool calls on a
-// caller that is no longer listening.
+// emitData writes one `data:` SSE frame to the client and flushes.
+// Latches the first write error into s.writeErr; see streamBase.writeErr.
 func (s *chatStreamer) emitData(body map[string]any) {
 	if s.writeErr != nil {
 		return

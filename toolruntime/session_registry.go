@@ -22,30 +22,19 @@ import (
 //     are fatal at Handle() time so mis-configured deployments surface
 //     loud errors instead of routing tool calls non-deterministically).
 type sessionRegistry struct {
-	// entries is the per-profile record, in the order the profiles
-	// were activated. Used for debug logging and for CloseAll so
-	// every opened session is closed exactly once, even if two
-	// profiles happened to advertise zero tools each.
+	// entries is in activation order, used by CloseAll and debug logs.
 	entries []sessionEntry
 
-	// byTool maps tool name -> session that will service it. Sealed
-	// after build(); mutation after seal is a programming error.
+	// byTool maps tool name -> servicing session. Sealed after build().
 	byTool map[string]*mcp.ClientSession
 
-	// owned is the set of router-owned tool names across all sessions,
-	// passed down the streamers and loop adapters unchanged so the
-	// existing splitToolCalls classification works verbatim.
+	// owned is the union of router-owned tool names across all sessions.
 	owned map[string]struct{}
 
-	// tools is the union of mcp.Tool records across all sessions,
-	// passed to the chat/responses tools schema so the upstream model
-	// sees every router-owned tool at once.
+	// tools is the union of advertised tools the upstream model sees.
 	tools []*mcp.Tool
 }
 
-// sessionEntry binds one opened MCP session to the profile and tool
-// list it was opened for. The fields are only read by debug logs and
-// the closer; the routing table is on the parent sessionRegistry.
 type sessionEntry struct {
 	profile toolprofile.Profile
 	session *mcp.ClientSession
