@@ -79,10 +79,19 @@ PORT=8090 \
 DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
 UPDATE_CONFIG_URL=/tmp/model-router-local.yml \
-go run .
+go run -tags toolruntime_debug .
 ```
 
 `LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP model hit a local MCP server instead of the attested deployment. The model name is upper-cased with non-alphanumeric characters replaced by underscores, so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which prevents a misconfigured production deployment from silently downgrading to a non-attested HTTP endpoint.
+
+### Toolruntime tracing
+
+The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated purely at compile time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is a compile-time `false` constant and every call site is eliminated by the Go compiler, so production TEE images carry zero debug code:
+
+- `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
+- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
+
+If you want the `toolruntime:<tid> ...` lines in this runbook, build with the tag as shown above. Otherwise you will still see `DEBUG=1` router logs but none of the per-iteration tool-loop trace.
 
 ## 4. Run router-facing smoke tests
 

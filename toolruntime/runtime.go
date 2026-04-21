@@ -5,12 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -50,100 +47,6 @@ const (
 	contentModeHighlights = "highlights"
 	contentModeText       = "text"
 )
-
-// debugEnabled is true when TOOLRUNTIME_DEBUG is set to a truthy value.
-// It gates the high-volume tracing helpers below so production deploys stay
-// quiet unless the operator explicitly opts in.
-var debugEnabled = func() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOOLRUNTIME_DEBUG"))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}()
-
-var debugTraceCounter uint64
-
-// debugTraceID returns a short monotonically increasing id that callers embed
-// in log lines so a single request's iterations can be grepped out of an
-// interleaved log. The id only reflects ordering within this router process
-// and is not meant to correlate with any external trace system.
-func debugTraceID() string {
-	return fmt.Sprintf("t%04d", atomic.AddUint64(&debugTraceCounter, 1))
-}
-
-// debugLogf emits a tracing log line when TOOLRUNTIME_DEBUG is enabled.
-// Callers should stick to a `toolruntime:<tid> <area>:` prefix so operators
-// can filter an individual request out of interleaved logs.
-func debugLogf(format string, args ...any) {
-	if !debugEnabled {
-		return
-	}
-	log.Printf(format, args...)
-}
-
-// debugPreview returns a JSON-safe preview of v capped at max bytes, with
-// a trailing "...(N more)" marker when truncated. Intended for tracing log
-// lines where we want to see the shape of upstream bodies / tool outputs
-// without spilling the full payload into the log.
-func debugPreview(v any, max int) string {
-	if !debugEnabled {
-		return ""
-	}
-	var s string
-	switch value := v.(type) {
-	case string:
-		s = value
-	case []byte:
-		s = string(value)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			s = fmt.Sprintf("%+v", v)
-		} else {
-			s = string(b)
-		}
-	}
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("...(+%d bytes)", len(s)-max)
-}
-
-// debugMessagesSummary compresses a []any messages slice into a compact
-// role+preview list so we can see upstream turn history without logging a
-// whole prompt. Content is previewed to contentMax bytes per message.
-func debugMessagesSummary(messages []any, contentMax int) string {
-	if !debugEnabled {
-		return ""
-	}
-	parts := make([]string, 0, len(messages))
-	for i, raw := range messages {
-		m, _ := raw.(map[string]any)
-		role := stringValue(m["role"])
-		name := stringValue(m["name"])
-		content := m["content"]
-		toolCalls, _ := m["tool_calls"].([]any)
-		var summary string
-		if len(toolCalls) > 0 {
-			names := make([]string, 0, len(toolCalls))
-			for _, tc := range toolCalls {
-				tm, _ := tc.(map[string]any)
-				fn, _ := tm["function"].(map[string]any)
-				names = append(names, stringValue(fn["name"]))
-			}
-			summary = fmt.Sprintf("tool_calls=%v", names)
-		} else if content != nil {
-			summary = debugPreview(content, contentMax)
-		}
-		if name != "" {
-			parts = append(parts, fmt.Sprintf("[%d]%s(%s): %s", i, role, name, summary))
-		} else {
-			parts = append(parts, fmt.Sprintf("[%d]%s: %s", i, role, summary))
-		}
-	}
-	return strings.Join(parts, " | ")
-}
 
 type headerRoundTripper struct {
 	base    http.RoundTripper
