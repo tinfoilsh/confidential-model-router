@@ -268,6 +268,10 @@ func main() {
 	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
 	log.Infof("Refresh interval: %s", *refreshInterval)
 
+	if *usageReporterSecret == "" {
+		log.Fatal("USAGE_REPORTER_SECRET is required")
+	}
+
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {
 		log.Fatal(err)
