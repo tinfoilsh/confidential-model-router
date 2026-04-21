@@ -14,7 +14,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 // runChatStreaming is the streaming entry point for the Chat Completions
@@ -710,15 +709,6 @@ func nestedAnnotationsFromMatches(matches []citationAnnotation) []any {
 	return out
 }
 
-// usageFromRawMap is a thin wrapper around usageFromRaw that accepts the
-// already-typed map form used by the streaming assembler.
-func usageFromRawMap(usage map[string]any) *tokencount.Usage {
-	if usage == nil {
-		return nil
-	}
-	return usageFromRaw(any(usage))
-}
-
 // mustMarshal serializes the given value to JSON, returning an empty byte
 // slice on failure. Used by error-surfacing helpers where failure to
 // marshal is already a lost cause; returning empty body preserves the
@@ -731,9 +721,4 @@ func mustMarshal(value any) []byte {
 	return data
 }
 
-func nonEmptyString(value, fallback string) string {
-	if value != "" {
-		return value
-	}
-	return fallback
-}
+

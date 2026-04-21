@@ -362,13 +362,6 @@ func extractExcludedDomains(raw any) []string {
 	return extractDomainListFromFilterMap(filters, "excluded_domains")
 }
 
-// extractAllowedDomainsFromFilterMap is kept as a thin shim over the shared
-// domain-list helper so existing callers keep compiling; new code should call
-// extractDomainListFromFilterMap directly.
-func extractAllowedDomainsFromFilterMap(filters map[string]any) []string {
-	return extractDomainListFromFilterMap(filters, "allowed_domains")
-}
-
 // extractDomainListFromFilterMap reads an array of hostnames under `key` from
 // a filters map and returns it lowercased, trimmed, and deduplicated.
 func extractDomainListFromFilterMap(filters map[string]any, key string) []string {

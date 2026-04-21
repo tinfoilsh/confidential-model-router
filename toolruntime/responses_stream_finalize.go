@@ -201,7 +201,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	})
 
 	if s.usageMetricsRequested && usage != nil {
-		s.w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usageFromRawMap(usage)))
+		s.w.Header().Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usageFromRaw(usage)))
 	}
 	s.emitBillingEvent(r, em, modelName, usage)
 	return s.writeErr

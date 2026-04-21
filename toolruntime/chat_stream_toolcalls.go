@@ -91,9 +91,13 @@ func (b *chatToolCallBuilder) raw() []any {
 		if entry == nil || entry.functionName == "" {
 			continue
 		}
+		toolType := entry.toolType
+		if toolType == "" {
+			toolType = "function"
+		}
 		calls = append(calls, map[string]any{
 			"id":   entry.id,
-			"type": nonEmptyString(entry.toolType, "function"),
+			"type": toolType,
 			"function": map[string]any{
 				"name":      entry.functionName,
 				"arguments": string(entry.arguments),
