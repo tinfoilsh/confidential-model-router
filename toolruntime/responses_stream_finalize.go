@@ -2,10 +2,7 @@ package toolruntime
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-
-	"github.com/google/uuid"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -27,64 +24,7 @@ import (
 // in `response.completed.output`, which is collapsed onto `failed` at
 // the envelope level but preserved on the record for tooling.
 func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
-	session, ok := registry.sessionFor(call.name)
-	if !ok {
-		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
-	}
-	switch call.name {
-	case "search":
-		id := "ws_" + uuid.NewString()
-		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		outputIndex := s.openWebSearchCallItem(id, action)
-		s.emitWebSearchCallPhase("response.web_search_call.in_progress", id, outputIndex)
-		s.emitWebSearchCallPhase("response.web_search_call.searching", id, outputIndex)
-		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
-		if err != nil {
-			reason := publicToolErrorReason(call.name, err)
-			status := "failed"
-			if reason == blockedToolErrorReason {
-				status = "blocked"
-			}
-			s.closeWebSearchCallItem(id, outputIndex, action, status, reason)
-			return "", err
-		}
-		s.emitWebSearchCallPhase("response.web_search_call.completed", id, outputIndex)
-		s.closeWebSearchCallItem(id, outputIndex, action, "completed", "")
-		return output, nil
-	case "fetch":
-		urls := fetchArgumentURLs(call.arguments)
-		if len(urls) == 0 {
-			return callTool(ctx, session, call.name, call.arguments, s.citations)
-		}
-		fetchIDs := make([]string, len(urls))
-		fetchIndices := make([]int, len(urls))
-		fetchActions := make([]map[string]any, len(urls))
-		for i, url := range urls {
-			fetchIDs[i] = "ws_" + uuid.NewString()
-			fetchActions[i] = map[string]any{"type": "open_page", "url": url}
-			fetchIndices[i] = s.openWebSearchCallItem(fetchIDs[i], fetchActions[i])
-			s.emitWebSearchCallPhase("response.web_search_call.in_progress", fetchIDs[i], fetchIndices[i])
-		}
-		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
-		if err != nil {
-			reason := publicToolErrorReason(call.name, err)
-			status := "failed"
-			if reason == blockedToolErrorReason {
-				status = "blocked"
-			}
-			for i := range urls {
-				s.closeWebSearchCallItem(fetchIDs[i], fetchIndices[i], fetchActions[i], status, reason)
-			}
-			return "", err
-		}
-		for i := range urls {
-			s.emitWebSearchCallPhase("response.web_search_call.completed", fetchIDs[i], fetchIndices[i])
-			s.closeWebSearchCallItem(fetchIDs[i], fetchIndices[i], fetchActions[i], "completed", "")
-		}
-		return output, nil
-	default:
-		return callTool(ctx, session, call.name, call.arguments, s.citations)
-	}
+	return executeToolWithProgress(ctx, registry, s.citations, &responsesToolProgressEmitter{streamer: s}, call)
 }
 
 // openWebSearchCallItem emits response.output_item.added for a

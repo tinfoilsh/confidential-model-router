@@ -98,21 +98,13 @@ func runResponsesStreaming(
 
 		toolOutputs := make([]any, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
-			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
-			sanitizeToolCallArguments(call.name, call.arguments)
-			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
-			output, toolErr := streamer.executeTool(ctx, registry, call)
-			record := toolCallRecord{
-				name:      call.name,
-				arguments: call.arguments,
-			}
-			if toolErr != nil {
-				output = humanizeToolArgError(call.name, toolErr, call.arguments)
-				record.errorReason = publicToolErrorReason(call.name, toolErr)
-			} else {
-				record.resultURLs = extractToolOutputURLs(output)
-			}
-			streamer.citations.recordToolCall(record)
+			output := resolveStreamingRouterToolCall(
+				ctx, call, searchOpts, toolSchemas, streamer.citations,
+				func(ctx context.Context, call toolCall) (string, error) {
+					return streamer.executeTool(ctx, registry, call)
+				},
+				"", "",
+			)
 			toolOutputs = append(toolOutputs, map[string]any{
 				"type":    "function_call_output",
 				"call_id": call.id,

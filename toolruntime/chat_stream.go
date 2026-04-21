@@ -134,27 +134,15 @@ func runChatStreaming(
 
 		messages, _ := reqBody["messages"].([]any)
 		messages = append(messages, result.assistantMessage())
+		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
 		for _, call := range routerToolCalls {
-			applyWebSearchOptionsToToolCall(call.name, call.arguments, searchOpts)
-			sanitizeToolCallArguments(call.name, call.arguments)
-			coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
-			debugLogf("toolruntime:%s chatstream.iter=%d tool.call name=%s args=%s", tid, i, call.name, debugPreview(call.arguments, 400))
-			tstart := time.Now()
-			output, toolErr := streamer.executeTool(ctx, registry, call)
-			record := toolCallRecord{
-				name:      call.name,
-				arguments: call.arguments,
-			}
-			if toolErr != nil {
-				debugLogf("toolruntime:%s chatstream.iter=%d tool.error name=%s elapsed=%s err=%v", tid, i, call.name, time.Since(tstart), toolErr)
-				output = humanizeToolArgError(call.name, toolErr, call.arguments)
-				record.errorReason = publicToolErrorReason(call.name, toolErr)
-			} else {
-				record.resultURLs = extractToolOutputURLs(output)
-				debugLogf("toolruntime:%s chatstream.iter=%d tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
-					tid, i, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
-			}
-			streamer.citations.recordToolCall(record)
+			output := resolveStreamingRouterToolCall(
+				ctx, call, searchOpts, toolSchemas, streamer.citations,
+				func(ctx context.Context, call toolCall) (string, error) {
+					return streamer.executeTool(ctx, registry, call)
+				},
+				tracePhase, tid,
+			)
 			messages = append(messages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": call.id,
@@ -525,51 +513,7 @@ func (s *chatStreamer) flushCitations() {
 // the raw error text (matching the non-streaming path that serializes
 // err.Error() into the tool-result message).
 func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
-	session, ok := registry.sessionFor(call.name)
-	if !ok {
-		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
-	}
-	switch call.name {
-	case "search":
-		id := "ws_" + uuid.NewString()
-		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		s.emitTinfoilEventMarker(id, "in_progress", action, "")
-		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
-		if err != nil {
-			s.emitTinfoilEventMarker(id, failureStatusFor(err), action, publicToolErrorReason(call.name, err))
-			return "", err
-		}
-		s.emitTinfoilEventMarker(id, "completed", action, "")
-		return output, nil
-	case "fetch":
-		urls := fetchArgumentURLs(call.arguments)
-		if len(urls) == 0 {
-			return callTool(ctx, session, call.name, call.arguments, s.citations)
-		}
-		// Pair one stable id per URL so opt-in clients can correlate
-		// the in_progress marker with its matching terminal marker,
-		// mirroring how the non-streaming shape surfaces fetches.
-		fetchIDs := make([]string, len(urls))
-		for i, url := range urls {
-			fetchIDs[i] = "ws_" + uuid.NewString()
-			s.emitTinfoilEventMarker(fetchIDs[i], "in_progress", map[string]any{"type": "open_page", "url": url}, "")
-		}
-		output, err := callTool(ctx, session, call.name, call.arguments, s.citations)
-		if err != nil {
-			reason := publicToolErrorReason(call.name, err)
-			status := failureStatusFor(err)
-			for i, url := range urls {
-				s.emitTinfoilEventMarker(fetchIDs[i], status, map[string]any{"type": "open_page", "url": url}, reason)
-			}
-			return "", err
-		}
-		for i, url := range urls {
-			s.emitTinfoilEventMarker(fetchIDs[i], "completed", map[string]any{"type": "open_page", "url": url}, "")
-		}
-		return output, nil
-	default:
-		return callTool(ctx, session, call.name, call.arguments, s.citations)
-	}
+	return executeToolWithProgress(ctx, registry, s.citations, &chatToolProgressEmitter{streamer: s}, call)
 }
 
 // emitTinfoilEventMarker writes a single `<tinfoil-event>` marker as the
