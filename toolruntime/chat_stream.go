@@ -212,7 +212,6 @@ type chatStreamer struct {
 	id             string
 	created        int64
 	model          string
-	fallbackModel  string
 	identityPinned bool
 
 	// upstreamHeaders holds the most recent upstream response headers so
@@ -295,7 +294,7 @@ func (s *chatStreamer) runIteration(
 	}
 	s.upstreamHeaders = resp.Header
 	if !s.headersWritten {
-		s.writeSSEHeaders(resp.Header, modelName)
+		s.writeSSEHeaders(resp.Header)
 	}
 
 	return s.pumpUpstream(newSSEReader(resp.Body))
@@ -476,11 +475,13 @@ func (s *chatStreamer) streamCreated() int64 {
 }
 
 // streamModel returns the stable model name for the current logical chat
-// completion, falling back to the caller-requested label only if upstream
-// never sent a model field.
+// completion. Every OpenAI-compatible inference server echoes
+// request.model on its streaming chunks; a missing value indicates an
+// upstream bug and is surfaced as a loud stream error so we do not mask
+// a fleet regression behind a cached config label.
 func (s *chatStreamer) streamModel() string {
 	if s.model == "" {
-		s.model = s.fallbackModel
+		s.writeErr = fmt.Errorf("upstream stream missing chunk.model field")
 	}
 	return s.model
 }
@@ -492,7 +493,7 @@ func (s *chatStreamer) streamModel() string {
 // chunk carries the upstream-provided id/created/model. The upstream
 // usage-metrics header is stripped unconditionally because we own the
 // authoritative aggregated-usage trailer for the full logical stream.
-func (s *chatStreamer) writeSSEHeaders(upstreamHeaders http.Header, fallbackModel string) {
+func (s *chatStreamer) writeSSEHeaders(upstreamHeaders http.Header) {
 	copyResponseHeaders(s.w.Header(), upstreamHeaders)
 	s.w.Header().Del("Content-Length")
 	s.w.Header().Del(manager.UsageMetricsResponseHeader)
@@ -504,7 +505,6 @@ func (s *chatStreamer) writeSSEHeaders(upstreamHeaders http.Header, fallbackMode
 	}
 	s.w.WriteHeader(http.StatusOK)
 	s.headersWritten = true
-	s.fallbackModel = fallbackModel
 }
 
 // ensureRoleEmitted writes the initial assistant role-delta chunk exactly

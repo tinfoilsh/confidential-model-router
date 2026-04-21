@@ -219,7 +219,6 @@ func TestChatStreamerEmitsUpstreamIdentityOnRoleChunk(t *testing.T) {
 	streamer.id = ""
 	streamer.created = 0
 	streamer.model = ""
-	streamer.fallbackModel = "tinfoil/gpt-oss-120b"
 	streamer.roleEmitted = false
 
 	upstream := strings.Join([]string{

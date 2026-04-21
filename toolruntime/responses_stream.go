@@ -153,7 +153,6 @@ type responsesStreamer struct {
 	responseID         string
 	createdAt          int64
 	model              string
-	fallbackModel      string
 
 	// upstreamHeaders holds the most recent upstream response headers so
 	// the billing event can surface the Tinfoil-Enclave attribution in
@@ -284,7 +283,7 @@ func (s *responsesStreamer) runIteration(
 	}
 	s.upstreamHeaders = resp.Header
 	if !s.headersWritten {
-		s.writeSSEHeaders(resp.Header, modelName)
+		s.writeSSEHeaders(resp.Header)
 	}
 
 	s.outputIndexMap = map[int]int{}
@@ -303,10 +302,10 @@ func (s *responsesStreamer) runIteration(
 // time upstream returns a 2xx status. Identity fields are NOT
 // pre-populated here: we wait until the first upstream event arrives so
 // response.created and every subsequent event carry upstream's own
-// id/created_at/model instead of router-minted placeholders. The
-// fallback values are stashed and consulted lazily from the identity
-// accessors below if upstream never sends a given field.
-func (s *responsesStreamer) writeSSEHeaders(upstreamHeaders http.Header, fallbackModel string) {
+// id/created_at/model. Missing id / created_at have safe router-owned
+// fallbacks on the identity accessors below; missing `model` is treated
+// as an upstream bug and surfaced as an error on emit.
+func (s *responsesStreamer) writeSSEHeaders(upstreamHeaders http.Header) {
 	copyResponseHeaders(s.w.Header(), upstreamHeaders)
 	s.w.Header().Del("Content-Length")
 	s.w.Header().Del(manager.UsageMetricsResponseHeader)
@@ -318,7 +317,6 @@ func (s *responsesStreamer) writeSSEHeaders(upstreamHeaders http.Header, fallbac
 	}
 	s.w.WriteHeader(http.StatusOK)
 	s.headersWritten = true
-	s.fallbackModel = fallbackModel
 }
 
 // streamResponseID returns the pinned response id, materializing a
@@ -341,11 +339,14 @@ func (s *responsesStreamer) streamCreatedAt() int64 {
 	return s.createdAt
 }
 
-// streamModel returns the pinned model name, falling back to the
-// caller-requested label only if upstream never sent a model field.
+// streamModel returns the pinned model name captured from upstream.
+// Every OpenAI-compatible inference server echoes request.model on
+// response.created; a missing value indicates an upstream bug and is
+// surfaced as a loud stream error so we do not mask a fleet regression
+// behind a cached config label.
 func (s *responsesStreamer) streamModel() string {
 	if s.model == "" {
-		s.model = s.fallbackModel
+		s.writeErr = fmt.Errorf("upstream stream missing response.model field")
 	}
 	return s.model
 }
