@@ -15,11 +15,19 @@ import (
 // Supports both Chat Completions (prompt_tokens/completion_tokens) and
 // Responses API (input_tokens/output_tokens) field names.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	InputTokens         int                  `json:"input_tokens"`
+	OutputTokens        int                  `json:"output_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	InputTokensDetails  *PromptTokensDetails `json:"input_tokens_details,omitempty"`
+
+	ExposePromptTokenDetails bool `json:"-"`
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // Normalize maps Responses API fields (input_tokens/output_tokens) into
@@ -32,6 +40,18 @@ func (u *Usage) Normalize() {
 	if u.CompletionTokens == 0 && u.OutputTokens > 0 {
 		u.CompletionTokens = u.OutputTokens
 	}
+	if u.PromptTokensDetails == nil && u.InputTokensDetails != nil {
+		u.PromptTokensDetails = u.InputTokensDetails
+	}
+}
+
+func (u *Usage) CachedPromptTokens() (int, bool) {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0, false
+	}
+
+	cached := min(u.PromptTokens, max(0, u.PromptTokensDetails.CachedTokens))
+	return cached, true
 }
 
 // OpenAIResponse represents a standard OpenAI-compatible response
@@ -191,7 +211,7 @@ func (s *StreamingTokenExtractor) processStream() {
 					// Check for usage in the chunk (Chat Completions API)
 					// or nested under "response" (Responses API streaming)
 					usageData, ok := chunk["usage"]
-					if (!ok || usageData == nil) {
+					if !ok || usageData == nil {
 						if respObj, rOk := chunk["response"].(map[string]interface{}); rOk {
 							usageData, ok = respObj["usage"]
 						}
@@ -210,6 +230,9 @@ func (s *StreamingTokenExtractor) processStream() {
 							}
 							if usage.TotalTokens > 0 {
 								s.usage.TotalTokens = usage.TotalTokens
+							}
+							if usage.PromptTokensDetails != nil {
+								s.usage.PromptTokensDetails = usage.PromptTokensDetails
 							}
 						}
 

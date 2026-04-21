@@ -72,6 +72,27 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 			expected: "prompt=128000,completion=4096,total=132096",
 		},
 		{
+			name: "includes cached prompt token details when present",
+			usage: &tokencount.Usage{
+				PromptTokens:             69,
+				CompletionTokens:         20,
+				TotalTokens:              89,
+				PromptTokensDetails:      &tokencount.PromptTokensDetails{CachedTokens: 64},
+				ExposePromptTokenDetails: true,
+			},
+			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5",
+		},
+		{
+			name: "keeps legacy format when prompt token details are not exposed",
+			usage: &tokencount.Usage{
+				PromptTokens:        69,
+				CompletionTokens:    20,
+				TotalTokens:         89,
+				PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 64},
+			},
+			expected: "prompt=69,completion=20,total=89",
+		},
+		{
 			name:     "nil usage",
 			usage:    nil,
 			expected: "",
