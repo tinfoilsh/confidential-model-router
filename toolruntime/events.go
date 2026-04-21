@@ -26,32 +26,12 @@ const (
 	tinfoilEventPayloadType = "tinfoil.web_search_call"
 )
 
-// webSearchCallEvent builds a single web_search_call output item in the
-// spec-conformant shape documented by OpenAI for the Responses API. The
-// returned map is used only for non-streaming `output[]` items; it does
-// NOT carry the `item_id` / `reason` fields the streaming envelopes use,
-// and it maps the router's internal `blocked` status onto the spec-valid
-// `failed` status (the safety-block signal is surfaced separately via
-// tinfoil-event markers when the caller opts in).
-//
-// Why collapse `blocked` onto `failed` here?
-//   - OpenAI's documented `web_search_call.status` enum is {in_progress,
-//     searching, completed, failed}. There is no `blocked` slot, so any
-//     client validating responses against the published schema (SDKs
-//     that expose the enum as a sealed type, JSON-schema gateways that
-//     reject unknown values, etc.) would reject a response carrying
-//     `status: "blocked"`.
-//   - We still want opt-in clients to distinguish a safety-filter block
-//     from a generic error so UIs can render a different affordance, so
-//     the unfiltered `blocked` string lives inside the tinfoil-event
-//     marker payload carried in-band. Clients that never opt into the
-//     marker stream never learn about `blocked` and see only the
-//     spec-valid `failed` status, which is semantically truthful: the
-//     call did not complete successfully.
-//   - Keeping the collapse at the leaf (this helper) rather than at the
-//     caller guarantees no future caller can accidentally ship a
-//     schema-invalid `blocked` status on an output item no matter which
-//     status-producing path it used.
+// webSearchCallEvent builds a single web_search_call output item for the
+// non-streaming `output[]` array. The `blocked` status is collapsed to
+// the spec-valid `failed` because OpenAI's web_search_call.status enum
+// has no `blocked` slot; the unfiltered status still rides on the
+// `_tinfoil` sidecar for clients that want to distinguish a safety
+// block from a generic failure.
 func webSearchCallEvent(id, status, errorCode string, action map[string]any) map[string]any {
 	item := map[string]any{
 		"type":   "web_search_call",
@@ -124,33 +104,10 @@ func tinfoilEventsEnabled(h http.Header) bool {
 }
 
 // tinfoilEventMarker renders a single progress event as a text marker:
-// a JSON payload wrapped in `<tinfoil-event>...</tinfoil-event>` tags on
-// its own line. The leading and trailing newlines isolate the marker
-// from natural-language text so client strip regexes do not leave stray
-// whitespace, and so raw SSE captures stay readable for debugging.
-//
-// Why pad the marker with `\n` on both sides?
-//   - OpenAI SDKs that do not recognize the tinfoil-event tags render
-//     them verbatim as part of the assistant text. A marker that
-//     abutted surrounding prose would visually merge into a sentence,
-//     creating a jarring in-line artifact on unopted-in clients and
-//     breaking the `text before marker` / `text after marker` visual
-//     separation that makes the stream legible during human debugging.
-//   - Opt-in clients strip the marker using a regex that matches
-//     `\n?<tinfoil-event>...</tinfoil-event>\n?`. The pad-newlines get
-//     absorbed by the strip so there is no visible gap or double blank
-//     line in the rendered output; the text before and after the
-//     marker collapses back together seamlessly.
-//   - Carrying the markers on their own line also means a streaming
-//     client can parse SSE frame-by-frame and detect a complete marker
-//     without needing to buffer across arbitrary partial frames: the
-//     close tag and its trailing newline arrive in the same delta as
-//     the open tag in practice, and at worst span two deltas that the
-//     parser already buffers.
-//
-// The parser tuned to these semantics lives in the tinfoil-events
-// packages the webapp and iOS apps import; the `\n` pad is part of that
-// contract and should not be trimmed without co-updating those parsers.
+// a JSON payload wrapped in `<tinfoil-event>...</tinfoil-event>` tags
+// padded with `\n` on both sides. The pad is part of the strip-regex
+// contract used by the tinfoil-events parsers in the webapp and iOS
+// apps and must not be changed without co-updating those parsers.
 func tinfoilEventMarker(id, status string, action map[string]any, reason string) string {
 	payload := map[string]any{
 		"type":    tinfoilEventPayloadType,

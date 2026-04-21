@@ -78,22 +78,11 @@ func forcedFinalResponsesRequest(reqBody map[string]any) map[string]any {
 }
 
 // forcedFinalResponseInput preserves the full conversation history for
-// the forced-final turn: user/assistant messages, router-issued
-// function_call items, and their matching function_call_output items
-// all ride through unchanged. Upstream accepts this shape even with
-// an empty tools array because the Responses API binds call_id to
-// the prior function_call in input, not to any currently-listed
-// tool.
-//
-// We deliberately do NOT rewrite function_call_output into a
-// message-role synthesis of "Tool result: <text>": doing so would
-// either bury tool content in the assistant-authoritative system
-// role (a prompt-injection footgun, since tool outputs include
-// scraped web content) or duplicate it as a free-floating user
-// turn disconnected from its originating call. Leaving the items
-// typed and call_id-linked is the only shape that preserves both
-// the trust boundary (tool output stays tool output) and the
-// conversation's structural integrity.
+// the forced-final turn: messages, router-issued function_call items,
+// and their matching function_call_output items ride through unchanged
+// so the Responses API's call_id binding stays intact. Tool outputs
+// are left typed rather than folded into a system or user message so
+// the trust boundary (tool output stays tool output) is preserved.
 func forcedFinalResponseInput(raw any) []any {
 	input := normalizeResponsesInput(raw)
 	finalInput := make([]any, 0, len(input))
