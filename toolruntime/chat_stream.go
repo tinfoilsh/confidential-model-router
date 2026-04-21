@@ -252,33 +252,12 @@ func (s *chatStreamer) runIteration(
 	reqBody map[string]any,
 	requestHeaders http.Header,
 ) (chatIterationResult, error) {
-	bodyBytes, err := json.Marshal(reqBody)
+	body, err := s.openUpstreamSSE(ctx, em, modelName, "/v1/chat/completions", reqBody, requestHeaders)
 	if err != nil {
 		return chatIterationResult{}, err
 	}
-	hdrs := cloneHeaders(requestHeaders)
-	hdrs.Set("Content-Type", "application/json")
-	hdrs.Set("Accept", "text/event-stream")
-
-	resp, err := em.DoModelRequest(ctx, modelName, "/v1/chat/completions", bodyBytes, hdrs)
-	if err != nil {
-		return chatIterationResult{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errBody, _ := io.ReadAll(resp.Body)
-		return chatIterationResult{}, &upstreamError{
-			statusCode: resp.StatusCode,
-			header:     resp.Header.Clone(),
-			body:       errBody,
-		}
-	}
-	s.upstreamHeaders = resp.Header
-	if !s.headersWritten {
-		s.writeSSEHeaders(resp.Header)
-	}
-
-	return s.pumpUpstream(newSSEReader(resp.Body))
+	defer body.Close()
+	return s.pumpUpstream(newSSEReader(body))
 }
 
 // pumpUpstream reads every SSE frame from upstream for the current
