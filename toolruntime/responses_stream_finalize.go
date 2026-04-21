@@ -207,25 +207,6 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	return s.writeErr
 }
 
-// emitBillingEvent delegates to the shared billing emitter used by the
-// non-streaming path so streaming and non-streaming requests produce the
-// same billing-event shape, including Tinfoil-Enclave attribution taken
-// from the most recent upstream response headers.
-func (s *responsesStreamer) emitBillingEvent(r *http.Request, em *manager.EnclaveManager, modelName string, usage map[string]any) {
-	if em == nil {
-		return
-	}
-	header := s.upstreamHeaders
-	if header == nil {
-		header = http.Header{}
-	}
-	response := &upstreamJSONResponse{
-		header: header,
-		body:   map[string]any{"usage": usage},
-	}
-	emitBillingEvent(em, r, response, modelName, true)
-}
-
 // terminateWithError surfaces a mid-stream upstream failure to the client.
 // If no SSE has started, the error bubbles up so Handle can turn it into a
 // plain JSON error response; otherwise the streamer emits a synthesized
