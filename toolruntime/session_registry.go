@@ -3,7 +3,6 @@ package toolruntime
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -167,7 +166,6 @@ func (r *sessionRegistry) profileNames() []string {
 	for _, e := range r.entries {
 		names = append(names, e.profile.Name)
 	}
-	sort.Strings(names)
 	return names
 }
 
