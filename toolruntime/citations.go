@@ -232,13 +232,21 @@ func (c *citationState) matchesFor(text string) []annotationMatch {
 		return nil
 	}
 
+	// byURL is keyed by the normalized URL so cosmetic differences
+	// between the URL the search tool recorded and the URL the model
+	// re-emitted (trailing slash, www prefix, tracking params,
+	// invisible runes, etc.) do not cause the lookup to miss.
 	byURL := make(map[string]citationSource, len(c.sources))
 	for _, source := range c.sources {
 		if source.url == "" {
 			continue
 		}
-		if existing, ok := byURL[source.url]; !ok || (existing.title == "" && source.title != "") {
-			byURL[source.url] = source
+		key := normalizeCitationURL(source.url)
+		if key == "" {
+			continue
+		}
+		if existing, ok := byURL[key]; !ok || (existing.title == "" && source.title != "") {
+			byURL[key] = source
 		}
 	}
 	if len(byURL) == 0 {
@@ -257,7 +265,7 @@ func (c *citationState) matchesFor(text string) []annotationMatch {
 			continue
 		}
 		url := text[m[4]:m[5]]
-		source, ok := byURL[url]
+		source, ok := byURL[normalizeCitationURL(url)]
 		if !ok {
 			continue
 		}
