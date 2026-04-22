@@ -53,7 +53,7 @@ func runResponsesStreaming(
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
 	base["stream"] = true
-	base["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(base)
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 

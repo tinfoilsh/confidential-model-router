@@ -59,7 +59,7 @@ func runChatStreaming(
 	stripRouterOwnedIncludes(reqBody)
 	reqBody["stream"] = true
 	reqBody["stream_options"] = map[string]any{"include_usage": true}
-	reqBody["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(reqBody)
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
 

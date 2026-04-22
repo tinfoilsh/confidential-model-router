@@ -474,6 +474,24 @@ func normalizePublishedDate(raw any) string {
 	return ""
 }
 
+// applyParallelToolCallsPolicy sets parallel_tool_calls on the upstream
+// request so client-owned tools can fan out. Router-owned tools (web
+// search, fetch) are still executed serially inside the tool-loop
+// dispatch regardless of the upstream flag, which keeps citation
+// numbering and streaming event ordering deterministic. The upstream
+// flag is a model-side hint for what it is allowed to emit, not an
+// execution requirement the router must honor.
+//
+// If the caller explicitly set parallel_tool_calls on the incoming
+// request, honor their choice. Otherwise default to true so callers
+// that expect parallel fan-out on their own tools get it.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
 // applyWebSearchOptionsToToolCall dispatches to the per-tool merge helper so
 // options forwarded from OpenAI's request shape end up on the MCP tool call.
 func applyWebSearchOptionsToToolCall(toolName string, arguments map[string]any, opts webSearchOptions) {

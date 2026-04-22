@@ -221,7 +221,7 @@ func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
 	delete(reqBody, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(reqBody)
 	reqBody["stream"] = false
-	reqBody["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(reqBody)
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(a.tools)...)
 	reqBody["messages"] = prependChatPrompt(a.prompt, reqBody["messages"])
 
@@ -339,7 +339,7 @@ func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *c
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	base := cloneJSONMap(a.body)
 	base["stream"] = false
-	base["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(base)
 	delete(base, "stream_options")
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
