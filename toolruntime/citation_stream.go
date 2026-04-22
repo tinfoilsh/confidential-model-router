@@ -292,15 +292,21 @@ func isSupportedURL(url string) bool {
 // resolveSource returns the most informative recorded source for the given
 // URL, or (zero, false) when the URL was never registered during the tool
 // loop. Mirrors the behavior of citationState.matchesFor so streaming and
-// non-streaming annotations agree on title-resolution tiebreaks.
+// non-streaming annotations agree on title-resolution tiebreaks. The URL
+// comparison is done on the normalized form so trailing slashes, `www.`
+// prefixes, tracking params, and invisible runes do not defeat the match.
 func (c *citationState) resolveSource(url string) (citationSource, bool) {
 	if c == nil || url == "" {
+		return citationSource{}, false
+	}
+	target := normalizeCitationURL(url)
+	if target == "" {
 		return citationSource{}, false
 	}
 	var best citationSource
 	found := false
 	for _, source := range c.sources {
-		if source.url != url {
+		if normalizeCitationURL(source.url) != target {
 			continue
 		}
 		if !found || (best.title == "" && source.title != "") {
