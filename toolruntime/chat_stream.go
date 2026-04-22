@@ -520,11 +520,11 @@ func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistr
 // `delta.content` of a chat.completion.chunk frame. When the caller did
 // not opt into the marker stream, this is a no-op so strict SDKs see a
 // pristine spec-conformant stream.
-func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string) {
+func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource) {
 	if !s.eventsEnabled {
 		return
 	}
-	marker := tinfoilEventMarker(id, status, action, reason)
+	marker := tinfoilEventMarker(id, status, action, reason, sources)
 	s.writeChunk(map[string]any{
 		"choices": []any{
 			map[string]any{

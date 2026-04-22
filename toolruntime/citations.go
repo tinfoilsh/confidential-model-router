@@ -26,11 +26,27 @@ type citationSource struct {
 // carries the tool-side error message when the call failed so terminal
 // web_search_call items can honestly report status:"failed" instead of
 // silently claiming completion on a request that never returned results.
+//
+// resultSources carries the ordered {url, title} pairs this specific call
+// produced (search results, fetched pages) so terminal tinfoil-event
+// markers can attribute sources to the exact search call that surfaced
+// them. resultURLs is the same list in URL-only form kept for the
+// Responses API `action.sources` shape.
 type toolCallRecord struct {
-	name        string
-	arguments   map[string]any
-	resultURLs  []string
-	errorReason string
+	name          string
+	arguments     map[string]any
+	resultURLs    []string
+	resultSources []toolCallSource
+	errorReason   string
+}
+
+// toolCallSource is a single {url, title} pair produced by a router tool
+// call (a search hit or a fetched page). Titles are best-effort: a
+// missing or empty title is surfaced as an empty string so clients can
+// fall back to displaying the bare URL.
+type toolCallSource struct {
+	url   string
+	title string
 }
 
 type citationState struct {
@@ -120,6 +136,52 @@ func extractToolOutputURLs(output string) []string {
 		urls = append(urls, url)
 	}
 	return urls
+}
+
+// extractToolOutputSources pulls the `{Source, URL}` pairs the router
+// embeds into each numbered result block so terminal tinfoil-event
+// markers can attribute sources to the specific search call that
+// produced them. Each block is formatted as:
+//
+//	Source: <title>
+//	URL: <url>
+//
+// with the `Source:` line optional. Duplicate URLs are dropped so a
+// single call never lists the same hit twice. Titles are best-effort;
+// a missing `Source:` line yields an empty title.
+func extractToolOutputSources(output string) []toolCallSource {
+	if output == "" {
+		return nil
+	}
+	lines := strings.Split(output, "\n")
+	sources := make([]toolCallSource, 0)
+	seen := make(map[string]struct{})
+	var pendingTitle string
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if strings.HasPrefix(trimmed, "Source:") {
+			pendingTitle = strings.TrimSpace(strings.TrimPrefix(trimmed, "Source:"))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "URL:") {
+			url := strings.TrimSpace(strings.TrimPrefix(trimmed, "URL:"))
+			if url == "" {
+				pendingTitle = ""
+				continue
+			}
+			if _, dup := seen[url]; dup {
+				pendingTitle = ""
+				continue
+			}
+			seen[url] = struct{}{}
+			sources = append(sources, toolCallSource{url: url, title: pendingTitle})
+			pendingTitle = ""
+		}
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return sources
 }
 
 // toActionSources wraps a list of URLs in the OpenAI-spec shape

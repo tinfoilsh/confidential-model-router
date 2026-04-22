@@ -45,7 +45,7 @@ func TestTinfoilEventsEnabledHeaderParsing(t *testing.T) {
 // callers depend on (id, status, action) plus the tinfoil-specific
 // reason when present.
 func TestTinfoilEventMarkerShape(t *testing.T) {
-	marker := tinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "")
+	marker := tinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil)
 	if !strings.HasPrefix(marker, "\n"+tinfoilEventOpenTag) {
 		t.Fatalf("marker must start on its own line with %q: got %q", tinfoilEventOpenTag, marker)
 	}
@@ -81,7 +81,7 @@ func TestTinfoilEventMarkerShape(t *testing.T) {
 // surface safety-block text or upstream error context without the field
 // polluting every success marker.
 func TestTinfoilEventMarkerIncludesReason(t *testing.T) {
-	marker := tinfoilEventMarker("ws_1", "blocked", map[string]any{"type": "search"}, "safety policy rejected this query")
+	marker := tinfoilEventMarker("ws_1", "blocked", map[string]any{"type": "search"}, "safety policy rejected this query", nil)
 	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
@@ -116,6 +116,119 @@ func TestTinfoilEventMarkersForRecordsMapsSearch(t *testing.T) {
 	}
 	if !strings.Contains(combined, `"status":"completed"`) {
 		t.Fatalf("missing completed marker: %q", combined)
+	}
+}
+
+// TestExtractToolOutputSourcesPairsSourceAndURL pins that the
+// formatted search tool output is parsed into the correct ordered
+// {url, title} list so terminal markers can attribute citations to
+// the call that produced them. URLs missing a `Source:` line yield an
+// empty title; duplicate URLs are dropped.
+func TestExtractToolOutputSourcesPairsSourceAndURL(t *testing.T) {
+	output := strings.Join([]string{
+		"Source: First Hit",
+		"URL: https://one.example",
+		"snippet one",
+		"",
+		"URL: https://no-title.example",
+		"snippet two",
+		"",
+		"Source: Third Hit",
+		"URL: https://one.example",
+		"duplicate url should be ignored",
+	}, "\n")
+
+	sources := extractToolOutputSources(output)
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 unique sources, got %d: %#v", len(sources), sources)
+	}
+	if sources[0].url != "https://one.example" || sources[0].title != "First Hit" {
+		t.Fatalf("first source mismatch: %#v", sources[0])
+	}
+	if sources[1].url != "https://no-title.example" || sources[1].title != "" {
+		t.Fatalf("second source mismatch: %#v", sources[1])
+	}
+}
+
+// TestTinfoilEventMarkerEmbedsSources pins that the optional sources
+// list surfaces on the marker JSON as a `sources` array of
+// `{url, title}` objects only on the terminal marker. Opt-in clients
+// use this to attribute citations to the specific search call that
+// produced them when a single turn runs multiple searches.
+func TestTinfoilEventMarkerEmbedsSources(t *testing.T) {
+	sources := []toolCallSource{
+		{url: "https://one.example", title: "One"},
+		{url: "https://two.example", title: "Two"},
+	}
+	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources)
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v (payload=%q)", err, payload)
+	}
+	rawSources, ok := decoded["sources"].([]any)
+	if !ok {
+		t.Fatalf("payload.sources missing or wrong type: %#v", decoded["sources"])
+	}
+	if got := len(rawSources); got != 2 {
+		t.Fatalf("expected 2 sources, got %d: %#v", got, rawSources)
+	}
+	first, _ := rawSources[0].(map[string]any)
+	if first["url"] != "https://one.example" || first["title"] != "One" {
+		t.Fatalf("first source did not round-trip: %#v", first)
+	}
+}
+
+// TestTinfoilEventMarkerOmitsSourcesWhenEmpty pins that the `sources`
+// field is absent from the payload when no sources are supplied so the
+// happy-path marker bytes stay minimal and existing snapshots continue
+// to round-trip.
+func TestTinfoilEventMarkerOmitsSourcesWhenEmpty(t *testing.T) {
+	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search"}, "", nil)
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v (payload=%q)", err, payload)
+	}
+	if _, present := decoded["sources"]; present {
+		t.Fatalf("payload.sources must be omitted when no sources supplied, got %#v", decoded)
+	}
+}
+
+// TestTinfoilEventMarkersForRecordsAttachesSources pins that the
+// non-streaming bulk-marker emitter puts record.resultSources onto the
+// terminal marker of a search record (and not onto the in_progress
+// marker), so the non-streaming chat path matches the streaming one.
+func TestTinfoilEventMarkersForRecordsAttachesSources(t *testing.T) {
+	records := []toolCallRecord{
+		{
+			name:      "search",
+			arguments: map[string]any{"query": "q"},
+			resultSources: []toolCallSource{
+				{url: "https://one.example", title: "One"},
+			},
+		},
+	}
+	combined := tinfoilEventMarkersForRecords(records)
+	// Split into individual marker payloads and confirm only the
+	// completed marker carries sources.
+	matches := tinfoilEventMarkerPattern.FindAllStringSubmatch(combined, -1)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 markers (in_progress + completed), got %d", len(matches))
+	}
+	for _, match := range matches {
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(match[1]), &decoded); err != nil {
+			t.Fatalf("marker payload must be valid JSON: %v (%q)", err, match[1])
+		}
+		status, _ := decoded["status"].(string)
+		_, hasSources := decoded["sources"]
+		if status == "in_progress" && hasSources {
+			t.Fatalf("in_progress marker must not carry sources: %q", match[1])
+		}
+		if status == "completed" && !hasSources {
+			t.Fatalf("completed marker must carry sources: %q", match[1])
+		}
 	}
 }
 

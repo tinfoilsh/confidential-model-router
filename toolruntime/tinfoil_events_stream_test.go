@@ -43,7 +43,7 @@ func TestChatStreamerEmitTinfoilEventMarkerWritesDeltaWhenEnabled(t *testing.T) 
 	streamer, rec := newTestChatStreamer(t)
 	streamer.eventsEnabled = true
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "")
+	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil)
 
 	body := rec.Body.String()
 	// Pull exactly one `data:` frame, decode it, and assert the
@@ -88,10 +88,42 @@ func TestChatStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.eventsEnabled = false
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "")
+	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "", nil)
 
 	if body := rec.Body.String(); body != "" {
 		t.Fatalf("expected empty stream when events are disabled, got %q", body)
+	}
+}
+
+// TestChatStreamerEmitsSourcesOnTerminalMarker pins that when the
+// terminal marker carries a non-empty sources list, the wire payload
+// includes them in the order provided so opt-in clients can attribute
+// citations to the specific search call that produced them.
+func TestChatStreamerEmitsSourcesOnTerminalMarker(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.eventsEnabled = true
+
+	sources := []toolCallSource{
+		{url: "https://first.example", title: "First"},
+		{url: "https://second.example", title: "Second"},
+	}
+	streamer.emitTinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources)
+
+	frame := firstSSEDataFrame(t, rec.Body.String())
+	var chunk map[string]any
+	if err := json.Unmarshal([]byte(frame), &chunk); err != nil {
+		t.Fatalf("chat stream frame must be valid JSON: %v (%q)", err, frame)
+	}
+	delta := chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	content := delta["content"].(string)
+	if !strings.Contains(content, `"https://first.example"`) {
+		t.Fatalf("terminal marker missing first source url: %q", content)
+	}
+	if !strings.Contains(content, `"First"`) {
+		t.Fatalf("terminal marker missing first source title: %q", content)
+	}
+	if !strings.Contains(content, `"https://second.example"`) {
+		t.Fatalf("terminal marker missing second source url: %q", content)
 	}
 }
 
