@@ -233,6 +233,7 @@ func executeRouterToolCall(
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
 		record.resultURLs = extractToolOutputURLs(output)
+		record.resultSources = extractToolOutputSources(output)
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))

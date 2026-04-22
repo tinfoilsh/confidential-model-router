@@ -36,7 +36,11 @@ type toolProgressEmitter interface {
 	// close emits the terminal progress frame for the call. status
 	// is one of "completed" / "failed" / "blocked"; reason is the
 	// opaque router error code surfaced to clients on non-success.
-	close(handle toolProgressHandle, action map[string]any, status, reason string)
+	// sources carries the ordered {url, title} pairs this specific
+	// call produced so clients can attribute citations to the search
+	// that surfaced them. May be nil on non-search calls or error
+	// terminations where no sources are available.
+	close(handle toolProgressHandle, action map[string]any, status, reason string, sources []toolCallSource)
 }
 
 // toolProgressHandle is the opaque per-call handle returned by
@@ -79,11 +83,12 @@ func executeToolWithProgress(
 		emitter.phase(handle, "response.web_search_call.searching")
 		output, err := callTool(ctx, session, call.name, call.arguments, citations)
 		if err != nil {
-			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err))
+			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
 			return "", err
 		}
+		sources := extractToolOutputSources(output)
 		emitter.phase(handle, "response.web_search_call.completed")
-		emitter.close(handle, action, "completed", "")
+		emitter.close(handle, action, "completed", "", sources)
 		return output, nil
 	case "fetch":
 		urls := fetchArgumentURLs(call.arguments)
@@ -103,13 +108,13 @@ func executeToolWithProgress(
 			reason := publicToolErrorReason(call.name, err)
 			status := failureStatusFor(err)
 			for i := range urls {
-				emitter.close(handles[i], actions[i], status, reason)
+				emitter.close(handles[i], actions[i], status, reason, nil)
 			}
 			return "", err
 		}
 		for i := range urls {
 			emitter.phase(handles[i], "response.web_search_call.completed")
-			emitter.close(handles[i], actions[i], "completed", "")
+			emitter.close(handles[i], actions[i], "completed", "", nil)
 		}
 		return output, nil
 	default:
@@ -130,14 +135,14 @@ type chatToolProgressEmitter struct {
 }
 
 func (c *chatToolProgressEmitter) open(id string, action map[string]any) toolProgressHandle {
-	c.streamer.emitTinfoilEventMarker(id, "in_progress", action, "")
+	c.streamer.emitTinfoilEventMarker(id, "in_progress", action, "", nil)
 	return toolProgressHandle{id: id}
 }
 
 func (c *chatToolProgressEmitter) phase(toolProgressHandle, string) {}
 
-func (c *chatToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string) {
-	c.streamer.emitTinfoilEventMarker(handle.id, status, action, reason)
+func (c *chatToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string, sources []toolCallSource) {
+	c.streamer.emitTinfoilEventMarker(handle.id, status, action, reason, sources)
 }
 
 // responsesToolProgressEmitter surfaces router-owned tool progress on
@@ -158,7 +163,7 @@ func (r *responsesToolProgressEmitter) phase(handle toolProgressHandle, phase st
 	r.streamer.emitWebSearchCallPhase(phase, handle.id, handle.outputIndex)
 }
 
-func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string) {
+func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string, _ []toolCallSource) {
 	r.streamer.closeWebSearchCallItem(handle.id, handle.outputIndex, action, status, reason)
 }
 
@@ -208,6 +213,7 @@ func resolveStreamingRouterToolCall(
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
 		record.resultURLs = extractToolOutputURLs(output)
+		record.resultSources = extractToolOutputSources(output)
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))

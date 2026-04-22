@@ -108,7 +108,13 @@ func tinfoilEventsEnabled(h http.Header) bool {
 // padded with `\n` on both sides. The pad is part of the strip-regex
 // contract used by the tinfoil-events parsers in the webapp and iOS
 // apps and must not be changed without co-updating those parsers.
-func tinfoilEventMarker(id, status string, action map[string]any, reason string) string {
+//
+// When sources is non-empty the marker payload gains a top-level
+// `sources` array of `{url, title}` objects so clients can attribute
+// the citations produced by this specific tool call (e.g. one search
+// among several in a multi-step turn) rather than having to merge all
+// sources into one bucket per turn. Older clients ignore unknown keys.
+func tinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource) string {
 	payload := map[string]any{
 		"type":    tinfoilEventPayloadType,
 		"item_id": id,
@@ -117,6 +123,9 @@ func tinfoilEventMarker(id, status string, action map[string]any, reason string)
 	}
 	if reason != "" {
 		payload["error"] = map[string]any{"code": reason}
+	}
+	if encoded := encodeMarkerSources(sources); len(encoded) > 0 {
+		payload["sources"] = encoded
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -127,6 +136,31 @@ func tinfoilEventMarker(id, status string, action map[string]any, reason string)
 		data = []byte(`{"type":"` + tinfoilEventPayloadType + `"}`)
 	}
 	return "\n" + tinfoilEventOpenTag + string(data) + tinfoilEventCloseTag + "\n"
+}
+
+// encodeMarkerSources maps toolCallSource into the plain-map shape used
+// on the wire. Entries with an empty URL are dropped because a source
+// without a target is not usable by a client. Titles are kept as-is,
+// including empty strings, so clients can choose to fall back to the
+// hostname rather than guess.
+func encodeMarkerSources(sources []toolCallSource) []map[string]any {
+	if len(sources) == 0 {
+		return nil
+	}
+	encoded := make([]map[string]any, 0, len(sources))
+	for _, source := range sources {
+		if source.url == "" {
+			continue
+		}
+		encoded = append(encoded, map[string]any{
+			"url":   source.url,
+			"title": source.title,
+		})
+	}
+	if len(encoded) == 0 {
+		return nil
+	}
+	return encoded
 }
 
 // tinfoilEventMarkersForRecords renders a sequence of in_progress then
@@ -145,10 +179,10 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 	}
 	var builder strings.Builder
 	status := func(record toolCallRecord) string { return statusForRecord(record) }
-	writePair := func(action map[string]any, s, reason string) {
+	writePair := func(action map[string]any, s, reason string, sources []toolCallSource) {
 		id := "ws_" + uuid.NewString()
-		builder.WriteString(tinfoilEventMarker(id, "in_progress", action, ""))
-		builder.WriteString(tinfoilEventMarker(id, s, action, reason))
+		builder.WriteString(tinfoilEventMarker(id, "in_progress", action, "", nil))
+		builder.WriteString(tinfoilEventMarker(id, s, action, reason, sources))
 	}
 	for _, record := range records {
 		switch record.name {
@@ -157,7 +191,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			if query := stringValue(record.arguments["query"]); query != "" {
 				action["query"] = query
 			}
-			writePair(action, status(record), record.errorReason)
+			writePair(action, status(record), record.errorReason, record.resultSources)
 		case "fetch":
 			urls := fetchArgumentURLs(record.arguments)
 			if len(urls) == 0 {
@@ -165,7 +199,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			}
 			for _, url := range urls {
 				action := map[string]any{"type": "open_page", "url": url}
-				writePair(action, status(record), record.errorReason)
+				writePair(action, status(record), record.errorReason, nil)
 			}
 		}
 	}
