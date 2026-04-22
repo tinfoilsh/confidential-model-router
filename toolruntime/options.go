@@ -475,12 +475,13 @@ func normalizePublishedDate(raw any) string {
 }
 
 // applyParallelToolCallsPolicy sets parallel_tool_calls on the upstream
-// request so client-owned tools can fan out. Router-owned tools (web
-// search, fetch) are still executed serially inside the tool-loop
-// dispatch regardless of the upstream flag, which keeps citation
-// numbering and streaming event ordering deterministic. The upstream
-// flag is a model-side hint for what it is allowed to emit, not an
-// execution requirement the router must honor.
+// request so the model is free to fan out client-owned tool calls.
+// Router-owned tools (web search, fetch) are still dispatched serially
+// inside runToolLoop to keep citation numbering and streaming event
+// order deterministic, and mixed turns (router + client tool calls in
+// one assistant response) are detected on every surface and finalized
+// without replaying the assistant turn to the model, so client calls
+// are never orphaned or silently dropped.
 //
 // If the caller explicitly set parallel_tool_calls on the incoming
 // request, honor their choice. Otherwise default to true so callers

@@ -91,12 +91,23 @@ func runResponsesStreaming(
 			return nil
 		}
 
-		routerToolCalls, _ := splitToolCalls(ownedTools, result.toolCalls)
+		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if len(routerToolCalls) == 0 {
 			return streamer.finalize(r, em, modelName, result)
 		}
 
-		toolOutputs := make([]any, 0, len(routerToolCalls))
+		// Execute every router-owned tool call so its citations and
+		// web_search_call progress events are surfaced to the client
+		// before any terminal events. On a non-mixed turn the outputs
+		// are also appended to accumulatedInput so the next upstream
+		// turn can see them; on a mixed turn the streamer finalizes
+		// instead of looping so the function_call_output wrappers are
+		// skipped.
+		mixedTurn := len(clientToolCalls) > 0
+		var toolOutputs []any
+		if !mixedTurn {
+			toolOutputs = make([]any, 0, len(routerToolCalls))
+		}
 		for _, call := range routerToolCalls {
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.citations,
@@ -105,11 +116,24 @@ func runResponsesStreaming(
 				},
 				"", "",
 			)
-			toolOutputs = append(toolOutputs, map[string]any{
-				"type":    "function_call_output",
-				"call_id": call.id,
-				"output":  output,
-			})
+			if !mixedTurn {
+				toolOutputs = append(toolOutputs, map[string]any{
+					"type":    "function_call_output",
+					"call_id": call.id,
+					"output":  output,
+				})
+			}
+		}
+		if mixedTurn {
+			// Orphan-avoidance: appending the client function_calls to
+			// accumulatedInput without matching function_call_output
+			// items violates the Responses API contract and upstream
+			// either rejects the next turn or silently drops the client
+			// call. finalize emits response.completed with the resolved
+			// web_search_call items (prepended by
+			// attachResponsesCitations) alongside the client
+			// function_calls already forwarded live.
+			return streamer.finalize(r, em, modelName, result)
 		}
 
 		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(result.outputItems)...)

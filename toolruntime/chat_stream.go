@@ -115,9 +115,6 @@ func runChatStreaming(
 			return nil
 		}
 
-		// Mid-turn client tool_calls are intentionally dropped; only the
-		// final turn (no router tool calls to resolve) forwards them to
-		// the client. This preserves parity with runChatLoop.
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if debugEnabled {
 			toolNames := make([]string, 0, len(result.toolCalls))
@@ -132,9 +129,19 @@ func runChatStreaming(
 			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 
-		messages, _ := reqBody["messages"].([]any)
-		messages = append(messages, result.assistantMessage())
+		// Execute every router-owned tool call live so its citations
+		// and progress markers flow to the client before any terminal
+		// chunks. On a non-mixed turn the outputs are also appended to
+		// the messages history so the next upstream turn can see them;
+		// on a mixed turn the router finalizes instead of looping so
+		// appending to history would be wasted work.
+		mixedTurn := len(clientToolCalls) > 0
 		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
+		var messages []any
+		if !mixedTurn {
+			messages, _ = reqBody["messages"].([]any)
+			messages = append(messages, result.assistantMessage())
+		}
 		for _, call := range routerToolCalls {
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.citations,
@@ -143,11 +150,24 @@ func runChatStreaming(
 				},
 				tracePhase, tid,
 			)
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": call.id,
-				"content":      output,
-			})
+			if !mixedTurn {
+				messages = append(messages, map[string]any{
+					"role":         "tool",
+					"tool_call_id": call.id,
+					"content":      output,
+				})
+			}
+		}
+		if mixedTurn {
+			// Orphan-avoidance: looping back with an assistant
+			// tool_calls entry that has no matching role:"tool"
+			// response for the client call would either be rejected
+			// by upstream or silently swallow the client call. Finalize
+			// instead; finalize's existing logic emits the client
+			// tool_calls chunk and picks finish_reason="tool_calls" when
+			// upstream did not already set one.
+			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+client calls in one turn; finalizing)", tid, i+1)
+			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 		reqBody["messages"] = messages
 	}

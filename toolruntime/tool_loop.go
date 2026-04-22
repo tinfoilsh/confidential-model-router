@@ -45,10 +45,24 @@ type toolLoopAdapter interface {
 	// onUpstreamResponse extracts router-owned tool calls plus any
 	// surface-specific state (Chat: assistant message; Responses: raw
 	// output items) that applyToolOutputs will fold back into the next
-	// request body. elapsed is the upstream call's wall time.
-	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, state any)
+	// request body. hasClientToolCalls reports whether the same turn
+	// also carried client-owned tool calls, which signals the driver to
+	// finalize rather than continue looping so client calls are not
+	// orphaned in history or silently dropped. elapsed is the upstream
+	// call's wall time.
+	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, hasClientToolCalls bool, state any)
 
 	applyToolOutputs(reqBody map[string]any, state any, outputs []toolOutput) map[string]any
+
+	// stripRouterToolCallsFromResponse removes the router-owned tool
+	// call items from the response body on a mixed-turn finalize so the
+	// caller sees only the client-owned tool calls that still need a
+	// response. The router's work is surfaced separately via
+	// attachCitations (tinfoil-event markers on Chat, web_search_call
+	// output items on Responses). Non-mixed turns never call this
+	// helper because applyToolOutputs feeds the same router outputs
+	// back into the next upstream request instead.
+	stripRouterToolCallsFromResponse(response *upstreamJSONResponse)
 
 	// forcedFinalRequest builds the forced-final-answer request body used
 	// when the iteration budget is exhausted without the model settling.
@@ -118,7 +132,7 @@ func runToolLoop(
 		}
 		usageTotals.Add(response)
 
-		routerToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
+		routerToolCalls, hasClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
 		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s done iterations=%d (no router tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
@@ -137,6 +151,28 @@ func runToolLoop(
 				output: output,
 			})
 		}
+
+		// Mixed turn: the model emitted both router-owned and
+		// client-owned tool calls on the same assistant turn. The
+		// router has now resolved its own calls; looping back to the
+		// model would orphan the client calls (Chat leaves an
+		// assistant tool_calls entry with no matching tool output;
+		// Responses leaves a function_call with no matching
+		// function_call_output) and either the upstream rejects the
+		// next request or silently swallows the client call. Finalize
+		// instead so the caller receives the unresolved client tool
+		// calls verbatim alongside the resolved router work surfaced
+		// as citations / web_search_call items.
+		if hasClientToolCalls {
+			if traceID := adapter.traceID(); traceID != "" {
+				debugLogf("toolruntime:%s %s mixed_turn iterations=%d (router+client calls in one turn; finalizing without replay)", traceID, adapter.tracePhase(i), i+1)
+			}
+			adapter.stripRouterToolCallsFromResponse(response)
+			adapter.applyUsage(response, usageTotals.Usage())
+			adapter.attachCitations(response.body, &citations, eventsEnabled)
+			return response, nil
+		}
+
 		reqBody = adapter.applyToolOutputs(reqBody, state, outputs)
 	}
 
@@ -244,7 +280,7 @@ func (a *chatLoopAdapter) preIteration(reqBody map[string]any, iteration int) {
 	}
 }
 
-func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) ([]toolCall, any) {
+func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) ([]toolCall, bool, any) {
 	message, toolCalls := parseChatToolCalls(response.body)
 	routerToolCalls, clientToolCalls := splitToolCalls(a.ownedTools, toolCalls)
 	if debugEnabled {
@@ -265,7 +301,60 @@ func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, ite
 		debugLogf("toolruntime:%s chat.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
 			a.tid, iteration, elapsed, finishReason, len(toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(content, 240))
 	}
-	return routerToolCalls, message
+	return routerToolCalls, len(clientToolCalls) > 0, message
+}
+
+// stripRouterToolCallsFromResponse rewrites the assistant message on a
+// mixed-turn response so only the client-owned tool_calls remain. The
+// router-owned tool outputs are already threaded into citationState
+// via executeRouterToolCall; attachChatCitations surfaces them on the
+// message's annotations and, for eventsEnabled callers, as
+// tinfoil-event markers in the assistant content. finish_reason is
+// normalized to "tool_calls" to match the message shape the caller
+// now sees (tool_calls present, no prose); SDKs that gate on it will
+// collect tool outputs and re-post instead of treating the response
+// as final.
+func (a *chatLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
+	if response == nil || response.body == nil {
+		return
+	}
+	choices, _ := response.body["choices"].([]any)
+	if len(choices) == 0 {
+		return
+	}
+	choice, _ := choices[0].(map[string]any)
+	if choice == nil {
+		return
+	}
+	message, _ := choice["message"].(map[string]any)
+	if message == nil {
+		return
+	}
+	rawCalls, _ := message["tool_calls"].([]any)
+	if len(rawCalls) == 0 {
+		return
+	}
+	filtered := make([]any, 0, len(rawCalls))
+	for _, raw := range rawCalls {
+		call, _ := raw.(map[string]any)
+		if call == nil {
+			continue
+		}
+		fn, _ := call["function"].(map[string]any)
+		name := ""
+		if fn != nil {
+			name = stringValue(fn["name"])
+		}
+		if _, ok := a.ownedTools[name]; ok {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	message["tool_calls"] = filtered
+	if len(filtered) == 0 {
+		delete(message, "tool_calls")
+	}
+	choice["finish_reason"] = "tool_calls"
 }
 
 func (a *chatLoopAdapter) applyToolOutputs(reqBody map[string]any, state any, outputs []toolOutput) map[string]any {
@@ -351,10 +440,43 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	return base
 }
 
-func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, any) {
-	routerToolCalls, _ := splitToolCalls(a.ownedTools, parseResponsesToolCalls(response.body))
+func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, bool, any) {
+	routerToolCalls, clientToolCalls := splitToolCalls(a.ownedTools, parseResponsesToolCalls(response.body))
 	outputItems, _ := response.body["output"].([]any)
-	return routerToolCalls, outputItems
+	return routerToolCalls, len(clientToolCalls) > 0, outputItems
+}
+
+// stripRouterToolCallsFromResponse removes router-owned function_call
+// items from the response's output array on a mixed-turn finalize so
+// the caller sees only the client-owned function_calls that need a
+// response. Router-owned work is surfaced via the synthesized
+// web_search_call items attachResponsesCitations prepends to the same
+// output array, which is the shape OpenAI's Responses API documents
+// for router-executed tools.
+func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
+	if response == nil || response.body == nil {
+		return
+	}
+	outputItems, _ := response.body["output"].([]any)
+	if len(outputItems) == 0 {
+		return
+	}
+	filtered := make([]any, 0, len(outputItems))
+	for _, rawItem := range outputItems {
+		item, _ := rawItem.(map[string]any)
+		if item == nil {
+			filtered = append(filtered, rawItem)
+			continue
+		}
+		itemType := stringValue(item["type"])
+		if itemType == "function_call" || itemType == "mcp_call" {
+			if _, ok := a.ownedTools[stringValue(item["name"])]; ok {
+				continue
+			}
+		}
+		filtered = append(filtered, rawItem)
+	}
+	response.body["output"] = filtered
 }
 
 func (a *responsesLoopAdapter) applyToolOutputs(_ map[string]any, state any, outputs []toolOutput) map[string]any {
