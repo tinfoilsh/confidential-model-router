@@ -33,7 +33,7 @@ func buildRouterPrompt() *mcp.GetPromptResult {
 			{
 				Role: "system",
 				Content: &mcp.TextContent{
-					Text: "You may use the search and fetch tools when current web information would improve the answer. Use search first to discover sources, then fetch specific URLs only when you need deeper detail. " + citationInstructions + " " + toolOutputWarning + " " + toolEconomyInstructions,
+					Text: fmt.Sprintf("You may use the %s and %s tools when current web information would improve the answer. Use %s first to discover sources, then %s specific URLs only when you need deeper detail. %s %s %s", routerSearchToolName, routerFetchToolName, routerSearchToolName, routerFetchToolName, citationInstructions, toolOutputWarning, toolEconomyInstructions),
 				},
 			},
 		},

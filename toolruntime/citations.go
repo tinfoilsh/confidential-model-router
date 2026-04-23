@@ -480,10 +480,10 @@ func formatStructuredToolOutput(name string, raw any, citations *citationState) 
 		return ""
 	}
 
-	switch name {
-	case "search":
+	switch {
+	case isRouterSearchToolName(name):
 		return formatSearchToolOutput(content["results"], citations)
-	case "fetch":
+	case isRouterFetchToolName(name):
 		if formatted := formatFetchToolOutput(content["pages"], citations); formatted != "" {
 			return formatted
 		}
@@ -753,8 +753,8 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 	events := make([]any, 0, len(records))
 	for _, record := range records {
 		status := statusForRecord(record)
-		switch record.name {
-		case "search":
+		switch {
+		case isRouterSearchToolName(record.name):
 			action := map[string]any{"type": "search"}
 			if query := stringValue(record.arguments["query"]); query != "" {
 				action["query"] = query
@@ -765,7 +765,7 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 				}
 			}
 			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
-		case "fetch":
+		case isRouterFetchToolName(record.name):
 			for _, url := range fetchArgumentURLs(record.arguments) {
 				action := map[string]any{"type": "open_page", "url": url}
 				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))

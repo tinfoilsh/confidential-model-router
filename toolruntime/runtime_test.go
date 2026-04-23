@@ -20,18 +20,18 @@ func TestReplaceResponsesWebSearchTools(t *testing.T) {
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "other"},
 	}, []any{
-		map[string]any{"type": "function", "name": "search"},
-		map[string]any{"type": "function", "name": "fetch"},
+		map[string]any{"type": "function", "name": routerSearchToolName},
+		map[string]any{"type": "function", "name": routerFetchToolName},
 	})
 
 	if len(replaced) != 3 {
 		t.Fatalf("expected 3 tools, got %d", len(replaced))
 	}
-	if replaced[0].(map[string]any)["name"] != "search" {
-		t.Fatalf("expected first replacement tool to be search, got %#v", replaced[0])
+	if replaced[0].(map[string]any)["name"] != routerSearchToolName {
+		t.Fatalf("expected first replacement tool to be %s, got %#v", routerSearchToolName, replaced[0])
 	}
-	if replaced[1].(map[string]any)["name"] != "fetch" {
-		t.Fatalf("expected second replacement tool to be fetch, got %#v", replaced[1])
+	if replaced[1].(map[string]any)["name"] != routerFetchToolName {
+		t.Fatalf("expected second replacement tool to be %s, got %#v", routerFetchToolName, replaced[1])
 	}
 }
 
@@ -41,8 +41,8 @@ func TestReplaceResponsesWebSearchToolsDedupes(t *testing.T) {
 		map[string]any{"type": "function", "name": "other"},
 		map[string]any{"type": "web_search"},
 	}, []any{
-		map[string]any{"type": "function", "name": "search"},
-		map[string]any{"type": "function", "name": "fetch"},
+		map[string]any{"type": "function", "name": routerSearchToolName},
+		map[string]any{"type": "function", "name": routerFetchToolName},
 	})
 
 	counts := map[string]int{}
@@ -52,11 +52,11 @@ func TestReplaceResponsesWebSearchToolsDedupes(t *testing.T) {
 			counts[name]++
 		}
 	}
-	if counts["search"] != 1 {
-		t.Fatalf("expected search injected exactly once, got %d", counts["search"])
+	if counts[routerSearchToolName] != 1 {
+		t.Fatalf("expected %s injected exactly once, got %d", routerSearchToolName, counts[routerSearchToolName])
 	}
-	if counts["fetch"] != 1 {
-		t.Fatalf("expected fetch injected exactly once, got %d", counts["fetch"])
+	if counts[routerFetchToolName] != 1 {
+		t.Fatalf("expected %s injected exactly once, got %d", routerFetchToolName, counts[routerFetchToolName])
 	}
 	if counts["other"] != 1 {
 		t.Fatalf("expected other tool preserved exactly once, got %d", counts["other"])
@@ -91,12 +91,12 @@ func TestParseResponsesToolCalls(t *testing.T) {
 
 func TestSplitToolCalls(t *testing.T) {
 	routerCalls, clientCalls := splitToolCalls(map[string]struct{}{
-		"search": {},
-		"fetch":  {},
+		routerSearchToolName: {},
+		routerFetchToolName:  {},
 	}, []toolCall{
-		{id: "call_1", name: "search"},
+		{id: "call_1", name: routerSearchToolName},
 		{id: "call_2", name: "client_lookup"},
-		{id: "call_3", name: "fetch"},
+		{id: "call_3", name: routerFetchToolName},
 	})
 
 	if len(routerCalls) != 2 {
@@ -525,7 +525,7 @@ func TestForcedFinalResponsesRequestStripsToolSelection(t *testing.T) {
 	reqBody := map[string]any{
 		"input":       []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
 		"tools":       []any{map[string]any{"type": "function"}},
-		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "search"}},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": routerSearchToolName}},
 	}
 	finalBody := forcedFinalResponsesRequest(reqBody)
 	for _, field := range []string{"tools", "tool_choice"} {

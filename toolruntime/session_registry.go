@@ -28,6 +28,12 @@ type sessionRegistry struct {
 	// byTool maps tool name -> servicing session. Sealed after build().
 	byTool map[string]*mcp.ClientSession
 
+	// dispatchByTool maps the model-facing tool name -> underlying MCP
+	// tool name. Most tools keep the same name on both sides; router-owned
+	// web-search tools are intentionally aliased so they do not collide
+	// with generic client tool names such as "search" or "fetch".
+	dispatchByTool map[string]string
+
 	// owned is the union of router-owned tool names across all sessions.
 	owned map[string]struct{}
 
@@ -57,8 +63,9 @@ func buildSessionRegistry(
 	}
 
 	r := &sessionRegistry{
-		byTool: make(map[string]*mcp.ClientSession),
-		owned:  make(map[string]struct{}),
+		byTool:         make(map[string]*mcp.ClientSession),
+		dispatchByTool: make(map[string]string),
+		owned:          make(map[string]struct{}),
 	}
 
 	for _, profile := range profiles {
@@ -75,7 +82,8 @@ func buildSessionRegistry(
 		}
 
 		for _, tool := range toolsResult.Tools {
-			if existing, clash := r.byTool[tool.Name]; clash {
+			outwardName := outwardRouterToolName(profile.Name, tool.Name)
+			if existing, clash := r.byTool[outwardName]; clash {
 				// We deliberately fail LOUD on overlapping tool names
 				// rather than silently routing to whichever session
 				// registered last. Namespacing would mask a genuine
@@ -86,11 +94,12 @@ func buildSessionRegistry(
 				r.CloseAll()
 				return nil, fmt.Errorf(
 					"tool name %q advertised by multiple profiles; rename or disable one",
-					tool.Name,
+					outwardName,
 				)
 			}
-			r.byTool[tool.Name] = session
-			r.owned[tool.Name] = struct{}{}
+			r.byTool[outwardName] = session
+			r.dispatchByTool[outwardName] = tool.Name
+			r.owned[outwardName] = struct{}{}
 		}
 
 		r.entries = append(r.entries, sessionEntry{
@@ -98,7 +107,9 @@ func buildSessionRegistry(
 			session: session,
 			tools:   toolsResult.Tools,
 		})
-		r.tools = append(r.tools, toolsResult.Tools...)
+		for _, tool := range toolsResult.Tools {
+			r.tools = append(r.tools, outwardRouterTool(profile.Name, tool))
+		}
 	}
 
 	return r, nil
@@ -116,6 +127,16 @@ func (r *sessionRegistry) sessionFor(toolName string) (*mcp.ClientSession, bool)
 	}
 	s, ok := r.byTool[toolName]
 	return s, ok
+}
+
+func (r *sessionRegistry) dispatchName(toolName string) string {
+	if r == nil {
+		return dispatchRouterToolName(toolName)
+	}
+	if name, ok := r.dispatchByTool[toolName]; ok {
+		return name
+	}
+	return dispatchRouterToolName(toolName)
 }
 
 // ownedTools returns the union of router-owned tool names across every

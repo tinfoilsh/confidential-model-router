@@ -74,14 +74,15 @@ func executeToolWithProgress(
 	if !ok {
 		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
 	}
-	switch call.name {
-	case "search":
+	dispatchName := registry.dispatchName(call.name)
+	switch {
+	case isRouterSearchToolName(call.name):
 		id := "ws_" + uuid.NewString()
 		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
 		handle := emitter.open(id, action)
 		emitter.phase(handle, "response.web_search_call.in_progress")
 		emitter.phase(handle, "response.web_search_call.searching")
-		output, err := callTool(ctx, session, call.name, call.arguments, citations)
+		output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
 		if err != nil {
 			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
 			return "", err
@@ -90,10 +91,10 @@ func executeToolWithProgress(
 		emitter.phase(handle, "response.web_search_call.completed")
 		emitter.close(handle, action, "completed", "", sources)
 		return output, nil
-	case "fetch":
+	case isRouterFetchToolName(call.name):
 		urls := fetchArgumentURLs(call.arguments)
 		if len(urls) == 0 {
-			return callTool(ctx, session, call.name, call.arguments, citations)
+			return callTool(ctx, session, dispatchName, call.arguments, citations)
 		}
 		handles := make([]toolProgressHandle, len(urls))
 		actions := make([]map[string]any, len(urls))
@@ -103,7 +104,7 @@ func executeToolWithProgress(
 			handles[i] = emitter.open(id, actions[i])
 			emitter.phase(handles[i], "response.web_search_call.in_progress")
 		}
-		output, err := callTool(ctx, session, call.name, call.arguments, citations)
+		output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
 			status := failureStatusFor(err)
@@ -118,7 +119,7 @@ func executeToolWithProgress(
 		}
 		return output, nil
 	default:
-		return callTool(ctx, session, call.name, call.arguments, citations)
+		return callTool(ctx, session, dispatchName, call.arguments, citations)
 	}
 }
 

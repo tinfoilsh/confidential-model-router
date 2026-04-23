@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-
 // Tinfoil-event marker constants. The router emits opt-in progress
 // markers for router-owned tool calls (web search, fetch) by wrapping a
 // JSON payload in `<tinfoil-event>...</tinfoil-event>` tags carried
@@ -185,14 +184,14 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 		builder.WriteString(tinfoilEventMarker(id, s, action, reason, sources))
 	}
 	for _, record := range records {
-		switch record.name {
-		case "search":
+		switch {
+		case isRouterSearchToolName(record.name):
 			action := map[string]any{"type": "search"}
 			if query := stringValue(record.arguments["query"]); query != "" {
 				action["query"] = query
 			}
 			writePair(action, status(record), record.errorReason, record.resultSources)
-		case "fetch":
+		case isRouterFetchToolName(record.name):
 			urls := fetchArgumentURLs(record.arguments)
 			if len(urls) == 0 {
 				continue

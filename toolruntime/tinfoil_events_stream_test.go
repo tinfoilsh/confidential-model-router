@@ -26,7 +26,7 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 		emitters:              map[itemContentKey]*citationEmitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
-		ownedTools:            map[string]struct{}{"search": {}, "fetch": {}},
+		ownedTools:            map[string]struct{}{routerSearchToolName: {}, routerFetchToolName: {}},
 		responseID:            "resp_test",
 		upstreamIDCaptured:    true,
 		createdAt:             1700000000,

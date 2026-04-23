@@ -496,10 +496,10 @@ func applyParallelToolCallsPolicy(reqBody map[string]any) {
 // applyWebSearchOptionsToToolCall dispatches to the per-tool merge helper so
 // options forwarded from OpenAI's request shape end up on the MCP tool call.
 func applyWebSearchOptionsToToolCall(toolName string, arguments map[string]any, opts webSearchOptions) {
-	switch toolName {
-	case "search":
+	switch {
+	case isRouterSearchToolName(toolName):
 		opts.applyToSearchArgs(arguments)
-	case "fetch":
+	case isRouterFetchToolName(toolName):
 		opts.applyToFetchArgs(arguments)
 	}
 }
