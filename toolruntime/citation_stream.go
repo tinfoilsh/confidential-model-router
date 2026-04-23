@@ -117,6 +117,7 @@ func (e *citationEmitter) drain(final bool) (string, []citationAnnotation) {
 			normalizeLinkBrackets(e.text, openIndex, endIndex)
 			contentBuilder.WriteString(string(e.text[openIndex:endIndex]))
 			if source, sourceOK := e.state.resolveSource(url); sourceOK {
+				source.url = url // Use the model's URL so the webapp can match it against the rendered markdown link
 				annotations = append(annotations, citationAnnotation{
 					startIndex: labelStart,
 					endIndex:   labelEnd,
