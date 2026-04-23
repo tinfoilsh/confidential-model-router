@@ -259,6 +259,7 @@ func (s *responsesStreamer) runIteration(
 	defer body.Close()
 
 	s.resetPerIterationState()
+	s.functionCallArguments = map[int]*strings.Builder{}
 	return s.pumpUpstream(newSSEReader(body), isFirst)
 }
 
