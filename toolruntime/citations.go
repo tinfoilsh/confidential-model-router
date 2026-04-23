@@ -269,6 +269,7 @@ func (c *citationState) matchesFor(text string) []annotationMatch {
 		if !ok {
 			continue
 		}
+		source.url = url // Use the model's URL so the webapp can match it against the rendered markdown link
 		// Span the visible label, not the whole [label](url) expression, so
 		// downstream consumers can highlight just the link text the user sees.
 		// Convert regex byte offsets to Unicode code-point offsets so the
