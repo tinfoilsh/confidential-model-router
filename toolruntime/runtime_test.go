@@ -832,3 +832,65 @@ func TestStripRouterOwnedIncludesFiltersActionSources(t *testing.T) {
 		t.Fatal("stripRouterOwnedIncludes must not invent an include key")
 	}
 }
+
+// TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries pins that
+// a raw tool_calls entry which fails the map[string]any assertion is kept
+// rather than silently dropped. The entry can't be inspected, so it can't
+// be attributed to the router; preserving it matches the defensive shape
+// the responses adapter uses for output items it can't classify.
+func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T) {
+	response := &upstreamJSONResponse{
+		body: map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{
+							"unparseable-entry",
+							map[string]any{
+								"id":   "call_router",
+								"type": "function",
+								"function": map[string]any{
+									"name":      routerSearchToolName,
+									"arguments": "{}",
+								},
+							},
+							map[string]any{
+								"id":   "call_client",
+								"type": "function",
+								"function": map[string]any{
+									"name":      "client_tool",
+									"arguments": "{}",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		header: make(http.Header),
+	}
+
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{})
+	adapter.stripRouterToolCallsFromResponse(response)
+
+	choice := response.body["choices"].([]any)[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	calls, _ := message["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool_calls after strip (unparseable + client), got %d: %#v", len(calls), calls)
+	}
+	if got, _ := calls[0].(string); got != "unparseable-entry" {
+		t.Fatalf("expected unparseable entry preserved as first call, got %#v", calls[0])
+	}
+	clientCall, _ := calls[1].(map[string]any)
+	if clientCall == nil {
+		t.Fatalf("expected client tool call preserved as second entry, got %#v", calls[1])
+	}
+	if fn, _ := clientCall["function"].(map[string]any); fn == nil || stringValue(fn["name"]) != "client_tool" {
+		t.Fatalf("expected client_tool to survive strip, got %#v", clientCall)
+	}
+	if stringValue(choice["finish_reason"]) != "tool_calls" {
+		t.Fatalf("expected finish_reason normalized to tool_calls, got %#v", choice["finish_reason"])
+	}
+}

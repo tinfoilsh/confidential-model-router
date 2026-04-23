@@ -338,6 +338,7 @@ func (a *chatLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSO
 	for _, raw := range rawCalls {
 		call, _ := raw.(map[string]any)
 		if call == nil {
+			filtered = append(filtered, raw)
 			continue
 		}
 		fn, _ := call["function"].(map[string]any)
