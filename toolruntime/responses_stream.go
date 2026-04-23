@@ -96,13 +96,6 @@ func runResponsesStreaming(
 			return streamer.finalize(r, em, modelName, result)
 		}
 
-		// Execute every router-owned tool call so its citations and
-		// web_search_call progress events are surfaced to the client
-		// before any terminal events. On a non-mixed turn the outputs
-		// are also appended to accumulatedInput so the next upstream
-		// turn can see them; on a mixed turn the streamer finalizes
-		// instead of looping so the function_call_output wrappers are
-		// skipped.
 		mixedTurn := len(clientToolCalls) > 0
 		var toolOutputs []any
 		if !mixedTurn {
@@ -124,15 +117,8 @@ func runResponsesStreaming(
 				})
 			}
 		}
+		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
-			// Orphan-avoidance: appending the client function_calls to
-			// accumulatedInput without matching function_call_output
-			// items violates the Responses API contract and upstream
-			// either rejects the next turn or silently drops the client
-			// call. finalize emits response.completed with the resolved
-			// web_search_call items (prepended by
-			// attachResponsesCitations) alongside the client
-			// function_calls already forwarded live.
 			return streamer.finalize(r, em, modelName, result)
 		}
 

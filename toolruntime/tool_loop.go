@@ -46,22 +46,16 @@ type toolLoopAdapter interface {
 	// surface-specific state (Chat: assistant message; Responses: raw
 	// output items) that applyToolOutputs will fold back into the next
 	// request body. hasClientToolCalls reports whether the same turn
-	// also carried client-owned tool calls, which signals the driver to
-	// finalize rather than continue looping so client calls are not
-	// orphaned in history or silently dropped. elapsed is the upstream
-	// call's wall time.
+	// also carried client-owned tool calls; see the mixed-turn contract
+	// in runToolLoop. elapsed is the upstream call's wall time.
 	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, hasClientToolCalls bool, state any)
 
 	applyToolOutputs(reqBody map[string]any, state any, outputs []toolOutput) map[string]any
 
-	// stripRouterToolCallsFromResponse removes the router-owned tool
-	// call items from the response body on a mixed-turn finalize so the
-	// caller sees only the client-owned tool calls that still need a
-	// response. The router's work is surfaced separately via
-	// attachCitations (tinfoil-event markers on Chat, web_search_call
-	// output items on Responses). Non-mixed turns never call this
-	// helper because applyToolOutputs feeds the same router outputs
-	// back into the next upstream request instead.
+	// stripRouterToolCallsFromResponse removes router-owned tool calls
+	// from a mixed-turn response so the caller sees only the client-owned
+	// calls that still need a response. Router work is surfaced via
+	// attachCitations instead.
 	stripRouterToolCallsFromResponse(response *upstreamJSONResponse)
 
 	// forcedFinalRequest builds the forced-final-answer request body used
@@ -96,6 +90,15 @@ type toolOutput struct {
 // "no router tool calls this turn -> finalize and return" contract, the
 // executeRouterToolCall dispatch, and the iteration-budget / forced-final
 // fallback with its usage-accumulation comment.
+//
+// Mixed-turn contract: when an assistant turn emits both router-owned
+// and client-owned tool calls, the router resolves its own calls and
+// then finalizes instead of replaying. Replaying would send back an
+// assistant message whose client tool_calls have no matching
+// role:"tool" / function_call_output entries; upstream then either
+// rejects the request or drops the client call. On finalize the
+// caller sees the client tool_calls verbatim and the router's work
+// surfaced via attachCitations.
 func runToolLoop(
 	ctx context.Context,
 	em *manager.EnclaveManager,
@@ -152,17 +155,8 @@ func runToolLoop(
 			})
 		}
 
-		// Mixed turn: the model emitted both router-owned and
-		// client-owned tool calls on the same assistant turn. The
-		// router has now resolved its own calls; looping back to the
-		// model would orphan the client calls (Chat leaves an
-		// assistant tool_calls entry with no matching tool output;
-		// Responses leaves a function_call with no matching
-		// function_call_output) and either the upstream rejects the
-		// next request or silently swallows the client call. Finalize
-		// instead so the caller receives the unresolved client tool
-		// calls verbatim alongside the resolved router work surfaced
-		// as citations / web_search_call items.
+		// Mixed turn: finalize instead of replaying so the client's
+		// tool calls are not orphaned in the next request's history.
 		if hasClientToolCalls {
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s mixed_turn iterations=%d (router+client calls in one turn; finalizing without replay)", traceID, adapter.tracePhase(i), i+1)
@@ -304,16 +298,10 @@ func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, ite
 	return routerToolCalls, len(clientToolCalls) > 0, message
 }
 
-// stripRouterToolCallsFromResponse rewrites the assistant message on a
-// mixed-turn response so only the client-owned tool_calls remain. The
-// router-owned tool outputs are already threaded into citationState
-// via executeRouterToolCall; attachChatCitations surfaces them on the
-// message's annotations and, for eventsEnabled callers, as
-// tinfoil-event markers in the assistant content. finish_reason is
-// normalized to "tool_calls" to match the message shape the caller
-// now sees (tool_calls present, no prose); SDKs that gate on it will
-// collect tool outputs and re-post instead of treating the response
-// as final.
+// stripRouterToolCallsFromResponse keeps only the client-owned
+// tool_calls on the assistant message and normalizes finish_reason to
+// "tool_calls" so SDKs that gate on it collect tool outputs and
+// re-post instead of treating the response as final.
 func (a *chatLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
 	if response == nil || response.body == nil {
 		return
@@ -447,13 +435,9 @@ func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse
 	return routerToolCalls, len(clientToolCalls) > 0, outputItems
 }
 
-// stripRouterToolCallsFromResponse removes router-owned function_call
-// items from the response's output array on a mixed-turn finalize so
-// the caller sees only the client-owned function_calls that need a
-// response. Router-owned work is surfaced via the synthesized
-// web_search_call items attachResponsesCitations prepends to the same
-// output array, which is the shape OpenAI's Responses API documents
-// for router-executed tools.
+// stripRouterToolCallsFromResponse drops router-owned function_call
+// items from the output array; attachResponsesCitations prepends the
+// matching web_search_call items that replace them.
 func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
 	if response == nil || response.body == nil {
 		return

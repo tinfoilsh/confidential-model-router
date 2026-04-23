@@ -129,12 +129,6 @@ func runChatStreaming(
 			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 
-		// Execute every router-owned tool call live so its citations
-		// and progress markers flow to the client before any terminal
-		// chunks. On a non-mixed turn the outputs are also appended to
-		// the messages history so the next upstream turn can see them;
-		// on a mixed turn the router finalizes instead of looping so
-		// appending to history would be wasted work.
 		mixedTurn := len(clientToolCalls) > 0
 		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
 		var messages []any
@@ -158,14 +152,8 @@ func runChatStreaming(
 				})
 			}
 		}
+		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
-			// Orphan-avoidance: looping back with an assistant
-			// tool_calls entry that has no matching role:"tool"
-			// response for the client call would either be rejected
-			// by upstream or silently swallow the client call. Finalize
-			// instead; finalize's existing logic emits the client
-			// tool_calls chunk and picks finish_reason="tool_calls" when
-			// upstream did not already set one.
 			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+client calls in one turn; finalizing)", tid, i+1)
 			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
