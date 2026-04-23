@@ -116,6 +116,39 @@ func TestChatStreamerFinalizeEmitsFinishAndUsage(t *testing.T) {
 	}
 }
 
+func TestChatStreamerFinalizeForcesToolCallsFinishReason(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	result := chatIterationResult{
+		finishReason: "stop",
+		rawToolCalls: []any{
+			map[string]any{
+				"id":   "call_1",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "client_lookup",
+					"arguments": `{"id":1}`,
+				},
+			},
+		},
+	}
+	clientToolCalls := []toolCall{
+		{id: "call_1", name: "client_lookup", arguments: map[string]any{"id": float64(1)}},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if err := streamer.finalize(req, nil, "gpt-oss-120b", result, clientToolCalls); err != nil {
+		t.Fatalf("finalize returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("expected finish_reason tool_calls, got %s", body)
+	}
+	if strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Fatalf("unexpected stop finish_reason when tool_calls are present, got %s", body)
+	}
+}
+
 func TestChatStreamerEmitContentDeltaForwardsAnnotations(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.citations.sources = []citationSource{
@@ -317,6 +350,43 @@ func TestChatToolCallBuilderAssemblesFragments(t *testing.T) {
 	fn, _ := rawMap["function"].(map[string]any)
 	if fn["arguments"].(string) != `{"query":"go"}` {
 		t.Fatalf("unexpected raw arguments: %#v", fn["arguments"])
+	}
+}
+
+func TestRawToolCallsFromParsedMatchesClientCallsWithoutIDs(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"id":   "",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "search",
+				"arguments": `{"query":"go"}`,
+			},
+		},
+		map[string]any{
+			"id":   "",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "client_lookup",
+				"arguments": `{"id":1}`,
+			},
+		},
+	}
+	parsed := []toolCall{
+		{name: "client_lookup", arguments: map[string]any{"id": float64(1)}},
+	}
+
+	filtered := rawToolCallsFromParsed(parsed, raw)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered raw tool call, got %#v", filtered)
+	}
+	call, _ := filtered[0].(map[string]any)
+	function, _ := call["function"].(map[string]any)
+	if got := function["name"]; got != "client_lookup" {
+		t.Fatalf("expected client_lookup raw tool call, got %#v", got)
+	}
+	if got := call["index"]; got != 0 {
+		t.Fatalf("expected reindexed client tool call at 0, got %#v", got)
 	}
 }
 

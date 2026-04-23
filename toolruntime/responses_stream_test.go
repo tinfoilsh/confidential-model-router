@@ -16,7 +16,8 @@ import (
 // newTestResponsesStreamer builds a responsesStreamer backed by an
 // httptest recorder, pre-marked as having written headers so tests can
 // exercise event emission without driving a real upstream request.
-// The router-owned tools are pre-seeded with `search` and `fetch` so
+// The router-owned tools are pre-seeded with `router_search` and
+// `router_fetch` so
 // tests exercising tool-call interception see the production-time
 // classification without having to wire up the full Handle() flow.
 func newTestResponsesStreamer(t *testing.T) (*responsesStreamer, *httptest.ResponseRecorder) {
@@ -39,8 +40,8 @@ func newTestResponsesStreamer(t *testing.T) (*responsesStreamer, *httptest.Respo
 		outputIndexMap:        map[int]int{},
 		suppressedItems:       map[int]struct{}{},
 		ownedTools: map[string]struct{}{
-			"search": {},
-			"fetch":  {},
+			routerSearchToolName: {},
+			routerFetchToolName:  {},
 		},
 	}
 	return streamer, rec
@@ -55,8 +56,8 @@ func TestResponsesStreamerPumpForwardsTextAndCapturesToolCalls(t *testing.T) {
 		"event: response.output_text.delta\n" + `data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","content_index":0,"delta":"world"}`,
 		"event: response.output_text.done\n" + `data: {"type":"response.output_text.done","output_index":0,"item_id":"msg_1","content_index":0,"text":"hello world"}`,
 		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message"}}`,
-		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":"{\"query\":\"go\"}"}}`,
-		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":"{\"query\":\"go\"}"}}`,
+		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":"{\"query\":\"go\"}"}}`,
+		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":"{\"query\":\"go\"}"}}`,
 		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
 	}
 	upstream := strings.Join(frames, "\n\n") + "\n\n"
@@ -69,8 +70,8 @@ func TestResponsesStreamerPumpForwardsTextAndCapturesToolCalls(t *testing.T) {
 	if streamer.responseID != "resp_upstream" {
 		t.Fatalf("expected upstream id captured, got %q", streamer.responseID)
 	}
-	if len(result.toolCalls) != 1 || result.toolCalls[0].name != "search" {
-		t.Fatalf("expected search tool call, got %#v", result.toolCalls)
+	if len(result.toolCalls) != 1 || result.toolCalls[0].name != routerSearchToolName {
+		t.Fatalf("expected %s tool call, got %#v", routerSearchToolName, result.toolCalls)
 	}
 	if got := result.toolCalls[0].arguments["query"]; got != "go" {
 		t.Fatalf("expected arguments to parse, got %#v", got)
@@ -481,11 +482,11 @@ func TestResponsesStreamerAnnotationIndexMonotonic(t *testing.T) {
 func TestResponsesStreamerFunctionCallArgumentsReassembly(t *testing.T) {
 	streamer, _ := newTestResponsesStreamer(t)
 	frames := []string{
-		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":""}}`,
+		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":""}}`,
 		"event: response.function_call_arguments.delta\n" + `data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"query\":\""}`,
 		"event: response.function_call_arguments.delta\n" + `data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"go\"}"}`,
 		"event: response.function_call_arguments.done\n" + `data: {"type":"response.function_call_arguments.done","output_index":0}`,
-		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":""}}`,
+		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":""}}`,
 		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream"}}`,
 	}
 	upstream := strings.Join(frames, "\n\n") + "\n\n"
@@ -513,11 +514,11 @@ func TestResponsesStreamerFunctionCallArgumentsReassembly(t *testing.T) {
 func TestResponsesStreamerRouterOwnedArgsSplicedBackIntoItem(t *testing.T) {
 	streamer, _ := newTestResponsesStreamer(t)
 	frames := []string{
-		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":""}}`,
+		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":""}}`,
 		"event: response.function_call_arguments.delta\n" + `data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"query\":"}`,
 		"event: response.function_call_arguments.delta\n" + `data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"go\"}"}`,
 		"event: response.function_call_arguments.done\n" + `data: {"type":"response.function_call_arguments.done","output_index":0}`,
-		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"search","call_id":"call_1","arguments":""}}`,
+		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"` + routerSearchToolName + `","call_id":"call_1","arguments":""}}`,
 		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream"}}`,
 	}
 	upstream := strings.Join(frames, "\n\n") + "\n\n"
@@ -615,7 +616,7 @@ func TestResponsesStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 		suppressedItems:       map[int]struct{}{},
 		responseID:            "resp_test",
 		createdAt:             1,
-		ownedTools:            map[string]struct{}{"search": {}},
+		ownedTools:            map[string]struct{}{routerSearchToolName: {}},
 	}
 
 	frames := []string{
@@ -703,15 +704,15 @@ func TestResponsesStreamerTwoIterationStitching(t *testing.T) {
 	// tool. pump captures it, suppresses it from the wire, and the
 	// outer driver would run it and re-pump.
 	turn0 := responsesIterationTurn("resp_upstream", []any{
-		map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"go"}`},
+		map[string]any{"id": "fc_1", "type": "function_call", "name": routerSearchToolName, "call_id": "call_a", "arguments": `{"query":"go"}`},
 	})
 	streamer.resetPerIterationState()
 	result0, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(turn0)), true)
 	if err != nil {
 		t.Fatalf("iter0 pump err: %v", err)
 	}
-	if len(result0.toolCalls) != 1 || result0.toolCalls[0].name != "search" {
-		t.Fatalf("iter0 expected 1 search tool call, got %+v", result0.toolCalls)
+	if len(result0.toolCalls) != 1 || result0.toolCalls[0].name != routerSearchToolName {
+		t.Fatalf("iter0 expected 1 %s tool call, got %+v", routerSearchToolName, result0.toolCalls)
 	}
 
 	// Iteration 1: upstream emits the final assistant message.
@@ -756,10 +757,10 @@ func TestResponsesStreamerThreeIterationStitching(t *testing.T) {
 
 	turns := []string{
 		responsesIterationTurn("resp_upstream", []any{
-			map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"q1"}`},
+			map[string]any{"id": "fc_1", "type": "function_call", "name": routerSearchToolName, "call_id": "call_a", "arguments": `{"query":"q1"}`},
 		}),
 		responsesIterationTurn("resp_upstream", []any{
-			map[string]any{"id": "fc_2", "type": "function_call", "name": "search", "call_id": "call_b", "arguments": `{"query":"q2"}`},
+			map[string]any{"id": "fc_2", "type": "function_call", "name": routerSearchToolName, "call_id": "call_b", "arguments": `{"query":"q2"}`},
 		}),
 		responsesIterationTurn("resp_upstream", []any{
 			map[string]any{"id": "msg_final", "type": "message", "text": "answer"},
@@ -843,7 +844,7 @@ func TestResponsesStreamerSequenceNumberMonotonicAcrossIterations(t *testing.T) 
 
 	turns := []string{
 		responsesIterationTurn("resp_upstream", []any{
-			map[string]any{"id": "fc_1", "type": "function_call", "name": "search", "call_id": "call_a", "arguments": `{"query":"q1"}`},
+			map[string]any{"id": "fc_1", "type": "function_call", "name": routerSearchToolName, "call_id": "call_a", "arguments": `{"query":"q1"}`},
 		}),
 		responsesIterationTurn("resp_upstream", []any{
 			map[string]any{"id": "msg_final", "type": "message", "text": "answer"},

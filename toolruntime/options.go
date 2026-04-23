@@ -474,13 +474,25 @@ func normalizePublishedDate(raw any) string {
 	return ""
 }
 
+// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
+// the model can fan out client-owned tool calls. Router-owned tools are
+// still dispatched serially inside runToolLoop to keep citation numbering
+// and streaming event order deterministic. A caller-provided value is
+// honored unchanged.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
 // applyWebSearchOptionsToToolCall dispatches to the per-tool merge helper so
 // options forwarded from OpenAI's request shape end up on the MCP tool call.
 func applyWebSearchOptionsToToolCall(toolName string, arguments map[string]any, opts webSearchOptions) {
-	switch toolName {
-	case "search":
+	switch {
+	case isRouterSearchToolName(toolName):
 		opts.applyToSearchArgs(arguments)
-	case "fetch":
+	case isRouterFetchToolName(toolName):
 		opts.applyToFetchArgs(arguments)
 	}
 }

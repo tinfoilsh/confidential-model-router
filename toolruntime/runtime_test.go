@@ -20,18 +20,18 @@ func TestReplaceResponsesWebSearchTools(t *testing.T) {
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "other"},
 	}, []any{
-		map[string]any{"type": "function", "name": "search"},
-		map[string]any{"type": "function", "name": "fetch"},
+		map[string]any{"type": "function", "name": routerSearchToolName},
+		map[string]any{"type": "function", "name": routerFetchToolName},
 	})
 
 	if len(replaced) != 3 {
 		t.Fatalf("expected 3 tools, got %d", len(replaced))
 	}
-	if replaced[0].(map[string]any)["name"] != "search" {
-		t.Fatalf("expected first replacement tool to be search, got %#v", replaced[0])
+	if replaced[0].(map[string]any)["name"] != routerSearchToolName {
+		t.Fatalf("expected first replacement tool to be %s, got %#v", routerSearchToolName, replaced[0])
 	}
-	if replaced[1].(map[string]any)["name"] != "fetch" {
-		t.Fatalf("expected second replacement tool to be fetch, got %#v", replaced[1])
+	if replaced[1].(map[string]any)["name"] != routerFetchToolName {
+		t.Fatalf("expected second replacement tool to be %s, got %#v", routerFetchToolName, replaced[1])
 	}
 }
 
@@ -41,8 +41,8 @@ func TestReplaceResponsesWebSearchToolsDedupes(t *testing.T) {
 		map[string]any{"type": "function", "name": "other"},
 		map[string]any{"type": "web_search"},
 	}, []any{
-		map[string]any{"type": "function", "name": "search"},
-		map[string]any{"type": "function", "name": "fetch"},
+		map[string]any{"type": "function", "name": routerSearchToolName},
+		map[string]any{"type": "function", "name": routerFetchToolName},
 	})
 
 	counts := map[string]int{}
@@ -52,11 +52,11 @@ func TestReplaceResponsesWebSearchToolsDedupes(t *testing.T) {
 			counts[name]++
 		}
 	}
-	if counts["search"] != 1 {
-		t.Fatalf("expected search injected exactly once, got %d", counts["search"])
+	if counts[routerSearchToolName] != 1 {
+		t.Fatalf("expected %s injected exactly once, got %d", routerSearchToolName, counts[routerSearchToolName])
 	}
-	if counts["fetch"] != 1 {
-		t.Fatalf("expected fetch injected exactly once, got %d", counts["fetch"])
+	if counts[routerFetchToolName] != 1 {
+		t.Fatalf("expected %s injected exactly once, got %d", routerFetchToolName, counts[routerFetchToolName])
 	}
 	if counts["other"] != 1 {
 		t.Fatalf("expected other tool preserved exactly once, got %d", counts["other"])
@@ -91,12 +91,12 @@ func TestParseResponsesToolCalls(t *testing.T) {
 
 func TestSplitToolCalls(t *testing.T) {
 	routerCalls, clientCalls := splitToolCalls(map[string]struct{}{
-		"search": {},
-		"fetch":  {},
+		routerSearchToolName: {},
+		routerFetchToolName:  {},
 	}, []toolCall{
-		{id: "call_1", name: "search"},
+		{id: "call_1", name: routerSearchToolName},
 		{id: "call_2", name: "client_lookup"},
-		{id: "call_3", name: "fetch"},
+		{id: "call_3", name: routerFetchToolName},
 	})
 
 	if len(routerCalls) != 2 {
@@ -525,7 +525,7 @@ func TestForcedFinalResponsesRequestStripsToolSelection(t *testing.T) {
 	reqBody := map[string]any{
 		"input":       []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
 		"tools":       []any{map[string]any{"type": "function"}},
-		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "search"}},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": routerSearchToolName}},
 	}
 	finalBody := forcedFinalResponsesRequest(reqBody)
 	for _, field := range []string{"tools", "tool_choice"} {
@@ -830,5 +830,67 @@ func TestStripRouterOwnedIncludesFiltersActionSources(t *testing.T) {
 	stripRouterOwnedIncludes(empty)
 	if _, present := empty["include"]; present {
 		t.Fatal("stripRouterOwnedIncludes must not invent an include key")
+	}
+}
+
+// TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries pins that
+// a raw tool_calls entry which fails the map[string]any assertion is kept
+// rather than silently dropped. The entry can't be inspected, so it can't
+// be attributed to the router; preserving it matches the defensive shape
+// the responses adapter uses for output items it can't classify.
+func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T) {
+	response := &upstreamJSONResponse{
+		body: map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{
+							"unparseable-entry",
+							map[string]any{
+								"id":   "call_router",
+								"type": "function",
+								"function": map[string]any{
+									"name":      routerSearchToolName,
+									"arguments": "{}",
+								},
+							},
+							map[string]any{
+								"id":   "call_client",
+								"type": "function",
+								"function": map[string]any{
+									"name":      "client_tool",
+									"arguments": "{}",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		header: make(http.Header),
+	}
+
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{})
+	adapter.stripRouterToolCallsFromResponse(response)
+
+	choice := response.body["choices"].([]any)[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	calls, _ := message["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool_calls after strip (unparseable + client), got %d: %#v", len(calls), calls)
+	}
+	if got, _ := calls[0].(string); got != "unparseable-entry" {
+		t.Fatalf("expected unparseable entry preserved as first call, got %#v", calls[0])
+	}
+	clientCall, _ := calls[1].(map[string]any)
+	if clientCall == nil {
+		t.Fatalf("expected client tool call preserved as second entry, got %#v", calls[1])
+	}
+	if fn, _ := clientCall["function"].(map[string]any); fn == nil || stringValue(fn["name"]) != "client_tool" {
+		t.Fatalf("expected client_tool to survive strip, got %#v", clientCall)
+	}
+	if stringValue(choice["finish_reason"]) != "tool_calls" {
+		t.Fatalf("expected finish_reason normalized to tool_calls, got %#v", choice["finish_reason"])
 	}
 }

@@ -220,7 +220,7 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, err := callTool(ctx, session, call.name, call.arguments, citations)
+	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, citations)
 	record := toolCallRecord{
 		name:      call.name,
 		arguments: call.arguments,
@@ -336,8 +336,6 @@ func postJSON(ctx context.Context, em *manager.EnclaveManager, modelName, path s
 		statusCode: resp.StatusCode,
 	}, nil
 }
-
-
 
 func isStream(body map[string]any) bool {
 	stream, _ := body["stream"].(bool)

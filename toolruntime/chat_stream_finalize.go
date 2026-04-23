@@ -40,12 +40,10 @@ func (s *chatStreamer) finalize(
 	}
 
 	finishReason := result.finishReason
-	if finishReason == "" {
-		if len(clientToolCalls) > 0 {
-			finishReason = "tool_calls"
-		} else {
-			finishReason = "stop"
-		}
+	if len(clientToolCalls) > 0 {
+		finishReason = "tool_calls"
+	} else if finishReason == "" {
+		finishReason = "stop"
 	}
 	s.writeChunk(map[string]any{
 		"choices": []any{

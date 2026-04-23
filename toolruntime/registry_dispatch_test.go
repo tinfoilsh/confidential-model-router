@@ -44,7 +44,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 	}{
 		{
 			name:     "search routes to websearch server",
-			callName: "search",
+			callName: routerSearchToolName,
 			wantSub:  "websearch:search",
 		},
 		{

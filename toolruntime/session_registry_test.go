@@ -94,7 +94,7 @@ func TestSessionRegistryRoutesTwoProfilesToSeparateSessions(t *testing.T) {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}
 
-	for _, name := range []string{"search", "fetch"} {
+	for _, name := range []string{routerSearchToolName, routerFetchToolName} {
 		got, ok := r.sessionFor(name)
 		if !ok {
 			t.Fatalf("sessionFor(%q) missing", name)
@@ -108,13 +108,19 @@ func TestSessionRegistryRoutesTwoProfilesToSeparateSessions(t *testing.T) {
 	}
 
 	owned := r.ownedTools()
-	for _, want := range []string{"search", "fetch", "fake_tool"} {
+	for _, want := range []string{routerSearchToolName, routerFetchToolName, "fake_tool"} {
 		if _, ok := owned[want]; !ok {
 			t.Errorf("ownedTools missing %q; got %v", want, owned)
 		}
 	}
 	if len(owned) != 3 {
 		t.Errorf("ownedTools size = %d, want 3", len(owned))
+	}
+	toolNames := ownedToolNames(r.allTools())
+	for _, want := range []string{routerSearchToolName, routerFetchToolName, "fake_tool"} {
+		if _, ok := toolNames[want]; !ok {
+			t.Errorf("allTools missing %q; got %v", want, toolNames)
+		}
 	}
 
 	names := r.profileNames()

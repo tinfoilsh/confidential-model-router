@@ -59,7 +59,7 @@ func runChatStreaming(
 	stripRouterOwnedIncludes(reqBody)
 	reqBody["stream"] = true
 	reqBody["stream_options"] = map[string]any{"include_usage": true}
-	reqBody["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(reqBody)
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
 
@@ -115,9 +115,6 @@ func runChatStreaming(
 			return nil
 		}
 
-		// Mid-turn client tool_calls are intentionally dropped; only the
-		// final turn (no router tool calls to resolve) forwards them to
-		// the client. This preserves parity with runChatLoop.
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if debugEnabled {
 			toolNames := make([]string, 0, len(result.toolCalls))
@@ -132,9 +129,13 @@ func runChatStreaming(
 			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 
-		messages, _ := reqBody["messages"].([]any)
-		messages = append(messages, result.assistantMessage())
+		mixedTurn := len(clientToolCalls) > 0
 		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
+		var messages []any
+		if !mixedTurn {
+			messages, _ = reqBody["messages"].([]any)
+			messages = append(messages, result.assistantMessage())
+		}
 		for _, call := range routerToolCalls {
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.citations,
@@ -143,11 +144,18 @@ func runChatStreaming(
 				},
 				tracePhase, tid,
 			)
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": call.id,
-				"content":      output,
-			})
+			if !mixedTurn {
+				messages = append(messages, map[string]any{
+					"role":         "tool",
+					"tool_call_id": call.id,
+					"content":      output,
+				})
+			}
+		}
+		// Mixed turn: see the mixed-turn contract on runToolLoop.
+		if mixedTurn {
+			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+client calls in one turn; finalizing)", tid, i+1)
+			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 		reqBody["messages"] = messages
 	}

@@ -114,14 +114,11 @@ func (b *chatToolCallBuilder) raw() []any {
 // tool_calls list. The `id`, `type`, and `function` fields are preserved
 // byte-for-byte from what upstream produced.
 func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
-	allowed := make(map[string]struct{}, len(parsed))
-	for _, call := range parsed {
-		allowed[call.id] = struct{}{}
-	}
 	filtered := make([]any, 0, len(parsed))
+	next := 0
 	for _, item := range raw {
 		source, _ := item.(map[string]any)
-		if _, ok := allowed[stringValue(source["id"])]; !ok {
+		if source == nil || next >= len(parsed) || !rawToolCallMatchesParsed(source, parsed[next]) {
 			continue
 		}
 		reindexed := map[string]any{
@@ -131,6 +128,21 @@ func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
 			"function": source["function"],
 		}
 		filtered = append(filtered, reindexed)
+		next++
 	}
 	return filtered
+}
+
+func rawToolCallMatchesParsed(source map[string]any, call toolCall) bool {
+	if source == nil {
+		return false
+	}
+	function, _ := source["function"].(map[string]any)
+	if function == nil || stringValue(function["name"]) != call.name {
+		return false
+	}
+	if call.id != "" && stringValue(source["id"]) != call.id {
+		return false
+	}
+	return true
 }

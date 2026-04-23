@@ -53,7 +53,7 @@ func runResponsesStreaming(
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
 	base["stream"] = true
-	base["parallel_tool_calls"] = false
+	applyParallelToolCallsPolicy(base)
 	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 
@@ -91,12 +91,16 @@ func runResponsesStreaming(
 			return nil
 		}
 
-		routerToolCalls, _ := splitToolCalls(ownedTools, result.toolCalls)
+		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if len(routerToolCalls) == 0 {
 			return streamer.finalize(r, em, modelName, result)
 		}
 
-		toolOutputs := make([]any, 0, len(routerToolCalls))
+		mixedTurn := len(clientToolCalls) > 0
+		var toolOutputs []any
+		if !mixedTurn {
+			toolOutputs = make([]any, 0, len(routerToolCalls))
+		}
 		for _, call := range routerToolCalls {
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.citations,
@@ -105,11 +109,17 @@ func runResponsesStreaming(
 				},
 				"", "",
 			)
-			toolOutputs = append(toolOutputs, map[string]any{
-				"type":    "function_call_output",
-				"call_id": call.id,
-				"output":  output,
-			})
+			if !mixedTurn {
+				toolOutputs = append(toolOutputs, map[string]any{
+					"type":    "function_call_output",
+					"call_id": call.id,
+					"output":  output,
+				})
+			}
+		}
+		// Mixed turn: see the mixed-turn contract on runToolLoop.
+		if mixedTurn {
+			return streamer.finalize(r, em, modelName, result)
 		}
 
 		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(result.outputItems)...)
@@ -235,6 +245,7 @@ func (s *responsesStreamer) runIteration(
 	defer body.Close()
 
 	s.resetPerIterationState()
+	s.functionCallArguments = map[int]*strings.Builder{}
 	return s.pumpUpstream(newSSEReader(body), isFirst)
 }
 
