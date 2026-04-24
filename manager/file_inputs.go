@@ -67,7 +67,7 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 		}
 	}
 
-	enclave := model.NextEnclave()
+	enclave := model.NextEnclave(nil)
 	if enclave == nil {
 		return "", &FileConversionError{
 			StatusCode: http.StatusBadGateway,

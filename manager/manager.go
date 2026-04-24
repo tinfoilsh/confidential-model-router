@@ -294,32 +294,43 @@ func (em *EnclaveManager) Shutdown() {
 	})
 }
 
-// NextEnclave picks a uniformly random enclave with a closed circuit breaker.
-// If an open breaker is past its cooldown, it sends a probe to that enclave.
-// If all breakers are open, it picks a random enclave (degraded > unavailable).
-func (m *Model) NextEnclave() *Enclave {
+// NextEnclave picks a uniformly random enclave with a closed circuit breaker,
+// preferring those that are not currently overloaded and not in skip. If an
+// open breaker is past its cooldown, it sends a probe to that enclave. Falls
+// back to any closed enclave, then any enclave (degraded > unavailable).
+func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if len(m.Enclaves) == 0 {
-		return nil
-	}
-
 	all := make([]*Enclave, 0, len(m.Enclaves))
-	var closed []*Enclave
+	var closed, preferred []*Enclave
 	for _, enclave := range m.Enclaves {
 		all = append(all, enclave)
-		if enclave.cb == nil || enclave.cb.Closed() {
-			closed = append(closed, enclave)
-		} else if enclave.cb.NeedProbe() {
-			return enclave
+		if enclave.cb != nil && !enclave.cb.Closed() {
+			if enclave.cb.NeedProbe() {
+				return enclave
+			}
+			continue
+		}
+		closed = append(closed, enclave)
+		if !skip[enclave.host] && !enclave.isOverloaded() {
+			preferred = append(preferred, enclave)
 		}
 	}
 
-	if len(closed) > 0 {
+	switch {
+	case len(preferred) > 0:
+		return preferred[rand.IntN(len(preferred))]
+	case len(closed) > 0:
 		return closed[rand.IntN(len(closed))]
+	case len(all) > 0:
+		return all[rand.IntN(len(all))]
 	}
-	return all[rand.IntN(len(all))]
+	return nil
+}
+
+func (e *Enclave) isOverloaded() bool {
+	return e != nil && e.metrics != nil && e.metrics.overloaded.Load()
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {

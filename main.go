@@ -551,13 +551,29 @@ func main() {
 			return
 		}
 
-		enclave := model.NextEnclave()
-		if enclave == nil {
-			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
-			return
+		// Retry with a different enclave if the first pick turns out to be
+		// overloaded at dispatch time, so one backed-up sibling doesn't cascade
+		// into a 429 when others are healthy.
+		var (
+			enclave    *manager.Enclave
+			overloaded bool
+			retryAfter time.Duration
+			waiting    float64
+			skip       = map[string]bool{}
+		)
+		for retry := 0; ; retry++ {
+			enclave = model.NextEnclave(skip)
+			if enclave == nil {
+				jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
+				return
+			}
+			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded || retry+1 >= len(model.Enclaves) {
+				break
+			}
+			skip[enclave.String()] = true
 		}
 
-		if overloaded, retryAfter, waiting := enclave.ShouldReject(); overloaded {
+		if overloaded {
 			secs := int(retryAfter.Seconds())
 			if secs <= 0 {
 				secs = 60
