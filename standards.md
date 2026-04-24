@@ -8,8 +8,8 @@ The meta-principle: **Go values simplicity, explicitness, and predictability ove
 
 - **Files are not scoping units.** Long files (1,000+ lines) are fine if they're about one thing. Split by concept, not line count.
 - **Packages are API boundaries, not folders.** Avoid splitting a package into sub-packages for organization.
-- **Accept interfaces, return structs.** Define interfaces in the consuming package, keep them small.
-- **Errors are values.** Wrap with `%w`, handle at each level, never swallow.
+- **Generally accept interfaces, return concrete types.** Define interfaces in the consuming package, keep them small. Returning an interface is fine for encapsulation, factories, or when the interface is the product (`io.Writer`, `hash.Hash`).
+- **Errors are values.** Wrap with `%w` when callers need to inspect; use `%v` at system boundaries. Add non-redundant context.
 - **Flat beats nested.** No classes-in-classes, no methods-in-methods. Everything sits at the package level.
 - **Zero values should be useful.** Constructors only when you need them.
 - **`gofmt` is non-negotiable.** Run it on save.
@@ -35,15 +35,15 @@ The meta-principle: **Go values simplicity, explicitness, and predictability ove
 
 Unlike Python (file = module), Java (file = class), or JavaScript (file = module with its own imports), **a Go file is just a file**. The compiler concatenates all `.go` files in a directory and treats them as a single compilation unit. A function in `user.go` can call an unexported helper in `session.go` with no import statement and no ceremony, they share a namespace.
 
-This means splitting a file gives you nothing in Go that you'd get in other languages: no encapsulation, no namespace benefit, no import cleanup. You just get more files to open.
+This means splitting a file gives you fewer of the benefits you'd get in other languages: no encapsulation, no namespace benefit, no import cleanup. But splitting can still help navigability.
 
 > There is no "one type, one file" convention as in some other languages. As a rule of thumb, files should be focused enough that a maintainer can tell which file contains something, and the files should be small enough that it will be easy to find once there.
 
 - Google's Go Best Practices
 
-### Long files are fine
+### Long files can be fine
 
-The standard library routinely ships files of 1,000–6,000 lines. `net/http/server.go` is around 3,500 lines. `runtime/proc.go` is over 6,000. If your file is long because it's about one coherent thing, that's the file doing its job.
+The standard library routinely ships files of several thousand lines. `net/http/server.go` is over 4,000 lines. `runtime/proc.go` is over 8,000. If your file is long because it's about one coherent thing, that's the file doing its job. That said, it's "usually not a good idea to have a single file with many thousands of lines in it, or having many tiny files" (Google's Best Practices).
 
 What matters is whether a reader can quickly find what they're looking for. A 1,500-line file about one type is easy to navigate. A 400-line file that mixes three unrelated types is not.
 
@@ -73,9 +73,9 @@ If you have an unexported type that exists only to support one function — buil
 
 ---
 
-## 2. Conventional file layout
+## 2. File layout
 
-Go files tend to follow a predictable top-to-bottom structure. This isn't enforced, but it's what readers expect:
+**Team convention** — the official sources don't prescribe a within-file ordering, but Daniel likes this predictable top-to-bottom structure:
 
 ```go
 // Package user manages user accounts and authentication.
@@ -171,7 +171,7 @@ func (s *Session) Expire()        { ... }
 
 ### Packages are API boundaries, not folders
 
-A package is a semantic unit. Everything inside it shares unexported access and presents one unified API to callers. **Resist the urge to split a package into sub-packages for organizational reasons.** It fragments the API, forces you to export things that should stay private, and creates import-cycle problems.
+A package is a semantic unit. Everything inside it shares unexported access and presents one unified API to callers. Think carefully before splitting a package into sub-packages for purely organizational reasons — it can fragment the API, force you to export things that should stay private, and create import-cycle problems. That said, when something is conceptually distinct, giving it its own small package can make it easier to use.
 
 ### Typical project layout
 
@@ -217,7 +217,7 @@ The package name should be the same as its directory name, and it should describ
 ## 4. Naming
 
 - **Exported** identifiers start with an uppercase letter (`User`, `NewClient`); **unexported** ones start lowercase (`parseHeader`, `userStore`).
-- **Acronyms stay uppercase**: `HTTPServer`, not `HttpServer`; `userID`, not `userId`.
+- **Acronyms stay uppercase**: `HTTPServer`, not `HttpServer`; `userID`, not `userId`. Exception: initialisms that contain lowercase letters in standard prose keep their conventional form (`gRPC`, `iOS`, `DDoS`).
 - **Short names in short scopes, longer in wider ones**: `i` for a loop index, `ctx` for a `context.Context`, a descriptive name for a package-level variable.
 
 ### Avoid stutter
@@ -237,9 +237,11 @@ func (u *User) Name() string       // Good: u.Name()
 func (u *User) GetUserName() string // Bad: u.GetUserName() stutters + "Get" prefix
 ```
 
-### No "Get" prefix on getters
+### No "Get" prefix on simple getters
 
 Idiomatic Go uses the field name directly. If `User` has an unexported `name` field, the getter is `Name()`, not `GetName()`. Setters do keep `Set`: `SetName()`.
+
+Exception: `Get` is appropriate when the underlying concept genuinely uses the word "get" (e.g., HTTP GET semantics: `http.Get`, `client.GetObject`).
 
 ### Receiver names
 
@@ -256,25 +258,26 @@ Don't use `self` or `this`. Don't vary the name between methods.
 
 ## 5. Types, pointers, and interfaces
 
-### Accept interfaces, return structs
+### Generally accept interfaces, return concrete types
 
-Functions take the smallest interface they need and return concrete types.
+Functions take the smallest interface they need and generally return concrete types.
 
 ```go
 // Good: accepts anything readable, returns a concrete type
 func countLines(r io.Reader) (int, error) { ... }
 
 func NewClient(cfg Config) *Client { ... }
-
-// Bad: returns an interface, forcing callers into whatever API you designed
-func NewClient(cfg Config) ClientInterface { ... }
 ```
 
 Why: interfaces on input give callers flexibility; concrete returns give callers full access to the type's API and let you add methods later without breaking anyone.
 
-### Interfaces are defined by consumers
+Returning an interface is appropriate for encapsulation (the `error` interface itself), factory/strategy patterns, and when the interface is the product (e.g., `crc32.NewIEEE` returns `hash.Hash32`). The official sources treat this as a guideline, not a strict rule.
+
+### Interfaces are generally defined by consumers
 
 Define the interface in the package that _uses_ it, not the package that _implements_ it. Interfaces are usually small — one or two methods — and named for what they do (`Reader`, `Stringer`, `Closer`).
+
+Exceptions: the producer should export an interface when the interface _is_ the product (`io.Writer`, `hash.Hash`), when many consumers would otherwise mirror the same interface, or to break circular dependencies.
 
 ```go
 // In the package that consumes the dependency:
@@ -341,19 +344,21 @@ if err != nil {
 }
 ```
 
-### Wrap with `%w`, not `%v`
+### `%w` vs `%v` — choose deliberately
 
-`fmt.Errorf` with `%w` preserves the original error in a chain, so callers can inspect it with `errors.Is` and `errors.As`:
+`fmt.Errorf` with `%w` preserves the original error in a chain, so callers can inspect it with `errors.Is` and `errors.As`. Use `%w` when the wrapped error is part of your package's documented contract and callers will programmatically inspect it.
+
+Use `%v` (or `errors.New`) when you're producing a fresh error at a system boundary, or when the underlying error is an implementation detail callers shouldn't depend on.
 
 ```go
-// %w wraps — the original error is recoverable
+// %w — callers can use errors.Is/errors.As to inspect
 return fmt.Errorf("parse config: %w", err)
 
-// %v just formats the message — the original error is lost
+// %v — creates an opaque error; appropriate at API/system boundaries
 return fmt.Errorf("parse config: %v", err)
 ```
 
-Add context at each level ("read config", "parse config") so a failure tells a story from where it happened up to where it was handled.
+Add context when you have _non-redundant_ information to contribute. Don't wrap purely to indicate failure — if the wrapping adds no information beyond "this failed," return `err` directly.
 
 ### Sentinel errors
 
@@ -368,7 +373,7 @@ if errors.Is(err, user.ErrNotFound) { ... }
 
 ### Don't swallow errors
 
-Never assign to `_` to make the compiler happy. Either handle the error, return it, or log it with context.
+Avoid assigning errors to `_` to make the compiler happy. Either handle the error, return it, or log it with context. In the rare case where ignoring an error is safe (e.g., `(*bytes.Buffer).Write` which is documented to never fail), add a comment explaining why.
 
 ---
 
@@ -381,7 +386,7 @@ Go deliberately avoids deep nesting. A Go file has effectively two levels:
 
 There are no classes-inside-classes, no methods-inside-methods, no module-level closures for private state. Every symbol in a file sits at column 0, findable by simple text search. This is a big reason long Go files stay readable — the structure is wide and flat, not tall and deep.
 
-Anonymous functions exist (`go func() { ... }()`, short callbacks, `defer`), but they're used sparingly and kept short. If a closure is getting long, it becomes a top-level function.
+Anonymous functions / closures are idiomatic and widely used — `defer func() {…}()`, goroutine launches, `sync.Once`, `http.HandlerFunc` adapters, functional options, and table-test setup all rely on them. Keep closures focused; if one is getting long or complex, extract it to a named top-level function.
 
 ---
 
@@ -397,7 +402,7 @@ goimports -w .
 golangci-lint run ./...
 ```
 
-There is no pre-commit hook or CI lint step today. Run both locally before pushing.
+Run both locally before pushing.
 
 ---
 
@@ -415,25 +420,42 @@ Any function doing I/O, waiting, or potentially long work should accept a `conte
 func FetchUser(ctx context.Context, id string) (*User, error) { ... }
 ```
 
-This lets callers cancel work, set deadlines, and pass request-scoped values.
+This lets callers cancel work, set deadlines, and pass request-scoped values. Exceptions exist where `ctx` comes from elsewhere: HTTP handlers get it from `req.Context()`, and test functions from `(testing.TB).Context()`.
+
+### Goroutine lifetimes
+
+When you spawn goroutines, make it clear when — or whether — they exit. Goroutines can leak by blocking on channel sends or receives, and leaked goroutines are a common source of production bugs.
+
+- Never start a goroutine without knowing how it will stop.
+- The caller that launches a goroutine should own its shutdown — typically via a `context.Context` cancellation, a done channel, or a `sync.WaitGroup`.
+- Prefer synchronous functions over asynchronous ones. Let the _caller_ decide whether to `go` your function rather than baking concurrency inside it. This keeps goroutine ownership local and makes leaks easier to prevent.
+
+### Generics
+
+Generics (Go 1.18+) are allowed where they fulfill your requirements. In many cases, a conventional approach using slices, maps, interfaces, and type assertions works just as well without the added complexity.
+
+- Don't use generics just because an algorithm doesn't care about member element types — consider whether a concrete type or interface would be simpler.
+- Don't use generics to invent domain-specific languages or overly abstract frameworks.
+- "Write code, don't design types" — start concrete, generalize only when you have real duplication.
 
 ---
 
 ## 10. A handful of smaller idioms
 
 - **Defer cleanup immediately after acquiring a resource.** `f, err := os.Open(path); if err != nil { ... }; defer f.Close()`. Keeps acquisition and release visually paired.
-- **Empty struct for "set" types.** `map[string]struct{}` — the `struct{}` takes zero bytes and signals "I only care about the keys."
+- **Sets via map.** `map[string]bool` is the simple, idiomatic choice (per Google's canonical Style Guide). `map[string]struct{}` is a common variation that uses zero bytes per entry — either is fine.
 - **Return early on errors.** Don't nest happy paths inside `if err == nil`. Handle the error, return, and let the rest of the function be unindented.
-- **`//` comments, not `/* */`.** Block comments are reserved for package-level documentation.
+- **`//` comments are the norm.** Block comments (`/* */`) are fine for package-level documentation, inline expressions, or temporarily disabling large blocks of code.
 - **Doc comments are complete sentences.** `// User represents an authenticated account.` — starts with the identifier name, ends with a period.
 
 ---
 
 ## Sources
 
-- [Effective Go](https://go.dev/doc/effective_go) — Official, canonical guide
-- [Go Style Guide (Google)](https://google.github.io/styleguide/go/) — normative style guide used at Google; good for specific decisions.
-- [Go Style Decisions (Google)](https://google.github.io/styleguide/go/decisions.html) — covers detailed questions like naming, formatting, and package structure.
-- [Go Style Best Practices (Google)](https://google.github.io/styleguide/go/best-practices.html) — includes the file-size guidance quoted above.
-- [Organizing a Go module](https://go.dev/doc/modules/layout) — official guide to project layout.
+- [Effective Go](https://go.dev/doc/effective_go) — Official, canonical guide (note: last significantly updated ~2009; does not cover generics or modules)
+- [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments) — community-maintained supplement to Effective Go covering common review feedback
+- [Go Style Guide (Google)](https://google.github.io/styleguide/go/) — normative and canonical style guide used at Google
+- [Go Style Decisions (Google)](https://google.github.io/styleguide/go/decisions.html) — normative but not canonical; covers naming, formatting, and package structure
+- [Go Style Best Practices (Google)](https://google.github.io/styleguide/go/best-practices.html) — neither normative nor canonical; auxiliary guidance that may not apply in every circumstance
+- [Organizing a Go module](https://go.dev/doc/modules/layout) — official guide to project layout
 - [The standard library source](https://github.com/golang/go/tree/master/src) — the ultimate reference. When in doubt, find a comparable package and copy its shape. `net/http`, `io`, `encoding/json`, and `os` are particularly instructive.
