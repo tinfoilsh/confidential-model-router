@@ -172,17 +172,26 @@ func (s *streamBase) emitBillingEvent(r *http.Request, em *manager.EnclaveManage
 	emitBillingEvent(em, r, response, modelName, true)
 }
 
-// upstreamErrorPayload extracts the most informative structured error
-// object we can show the client. If the underlying error is an
-// *upstreamError whose body is JSON with an `error` field, we return that
-// object verbatim (preserving the upstream's own `code`, `type`, `param`,
-// etc.). Otherwise we fall back to a minimal `{message, type}` envelope.
+// upstreamErrorPayload extracts a structured error object to show the
+// client. If the underlying error is an *upstreamError whose body is
+// JSON with an `error` field, we allowlist the standard OpenAI error
+// fields rather than forwarding the object verbatim.
 func upstreamErrorPayload(err error) map[string]any {
 	if upErr, ok := err.(*upstreamError); ok && len(upErr.body) > 0 {
 		var parsed map[string]any
 		if json.Unmarshal(upErr.body, &parsed) == nil {
 			if inner, ok := parsed["error"].(map[string]any); ok {
-				return inner
+				safe := map[string]any{
+					"message": stringValue(inner["message"]),
+					"type":    stringValue(inner["type"]),
+				}
+				if code, ok := inner["code"]; ok {
+					safe["code"] = code
+				}
+				if param, ok := inner["param"]; ok {
+					safe["param"] = param
+				}
+				return safe
 			}
 		}
 	}

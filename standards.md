@@ -1,6 +1,6 @@
-# Idiomatic Go Guide
+# Go standards
 
-A distilled guide to writing Go code that reads like Go code. Draws on the official sources at the end.
+Distilled from sources at the end.
 
 The meta-principle: **Go values simplicity, explicitness, and predictability over cleverness or density.** Most of the conventions below exist to make code fast to skim for a reader who has never seen it before. When you find yourself reaching for an abstraction or a file split, ask whether it makes the code easier to read for someone else, not whether it feels tidier to you.
 

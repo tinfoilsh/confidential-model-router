@@ -176,20 +176,6 @@ func (r *sessionRegistry) profileNames() []string {
 	return names
 }
 
-// endpointSummary returns a human-readable summary of the profiles the
-// registry was built from, e.g. ["web_search (websearch)"].
-// Used by devLog to display which MCP servers the request is running against.
-func (r *sessionRegistry) endpointSummary() []string {
-	if r == nil {
-		return nil
-	}
-	out := make([]string, 0, len(r.entries))
-	for _, e := range r.entries {
-		out = append(out, e.profile.Name+" ("+e.profile.ToolServerModel+")")
-	}
-	return out
-}
-
 // CloseAll closes every session the registry opened. Safe to call
 // multiple times: each session's Close is idempotent in the MCP
 // client, and the entries slice is walked once. CloseAll does not
