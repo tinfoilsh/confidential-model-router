@@ -90,12 +90,36 @@ var (
 
 	// ProxyFailureTotal tracks failed proxy responses and transport errors per enclave.
 	// The "reason" label classifies the failure: timeout, tls_mismatch, connection_refused,
-	// connection_reset, dns_error, tls_error, canceled, transport_error, or http_<status>.
+	// connection_reset, dns_error, tls_error, transport_error, or http_<status>. These are
+	// all inputs to the circuit breaker. Client cancellations and slow-header observations
+	// are tracked separately in ClientCancellationsTotal and SlowHeadersTotal.
 	ProxyFailureTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_proxy_failure_total",
 			Help: "Total number of failed proxy responses (status >= 500 or transport error)",
 		},
 		[]string{"model", "enclave", "reason"},
+	)
+
+	// ClientCancellationsTotal tracks requests that ended because the client
+	// disconnected or aborted. Not a backend fault; does not trip the breaker.
+	ClientCancellationsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_client_cancellations_total",
+			Help: "Total number of requests that ended because the client disconnected or aborted",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// SlowHeadersTotal tracks requests where response headers took longer than
+	// responseHeaderTimeout to arrive. Observed passively while the request is
+	// still in flight; its terminal outcome is counted separately in
+	// ProxySuccessTotal or ProxyFailureTotal. Does not trip the breaker.
+	SlowHeadersTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_slow_headers_total",
+			Help: "Total number of requests where response headers took longer than responseHeaderTimeout to arrive",
+		},
+		[]string{"model", "enclave"},
 	)
 )
