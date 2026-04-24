@@ -385,9 +385,19 @@ Anonymous functions exist (`go func() { ... }()`, short callbacks, `defer`), but
 
 ---
 
-## 8. Formatting
+## 8. Formatting and tooling
 
-`goimports` (superset of `gofmt`), `olangci-lint`.
+`goimports` is a superset of `gofmt` — it formats code and manages import blocks (grouping, sorting, removing unused). `golangci-lint` runs a battery of static checks beyond formatting.
+
+```bash
+# format all files (fixes imports + gofmt in one pass)
+goimports -w .
+
+# lint
+golangci-lint run ./...
+```
+
+There is no pre-commit hook or CI lint step today. Run both locally before pushing.
 
 ---
 

@@ -257,7 +257,6 @@ func (s *responsesStreamer) pumpUpstream(reader *sseReader, isFirst bool) (respo
 				s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": usage}})
 			}
 		case "response.failed", "response.incomplete":
-			terminalSeen = true
 			if usage := extractResponsesUsage(event); usage != nil {
 				result.usage = usage
 				s.aggregatedUsage = usage

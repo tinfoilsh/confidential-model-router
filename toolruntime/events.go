@@ -165,5 +165,3 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 	}
 	return builder.String()
 }
-
-
