@@ -2,17 +2,14 @@
 
 Distilled from sources at the end.
 
-The meta-principle: **Go values simplicity, explicitness, and predictability over cleverness or density.** Most of the conventions below exist to make code fast to skim for a reader who has never seen it before. When you find yourself reaching for an abstraction or a file split, ask whether it makes the code easier to read for someone else, not whether it feels tidier to you.
-
 ## TL;DR
 
 - **Files are not scoping units.** Long files (1,000+ lines) are fine if they're about one thing. Split by concept, not line count.
 - **Packages are API boundaries, not folders.** Avoid splitting a package into sub-packages for organization.
 - **Generally accept interfaces, return concrete types.** Define interfaces in the consuming package, keep them small. Returning an interface is fine for encapsulation, factories, or when the interface is the product (`io.Writer`, `hash.Hash`).
-- **Errors are values.** Wrap with `%w` when callers need to inspect; use `%v` at system boundaries. Add non-redundant context.
-- **Flat beats nested.** No classes-in-classes, no methods-in-methods. Everything sits at the package level.
+- **Return errors, handle them at each call site.** Wrap with `%w` when callers need to inspect; use `%v` at system boundaries. Add non-redundant context.
+- **Prefer flat structure.** No classes-in-classes, no methods-in-methods. Everything sits at the package level.
 - **Zero values should be useful.** Constructors only when you need them.
-- **`gofmt` is non-negotiable.** Run it on save.
 
 ## Contents
 
@@ -140,7 +137,7 @@ func Compare(a, b *User) int { /* ... */ }
 func normalizeName(s string) string { /* ... */ }
 ```
 
-The principle: **a reader scanning top-to-bottom should be able to learn what's in the file without jumping around.** Constants and vars set context. Types come before the functions that use them. Constructors come before methods. Helpers go at the bottom like footnotes.
+The principle: **a reader scanning top-to-bottom should be able to learn what's in the file without jumping around.** Types come before the functions that use them. Constructors come before methods. Helpers go at the bottom.
 
 ### Group by type, not by kind
 
@@ -333,9 +330,9 @@ This is an "has-a" relationship, not "is-a." It's additive and local.
 
 ## 6. Errors
 
-### Errors are values
+### Return errors, handle them at each call site
 
-Every function that can fail returns an `error` as the last return value. Callers handle it immediately. No exceptions, no hidden control flow.
+Every function that can fail returns an `error` as the last return value. Callers handle it immediately.
 
 ```go
 data, err := os.ReadFile(path)
@@ -384,7 +381,7 @@ Go deliberately avoids deep nesting. A Go file has effectively two levels:
 1. **Package level** (indentation 0): all types, all functions, all variables, all constants.
 2. **Function body level**: local variables, loops, conditionals, short anonymous functions.
 
-There are no classes-inside-classes, no methods-inside-methods, no module-level closures for private state. Every symbol in a file sits at column 0, findable by simple text search. This is a big reason long Go files stay readable — the structure is wide and flat, not tall and deep.
+There are no classes-inside-classes, no methods-inside-methods, no module-level closures for private state. Every symbol in a file sits at column 0, findable by simple text search. This is a big reason long Go files stay readable.
 
 Anonymous functions / closures are idiomatic and widely used — `defer func() {…}()`, goroutine launches, `sync.Once`, `http.HandlerFunc` adapters, functional options, and table-test setup all rely on them. Keep closures focused; if one is getting long or complex, extract it to a named top-level function.
 
@@ -410,7 +407,7 @@ Run both locally before pushing.
 
 ### Communicate via channels; synchronize with mutexes where simpler
 
-Go's motto: _"Don't communicate by sharing memory; share memory by communicating."_ Channels are for passing ownership of data between goroutines. But for simple shared state (a counter, a cache), a `sync.Mutex` is often clearer than channels. Use the right tool.
+Go's motto: _"Don't communicate by sharing memory; share memory by communicating."_ Channels are for passing ownership of data between goroutines. But for simple shared state (a counter, a cache), a `sync.Mutex` is often clearer than channels.
 
 ### Pass `context.Context` as the first parameter
 
@@ -452,10 +449,9 @@ Generics (Go 1.18+) are allowed where they fulfill your requirements. In many ca
 
 ## Sources
 
-- [Effective Go](https://go.dev/doc/effective_go) — Official, canonical guide (note: last significantly updated ~2009; does not cover generics or modules)
-- [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments) — community-maintained supplement to Effective Go covering common review feedback
 - [Go Style Guide (Google)](https://google.github.io/styleguide/go/) — normative and canonical style guide used at Google
 - [Go Style Decisions (Google)](https://google.github.io/styleguide/go/decisions.html) — normative but not canonical; covers naming, formatting, and package structure
 - [Go Style Best Practices (Google)](https://google.github.io/styleguide/go/best-practices.html) — neither normative nor canonical; auxiliary guidance that may not apply in every circumstance
 - [Organizing a Go module](https://go.dev/doc/modules/layout) — official guide to project layout
-- [The standard library source](https://github.com/golang/go/tree/master/src) — the ultimate reference. When in doubt, find a comparable package and copy its shape. `net/http`, `io`, `encoding/json`, and `os` are particularly instructive.
+- [The standard library source](https://github.com/golang/go/tree/master/src) — the ultimate reference. When in doubt, find a comparable package. `net/http`, `io`, `encoding/json`, and `os` are particularly instructive.
+- [Effective Go](https://go.dev/doc/effective_go) — Official, canonical guide (note: last significantly updated ~2009; does not cover generics or modules)
