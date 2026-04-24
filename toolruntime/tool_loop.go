@@ -13,6 +13,8 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
+const maxToolIterations = 10
+
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
 // Responses) behind a single interface so the shared driver can walk the
 // iteration, usage-accumulation, and finalize logic without caring which
@@ -194,6 +196,71 @@ func runToolLoop(
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
 	adapter.attachCitations(finalResponse.body, &citations, &toolCalls, eventFlags)
 	return finalResponse, nil
+}
+
+// executeRouterToolCall runs one router-owned tool call on behalf of
+// the chat or responses loop. It mutates the call's arguments in place
+// with forwarded web-search options and per-schema coercion, invokes
+// the tool over the MCP session, and records the outcome on citations
+// so downstream annotation and web_search_call item emission has a
+// uniform record of what happened. The returned string is the text
+// payload to hand back to the upstream model: either the tool's output
+// on success or a humanized error message when the call failed.
+//
+// tracePhase is the short label debug logs use to identify the caller
+// (`chat.iter=N` or `responses.iter=N`); traceID is the per-request
+// trace id the chat loop threads through its logs, or empty when the
+// caller does not emit the same logs.
+func executeRouterToolCall(
+	ctx context.Context,
+	registry *sessionRegistry,
+	call toolCall,
+	opts webSearchOptions,
+	toolSchemas map[string]*jsonschema.Schema,
+	citations *citationState,
+	toolCalls *toolCallLog,
+	tracePhase, traceID string,
+) string {
+	applyWebSearchOptionsToToolCall(call.name, call.arguments, opts)
+	sanitizeToolCallArguments(call.name, call.arguments)
+	coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
+
+	if traceID != "" {
+		debugLogf("toolruntime:%s %s tool.call name=%s args=%s", traceID, tracePhase, call.name, debugPreview(call.arguments, 400))
+	}
+	session, ok := registry.sessionFor(call.name)
+	if !ok {
+		// Programming error: splitToolCalls classified this as
+		// router-owned against the same owned-set the registry
+		// built, so any mismatch is a router bug. Humanize it
+		// rather than panicking so the upstream model sees a
+		// deterministic error string.
+		output := humanizeToolArgError(call.name, fmt.Errorf("no MCP session registered for tool %q", call.name), call.arguments)
+		toolCalls.record(toolCallRecord{name: call.name, arguments: call.arguments, errorReason: "tool_error"})
+		return output
+	}
+	tstart := time.Now()
+	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, citations)
+	record := toolCallRecord{
+		name:      call.name,
+		arguments: call.arguments,
+	}
+	if err != nil {
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.error name=%s elapsed=%s err=%v", traceID, tracePhase, call.name, time.Since(tstart), err)
+		}
+		output = humanizeToolArgError(call.name, err, call.arguments)
+		record.errorReason = publicToolErrorReason(call.name, err)
+	} else {
+		record.resultURLs = extractToolOutputURLs(output)
+		record.resultSources = extractToolOutputSources(output)
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
+				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
+		}
+	}
+	toolCalls.record(record)
+	return output
 }
 
 // chatLoopAdapter drives /v1/chat/completions: it owns the OpenAI-compatible
