@@ -136,8 +136,14 @@ func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
-		cb.RecordFailure()
+		// Client cancellations aren't backend faults — track in a dedicated
+		// counter, don't trip the breaker.
+		if reason == "canceled" {
+			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
+			return
+		}
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
+		cb.RecordFailure()
 		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
 	}
 	recordSuccess := func() {
@@ -157,7 +163,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"enclave": host,
 				"timeout": responseHeaderTimeout,
 			}).Warn("backend slow: response headers not received within timeout")
-			recordFailure("slow")
+			// Purely observational: the request is still in flight; its
+			// terminal outcome will be counted in ProxySuccessTotal or
+			// ProxyFailureTotal. Does not feed the breaker.
+			SlowHeadersTotal.WithLabelValues(modelName, host).Inc()
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
