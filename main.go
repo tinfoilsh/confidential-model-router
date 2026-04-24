@@ -551,9 +551,10 @@ func main() {
 			return
 		}
 
-		// Retry with a different enclave if the first pick turns out to be
-		// overloaded at dispatch time, so one backed-up sibling doesn't cascade
-		// into a 429 when others are healthy.
+		// Try up to N picks (N = number of configured enclaves). Each pick
+		// that turns out overloaded goes into skip, so NextEnclave will prefer
+		// a sibling on the next iteration. Bounded so a single backed-up
+		// enclave doesn't cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
 			overloaded bool
@@ -561,16 +562,19 @@ func main() {
 			waiting    float64
 			skip       = map[string]bool{}
 		)
-		for retry := 0; ; retry++ {
+		for range model.EnclaveCount() {
 			enclave = model.NextEnclave(skip)
 			if enclave == nil {
-				jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
-				return
+				break
 			}
-			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded || retry+1 >= len(model.Enclaves) {
+			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
 				break
 			}
 			skip[enclave.String()] = true
+		}
+		if enclave == nil {
+			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
+			return
 		}
 
 		if overloaded {

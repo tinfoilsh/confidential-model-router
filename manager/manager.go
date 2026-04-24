@@ -329,6 +329,15 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 	return nil
 }
 
+// EnclaveCount returns the number of configured enclaves under the model lock.
+// Callers that need to bound a retry loop on enclave cardinality should use
+// this rather than reading len(m.Enclaves) directly.
+func (m *Model) EnclaveCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.Enclaves)
+}
+
 func (e *Enclave) isOverloaded() bool {
 	return e != nil && e.metrics != nil && e.metrics.overloaded.Load()
 }
