@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,27 +98,41 @@ type devLog struct {
 	file *os.File
 }
 
-// openDevLog creates the logs/ directory (if needed) and opens
-// logs/<sessionID>.txt in append mode. The sessionID is sanitized to its
+// openDevLog derives the session ID from the request, creates the logs/
+// directory (if needed), opens logs/<session-id>.txt in append mode, and
+// writes the initial header block. The session ID is sanitized to its
 // base name so a client-controlled X-Session-Id header cannot escape the
 // logs/ directory. Returns nil on any error so callers never have to
 // nil-check beyond the initial open.
-func openDevLog(sessionID string) *devLog {
+func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry) *devLog {
+	sid := r.Header.Get("X-Session-Id")
+	if sid == "" {
+		sid = "no-session-" + debugTraceID()
+	}
 	// Defense-in-depth: strip directory components so a malicious
 	// X-Session-Id value like "../../etc/cron.d/evil" cannot write
 	// outside the logs/ directory.
-	sessionID = filepath.Base(sessionID)
+	sid = filepath.Base(sid)
 
 	dir := "logs"
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil
 	}
-	path := filepath.Join(dir, sessionID+".txt")
+	path := filepath.Join(dir, sid+".txt")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil
 	}
-	return &devLog{file: f}
+	d := &devLog{file: f}
+	d.writef("\n%s\n", devLogSeparator)
+	d.writef("User: %s\n", truncate(extractLastUserMessage(body), 200))
+	d.writef("Model: %s\n", modelName)
+	d.writef("Session: %s\n", sid)
+	if endpoints := strings.Join(registry.endpointSummary(), ", "); endpoints != "" {
+		d.writef("MCP endpoint: %s\n", endpoints)
+	}
+	d.writef("%s\n", devLogSeparator)
+	return d
 }
 
 // Close syncs and closes the underlying file.
@@ -141,23 +156,6 @@ func (d *devLog) writef(format string, args ...any) {
 }
 
 const devLogSeparator = "============================================================"
-
-// WriteHeader writes the session header block at the top of a new request.
-// It extracts the last user message from the raw request body internally
-// so callers never need to import the extraction helpers.
-func (d *devLog) WriteHeader(body map[string]any, modelName, sessionID, mcpEndpoints string) {
-	if d == nil {
-		return
-	}
-	d.writef("\n%s\n", devLogSeparator)
-	d.writef("User: %s\n", truncate(extractLastUserMessage(body), 200))
-	d.writef("Model: %s\n", modelName)
-	d.writef("Session: %s\n", sessionID)
-	if mcpEndpoints != "" {
-		d.writef("MCP endpoint: %s\n", mcpEndpoints)
-	}
-	d.writef("%s\n", devLogSeparator)
-}
 
 // WriteTurnHeader writes the turn separator.
 func (d *devLog) WriteTurnHeader(turn int) {

@@ -2,7 +2,10 @@
 
 package toolruntime
 
-import "time"
+import (
+	"net/http"
+	"time"
+)
 
 // debugEnabled is a compile-time false constant in production builds. Every
 // `if debugEnabled { ... }` block and every call whose body is purely
@@ -28,13 +31,11 @@ func debugMessagesSummary([]any, int) string { return "" }
 // toolruntime_debug build tag). Every method is a no-op so call sites
 // compile unconditionally without any #ifdef ceremony. The real
 // implementation lives in debug_enabled.go and is only included in
-// debug builds, so user content never touches disk in a deployed
-// enclave regardless of the runtime DEBUG flag.
+// debug builds.
 type devLog struct{}
 
-func openDevLog(string) *devLog                                                       { return nil }
+func openDevLog(*http.Request, map[string]any, string, *sessionRegistry) *devLog      { return nil }
 func (d *devLog) Close()                                                              {}
-func (d *devLog) WriteHeader(map[string]any, string, string, string)                  {}
 func (d *devLog) WriteTurnHeader(int)                                                 {}
 func (d *devLog) WriteTokens(map[string]any)                                          {}
 func (d *devLog) WriteResponseBody(map[string]any)                                    {}

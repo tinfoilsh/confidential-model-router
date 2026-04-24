@@ -171,3 +171,35 @@ func (s *streamBase) emitBillingEvent(r *http.Request, em *manager.EnclaveManage
 	}
 	emitBillingEvent(em, r, response, modelName, true)
 }
+
+// upstreamErrorPayload extracts the most informative structured error
+// object we can show the client. If the underlying error is an
+// *upstreamError whose body is JSON with an `error` field, we return that
+// object verbatim (preserving the upstream's own `code`, `type`, `param`,
+// etc.). Otherwise we fall back to a minimal `{message, type}` envelope.
+func upstreamErrorPayload(err error) map[string]any {
+	if upErr, ok := err.(*upstreamError); ok && len(upErr.body) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(upErr.body, &parsed) == nil {
+			if inner, ok := parsed["error"].(map[string]any); ok {
+				return inner
+			}
+		}
+	}
+	return map[string]any{
+		"message": err.Error(),
+		"type":    "upstream_error",
+	}
+}
+
+// mustMarshal serializes the given value to JSON, returning an empty byte
+// slice on failure. Used by error-surfacing helpers where failure to
+// marshal is already a lost cause; returning empty body preserves the
+// status-code signal on the upstream error.
+func mustMarshal(value any) []byte {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
+}

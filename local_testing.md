@@ -90,19 +90,23 @@ only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag),
 which prevents a misconfigured production deployment from silently downgrading
 to a non-attested HTTP endpoint.
 
-### Toolruntime tracing
+### Toolruntime debug build tag
 
-The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated
-purely at compile time by the `toolruntime_debug` build tag. Without the tag,
-`debugEnabled` is a compile-time `false` constant and every call site is
-eliminated by the Go compiler, so production TEE images carry zero debug code:
+All heavyweight debugging — per-request `toolruntime:<tid>` trace logging
+**and** the per-session devlog (`logs/<session-id>.txt`) — is gated at compile
+time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is
+a compile-time `false` constant and every debug call site (including the
+`devLog` type and all extraction helpers that touch user content) is eliminated
+by the Go compiler. Production TEE images carry zero debug code and can never
+write user content to disk, regardless of the runtime `DEBUG` flag.
 
-- `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
-- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
+- `go run .` / `go build .`: debug code is compiled out.
+- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: debug code is compiled in.
 
-If you want the `toolruntime:<tid> ...` lines in this runbook, build with the
-tag as shown above. Otherwise you will still see `DEBUG=1` router logs but
-none of the per-iteration tool-loop trace.
+If you want `toolruntime:<tid> ...` trace lines and `logs/*.txt` session files
+in this runbook, build with the tag as shown above. Otherwise you will still
+see `DEBUG=1` router logs but none of the per-iteration tool-loop trace or
+session-level devlog output.
 
 ---
 

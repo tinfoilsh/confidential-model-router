@@ -94,15 +94,8 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 
 	var dl *devLog
 	if em.DebugMode() {
-		sid := r.Header.Get("X-Session-Id")
-		if sid == "" {
-			sid = "no-session-" + debugTraceID()
-		}
-		dl = openDevLog(sid)
-		if dl != nil {
-			defer dl.Close()
-			dl.WriteHeader(body, modelName, sid, strings.Join(registry.endpointSummary(), ", "))
-		}
+		dl = openDevLog(r, body, modelName, registry)
+		defer dl.Close()
 	}
 
 	promptResult := buildRouterPrompt()
