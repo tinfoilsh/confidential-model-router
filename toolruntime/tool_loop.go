@@ -144,9 +144,7 @@ func runToolLoop(
 		if usage, ok := response.body["usage"].(map[string]any); ok {
 			dl.WriteTokens(usage)
 		}
-		thinking, content := extractThinkingAndContent(response.body)
-		dl.WriteThinking(thinking)
-		dl.WriteContent(content)
+		dl.WriteResponseBody(response.body)
 
 		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {

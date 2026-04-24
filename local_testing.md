@@ -13,7 +13,7 @@ One tool profile is currently supported:
 ### Web Search (port 8091)
 
 For standalone bring-up and direct MCP probes, see
-`../websearch/local_testing.md`.
+`local_testing.md` in the `confidential-websearch` repo.
 
 #### Fixture mode
 
@@ -38,6 +38,8 @@ go run .
 ## 2. Create a small router config
 
 Create a temporary config with the models you want to exercise:
+
+_note that kimi may not work_
 
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'

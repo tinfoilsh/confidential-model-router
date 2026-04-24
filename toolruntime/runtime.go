@@ -101,7 +101,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		dl = openDevLog(sid)
 		if dl != nil {
 			defer dl.Close()
-			dl.WriteHeader(extractLastUserMessage(body), modelName, sid, strings.Join(registry.endpointSummary(), ", "))
+			dl.WriteHeader(body, modelName, sid, strings.Join(registry.endpointSummary(), ", "))
 		}
 	}
 

@@ -757,8 +757,7 @@ func runChatStreaming(
 		// Dev log: turn header + tokens + thinking + content
 		dl.WriteTurnHeader(i + 1)
 		dl.WriteTokens(result.usage)
-		dl.WriteThinking(result.reasoning)
-		dl.WriteContent(result.content)
+		dl.WriteStreamedThinkingAndContent(result.reasoning, result.content)
 
 		// Mid-turn client tool_calls are intentionally dropped; only the
 		// final turn (no router tool calls to resolve) forwards them to
