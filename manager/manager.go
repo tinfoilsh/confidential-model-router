@@ -312,8 +312,11 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 			}
 			continue
 		}
+		if skip[enclave.host] {
+			continue
+		}
 		closed = append(closed, enclave)
-		if !skip[enclave.host] && !enclave.isOverloaded() {
+		if !enclave.isOverloaded() {
 			preferred = append(preferred, enclave)
 		}
 	}
