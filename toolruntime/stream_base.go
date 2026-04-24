@@ -33,6 +33,7 @@ type streamBase struct {
 	usageMetricsRequested bool
 
 	citations   *citationState
+	toolCalls   *toolCallLog
 	usageTotals *usageAccumulator
 
 	// headersWritten is flipped on the first 2xx from upstream; after

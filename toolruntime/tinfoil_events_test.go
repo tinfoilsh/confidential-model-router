@@ -287,7 +287,8 @@ func TestTinfoilEventMarkersForRecordsMapsBlocked(t *testing.T) {
 func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.record("https://example.com/page", "Example page")
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	original := "A claim [Example page](https://example.com/page) stands."
 	body := map[string]any{
@@ -298,7 +299,7 @@ func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 		},
 	}
 
-	attachChatCitations(body, state, true)
+	attachChatOutput(body, state, tc, tinfoilEventFlags{webSearch: true})
 
 	message := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
 	content := message["content"].(string)
@@ -333,14 +334,15 @@ func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 // router ran router-owned tools that would have produced progress.
 func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 	body := map[string]any{
 		"choices": []any{
 			map[string]any{"message": map[string]any{"role": "assistant", "content": "Answer"}},
 		},
 	}
 
-	attachChatCitations(body, state, false)
+	attachChatOutput(body, state, tc, tinfoilEventFlags{})
 
 	content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
 	if strings.Contains(content, tinfoilEventOpenTag) {
@@ -359,7 +361,8 @@ func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.record("https://example.com/page", "Example page")
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	original := "A claim [Example page](https://example.com/page) stands."
 	body := map[string]any{
@@ -374,7 +377,7 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	// A web_search_call item is prepended, then the assistant message
@@ -420,7 +423,8 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 // safety-filter block from a generic failure.
 func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{
 		name:        "search",
 		arguments:   map[string]any{"query": "sensitive"},
 		errorReason: blockedToolErrorReason,
@@ -430,7 +434,7 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 		"output": []any{},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	if len(items) != 1 {
@@ -473,10 +477,11 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 // surfacing beyond the spec envelope.
 func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	body := map[string]any{"output": []any{}}
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	if len(items) != 1 {
@@ -496,7 +501,8 @@ func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T)
 // Responses path, regardless of recorded tool calls.
 func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	body := map[string]any{
 		"output": []any{
@@ -510,7 +516,7 @@ func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	for _, raw := range items {
