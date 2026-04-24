@@ -15,6 +15,18 @@ import (
 
 const maxToolIterations = 10
 
+// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
+// the model can fan out client-owned tool calls. Router-owned tools are
+// still dispatched serially inside runToolLoop to keep citation numbering
+// and streaming event order deterministic. A caller-provided value is
+// honored unchanged.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
 // Responses) behind a single interface so the shared driver can walk the
 // iteration, usage-accumulation, and finalize logic without caring which
