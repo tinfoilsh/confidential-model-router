@@ -904,9 +904,7 @@ func runResponsesStreaming(
 			return nil
 		}
 
-		// Dev log: turn header + tokens
-		dl.WriteTurnHeader(i + 1)
-		dl.WriteTokens(result.usage)
+		dl.WriteStreamedTurn(i+1, result.usage, "", "")
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if len(routerToolCalls) == 0 {

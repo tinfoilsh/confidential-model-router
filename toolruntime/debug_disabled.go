@@ -36,10 +36,8 @@ type devLog struct{}
 
 func openDevLog(*http.Request, map[string]any, string, *sessionRegistry) *devLog      { return nil }
 func (d *devLog) Close()                                                              {}
-func (d *devLog) WriteTurnHeader(int)                                                 {}
-func (d *devLog) WriteTokens(map[string]any)                                          {}
-func (d *devLog) WriteResponseBody(map[string]any)                                    {}
-func (d *devLog) WriteStreamedThinkingAndContent(string, string)                      {}
+func (d *devLog) WriteTurn(int, map[string]any)                                       {}
+func (d *devLog) WriteStreamedTurn(int, map[string]any, string, string)               {}
 func (d *devLog) WriteToolCalls([]toolCall)                                           {}
 func (d *devLog) WriteToolExec(string, map[string]any, string, time.Duration, string) {}
 func (d *devLog) WriteFinish(string)                                                  {}

@@ -139,12 +139,7 @@ func runToolLoop(
 
 		routerToolCalls, hasClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
 
-		// Dev log: turn header + tokens + thinking + content
-		dl.WriteTurnHeader(i + 1)
-		if usage, ok := response.body["usage"].(map[string]any); ok {
-			dl.WriteTokens(usage)
-		}
-		dl.WriteResponseBody(response.body)
+		dl.WriteTurn(i+1, response.body)
 
 		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {

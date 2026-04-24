@@ -431,10 +431,9 @@ This lets callers cancel work, set deadlines, and pass request-scoped values.
 
 ## Sources
 
-- [Effective Go](https://go.dev/doc/effective_go) — the official, canonical guide. Read this first if you read nothing else.
+- [Effective Go](https://go.dev/doc/effective_go) — Official, canonical guide
 - [Go Style Guide (Google)](https://google.github.io/styleguide/go/) — normative style guide used at Google; good for specific decisions.
 - [Go Style Decisions (Google)](https://google.github.io/styleguide/go/decisions.html) — covers detailed questions like naming, formatting, and package structure.
 - [Go Style Best Practices (Google)](https://google.github.io/styleguide/go/best-practices.html) — includes the file-size guidance quoted above.
 - [Organizing a Go module](https://go.dev/doc/modules/layout) — official guide to project layout.
-- [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md) — well-regarded industry guide, especially strong on concurrency patterns.
 - [The standard library source](https://github.com/golang/go/tree/master/src) — the ultimate reference. When in doubt, find a comparable package and copy its shape. `net/http`, `io`, `encoding/json`, and `os` are particularly instructive.

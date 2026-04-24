@@ -157,19 +157,49 @@ func (d *devLog) writef(format string, args ...any) {
 
 const devLogSeparator = "============================================================"
 
-// WriteTurnHeader writes the turn separator.
-func (d *devLog) WriteTurnHeader(turn int) {
+// WriteTurn logs the turn separator, token usage, and thinking/content
+// extracted from a non-streaming upstream response body.
+func (d *devLog) WriteTurn(turn int, responseBody map[string]any) {
 	if d == nil {
 		return
 	}
 	d.writef("\n%s\n", devLogSeparator)
 	d.writef("Turn %d\n", turn)
 	d.writef("%s\n", devLogSeparator)
+	if usage, ok := responseBody["usage"].(map[string]any); ok {
+		d.writeTokens(usage)
+	}
+	thinking, content := extractThinkingAndContent(responseBody)
+	if thinking != "" {
+		d.writef("[thinking] %s\n", truncate(strings.TrimSpace(thinking), 500))
+	}
+	if content != "" {
+		d.writef("[content] %s\n", truncate(strings.TrimSpace(content), 500))
+	}
 }
 
-// WriteTokens writes the token usage line.
-func (d *devLog) WriteTokens(usage map[string]any) {
-	if d == nil || usage == nil {
+// WriteStreamedTurn logs the turn separator, token usage, and
+// pre-extracted thinking/content from a streaming iteration. The
+// streaming path accumulates these values incrementally rather than
+// extracting them from a final response body.
+func (d *devLog) WriteStreamedTurn(turn int, usage map[string]any, thinking, content string) {
+	if d == nil {
+		return
+	}
+	d.writef("\n%s\n", devLogSeparator)
+	d.writef("Turn %d\n", turn)
+	d.writef("%s\n", devLogSeparator)
+	d.writeTokens(usage)
+	if thinking != "" {
+		d.writef("[thinking] %s\n", truncate(strings.TrimSpace(thinking), 500))
+	}
+	if content != "" {
+		d.writef("[content] %s\n", truncate(strings.TrimSpace(content), 500))
+	}
+}
+
+func (d *devLog) writeTokens(usage map[string]any) {
+	if usage == nil {
 		return
 	}
 	// Chat uses prompt_tokens/completion_tokens; Responses uses input_tokens/output_tokens.
@@ -186,38 +216,6 @@ func (d *devLog) WriteTokens(usage map[string]any) {
 		total = prompt + completion
 	}
 	d.writef("[tokens] prompt=%d completion=%d total=%d\n", prompt, completion, total)
-}
-
-// WriteResponseBody extracts and logs the thinking/reasoning and content
-// from an upstream response body. Works for both Chat Completions and
-// Responses shapes. Extraction happens internally so callers just pass
-// the raw response body.
-func (d *devLog) WriteResponseBody(responseBody map[string]any) {
-	if d == nil {
-		return
-	}
-	thinking, content := extractThinkingAndContent(responseBody)
-	if thinking != "" {
-		d.writef("[thinking] %s\n", truncate(strings.TrimSpace(thinking), 500))
-	}
-	if content != "" {
-		d.writef("[content] %s\n", truncate(strings.TrimSpace(content), 500))
-	}
-}
-
-// WriteStreamedThinkingAndContent logs pre-extracted thinking and content
-// from the streaming path, which accumulates these values incrementally
-// rather than extracting them from a final response body.
-func (d *devLog) WriteStreamedThinkingAndContent(thinking, content string) {
-	if d == nil {
-		return
-	}
-	if thinking != "" {
-		d.writef("[thinking] %s\n", truncate(strings.TrimSpace(thinking), 500))
-	}
-	if content != "" {
-		d.writef("[content] %s\n", truncate(strings.TrimSpace(content), 500))
-	}
 }
 
 // WriteToolCalls writes the tool calls summary.
