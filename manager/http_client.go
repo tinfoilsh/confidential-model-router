@@ -17,7 +17,7 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 		return "", nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave := model.NextEnclave()
+	enclave := model.NextEnclave(nil)
 	if enclave == nil {
 		return "", nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
