@@ -20,86 +20,59 @@ import (
 const (
 	tinfoilEventsHeader     = "X-Tinfoil-Events"
 	tinfoilEventsWebSearch  = "web_search"
+	tinfoilEventsCodeExec   = "code_execution"
 	tinfoilEventOpenTag     = "<tinfoil-event>"
 	tinfoilEventCloseTag    = "</tinfoil-event>"
 	tinfoilEventPayloadType = "tinfoil.web_search_call"
+	tinfoilEventToolCallType = "tinfoil.tool_call"
+
+	// maxToolCallOutputInMarker caps the tool output text embedded in
+	// tinfoil-event markers. The full output still goes to the model;
+	// this limit keeps the marker payload from inflating the
+	// assistant content delta to an unreasonable size.
+	maxToolCallOutputInMarker = 4096
 )
 
-// webSearchCallEvent builds a single web_search_call output item for the
-// non-streaming `output[]` array. The `blocked` status is collapsed to
-// the spec-valid `failed` because OpenAI's web_search_call.status enum
-// has no `blocked` slot; the unfiltered status still rides on the
-// `_tinfoil` sidecar for clients that want to distinguish a safety
-// block from a generic failure.
-func webSearchCallEvent(id, status, errorCode string, action map[string]any) map[string]any {
-	item := map[string]any{
-		"type":   "web_search_call",
-		"id":     id,
-		"status": status,
-		"action": action,
-	}
-	if status == "blocked" {
-		item["status"] = "failed"
-	}
-	if sidecar := tinfoilSidecar(status, errorCode); sidecar != nil {
-		item["_tinfoil"] = sidecar
-	}
-	return item
+// tinfoilEventFlags tracks which opt-in marker families the caller
+// requested via the `X-Tinfoil-Events` header. Each field gates the
+// corresponding marker type so a client that only understands web
+// search markers does not see code execution markers (and vice versa).
+type tinfoilEventFlags struct {
+	webSearch     bool
+	codeExecution bool
 }
 
-// tinfoilSidecar builds the `_tinfoil` vendor-extension field that rides
-// alongside a web_search_call item on the Responses API. Strict OpenAI
-// SDKs ignore unknown object fields, so this is invisible to clients
-// that don't opt into reading it; clients that do (tinfoil-webapp,
-// tinfoil-ios, anyone building a richer error UI on top of Tinfoil) can
-// consume it directly off `item._tinfoil` with no additional opt-in.
-//
-// The sidecar carries ONLY information the spec cannot express:
-//   - `status`: the unfiltered router status, which may be `blocked`
-//     (distinct from the spec-valid `failed` that rides on the envelope
-//     `status` field). Present only when the router status differs from
-//     the envelope status, i.e., only on `blocked` today.
-//   - `error.code`: an opaque router error code (e.g.
-//     `blocked_by_safety_filter`) for clients that want to branch UI on
-//     the specific reason. Present only when the tool call errored.
-//
-// Returns nil when there is nothing worth surfacing (the default, happy
-// path) so the `_tinfoil` field is simply omitted from the item and the
-// serialized JSON stays minimal for successful searches.
-func tinfoilSidecar(rawStatus, errorCode string) map[string]any {
-	if rawStatus != "blocked" && errorCode == "" {
-		return nil
-	}
-	sidecar := map[string]any{}
-	if rawStatus == "blocked" {
-		sidecar["status"] = rawStatus
-	}
-	if errorCode != "" {
-		sidecar["error"] = map[string]any{"code": errorCode}
-	}
-	return sidecar
-}
-
-// tinfoilEventsEnabled reports whether the caller opted into the
-// router-owned tinfoil-event marker stream for web-search tool calls.
-// The header value is a comma-separated list of families the client is
-// prepared to parse. We match case-insensitively and tolerate whitespace.
-// A missing or empty header means the client gets a pristine
+// parseTinfoilEventFlags parses the `X-Tinfoil-Events` header into per-family
+// booleans. The header value is a comma-separated list of families the
+// client is prepared to parse. We match case-insensitively and tolerate
+// whitespace. A missing or empty header means the client gets a pristine
 // spec-conformant stream with no markers at all.
-func tinfoilEventsEnabled(h http.Header) bool {
+func parseTinfoilEventFlags(h http.Header) tinfoilEventFlags {
 	if h == nil {
-		return false
+		return tinfoilEventFlags{}
 	}
 	raw := h.Get(tinfoilEventsHeader)
 	if raw == "" {
-		return false
+		return tinfoilEventFlags{}
 	}
+	var flags tinfoilEventFlags
 	for _, part := range strings.Split(raw, ",") {
-		if strings.EqualFold(strings.TrimSpace(part), tinfoilEventsWebSearch) {
-			return true
+		family := strings.TrimSpace(part)
+		if strings.EqualFold(family, tinfoilEventsWebSearch) {
+			flags.webSearch = true
+		}
+		if strings.EqualFold(family, tinfoilEventsCodeExec) {
+			flags.codeExecution = true
 		}
 	}
-	return false
+	return flags
+}
+
+// tinfoilEventsEnabled reports whether the caller opted into web-search
+// tinfoil-event markers. Retained for call sites that only need the
+// web-search gate.
+func tinfoilEventsEnabled(h http.Header) bool {
+	return parseTinfoilEventFlags(h).webSearch
 }
 
 // tinfoilEventMarker renders a single progress event as a text marker:
@@ -205,17 +178,61 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 	return builder.String()
 }
 
-// fetchArgumentURLs extracts the string URLs the model handed the fetch tool.
-func fetchArgumentURLs(arguments map[string]any) []string {
-	raw, ok := arguments["urls"].([]any)
-	if !ok {
-		return nil
-	}
-	urls := make([]string, 0, len(raw))
-	for _, item := range raw {
-		if url := strings.TrimSpace(stringValue(item)); url != "" {
-			urls = append(urls, url)
+// tinfoilToolCallMarker renders a code-execution tool-call progress
+// event as a `<tinfoil-event>` marker. The payload shape is:
+//
+//	in_progress: {"type":"tinfoil.tool_call","item_id":"…","status":"in_progress",
+//	              "tool":{"name":"bash","arguments":{…}}}
+//	completed:   {"type":"tinfoil.tool_call","item_id":"…","status":"completed",
+//	              "tool":{"name":"bash","output":"…"}}
+//	failed:      {"type":"tinfoil.tool_call","item_id":"…","status":"failed",
+//	              "tool":{"name":"bash","output":"error: …"}}
+func tinfoilToolCallMarker(id, status, toolName string, arguments map[string]any, output string) string {
+	tool := map[string]any{"name": toolName}
+	if status == "in_progress" {
+		tool["arguments"] = arguments
+	} else {
+		if len(output) > maxToolCallOutputInMarker {
+			output = output[:maxToolCallOutputInMarker] + "…[truncated]"
 		}
+		tool["output"] = output
 	}
-	return urls
+	payload := map[string]any{
+		"type":    tinfoilEventToolCallType,
+		"item_id": id,
+		"status":  status,
+		"tool":    tool,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		data = []byte(`{"type":"` + tinfoilEventToolCallType + `"}`)
+	}
+	return "\n" + tinfoilEventOpenTag + string(data) + tinfoilEventCloseTag + "\n"
 }
+
+// tinfoilToolCallMarkersForRecords renders in_progress + terminal marker
+// pairs for code-execution tool calls in the non-streaming path. It
+// skips records whose name is "search" or "fetch" because those are
+// handled by tinfoilEventMarkersForRecords. Every other recorded
+// router-owned tool call gets one marker pair.
+func tinfoilToolCallMarkersForRecords(records []toolCallRecord) string {
+	if len(records) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	for _, record := range records {
+		if isWebSearchTool(record.name) {
+			continue
+		}
+		id := "tc_" + uuid.NewString()
+		builder.WriteString(tinfoilToolCallMarker(id, "in_progress", record.name, record.arguments, ""))
+		status := statusForRecord(record)
+		output := record.output
+		if status != "completed" && output == "" {
+			output = record.errorReason
+		}
+		builder.WriteString(tinfoilToolCallMarker(id, status, record.name, nil, output))
+	}
+	return builder.String()
+}
+

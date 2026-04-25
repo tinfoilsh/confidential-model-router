@@ -57,6 +57,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			citations := &citationState{nextIndex: 1}
+			toolCalls := &toolCallLog{}
 			output := executeRouterToolCall(
 				context.Background(),
 				registry,
@@ -64,6 +65,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 				webSearchOptions{},
 				nil,
 				citations,
+				toolCalls,
 				"test",
 				"",
 			)
@@ -92,6 +94,7 @@ func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 	defer registry.CloseAll()
 
 	citations := &citationState{nextIndex: 1}
+	toolCalls := &toolCallLog{}
 	output := executeRouterToolCall(
 		context.Background(),
 		registry,
@@ -99,16 +102,17 @@ func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 		webSearchOptions{},
 		nil,
 		citations,
+		toolCalls,
 		"test",
 		"",
 	)
 	if output == "" {
 		t.Fatalf("expected non-empty humanized error output, got empty string")
 	}
-	if len(citations.toolCalls) != 1 {
-		t.Fatalf("expected 1 recorded tool call, got %d", len(citations.toolCalls))
+	if len(toolCalls.records) != 1 {
+		t.Fatalf("expected 1 recorded tool call, got %d", len(toolCalls.records))
 	}
-	if citations.toolCalls[0].errorReason == "" {
+	if toolCalls.records[0].errorReason == "" {
 		t.Errorf("expected recorded errorReason, got empty string")
 	}
 }

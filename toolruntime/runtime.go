@@ -80,7 +80,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
-	eventsEnabled := tinfoilEventsEnabled(r.Header)
+	eventFlags := parseTinfoilEventFlags(r.Header)
 	safetyOpts := parseSafetyOptIns(body)
 
 	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
@@ -92,18 +92,31 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 	defer registry.CloseAll()
 
+	var dl *devLog
+	if em.DebugMode() {
+		sid := r.Header.Get("X-Session-Id")
+		if sid == "" {
+			sid = "no-session-" + debugTraceID()
+		}
+		dl = openDevLog(sid)
+		if dl != nil {
+			defer dl.Close()
+			dl.WriteHeader(extractLastUserMessage(body), modelName, sid, strings.Join(registry.endpointSummary(), ", "))
+		}
+	}
+
 	promptResult := buildRouterPrompt()
 
 	streaming := isStream(body)
 	switch r.URL.Path {
 	case "/v1/chat/completions":
 		if streaming {
-			if err := runChatStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult); err != nil {
+			if err := runChatStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, dl); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventsEnabled)
+		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -112,12 +125,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
 		if streaming {
-			if err := runResponsesStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult); err != nil {
+			if err := runResponsesStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, dl); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventsEnabled)
+		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -157,6 +170,9 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
 	}
+	if sessionID := r.Header.Get("X-Session-Id"); sessionID != "" {
+		headers.Set("X-Session-Id", sessionID)
+	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,
 		headers: headers,
@@ -169,14 +185,14 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	}, nil)
 }
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventsEnabled bool) (*upstreamJSONResponse, error) {
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, dl *devLog) (*upstreamJSONResponse, error) {
 	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders)
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventsEnabled)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, dl)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventsEnabled bool) (*upstreamJSONResponse, error) {
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, dl *devLog) (*upstreamJSONResponse, error) {
 	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools())
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventsEnabled)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, dl)
 }
 
 // executeRouterToolCall runs one router-owned tool call on behalf of
@@ -199,6 +215,7 @@ func executeRouterToolCall(
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
 	citations *citationState,
+	toolCalls *toolCallLog,
 	tracePhase, traceID string,
 ) string {
 	applyWebSearchOptionsToToolCall(call.name, call.arguments, opts)
@@ -216,7 +233,7 @@ func executeRouterToolCall(
 		// rather than panicking so the upstream model sees a
 		// deterministic error string.
 		output := humanizeToolArgError(call.name, fmt.Errorf("no MCP session registered for tool %q", call.name), call.arguments)
-		citations.recordToolCall(toolCallRecord{name: call.name, arguments: call.arguments, errorReason: "tool_error"})
+		toolCalls.record(toolCallRecord{name: call.name, arguments: call.arguments, errorReason: "tool_error"})
 		return output
 	}
 	tstart := time.Now()
@@ -239,7 +256,8 @@ func executeRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
-	citations.recordToolCall(record)
+	record.output = output
+	toolCalls.record(record)
 	return output
 }
 

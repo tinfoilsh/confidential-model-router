@@ -237,10 +237,19 @@ func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile 
 		profiles = append(profiles, toolprofile.WebSearch)
 	}
 
+	// code_execution_options is the chat-completions shortcut for
+	// activating code_execution.
+	if _, ok := body["code_execution_options"]; ok {
+		profiles = append(profiles, toolprofile.CodeExecution)
+	}
+
 	if path == "/v1/responses" {
 		if tools, ok := body["tools"].([]any); ok {
 			seenWebSearch := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
 				return p.Name == toolprofile.WebSearch.Name
+			})
+			seenCodeExecution := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
+				return p.Name == toolprofile.CodeExecution.Name
 			})
 			for _, t := range tools {
 				m, _ := t.(map[string]any)
@@ -250,6 +259,11 @@ func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile 
 					if !seenWebSearch {
 						profiles = append(profiles, toolprofile.WebSearch)
 						seenWebSearch = true
+					}
+				case "code_execution":
+					if !seenCodeExecution {
+						profiles = append(profiles, toolprofile.CodeExecution)
+						seenCodeExecution = true
 					}
 				}
 			}

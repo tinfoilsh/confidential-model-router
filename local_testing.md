@@ -1,27 +1,26 @@
 # Local Testing
 
-This is the router-centric runbook. Use it when you want to debug the
-router-owned websearch tool loop end-to-end.
+This is the router-centric runbook for testing router-owned tool loops
+end-to-end. The router talks to real model enclaves for generation but sends
+MCP tool traffic to local servers.
 
-For standalone `confidential-websearch` bring-up, mode selection, and direct
-MCP probes, start with `../websearch/local_testing.md`. The two guides are
-intentionally split so this file focuses on router behavior while the websearch
-guide focuses on the MCP server itself.
+Two tool profiles are currently supported:
 
-This flow runs:
+- **Web Search** — `confidential-websearch` MCP server
+- **Code Execution** — `confidential-code-execution` MCP server (orchestrator)
 
-- a local `confidential-websearch` MCP server
-- a local `confidential-model-router`
-- real model requests through the router
+You can run either or both depending on what you're testing.
 
-The router still talks to real model enclaves for generation, but it sends MCP
-tool traffic to your local websearch server.
+## 1. Start local MCP servers
 
-## 1. Start the local websearch MCP server
+Start whichever servers you need. Each listens on its own port.
 
-From the `confidential-websearch` repo, choose one mode:
+### Web Search (port 8091)
 
-### Fixture mode
+For standalone bring-up and direct MCP probes, see
+`../websearch/local_testing.md`.
+
+#### Fixture mode
 
 ```bash
 cd ../websearch
@@ -32,7 +31,7 @@ go run .
 
 `LOCAL_TEST_MODE=1` replaces Exa and Cloudflare with deterministic fixtures.
 
-### Real-provider mode
+#### Real-provider mode
 
 ```bash
 cd ../websearch
@@ -41,8 +40,19 @@ LISTEN_ADDR=127.0.0.1:8091 \
 go run .
 ```
 
-Use `../websearch/local_testing.md` if you want direct MCP smoke tests before
-introducing the router.
+### Code Execution (port 7070)
+
+From the `code-execution` repo:
+
+```bash
+cd ../code-execution/code-container/orchestrator
+ADMIN_API_KEY=$TINFOIL_API_KEY \
+python main.py
+```
+
+The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) alongside its
+admin endpoints. It manages a pool of sandboxed containers and routes tool
+calls to them.
 
 ## 2. Create a small router config
 
@@ -59,6 +69,10 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
       - gpt-oss-120b-0.inf9.tinfoil.sh
+  kimi-k2-6:
+    repo: tinfoilsh/confidential-kimi-k2-6
+    enclaves:
+      - kimi-k2-6.tinfoil.containers.tinfoil.dev
 EOF
 ```
 
@@ -70,11 +84,13 @@ shasum -a 256 /tmp/model-router-local.yml
 
 ## 3. Start the local router
 
-From the `confidential-model-router` repo:
+From the `confidential-model-router` repo. Include `LOCAL_MCP_ENDPOINT_*`
+variables for whichever MCP servers you started in step 1:
 
 ```bash
 DEBUG=1 \
 LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
+LOCAL_MCP_ENDPOINT_CODE_EXECUTION=http://127.0.0.1:7070/mcp \
 PORT=8090 \
 DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
@@ -83,21 +99,35 @@ USAGE_REPORTER_SECRET=test-secret \
 go run -tags toolruntime_debug .
 ```
 
-`LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP model hit a local MCP server instead of the attested deployment. The model name is upper-cased with non-alphanumeric characters replaced by underscores, so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which prevents a misconfigured production deployment from silently downgrading to a non-attested HTTP endpoint.
+`LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP
+model hit a local MCP server instead of the attested deployment. The model
+name is upper-cased with non-alphanumeric characters replaced by underscores,
+so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH` and `code-execution`
+becomes `LOCAL_MCP_ENDPOINT_CODE_EXECUTION`. These overrides are only honored
+when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which
+prevents a misconfigured production deployment from silently downgrading to a
+non-attested HTTP endpoint.
 
 ### Toolruntime tracing
 
-The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated purely at compile time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is a compile-time `false` constant and every call site is eliminated by the Go compiler, so production TEE images carry zero debug code:
+The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated
+purely at compile time by the `toolruntime_debug` build tag. Without the tag,
+`debugEnabled` is a compile-time `false` constant and every call site is
+eliminated by the Go compiler, so production TEE images carry zero debug code:
 
 - `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
 - `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
 
-If you want the `toolruntime:<tid> ...` lines in this runbook, build with the tag as shown above. Otherwise you will still see `DEBUG=1` router logs but none of the per-iteration tool-loop trace.
+If you want the `toolruntime:<tid> ...` lines in this runbook, build with the
+tag as shown above. Otherwise you will still see `DEBUG=1` router logs but
+none of the per-iteration tool-loop trace.
 
-## 4. Run router-facing smoke tests
+---
 
-If the websearch server is running in fixture mode, these prompts should return
-the quoted answers.
+## Web Search smoke tests
+
+If the websearch server is running in fixture mode, these prompts should
+return the quoted answers.
 
 ### Chat Completions
 
@@ -146,7 +176,7 @@ Expected answer:
 According to the Neighborhood Cat Gazette, the cats in the sunroom prefer saffron cushions because they stay warm in the afternoon light.
 ```
 
-## 5. Run the eval harness
+### Eval harness
 
 ```bash
 cd ../websearch
@@ -162,7 +192,107 @@ TINFOIL_API_KEY=... python3 evals/run_websearch_eval.py \
 For the matrix layout and result analyzer details, see
 `../websearch/evals/WEBSEARCH_EVAL.md`.
 
-## 6. Verified model matrix
+---
+
+## Code Execution smoke tests
+
+Code execution requires an `X-Session-Id` header so the orchestrator can
+persist a container across multiple tool calls within a conversation. Without
+it, the MCP server rejects tool calls.
+
+### Chat Completions
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gemma4-31b",
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Create a new file called test.txt with hello from tinfoil in it"
+      }
+    ],
+    "max_tokens": 200
+  }'
+```
+
+Test that the session persists (same `X-Session-Id`, same container):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gemma4-31b",
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Use cat to read test.txt. What does it say in it?"
+      }
+    ],
+    "max_tokens": 200
+  }'
+```
+
+### Responses
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
+    "stream": false,
+    "temperature": 0,
+    "max_output_tokens": 400,
+    "tools": [{"type": "code_execution"}]
+  }'
+```
+
+### Both tools together
+
+Web search and code execution can be activated in the same request:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-2" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "web_search_options": {},
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Search the web for the current Python version, then use bash to run: python3 --version"
+      }
+    ],
+    "max_tokens": 300
+  }'
+```
+
+### Session cleanup
+
+After testing, clean up orchestrator sessions to release containers:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7070/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId": "test-session-1"}'
+```
+
+---
+
+## Verified model matrix
 
 These combinations were validated locally:
 
@@ -184,14 +314,14 @@ For the `gpt-oss-120b` Responses API path, the most stable local settings were:
 `qwen3-vl-30b` was not added to the recommended local matrix because
 attestation fetches for its current enclave were failing during this test run.
 
-## 7. Cleanup
+## Cleanup
 
-If you launched both processes in interactive shells, `Ctrl+C` in each is enough.
+If you launched processes in interactive shells, `Ctrl+C` in each is enough.
 
-If they are still running in the background, kill by port rather than by path
-so cleanup works regardless of where you launched the binaries from:
+If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server
+lsof -ti tcp:7070 | xargs kill   # code execution orchestrator
 lsof -ti tcp:8090 | xargs kill   # model-router
 ```

@@ -69,7 +69,7 @@ type toolLoopAdapter interface {
 
 	// attachCitations resolves inline markdown links and surfaces
 	// router-owned tool progress in the surface-specific shape.
-	attachCitations(body map[string]any, citations *citationState, eventsEnabled bool)
+	attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
@@ -106,11 +106,13 @@ func runToolLoop(
 	modelName string,
 	requestHeaders http.Header,
 	adapter toolLoopAdapter,
-	eventsEnabled bool,
+	eventFlags tinfoilEventFlags,
+	dl *devLog,
 ) (*upstreamJSONResponse, error) {
 	reqBody := adapter.buildInitialRequest()
 	usageTotals := usageAccumulator{}
 	citations := citationState{nextIndex: 1}
+	toolCalls := toolCallLog{}
 	opts := adapter.options()
 	toolSchemas := adapter.schemas()
 	path := adapter.upstreamPath()
@@ -136,18 +138,32 @@ func runToolLoop(
 		usageTotals.Add(response)
 
 		routerToolCalls, hasClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
+
+		// Dev log: turn header + tokens + thinking + content
+		dl.WriteTurnHeader(i + 1)
+		if usage, ok := response.body["usage"].(map[string]any); ok {
+			dl.WriteTokens(usage)
+		}
+		thinking, content := extractThinkingAndContent(response.body)
+		dl.WriteThinking(thinking)
+		dl.WriteContent(content)
+
 		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s done iterations=%d (no router tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
 			}
+			dl.WriteFinish("stop (no router tool calls)")
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, eventsEnabled)
+			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
 			return response, nil
 		}
 
+		dl.WriteToolCalls(routerToolCalls)
 		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
-			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, adapter.tracePhase(i), adapter.traceID())
+			tstart := time.Now()
+			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, &toolCalls, adapter.tracePhase(i), adapter.traceID())
+			dl.WriteToolExec(call.name, call.arguments, output, time.Since(tstart), "")
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
 				name:   call.name,
@@ -163,7 +179,7 @@ func runToolLoop(
 			}
 			adapter.stripRouterToolCallsFromResponse(response)
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, eventsEnabled)
+			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -183,7 +199,7 @@ func runToolLoop(
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
-	adapter.attachCitations(finalResponse.body, &citations, eventsEnabled)
+	adapter.attachCitations(finalResponse.body, &citations, &toolCalls, eventFlags)
 	return finalResponse, nil
 }
 
@@ -238,13 +254,14 @@ func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *toke
 	}
 }
 
-func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, eventsEnabled bool) {
-	attachChatCitations(body, citations, eventsEnabled)
+func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	attachChatOutput(body, citations, toolCalls, eventFlags)
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
 	reqBody := cloneJSONMap(a.body)
 	delete(reqBody, "web_search_options")
+	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
 	delete(reqBody, "stream_options")
 	delete(reqBody, "pii_check_options")
@@ -391,9 +408,11 @@ func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, t
 	}
 }
 
-func (a *responsesLoopAdapter) upstreamPath() string                   { return "/v1/responses" }
-func (a *responsesLoopAdapter) traceID() string                        { return "" }
-func (a *responsesLoopAdapter) tracePhase(iteration int) string        { return fmt.Sprintf("responses.iter=%d", iteration) }
+func (a *responsesLoopAdapter) upstreamPath() string { return "/v1/responses" }
+func (a *responsesLoopAdapter) traceID() string      { return "" }
+func (a *responsesLoopAdapter) tracePhase(iteration int) string {
+	return fmt.Sprintf("responses.iter=%d", iteration)
+}
 func (a *responsesLoopAdapter) includeActionSources() bool             { return a.opts.includeActionSources }
 func (a *responsesLoopAdapter) options() webSearchOptions              { return a.opts }
 func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema { return a.toolSchemas }
@@ -410,8 +429,8 @@ func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage 
 	}
 }
 
-func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, _ bool) {
-	attachResponsesCitations(body, citations, a.opts.includeActionSources)
+func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, _ tinfoilEventFlags) {
+	attachResponsesOutput(body, citations, toolCalls, a.opts.includeActionSources)
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
@@ -422,7 +441,7 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
-	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(a.tools))
+	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(a.tools))
 	base["input"] = prependResponsesPrompt(a.prompt, base["input"])
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
@@ -436,7 +455,7 @@ func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse
 }
 
 // stripRouterToolCallsFromResponse drops router-owned function_call
-// items from the output array; attachResponsesCitations prepends the
+// items from the output array; attachResponsesOutput prepends the
 // matching web_search_call items that replace them.
 func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
 	if response == nil || response.body == nil {

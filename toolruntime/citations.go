@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -21,47 +20,9 @@ type citationSource struct {
 	title string
 }
 
-// toolCallRecord captures a tool call the router made on the user's behalf,
-// used to surface web_search_call progress items to clients. errorReason
-// carries the tool-side error message when the call failed so terminal
-// web_search_call items can honestly report status:"failed" instead of
-// silently claiming completion on a request that never returned results.
-//
-// resultSources carries the ordered {url, title} pairs this specific call
-// produced (search results, fetched pages) so terminal tinfoil-event
-// markers can attribute sources to the exact search call that surfaced
-// them. resultURLs is the same list in URL-only form kept for the
-// Responses API `action.sources` shape.
-type toolCallRecord struct {
-	name          string
-	arguments     map[string]any
-	resultURLs    []string
-	resultSources []toolCallSource
-	errorReason   string
-}
-
-// toolCallSource is a single {url, title} pair produced by a router tool
-// call (a search hit or a fetched page). Titles are best-effort: a
-// missing or empty title is surfaced as an empty string so clients can
-// fall back to displaying the bare URL.
-type toolCallSource struct {
-	url   string
-	title string
-}
-
 type citationState struct {
 	nextIndex int
 	sources   []citationSource
-	toolCalls []toolCallRecord
-}
-
-// recordToolCall appends a completed tool call (search or fetch) for later
-// surfacing as a web_search_call stream event or Responses output item.
-func (c *citationState) recordToolCall(record toolCallRecord) {
-	if c == nil {
-		return
-	}
-	c.toolCalls = append(c.toolCalls, record)
 }
 
 // record registers a source the router surfaced to the model in a tool output
@@ -177,29 +138,6 @@ func extractToolOutputSources(output string) []toolCallSource {
 			sources = append(sources, toolCallSource{url: url, title: pendingTitle})
 			pendingTitle = ""
 		}
-	}
-	if len(sources) == 0 {
-		return nil
-	}
-	return sources
-}
-
-// toActionSources wraps a list of URLs in the OpenAI-spec shape
-// `[{type: "url", url: "..."}]` documented for `WebSearchCall.action.sources`.
-// Returns nil when the input is empty so callers can omit the field entirely.
-func toActionSources(urls []string) []any {
-	if len(urls) == 0 {
-		return nil
-	}
-	sources := make([]any, 0, len(urls))
-	for _, url := range urls {
-		if url == "" {
-			continue
-		}
-		sources = append(sources, map[string]any{
-			"type": "url",
-			"url":  url,
-		})
 	}
 	if len(sources) == 0 {
 		return nil
@@ -599,56 +537,6 @@ func formatFetchFailures(raw any) string {
 	return strings.Join(lines, "\n")
 }
 
-// attachChatCitations resolves the inline markdown links the model wrote into
-// each choice's content back to the URLs the router registered during the
-// tool loop and attaches them to message.annotations in the Chat Completions
-// nested url_citation shape:
-//
-//	{"type":"url_citation","url_citation":{"title":..,"url":..,"start_index":..,"end_index":..}}
-//
-// This matches OpenAI's documented Chat Completions response shape.
-//
-// When `eventsEnabled` is true, `<tinfoil-event>...</tinfoil-event>`
-// markers for every recorded router tool call are prepended to each
-// choice's message content so clients that opted into the tinfoil-event
-// stream see the same in_progress -> terminal progression in the
-// non-streaming response as they do in streaming. url_citation
-// annotation indices are shifted by the marker prefix length so spans
-// continue to refer to the correct byte range in the new content.
-func attachChatCitations(responseBody map[string]any, citations *citationState, eventsEnabled bool) {
-	if responseBody == nil || citations == nil {
-		return
-	}
-	choices, _ := responseBody["choices"].([]any)
-	for _, rawChoice := range choices {
-		choice, _ := rawChoice.(map[string]any)
-		if choice == nil {
-			continue
-		}
-		message, _ := choice["message"].(map[string]any)
-		if message == nil {
-			continue
-		}
-		content := stringValue(message["content"])
-		if normalized := normalizeCitationLinks(content); normalized != content {
-			content = normalized
-		}
-		annotations := citations.nestedAnnotationsFor(content)
-		var prefix string
-		if eventsEnabled {
-			prefix = tinfoilEventMarkersForRecords(citations.toolCalls)
-		}
-		if prefix != "" {
-			content = prefix + content
-			shiftNestedAnnotationIndices(annotations, utf8.RuneCountInString(prefix))
-		}
-		message["content"] = content
-		if len(annotations) > 0 {
-			message["annotations"] = annotations
-		}
-	}
-}
-
 // shiftNestedAnnotationIndices shifts every `start_index` / `end_index`
 // on a nested-shape url_citation by `offset` bytes. Called after marker
 // injection to keep the annotation spans pointing at the same substrings
@@ -696,104 +584,4 @@ func shiftFlatAnnotationIndices(annotations []any, offset int) {
 			ann["end_index"] = end + offset
 		}
 	}
-}
-
-// attachResponsesCitations resolves inline markdown links in each output_text
-// item back to the URLs the router registered during the tool loop and
-// attaches them in the Responses API flat url_citation shape documented by
-// OpenAI:
-//
-//	{"type":"url_citation","start_index":..,"end_index":..,"url":..,"title":..}
-//
-// It also prepends a web_search_call output item per recorded router tool
-// call in the shape OpenAI documents for the Responses API, surfaced to
-// clients as response.output_item.added events.
-//
-// The Responses path is always fully spec-conformant: router-specific
-// progress information rides on the spec-defined web_search_call items
-// and streaming envelopes, never on an opt-in marker channel.
-func attachResponsesCitations(responseBody map[string]any, citations *citationState, includeActionSources bool) {
-	if responseBody == nil || citations == nil {
-		return
-	}
-	outputItems, _ := responseBody["output"].([]any)
-	for _, rawItem := range outputItems {
-		item, _ := rawItem.(map[string]any)
-		if item == nil || stringValue(item["type"]) != "message" {
-			continue
-		}
-		contentList, _ := item["content"].([]any)
-		for _, rawContent := range contentList {
-			contentMap, _ := rawContent.(map[string]any)
-			if contentMap == nil || stringValue(contentMap["type"]) != "output_text" {
-				continue
-			}
-			text := stringValue(contentMap["text"])
-			if normalized := normalizeCitationLinks(text); normalized != text {
-				contentMap["text"] = normalized
-				text = normalized
-			}
-			annotations := citations.flatAnnotationsFor(text)
-			if len(annotations) > 0 {
-				contentMap["annotations"] = annotations
-			}
-		}
-	}
-
-	if len(citations.toolCalls) == 0 {
-		return
-	}
-	events := buildWebSearchCallOutputItems(citations.toolCalls, includeActionSources)
-	prepended := make([]any, 0, len(events)+len(outputItems))
-	prepended = append(prepended, events...)
-	prepended = append(prepended, outputItems...)
-	responseBody["output"] = prepended
-}
-
-// buildWebSearchCallOutputItems turns recorded router tool calls into the
-// web_search_call output items documented by OpenAI's Responses API.
-//   - search tool calls become one action.type:"search" event with the query
-//     and (when the caller opted in via `include:
-//     ["web_search_call.action.sources"]`) the resolved source URLs in the
-//     spec shape `[{type:"url", url:"..."}]`.
-//   - fetch tool calls become one action.type:"open_page" event per URL so
-//     clients can correlate each fetched page with its surrounding search.
-func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSources bool) []any {
-	events := make([]any, 0, len(records))
-	for _, record := range records {
-		status := statusForRecord(record)
-		switch {
-		case isRouterSearchToolName(record.name):
-			action := map[string]any{"type": "search"}
-			if query := stringValue(record.arguments["query"]); query != "" {
-				action["query"] = query
-			}
-			if includeActionSources {
-				if sources := toActionSources(record.resultURLs); len(sources) > 0 {
-					action["sources"] = sources
-				}
-			}
-			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
-		case isRouterFetchToolName(record.name):
-			for _, url := range fetchArgumentURLs(record.arguments) {
-				action := map[string]any{"type": "open_page", "url": url}
-				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
-			}
-		}
-	}
-	return events
-}
-
-// statusForRecord maps a recorded router tool call to the web_search_call
-// status surfaced to clients. "blocked" is reserved for PII or prompt
-// injection safeguards so client UIs can surface a distinct affordance for
-// the user; any other error becomes "failed".
-func statusForRecord(record toolCallRecord) string {
-	if record.errorReason == "" {
-		return "completed"
-	}
-	if record.errorReason == blockedToolErrorReason {
-		return "blocked"
-	}
-	return "failed"
 }

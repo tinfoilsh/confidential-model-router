@@ -287,7 +287,8 @@ func TestTinfoilEventMarkersForRecordsMapsBlocked(t *testing.T) {
 func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.record("https://example.com/page", "Example page")
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	original := "A claim [Example page](https://example.com/page) stands."
 	body := map[string]any{
@@ -298,7 +299,7 @@ func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 		},
 	}
 
-	attachChatCitations(body, state, true)
+	attachChatOutput(body, state, tc, tinfoilEventFlags{webSearch: true})
 
 	message := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
 	content := message["content"].(string)
@@ -333,14 +334,15 @@ func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 // router ran router-owned tools that would have produced progress.
 func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 	body := map[string]any{
 		"choices": []any{
 			map[string]any{"message": map[string]any{"role": "assistant", "content": "Answer"}},
 		},
 	}
 
-	attachChatCitations(body, state, false)
+	attachChatOutput(body, state, tc, tinfoilEventFlags{})
 
 	content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
 	if strings.Contains(content, tinfoilEventOpenTag) {
@@ -359,7 +361,8 @@ func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 	state := &citationState{nextIndex: 1}
 	state.record("https://example.com/page", "Example page")
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	original := "A claim [Example page](https://example.com/page) stands."
 	body := map[string]any{
@@ -374,7 +377,7 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	// A web_search_call item is prepended, then the assistant message
@@ -420,7 +423,8 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 // safety-filter block from a generic failure.
 func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{
 		name:        "search",
 		arguments:   map[string]any{"query": "sensitive"},
 		errorReason: blockedToolErrorReason,
@@ -430,7 +434,7 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 		"output": []any{},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	if len(items) != 1 {
@@ -473,10 +477,11 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 // surfacing beyond the spec envelope.
 func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	body := map[string]any{"output": []any{}}
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	if len(items) != 1 {
@@ -496,7 +501,8 @@ func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T)
 // Responses path, regardless of recorded tool calls.
 func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 	state := &citationState{nextIndex: 1}
-	state.recordToolCall(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
 	body := map[string]any{
 		"output": []any{
@@ -510,7 +516,7 @@ func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 		},
 	}
 
-	attachResponsesCitations(body, state, false)
+	attachResponsesOutput(body, state, tc, false)
 
 	items := body["output"].([]any)
 	for _, raw := range items {
@@ -525,6 +531,257 @@ func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
 		if text != "Answer" {
 			t.Fatalf("Responses output_text must be pristine: %q", text)
 		}
+	}
+}
+
+// --------------- Code Execution Event Tests ---------------
+
+// TestParseTinfoilEventFlagsCodeExecution pins that the
+// `X-Tinfoil-Events` header accepts `code_execution` as a family.
+func TestParseTinfoilEventFlagsCodeExecution(t *testing.T) {
+	cases := []struct {
+		name      string
+		value     string
+		wantWS    bool
+		wantCE    bool
+	}{
+		{"empty", "", false, false},
+		{"web_search only", "web_search", true, false},
+		{"code_execution only", "code_execution", false, true},
+		{"both", "web_search,code_execution", true, true},
+		{"both reversed", "code_execution, web_search", true, true},
+		{"case insensitive", "CODE_EXECUTION", false, true},
+		{"unrelated", "audio_progress", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.value != "" {
+				h.Set(tinfoilEventsHeader, tc.value)
+			}
+			flags := parseTinfoilEventFlags(h)
+			if flags.webSearch != tc.wantWS {
+				t.Fatalf("webSearch = %v, want %v", flags.webSearch, tc.wantWS)
+			}
+			if flags.codeExecution != tc.wantCE {
+				t.Fatalf("codeExecution = %v, want %v", flags.codeExecution, tc.wantCE)
+			}
+		})
+	}
+}
+
+// TestTinfoilToolCallMarkerShape pins the on-the-wire format for code
+// execution markers: the payload type is tinfoil.tool_call, and the
+// tool field carries name + arguments on in_progress and name + output
+// on completed.
+func TestTinfoilToolCallMarkerShape(t *testing.T) {
+	args := map[string]any{"command": "python3 script.py"}
+	marker := tinfoilToolCallMarker("tc_1", "in_progress", "bash", args, "")
+	if !strings.HasPrefix(marker, "\n"+tinfoilEventOpenTag) {
+		t.Fatalf("marker must start with tag: got %q", marker)
+	}
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v (payload=%q)", err, payload)
+	}
+	if decoded["type"] != tinfoilEventToolCallType {
+		t.Fatalf("payload.type = %v, want %q", decoded["type"], tinfoilEventToolCallType)
+	}
+	if decoded["item_id"] != "tc_1" {
+		t.Fatalf("payload.item_id = %v, want tc_1", decoded["item_id"])
+	}
+	if decoded["status"] != "in_progress" {
+		t.Fatalf("payload.status = %v, want in_progress", decoded["status"])
+	}
+	tool, _ := decoded["tool"].(map[string]any)
+	if tool == nil || tool["name"] != "bash" {
+		t.Fatalf("payload.tool.name malformed: %#v", decoded["tool"])
+	}
+	toolArgs, _ := tool["arguments"].(map[string]any)
+	if toolArgs == nil || toolArgs["command"] != "python3 script.py" {
+		t.Fatalf("payload.tool.arguments malformed: %#v", tool["arguments"])
+	}
+	if _, present := tool["output"]; present {
+		t.Fatalf("in_progress marker must not include output")
+	}
+}
+
+// TestTinfoilToolCallMarkerCompletedCarriesOutput pins that a completed
+// marker has tool.output and no tool.arguments.
+func TestTinfoilToolCallMarkerCompletedCarriesOutput(t *testing.T) {
+	marker := tinfoilToolCallMarker("tc_1", "completed", "bash", nil, "Hello world\nexit_code: 0")
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v", err)
+	}
+	tool, _ := decoded["tool"].(map[string]any)
+	if tool == nil {
+		t.Fatalf("payload.tool missing")
+	}
+	if tool["output"] != "Hello world\nexit_code: 0" {
+		t.Fatalf("payload.tool.output = %v, want output text", tool["output"])
+	}
+	if _, present := tool["arguments"]; present {
+		t.Fatalf("completed marker must not include arguments")
+	}
+}
+
+// TestTinfoilToolCallMarkerTruncatesLargeOutput pins that the output
+// field is truncated when it exceeds maxToolCallOutputInMarker.
+func TestTinfoilToolCallMarkerTruncatesLargeOutput(t *testing.T) {
+	longOutput := strings.Repeat("x", maxToolCallOutputInMarker+100)
+	marker := tinfoilToolCallMarker("tc_1", "completed", "view", nil, longOutput)
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v", err)
+	}
+	tool, _ := decoded["tool"].(map[string]any)
+	output := tool["output"].(string)
+	if len(output) > maxToolCallOutputInMarker+50 {
+		t.Fatalf("output should be truncated, got len=%d", len(output))
+	}
+	if !strings.HasSuffix(output, "…[truncated]") {
+		t.Fatalf("truncated output should end with truncation marker: %q", output[len(output)-20:])
+	}
+}
+
+// TestTinfoilToolCallMarkersForRecords pins the non-streaming bulk
+// marker builder for code-exec tools: each recorded tool call yields
+// one in_progress + one terminal marker pair. Search and fetch records
+// are skipped.
+func TestTinfoilToolCallMarkersForRecords(t *testing.T) {
+	records := []toolCallRecord{
+		{name: "search", arguments: map[string]any{"query": "q"}}, // skipped
+		{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"},
+		{name: "view", arguments: map[string]any{"path": "/tmp/x"}, output: "contents", errorReason: "tool_error"},
+	}
+	combined := tinfoilToolCallMarkersForRecords(records)
+	// 2 code-exec records * 2 markers each = 4 markers
+	if got := strings.Count(combined, tinfoilEventOpenTag); got != 4 {
+		t.Fatalf("expected 4 markers (2 records * 2 phases), got %d in %q", got, combined)
+	}
+	if !strings.Contains(combined, `"tinfoil.tool_call"`) {
+		t.Fatalf("markers must use tinfoil.tool_call type: %q", combined)
+	}
+	// Search records must be absent
+	if strings.Contains(combined, `"search"`) {
+		t.Fatalf("search records should be skipped: %q", combined)
+	}
+}
+
+// TestCodeInterpreterCallEventShape pins the output item for Responses.
+func TestCodeInterpreterCallEventShape(t *testing.T) {
+	item := codeInterpreterCallEvent("ci_1", "completed", "bash", map[string]any{"command": "echo hi"}, "hi\n", "")
+	if item["type"] != "code_interpreter_call" {
+		t.Fatalf("type = %v, want code_interpreter_call", item["type"])
+	}
+	if item["status"] != "completed" {
+		t.Fatalf("status = %v, want completed", item["status"])
+	}
+	code, _ := item["code"].(string)
+	if !strings.Contains(code, "bash") {
+		t.Fatalf("code should contain tool name: %q", code)
+	}
+	results, _ := item["results"].([]map[string]any)
+	if len(results) != 1 || results[0]["text"] != "hi\n" {
+		t.Fatalf("results malformed: %#v", item["results"])
+	}
+	if _, present := item["_tinfoil"]; present {
+		t.Fatalf("successful call must omit _tinfoil sidecar")
+	}
+}
+
+// TestCodeInterpreterCallEventBlocked pins that a blocked code-exec call
+// collapses status onto failed (matching web_search_call behavior).
+func TestCodeInterpreterCallEventBlocked(t *testing.T) {
+	item := codeInterpreterCallEvent("ci_1", "blocked", "bash", nil, "", blockedToolErrorReason)
+	if item["status"] != "failed" {
+		t.Fatalf("blocked status must collapse to failed, got %v", item["status"])
+	}
+	sidecar, ok := item["_tinfoil"].(map[string]any)
+	if !ok || sidecar["status"] != "blocked" {
+		t.Fatalf("_tinfoil sidecar must preserve blocked status: %#v", item["_tinfoil"])
+	}
+}
+
+// TestAttachResponsesCitationsPrependsCodeInterpreterCallItem pins that
+// code-execution tool calls produce code_interpreter_call output items
+// on the Responses path, prepended alongside web_search_call items.
+func TestAttachResponsesCitationsPrependsCodeInterpreterCallItem(t *testing.T) {
+	state := &citationState{nextIndex: 1}
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
+	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
+
+	body := map[string]any{"output": []any{}}
+	attachResponsesOutput(body, state, tc, false)
+
+	items := body["output"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (web_search_call + code_interpreter_call), got %d: %#v", len(items), items)
+	}
+	first := items[0].(map[string]any)
+	if first["type"] != "web_search_call" {
+		t.Fatalf("first item should be web_search_call, got %v", first["type"])
+	}
+	second := items[1].(map[string]any)
+	if second["type"] != "code_interpreter_call" {
+		t.Fatalf("second item should be code_interpreter_call, got %v", second["type"])
+	}
+	if second["status"] != "completed" {
+		t.Fatalf("expected status=completed, got %v", second["status"])
+	}
+}
+
+// TestAttachChatCitationsInjectsCodeExecMarkersWhenEnabled pins that
+// code-execution markers are prepended to assistant content when the
+// code_execution event flag is set.
+func TestAttachChatCitationsInjectsCodeExecMarkersWhenEnabled(t *testing.T) {
+	state := &citationState{nextIndex: 1}
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
+
+	body := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{"role": "assistant", "content": "Answer"},
+			},
+		},
+	}
+
+	attachChatOutput(body, state, tc, tinfoilEventFlags{codeExecution: true})
+
+	message := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	content := message["content"].(string)
+	if !strings.Contains(content, tinfoilEventToolCallType) {
+		t.Fatalf("expected code-exec markers in content when code_execution enabled: %q", content)
+	}
+	if !strings.HasSuffix(content, "Answer") {
+		t.Fatalf("original content should be preserved after markers: %q", content)
+	}
+}
+
+// TestAttachChatCitationsSkipsCodeExecMarkersWhenDisabled pins that
+// code-execution markers are NOT emitted when only webSearch is enabled.
+func TestAttachChatCitationsSkipsCodeExecMarkersWhenDisabled(t *testing.T) {
+	state := &citationState{nextIndex: 1}
+	tc := &toolCallLog{}
+	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
+
+	body := map[string]any{
+		"choices": []any{
+			map[string]any{"message": map[string]any{"role": "assistant", "content": "Answer"}},
+		},
+	}
+
+	attachChatOutput(body, state, tc, tinfoilEventFlags{webSearch: true})
+
+	content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
+	if strings.Contains(content, tinfoilEventToolCallType) {
+		t.Fatalf("code-exec markers must be absent when only webSearch enabled: %q", content)
 	}
 }
 
