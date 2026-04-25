@@ -4,16 +4,21 @@ This is the router-centric runbook for testing router-owned tool loops
 end-to-end. The router talks to real model enclaves for generation but sends
 MCP tool traffic to local servers.
 
-One tool profile is currently supported:
+Two tool profiles are currently supported:
 
 - **Web Search** — `confidential-websearch` MCP server
+- **Code Execution** — `confidential-code-execution` MCP server (orchestrator)
 
-## 1. Start the local MCP server
+You can run either or both depending on what you're testing.
+
+## 1. Start local MCP servers
+
+Start whichever servers you need. Each listens on its own port.
 
 ### Web Search (port 8091)
 
 For standalone bring-up and direct MCP probes, see
-`local_testing.md` in the `confidential-websearch` repo.
+`../websearch/local_testing.md`.
 
 #### Fixture mode
 
@@ -35,11 +40,23 @@ LISTEN_ADDR=127.0.0.1:8091 \
 go run .
 ```
 
+### Code Execution (port 7070)
+
+From the `code-execution` repo:
+
+```bash
+cd ../code-execution/code-container/orchestrator
+ADMIN_API_KEY=$TINFOIL_API_KEY \
+python main.py
+```
+
+The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) alongside its
+admin endpoints. It manages a pool of sandboxed containers and routes tool
+calls to them.
+
 ## 2. Create a small router config
 
 Create a temporary config with the models you want to exercise:
-
-_note that kimi may not work_
 
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'
@@ -56,7 +73,6 @@ models:
     repo: tinfoilsh/confidential-kimi-k2-6
     enclaves:
       - kimi-k2-6.tinfoil.containers.tinfoil.dev
-
 EOF
 ```
 
@@ -74,6 +90,7 @@ variables for whichever MCP servers you started in step 1:
 ```bash
 DEBUG=1 \
 LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
+LOCAL_MCP_ENDPOINT_CODE_EXECUTION=http://127.0.0.1:7070/mcp \
 PORT=8090 \
 DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
@@ -85,28 +102,25 @@ go run -tags toolruntime_debug .
 `LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP
 model hit a local MCP server instead of the attested deployment. The model
 name is upper-cased with non-alphanumeric characters replaced by underscores,
-so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are
-only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag),
-which prevents a misconfigured production deployment from silently downgrading
-to a non-attested HTTP endpoint.
+so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH` and `code-execution`
+becomes `LOCAL_MCP_ENDPOINT_CODE_EXECUTION`. These overrides are only honored
+when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which
+prevents a misconfigured production deployment from silently downgrading to a
+non-attested HTTP endpoint.
 
-### Toolruntime debug build tag
+### Toolruntime tracing
 
-All heavyweight debugging — per-request `toolruntime:<tid>` trace logging
-**and** the per-session devlog (`logs/<session-id>.txt`) — is gated at compile
-time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is
-a compile-time `false` constant and every debug call site (including the
-`devLog` type and all extraction helpers that touch user content) is eliminated
-by the Go compiler. Production TEE images carry zero debug code and can never
-write user content to disk, regardless of the runtime `DEBUG` flag.
+The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated
+purely at compile time by the `toolruntime_debug` build tag. Without the tag,
+`debugEnabled` is a compile-time `false` constant and every call site is
+eliminated by the Go compiler, so production TEE images carry zero debug code:
 
-- `go run .` / `go build .`: debug code is compiled out.
-- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: debug code is compiled in.
+- `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
+- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
 
-If you want `toolruntime:<tid> ...` trace lines and `logs/*.txt` session files
-in this runbook, build with the tag as shown above. Otherwise you will still
-see `DEBUG=1` router logs but none of the per-iteration tool-loop trace or
-session-level devlog output.
+If you want the `toolruntime:<tid> ...` lines in this runbook, build with the
+tag as shown above. Otherwise you will still see `DEBUG=1` router logs but
+none of the per-iteration tool-loop trace.
 
 ---
 
@@ -180,6 +194,104 @@ For the matrix layout and result analyzer details, see
 
 ---
 
+## Code Execution smoke tests
+
+Code execution requires an `X-Session-Id` header so the orchestrator can
+persist a container across multiple tool calls within a conversation. Without
+it, the MCP server rejects tool calls.
+
+### Chat Completions
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gemma4-31b",
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Create a new file called test.txt with hello from tinfoil in it"
+      }
+    ],
+    "max_tokens": 200
+  }'
+```
+
+Test that the session persists (same `X-Session-Id`, same container):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gemma4-31b",
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Use cat to read test.txt. What does it say in it?"
+      }
+    ],
+    "max_tokens": 200
+  }'
+```
+
+### Responses
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-1" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
+    "stream": false,
+    "temperature": 0,
+    "max_output_tokens": 400,
+    "tools": [{"type": "code_execution"}]
+  }'
+```
+
+### Both tools together
+
+Web search and code execution can be activated in the same request:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -H "X-Session-Id: test-session-2" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "web_search_options": {},
+    "code_execution_options": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": "Search the web for the current Python version, then use bash to run: python3 --version"
+      }
+    ],
+    "max_tokens": 300
+  }'
+```
+
+### Session cleanup
+
+After testing, clean up orchestrator sessions to release containers:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7070/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId": "test-session-1"}'
+```
+
+---
+
 ## Verified model matrix
 
 These combinations were validated locally:
@@ -210,5 +322,6 @@ If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server
+lsof -ti tcp:7070 | xargs kill   # code execution orchestrator
 lsof -ti tcp:8090 | xargs kill   # model-router
 ```
