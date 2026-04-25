@@ -416,6 +416,24 @@ func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[stri
 	})
 }
 
+// emitTinfoilToolCallMarker writes a single `tinfoil.tool_call` marker as
+// `delta.content` of a chat.completion.chunk frame. Gated on the
+// code_execution event flag; if the caller did not opt in, this is a no-op.
+func (s *chatStreamer) emitTinfoilToolCallMarker(id, status, toolName string, arguments map[string]any, output string) {
+	if !s.eventFlags.codeExecution {
+		return
+	}
+	marker := tinfoilToolCallMarker(id, status, toolName, arguments, output)
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{"content": marker},
+			},
+		},
+	})
+}
+
 // writeChunk serializes a single chat.completion.chunk to the client,
 // filling in the stable id/created/model fields captured from upstream.
 // Accessors lazily fall back to router-minted defaults if upstream never
@@ -691,6 +709,7 @@ func runChatStreaming(
 	toolSchemas := schemaLookup(tools)
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
+	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
 	delete(reqBody, "pii_check_options")
 	delete(reqBody, "prompt_injection_check_options")

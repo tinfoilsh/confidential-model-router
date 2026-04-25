@@ -204,6 +204,9 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
 	}
+	if sessionID := r.Header.Get("X-Session-Id"); sessionID != "" {
+		headers.Set("X-Session-Id", sessionID)
+	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,
 		headers: headers,
