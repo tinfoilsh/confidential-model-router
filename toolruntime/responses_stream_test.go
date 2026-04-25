@@ -1,14 +1,11 @@
 package toolruntime
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -889,46 +886,32 @@ func TestResponsesStreamerSequenceNumberMonotonicAcrossIterations(t *testing.T) 
 // each when they actually fire. vLLM's /responses implementation always
 // emits both on response.created; a hit on this fallback signals an
 // upstream regression that operators need to see.
-func TestResponsesStreamerFallbacksLogOnceWhenUpstreamOmitsIdentity(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+func TestResponsesStreamerFallbacksWhenUpstreamOmitsIdentity(t *testing.T) {
 	streamer, _ := newTestResponsesStreamer(t)
 	streamer.responseID = ""
 	streamer.createdAt = 0
 
-	if got := streamer.streamResponseID(); !strings.HasPrefix(got, "resp_") {
-		t.Fatalf("streamResponseID fallback should be router-minted, got %q", got)
+	id1 := streamer.streamResponseID()
+	if !strings.HasPrefix(id1, "resp_") {
+		t.Fatalf("streamResponseID fallback should be router-minted, got %q", id1)
 	}
 	if got := streamer.streamCreatedAt(); got <= 0 {
 		t.Fatalf("streamCreatedAt fallback should be a positive unix time, got %d", got)
 	}
-	_ = streamer.streamResponseID()
-	_ = streamer.streamCreatedAt()
-
-	logged := buf.String()
-	if idHits := strings.Count(logged, "upstream omitted response id"); idHits != 1 {
-		t.Fatalf("expected exactly one id-fallback log line, got %d in %q", idHits, logged)
-	}
-	if createdHits := strings.Count(logged, "upstream omitted response created_at"); createdHits != 1 {
-		t.Fatalf("expected exactly one created_at-fallback log line, got %d in %q", createdHits, logged)
+	// Subsequent calls must return the same minted value (idempotent).
+	if id2 := streamer.streamResponseID(); id2 != id1 {
+		t.Fatalf("streamResponseID must be idempotent: first=%q second=%q", id1, id2)
 	}
 }
 
-// TestResponsesStreamerDoesNotLogWhenUpstreamProvidesIdentity pins the
-// inverse: the happy path must produce zero log noise.
-func TestResponsesStreamerDoesNotLogWhenUpstreamProvidesIdentity(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+// TestResponsesStreamerDoesNotMintFallbackWhenUpstreamProvidesIdentity
+// pins the inverse: the happy path must return upstream values unchanged.
+func TestResponsesStreamerDoesNotMintFallbackWhenUpstreamProvidesIdentity(t *testing.T) {
 	streamer, _ := newTestResponsesStreamer(t)
-	_ = streamer.streamResponseID()
-	_ = streamer.streamCreatedAt()
-	_ = streamer.streamResponseID()
-
-	if logged := buf.String(); logged != "" {
-		t.Fatalf("happy path must not log; got %q", logged)
+	if got := streamer.streamResponseID(); got != streamer.responseID {
+		t.Fatalf("happy path should return upstream id %q, got %q", streamer.responseID, got)
+	}
+	if got := streamer.streamCreatedAt(); got != streamer.createdAt {
+		t.Fatalf("happy path should return upstream createdAt %d, got %d", streamer.createdAt, got)
 	}
 }

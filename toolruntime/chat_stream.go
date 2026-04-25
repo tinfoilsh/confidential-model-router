@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
 
@@ -253,7 +252,7 @@ func (s *chatStreamer) ensureStreamIdentity(chunk map[string]any) {
 func (s *chatStreamer) streamID() string {
 	if s.id == "" {
 		s.id = "chatcmpl-" + uuid.NewString()
-		log.Printf("toolruntime: upstream omitted chat.completion.chunk id, router minted fallback %s model=%s", s.id, s.model)
+		debugLogf("toolruntime: upstream omitted chat.completion.chunk id, router minted fallback %s model=%s", s.id, s.model)
 	}
 	return s.id
 }
@@ -266,7 +265,7 @@ func (s *chatStreamer) streamID() string {
 func (s *chatStreamer) streamCreated() int64 {
 	if s.created == 0 {
 		s.created = time.Now().Unix()
-		log.Printf("toolruntime: upstream omitted chat.completion.chunk created, router stamped fallback %d model=%s", s.created, s.model)
+		debugLogf("toolruntime: upstream omitted chat.completion.chunk created, router stamped fallback %d model=%s", s.created, s.model)
 	}
 	return s.created
 }

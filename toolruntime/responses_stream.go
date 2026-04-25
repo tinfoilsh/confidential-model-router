@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -154,7 +153,7 @@ func (s *responsesStreamer) resetPerIterationState() {
 func (s *responsesStreamer) streamResponseID() string {
 	if s.responseID == "" {
 		s.responseID = "resp_" + uuid.NewString()
-		log.Printf("toolruntime: upstream omitted response id on response.created, router minted fallback %s model=%s", s.responseID, s.model)
+		debugLogf("toolruntime: upstream omitted response id on response.created, router minted fallback %s model=%s", s.responseID, s.model)
 	}
 	return s.responseID
 }
@@ -166,7 +165,7 @@ func (s *responsesStreamer) streamResponseID() string {
 func (s *responsesStreamer) streamCreatedAt() int64 {
 	if s.createdAt == 0 {
 		s.createdAt = time.Now().Unix()
-		log.Printf("toolruntime: upstream omitted response created_at, router stamped fallback %d model=%s", s.createdAt, s.model)
+		debugLogf("toolruntime: upstream omitted response created_at, router stamped fallback %d model=%s", s.createdAt, s.model)
 	}
 	return s.createdAt
 }

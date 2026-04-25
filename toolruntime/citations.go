@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -322,7 +321,7 @@ func publicToolErrorReason(toolName string, err error) string {
 	if err == nil {
 		return ""
 	}
-	log.Printf("toolruntime: %s tool call failed: %v", toolName, err)
+	debugLogf("toolruntime: %s tool call failed: %v", toolName, err)
 	if isToolCallBlocked(err) {
 		return blockedToolErrorReason
 	}
