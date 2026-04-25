@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+// Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`,
+// `content_mode`, and `max_content_chars`. The mapping mirrors how OpenAI
+// documents `search_context_size`: low leans on a handful of highlight
+// snippets, medium is the typical default, high pulls a broader sample and
+// asks for the full rendered page text.
+const (
+	searchContextResultsLow    = 10
+	searchContextResultsMedium = 20
+	searchContextResultsHigh   = 30
+
+	searchContextCharsLow    = 500
+	searchContextCharsMedium = 700
+	searchContextCharsHigh   = 2000
+
+	contentModeHighlights = "highlights"
+	contentModeText       = "text"
+)
+
 // webSearchOptions is the parsed view of the OpenAI web_search_options /
 // Responses `web_search` tool-config surface that we forward to the MCP tools.
 //
@@ -472,18 +490,6 @@ func normalizePublishedDate(raw any) string {
 		return t.UTC().Format(time.RFC3339)
 	}
 	return ""
-}
-
-// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
-// the model can fan out client-owned tool calls. Router-owned tools are
-// still dispatched serially inside runToolLoop to keep citation numbering
-// and streaming event order deterministic. A caller-provided value is
-// honored unchanged.
-func applyParallelToolCallsPolicy(reqBody map[string]any) {
-	if _, ok := reqBody["parallel_tool_calls"]; ok {
-		return
-	}
-	reqBody["parallel_tool_calls"] = true
 }
 
 // applyWebSearchOptionsToToolCall dispatches to the per-tool merge helper so

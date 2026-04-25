@@ -1,14 +1,11 @@
 package toolruntime
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -25,6 +22,7 @@ func newTestChatStreamer(t *testing.T) (*chatStreamer, *httptest.ResponseRecorde
 			flusher:               rec,
 			usageMetricsRequested: true,
 			citations:             &citationState{nextIndex: 1},
+			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 			model:                 "gpt-oss-120b",
 			headersWritten:        true,
@@ -439,6 +437,7 @@ func TestChatStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 			w:              w,
 			flusher:        w,
 			citations:      &citationState{nextIndex: 1},
+			toolCalls:      &toolCallLog{},
 			usageTotals:    &usageAccumulator{},
 			headersWritten: true,
 			model:          "gpt-oss-120b",
@@ -665,51 +664,35 @@ func TestChatStreamerThreeIterationStitching(t *testing.T) {
 // a misbehaving upstream, emit a single log line each when they actually
 // fire. Silent fallbacks hide fleet regressions; logging gives operators
 // a breadcrumb when an upstream starts dropping OpenAI-required fields.
-func TestChatStreamerFallbacksLogOnceWhenUpstreamOmitsIdentity(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+func TestChatStreamerFallbacksWhenUpstreamOmitsIdentity(t *testing.T) {
 	streamer, _ := newTestChatStreamer(t)
 	streamer.id = ""
 	streamer.created = 0
 
-	if got := streamer.streamID(); !strings.HasPrefix(got, "chatcmpl-") {
-		t.Fatalf("streamID fallback should be router-minted, got %q", got)
+	id1 := streamer.streamID()
+	if !strings.HasPrefix(id1, "chatcmpl-") {
+		t.Fatalf("streamID fallback should be router-minted, got %q", id1)
 	}
 	if got := streamer.streamCreated(); got <= 0 {
 		t.Fatalf("streamCreated fallback should be a positive unix time, got %d", got)
 	}
-	// Subsequent calls must NOT relog; the fallback is idempotent.
-	_ = streamer.streamID()
-	_ = streamer.streamCreated()
-
-	logged := buf.String()
-	if idHits := strings.Count(logged, "upstream omitted chat.completion.chunk id"); idHits != 1 {
-		t.Fatalf("expected exactly one id-fallback log line, got %d in %q", idHits, logged)
-	}
-	if createdHits := strings.Count(logged, "upstream omitted chat.completion.chunk created"); createdHits != 1 {
-		t.Fatalf("expected exactly one created-fallback log line, got %d in %q", createdHits, logged)
+	// Subsequent calls must return the same minted value (idempotent).
+	if id2 := streamer.streamID(); id2 != id1 {
+		t.Fatalf("streamID must be idempotent: first=%q second=%q", id1, id2)
 	}
 }
 
-// TestChatStreamerDoesNotLogWhenUpstreamProvidesIdentity pins the
-// inverse: the happy path (vLLM always emits id/created) must produce
-// zero log noise. A chatty router on every request would bury real
-// signals.
-func TestChatStreamerDoesNotLogWhenUpstreamProvidesIdentity(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+// TestChatStreamerDoesNotMintFallbackWhenUpstreamProvidesIdentity pins
+// the inverse: the happy path (vLLM always emits id/created) must
+// return the upstream values unchanged.
+func TestChatStreamerDoesNotMintFallbackWhenUpstreamProvidesIdentity(t *testing.T) {
 	streamer, _ := newTestChatStreamer(t)
 	// newTestChatStreamer pre-seeds id and created, mirroring a
 	// well-behaved upstream that populated them on the first chunk.
-	_ = streamer.streamID()
-	_ = streamer.streamCreated()
-	_ = streamer.streamID()
-
-	if logged := buf.String(); logged != "" {
-		t.Fatalf("happy path must not log; got %q", logged)
+	if got := streamer.streamID(); got != streamer.id {
+		t.Fatalf("happy path should return upstream id %q, got %q", streamer.id, got)
+	}
+	if got := streamer.streamCreated(); got != streamer.created {
+		t.Fatalf("happy path should return upstream created %d, got %d", streamer.created, got)
 	}
 }

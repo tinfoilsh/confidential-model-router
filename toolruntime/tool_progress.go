@@ -161,7 +161,7 @@ func (r *responsesToolProgressEmitter) open(id string, action map[string]any) to
 }
 
 func (r *responsesToolProgressEmitter) phase(handle toolProgressHandle, phase string) {
-	r.streamer.emitWebSearchCallPhase(phase, handle.id, handle.outputIndex)
+	r.streamer.emitToolCallPhase(phase, handle.id, handle.outputIndex)
 }
 
 func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string, _ []toolCallSource) {
@@ -190,6 +190,7 @@ func resolveStreamingRouterToolCall(
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
 	citations *citationState,
+	toolCalls *toolCallLog,
 	executor func(ctx context.Context, call toolCall) (string, error),
 	tracePhase, traceID string,
 ) string {
@@ -220,6 +221,6 @@ func resolveStreamingRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
-	citations.recordToolCall(record)
+	toolCalls.record(record)
 	return output
 }

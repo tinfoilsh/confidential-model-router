@@ -15,8 +15,8 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
-func TestReplaceResponsesWebSearchTools(t *testing.T) {
-	replaced := replaceResponsesWebSearchTools([]any{
+func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
+	replaced := replaceRouterOwnedResponsesTools([]any{
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "other"},
 	}, []any{
@@ -35,8 +35,8 @@ func TestReplaceResponsesWebSearchTools(t *testing.T) {
 	}
 }
 
-func TestReplaceResponsesWebSearchToolsDedupes(t *testing.T) {
-	replaced := replaceResponsesWebSearchTools([]any{
+func TestReplaceRouterOwnedResponsesToolsDedupes(t *testing.T) {
+	replaced := replaceRouterOwnedResponsesTools([]any{
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "other"},
 		map[string]any{"type": "web_search"},
@@ -182,14 +182,12 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		},
 		header: make(http.Header),
 	}
-	citations := &citationState{
-		toolCalls: []toolCallRecord{
-			{
-				name:      "search",
-				arguments: map[string]any{"query": "cats"},
-			},
-		},
-	}
+	citations := &citationState{}
+	toolCalls := &toolCallLog{}
+	toolCalls.record(toolCallRecord{
+		name:      "search",
+		arguments: map[string]any{"query": "cats"},
+	})
 
 	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
 	adapter.applyUsage(response, &tokencount.Usage{
@@ -197,7 +195,7 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		CompletionTokens: 11,
 		TotalTokens:      18,
 	})
-	adapter.attachCitations(response.body, citations, false)
+	adapter.attachCitations(response.body, citations, toolCalls, tinfoilEventFlags{})
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -230,15 +228,13 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		},
 		header: make(http.Header),
 	}
-	citations := &citationState{
-		toolCalls: []toolCallRecord{
-			{
-				name:       "search",
-				arguments:  map[string]any{"query": "cats"},
-				resultURLs: []string{"https://example.com"},
-			},
-		},
-	}
+	citations := &citationState{}
+	toolCalls := &toolCallLog{}
+	toolCalls.record(toolCallRecord{
+		name:       "search",
+		arguments:  map[string]any{"query": "cats"},
+		resultURLs: []string{"https://example.com"},
+	})
 
 	adapter := newResponsesLoopAdapter(map[string]any{
 		"include": []any{includeActionSourcesFlag},
@@ -248,7 +244,7 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		CompletionTokens: 11,
 		TotalTokens:      18,
 	})
-	adapter.attachCitations(response.body, citations, false)
+	adapter.attachCitations(response.body, citations, toolCalls, tinfoilEventFlags{})
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {

@@ -160,7 +160,7 @@ func TestNormalizeCitationLinksRewritesMixedBrackets(t *testing.T) {
 }
 
 // TestAttachChatCitationsNormalizesContent exercises the end-to-end pathway:
-// when attachChatCitations runs, any fullwidth-bracketed links in the
+// when attachChatOutput runs, any fullwidth-bracketed links in the
 // assistant message content are rewritten into ASCII markdown and surfaced
 // as url_citation annotations.
 func TestAttachChatCitationsNormalizesContent(t *testing.T) {
@@ -178,7 +178,7 @@ func TestAttachChatCitationsNormalizesContent(t *testing.T) {
 		},
 	}
 
-	attachChatCitations(body, state, false)
+	attachChatOutput(body, state, nil, tinfoilEventFlags{})
 
 	choice := body["choices"].([]any)[0].(map[string]any)
 	message := choice["message"].(map[string]any)

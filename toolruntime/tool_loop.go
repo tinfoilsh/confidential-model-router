@@ -13,6 +13,20 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
+const maxToolIterations = 10
+
+// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
+// the model can fan out client-owned tool calls. Router-owned tools are
+// still dispatched serially inside runToolLoop to keep citation numbering
+// and streaming event order deterministic. A caller-provided value is
+// honored unchanged.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
 // Responses) behind a single interface so the shared driver can walk the
 // iteration, usage-accumulation, and finalize logic without caring which
@@ -69,7 +83,7 @@ type toolLoopAdapter interface {
 
 	// attachCitations resolves inline markdown links and surfaces
 	// router-owned tool progress in the surface-specific shape.
-	attachCitations(body map[string]any, citations *citationState, eventsEnabled bool)
+	attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
@@ -106,11 +120,13 @@ func runToolLoop(
 	modelName string,
 	requestHeaders http.Header,
 	adapter toolLoopAdapter,
-	eventsEnabled bool,
+	eventFlags tinfoilEventFlags,
+	dl *devLog,
 ) (*upstreamJSONResponse, error) {
 	reqBody := adapter.buildInitialRequest()
 	usageTotals := usageAccumulator{}
 	citations := citationState{nextIndex: 1}
+	toolCalls := toolCallLog{}
 	opts := adapter.options()
 	toolSchemas := adapter.schemas()
 	path := adapter.upstreamPath()
@@ -136,18 +152,25 @@ func runToolLoop(
 		usageTotals.Add(response)
 
 		routerToolCalls, hasClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
+
+		dl.WriteTurn(i+1, response.body)
+
 		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s done iterations=%d (no router tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
 			}
+			dl.WriteFinish("stop (no router tool calls)")
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, eventsEnabled)
+			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
 			return response, nil
 		}
 
+		dl.WriteToolCalls(routerToolCalls)
 		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
-			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, adapter.tracePhase(i), adapter.traceID())
+			tstart := time.Now()
+			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, &toolCalls, adapter.tracePhase(i), adapter.traceID())
+			dl.WriteToolExec(call.name, call.arguments, output, time.Since(tstart), "")
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
 				name:   call.name,
@@ -163,7 +186,7 @@ func runToolLoop(
 			}
 			adapter.stripRouterToolCallsFromResponse(response)
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, eventsEnabled)
+			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -183,8 +206,73 @@ func runToolLoop(
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
-	adapter.attachCitations(finalResponse.body, &citations, eventsEnabled)
+	adapter.attachCitations(finalResponse.body, &citations, &toolCalls, eventFlags)
 	return finalResponse, nil
+}
+
+// executeRouterToolCall runs one router-owned tool call on behalf of
+// the chat or responses loop. It mutates the call's arguments in place
+// with forwarded web-search options and per-schema coercion, invokes
+// the tool over the MCP session, and records the outcome on citations
+// so downstream annotation and web_search_call item emission has a
+// uniform record of what happened. The returned string is the text
+// payload to hand back to the upstream model: either the tool's output
+// on success or a humanized error message when the call failed.
+//
+// tracePhase is the short label debug logs use to identify the caller
+// (`chat.iter=N` or `responses.iter=N`); traceID is the per-request
+// trace id the chat loop threads through its logs, or empty when the
+// caller does not emit the same logs.
+func executeRouterToolCall(
+	ctx context.Context,
+	registry *sessionRegistry,
+	call toolCall,
+	opts webSearchOptions,
+	toolSchemas map[string]*jsonschema.Schema,
+	citations *citationState,
+	toolCalls *toolCallLog,
+	tracePhase, traceID string,
+) string {
+	applyWebSearchOptionsToToolCall(call.name, call.arguments, opts)
+	sanitizeToolCallArguments(call.name, call.arguments)
+	coerceArgumentsToSchema(call.name, call.arguments, toolSchemas)
+
+	if traceID != "" {
+		debugLogf("toolruntime:%s %s tool.call name=%s args=%s", traceID, tracePhase, call.name, debugPreview(call.arguments, 400))
+	}
+	session, ok := registry.sessionFor(call.name)
+	if !ok {
+		// Programming error: splitToolCalls classified this as
+		// router-owned against the same owned-set the registry
+		// built, so any mismatch is a router bug. Humanize it
+		// rather than panicking so the upstream model sees a
+		// deterministic error string.
+		output := humanizeToolArgError(call.name, fmt.Errorf("no MCP session registered for tool %q", call.name), call.arguments)
+		toolCalls.record(toolCallRecord{name: call.name, arguments: call.arguments, errorReason: "tool_error"})
+		return output
+	}
+	tstart := time.Now()
+	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, citations)
+	record := toolCallRecord{
+		name:      call.name,
+		arguments: call.arguments,
+	}
+	if err != nil {
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.error name=%s elapsed=%s err=%v", traceID, tracePhase, call.name, time.Since(tstart), err)
+		}
+		output = humanizeToolArgError(call.name, err, call.arguments)
+		record.errorReason = publicToolErrorReason(call.name, err)
+	} else {
+		record.resultURLs = extractToolOutputURLs(output)
+		record.resultSources = extractToolOutputSources(output)
+		if traceID != "" {
+			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
+				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
+		}
+	}
+	toolCalls.record(record)
+	return output
 }
 
 // chatLoopAdapter drives /v1/chat/completions: it owns the OpenAI-compatible
@@ -238,8 +326,8 @@ func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *toke
 	}
 }
 
-func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, eventsEnabled bool) {
-	attachChatCitations(body, citations, eventsEnabled)
+func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	attachChatOutput(body, citations, toolCalls, eventFlags)
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
@@ -391,9 +479,11 @@ func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, t
 	}
 }
 
-func (a *responsesLoopAdapter) upstreamPath() string                   { return "/v1/responses" }
-func (a *responsesLoopAdapter) traceID() string                        { return "" }
-func (a *responsesLoopAdapter) tracePhase(iteration int) string        { return fmt.Sprintf("responses.iter=%d", iteration) }
+func (a *responsesLoopAdapter) upstreamPath() string { return "/v1/responses" }
+func (a *responsesLoopAdapter) traceID() string      { return "" }
+func (a *responsesLoopAdapter) tracePhase(iteration int) string {
+	return fmt.Sprintf("responses.iter=%d", iteration)
+}
 func (a *responsesLoopAdapter) includeActionSources() bool             { return a.opts.includeActionSources }
 func (a *responsesLoopAdapter) options() webSearchOptions              { return a.opts }
 func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema { return a.toolSchemas }
@@ -410,8 +500,8 @@ func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage 
 	}
 }
 
-func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, _ bool) {
-	attachResponsesCitations(body, citations, a.opts.includeActionSources)
+func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, _ tinfoilEventFlags) {
+	attachResponsesOutput(body, citations, toolCalls, a.opts.includeActionSources)
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
@@ -422,7 +512,7 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
-	base["tools"] = replaceResponsesWebSearchTools(base["tools"], responseTools(a.tools))
+	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(a.tools))
 	base["input"] = prependResponsesPrompt(a.prompt, base["input"])
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
@@ -436,7 +526,7 @@ func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse
 }
 
 // stripRouterToolCallsFromResponse drops router-owned function_call
-// items from the output array; attachResponsesCitations prepends the
+// items from the output array; attachResponsesOutput prepends the
 // matching web_search_call items that replace them.
 func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSONResponse) {
 	if response == nil || response.body == nil {

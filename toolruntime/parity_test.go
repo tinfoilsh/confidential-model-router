@@ -20,10 +20,11 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 
 	const assistantText = "The sky is blue [Example](https://example.com/article)."
 
-	buildCitationState := func() *citationState {
+	buildState := func() (*citationState, *toolCallLog) {
 		c := &citationState{nextIndex: 1}
 		c.record("https://example.com/article", "Example")
-		c.recordToolCall(toolCallRecord{
+		tc := &toolCallLog{}
+		tc.record(toolCallRecord{
 			name:      "search",
 			arguments: map[string]any{"query": "why is the sky blue"},
 			resultURLs: []string{
@@ -31,21 +32,21 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 				"https://example.com/other",
 			},
 		})
-		c.recordToolCall(toolCallRecord{
+		tc.record(toolCallRecord{
 			name:      "fetch",
 			arguments: map[string]any{"urls": []any{"https://example.com/article"}},
 		})
-		c.recordToolCall(toolCallRecord{
+		tc.record(toolCallRecord{
 			name:        "search",
 			arguments:   map[string]any{"query": "blocked query"},
 			errorReason: blockedToolErrorReason,
 		})
-		return c
+		return c, tc
 	}
 
 	// Chat surface: tinfoil-event markers are injected into the
 	// assistant content when the caller opted in via the header.
-	chatCitations := buildCitationState()
+	chatCitations, chatToolCalls := buildState()
 	chatBody := map[string]any{
 		"choices": []any{
 			map[string]any{
@@ -53,11 +54,11 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 			},
 		},
 	}
-	attachChatCitations(chatBody, chatCitations, true)
+	attachChatOutput(chatBody, chatCitations, chatToolCalls, tinfoilEventFlags{webSearch: true})
 
 	// Responses surface: the spec-conformant web_search_call output
 	// items carry progress, no tinfoil markers ride on this path.
-	respCitations := buildCitationState()
+	respCitations, respToolCalls := buildState()
 	respBody := map[string]any{
 		"output": []any{
 			map[string]any{
@@ -69,7 +70,7 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 			},
 		},
 	}
-	attachResponsesCitations(respBody, respCitations, true)
+	attachResponsesOutput(respBody, respCitations, respToolCalls, true)
 
 	// Citation URL set must match exactly across surfaces.
 	chatURLs := extractChatCitationURLs(t, chatBody)
@@ -168,7 +169,7 @@ func extractSpecStatuses(t *testing.T, body map[string]any) []string {
 }
 
 // firstChatContent returns the content string on the first choice's
-// assistant message, which is where attachChatCitations injects markers.
+// assistant message, which is where attachChatOutput injects markers.
 func firstChatContent(t *testing.T, body map[string]any) string {
 	t.Helper()
 	choices, _ := body["choices"].([]any)
@@ -181,7 +182,7 @@ func firstChatContent(t *testing.T, body map[string]any) string {
 }
 
 // firstResponsesOutputText returns the first output_text `text` field in
-// the Responses body, which is where attachResponsesCitations prefixes
+// the Responses body, which is where attachResponsesOutput prefixes
 // the marker sequence onto the assistant message.
 func firstResponsesOutputText(t *testing.T, body map[string]any) string {
 	t.Helper()

@@ -141,7 +141,15 @@ func responseTools(tools []*mcp.Tool) []any {
 	return result
 }
 
-func replaceResponsesWebSearchTools(raw any, replacements []any) []any {
+// routerOwnedToolTypes is the set of tool type values in the /responses
+// tools array that the router resolves internally via MCP sessions. These
+// placeholder entries are stripped from the upstream request and replaced
+// with the concrete function definitions the MCP servers advertise.
+var routerOwnedToolTypes = map[string]bool{
+	"web_search": true,
+}
+
+func replaceRouterOwnedResponsesTools(raw any, replacements []any) []any {
 	tools, _ := raw.([]any)
 	if len(tools) == 0 {
 		return replacements
@@ -150,7 +158,7 @@ func replaceResponsesWebSearchTools(raw any, replacements []any) []any {
 	injected := false
 	for _, tool := range tools {
 		toolMap, _ := tool.(map[string]any)
-		if stringValue(toolMap["type"]) == "web_search" {
+		if routerOwnedToolTypes[stringValue(toolMap["type"])] {
 			if !injected {
 				result = append(result, replacements...)
 				injected = true

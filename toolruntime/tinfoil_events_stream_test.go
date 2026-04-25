@@ -19,6 +19,7 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 			flusher:               rec,
 			usageMetricsRequested: true,
 			citations:             &citationState{nextIndex: 1},
+			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 			model:                 "gpt-oss-120b",
 			headersWritten:        true,
@@ -41,7 +42,7 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 // with a regex.
 func TestChatStreamerEmitTinfoilEventMarkerWritesDeltaWhenEnabled(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.eventsEnabled = true
+	streamer.eventFlags = tinfoilEventFlags{webSearch: true}
 
 	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil)
 
@@ -86,7 +87,7 @@ func firstSSEDataFrame(t *testing.T, body string) string {
 // to the wire, preserving a fully pristine OpenAI-spec stream.
 func TestChatStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.eventsEnabled = false
+	streamer.eventFlags = tinfoilEventFlags{}
 
 	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "", nil)
 
@@ -101,7 +102,7 @@ func TestChatStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
 // citations to the specific search call that produced them.
 func TestChatStreamerEmitsSourcesOnTerminalMarker(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.eventsEnabled = true
+	streamer.eventFlags = tinfoilEventFlags{webSearch: true}
 
 	sources := []toolCallSource{
 		{url: "https://first.example", title: "First"},
@@ -138,9 +139,9 @@ func TestResponsesStreamerEmitsSpecWebSearchCallEvents(t *testing.T) {
 
 	action := map[string]any{"type": "search", "query": "q"}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
-	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
-	streamer.emitWebSearchCallPhase("response.web_search_call.searching", "ws_1", idx)
-	streamer.emitWebSearchCallPhase("response.web_search_call.completed", "ws_1", idx)
+	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.emitToolCallPhase("response.web_search_call.searching", "ws_1", idx)
+	streamer.emitToolCallPhase("response.web_search_call.completed", "ws_1", idx)
 	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "")
 
 	body := rec.Body.String()
@@ -206,7 +207,7 @@ func TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent(t *testing.T) {
 
 	action := map[string]any{"type": "search", "query": "q"}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
-	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
 	streamer.closeWebSearchCallItem("ws_1", idx, action, "failed", "upstream_timeout")
 
 	body := rec.Body.String()
@@ -251,7 +252,7 @@ func TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar(t *testing.T
 
 	action := map[string]any{"type": "search", "query": "sensitive"}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
-	streamer.emitWebSearchCallPhase("response.web_search_call.in_progress", "ws_1", idx)
+	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
 	streamer.closeWebSearchCallItem("ws_1", idx, action, "blocked", blockedToolErrorReason)
 
 	body := rec.Body.String()

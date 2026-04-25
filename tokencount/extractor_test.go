@@ -104,10 +104,10 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			if string(bodyBytes) != tt.responseBody {
 				t.Errorf("Body content changed: got %s, want %s", string(bodyBytes), tt.responseBody)
 			}
-			
+
 			// Close to trigger token extraction
 			newBody.Close()
-			
+
 			// Verify usage was captured correctly
 			if tt.wantUsage != nil {
 				if capturedUsage == nil {
@@ -176,7 +176,7 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288
 data: [DONE]
 
 `,
-			expectedUsage:  nil, // No usage data means no billing
+			expectedUsage:  nil,   // No usage data means no billing
 			expectCallback: false, // Callback should not be called without real usage data
 		},
 	}

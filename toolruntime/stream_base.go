@@ -33,6 +33,7 @@ type streamBase struct {
 	usageMetricsRequested bool
 
 	citations   *citationState
+	toolCalls   *toolCallLog
 	usageTotals *usageAccumulator
 
 	// headersWritten is flipped on the first 2xx from upstream; after
@@ -169,4 +170,45 @@ func (s *streamBase) emitBillingEvent(r *http.Request, em *manager.EnclaveManage
 		body:   map[string]any{"usage": usage},
 	}
 	emitBillingEvent(em, r, response, modelName, true)
+}
+
+// upstreamErrorPayload extracts a structured error object to show the
+// client. If the underlying error is an *upstreamError whose body is
+// JSON with an `error` field, we allowlist the standard OpenAI error
+// fields rather than forwarding the object verbatim.
+func upstreamErrorPayload(err error) map[string]any {
+	if upErr, ok := err.(*upstreamError); ok && len(upErr.body) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(upErr.body, &parsed) == nil {
+			if inner, ok := parsed["error"].(map[string]any); ok {
+				safe := map[string]any{
+					"message": stringValue(inner["message"]),
+					"type":    stringValue(inner["type"]),
+				}
+				if code, ok := inner["code"]; ok {
+					safe["code"] = code
+				}
+				if param, ok := inner["param"]; ok {
+					safe["param"] = param
+				}
+				return safe
+			}
+		}
+	}
+	return map[string]any{
+		"message": err.Error(),
+		"type":    "upstream_error",
+	}
+}
+
+// mustMarshal serializes the given value to JSON, returning an empty byte
+// slice on failure. Used by error-surfacing helpers where failure to
+// marshal is already a lost cause; returning empty body preserves the
+// status-code signal on the upstream error.
+func mustMarshal(value any) []byte {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
 }

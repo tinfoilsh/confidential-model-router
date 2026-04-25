@@ -20,8 +20,8 @@ type citationAnnotation struct {
 	source     citationSource
 }
 
-// citationEmitter is the streaming counterpart of `attachChatCitations` /
-// `attachResponsesCitations`. As the upstream model emits content deltas, the
+// citationEmitter is the streaming counterpart of the non-streaming citation
+// attachment functions. As the upstream model emits content deltas, the
 // emitter holds back only the tail that could be part of an in-progress
 // markdown link, flushing everything upstream of any opening bracket as a
 // plain content delta immediately. When a `[label](url)` (or fullwidth

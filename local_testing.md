@@ -1,27 +1,21 @@
 # Local Testing
 
-This is the router-centric runbook. Use it when you want to debug the
-router-owned websearch tool loop end-to-end.
+This is the router-centric runbook for testing router-owned tool loops
+end-to-end. The router talks to real model enclaves for generation but sends
+MCP tool traffic to local servers.
 
-For standalone `confidential-websearch` bring-up, mode selection, and direct
-MCP probes, start with `../websearch/local_testing.md`. The two guides are
-intentionally split so this file focuses on router behavior while the websearch
-guide focuses on the MCP server itself.
+One tool profile is currently supported:
 
-This flow runs:
+- **Web Search** — `confidential-websearch` MCP server
 
-- a local `confidential-websearch` MCP server
-- a local `confidential-model-router`
-- real model requests through the router
+## 1. Start the local MCP server
 
-The router still talks to real model enclaves for generation, but it sends MCP
-tool traffic to your local websearch server.
+### Web Search (port 8091)
 
-## 1. Start the local websearch MCP server
+For standalone bring-up and direct MCP probes, see
+`local_testing.md` in the `confidential-websearch` repo.
 
-From the `confidential-websearch` repo, choose one mode:
-
-### Fixture mode
+#### Fixture mode
 
 ```bash
 cd ../websearch
@@ -32,7 +26,7 @@ go run .
 
 `LOCAL_TEST_MODE=1` replaces Exa and Cloudflare with deterministic fixtures.
 
-### Real-provider mode
+#### Real-provider mode
 
 ```bash
 cd ../websearch
@@ -41,12 +35,11 @@ LISTEN_ADDR=127.0.0.1:8091 \
 go run .
 ```
 
-Use `../websearch/local_testing.md` if you want direct MCP smoke tests before
-introducing the router.
-
 ## 2. Create a small router config
 
 Create a temporary config with the models you want to exercise:
+
+_note that kimi may not work_
 
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'
@@ -59,6 +52,11 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
       - gpt-oss-120b-0.inf9.tinfoil.sh
+  kimi-k2-6:
+    repo: tinfoilsh/confidential-kimi-k2-6
+    enclaves:
+      - kimi-k2-6.tinfoil.containers.tinfoil.dev
+
 EOF
 ```
 
@@ -70,7 +68,8 @@ shasum -a 256 /tmp/model-router-local.yml
 
 ## 3. Start the local router
 
-From the `confidential-model-router` repo:
+From the `confidential-model-router` repo. Include `LOCAL_MCP_ENDPOINT_*`
+variables for whichever MCP servers you started in step 1:
 
 ```bash
 DEBUG=1 \
@@ -83,21 +82,38 @@ USAGE_REPORTER_SECRET=test-secret \
 go run -tags toolruntime_debug .
 ```
 
-`LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP model hit a local MCP server instead of the attested deployment. The model name is upper-cased with non-alphanumeric characters replaced by underscores, so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which prevents a misconfigured production deployment from silently downgrading to a non-attested HTTP endpoint.
+`LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP
+model hit a local MCP server instead of the attested deployment. The model
+name is upper-cased with non-alphanumeric characters replaced by underscores,
+so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are
+only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag),
+which prevents a misconfigured production deployment from silently downgrading
+to a non-attested HTTP endpoint.
 
-### Toolruntime tracing
+### Toolruntime debug build tag
 
-The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated purely at compile time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is a compile-time `false` constant and every call site is eliminated by the Go compiler, so production TEE images carry zero debug code:
+All heavyweight debugging — per-request `toolruntime:<tid>` trace logging
+**and** the per-session devlog (`logs/<session-id>.txt`) — is gated at compile
+time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is
+a compile-time `false` constant and every debug call site (including the
+`devLog` type and all extraction helpers that touch user content) is eliminated
+by the Go compiler. Production TEE images carry zero debug code and can never
+write user content to disk, regardless of the runtime `DEBUG` flag.
 
-- `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
-- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
+- `go run .` / `go build .`: debug code is compiled out.
+- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: debug code is compiled in.
 
-If you want the `toolruntime:<tid> ...` lines in this runbook, build with the tag as shown above. Otherwise you will still see `DEBUG=1` router logs but none of the per-iteration tool-loop trace.
+If you want `toolruntime:<tid> ...` trace lines and `logs/*.txt` session files
+in this runbook, build with the tag as shown above. Otherwise you will still
+see `DEBUG=1` router logs but none of the per-iteration tool-loop trace or
+session-level devlog output.
 
-## 4. Run router-facing smoke tests
+---
 
-If the websearch server is running in fixture mode, these prompts should return
-the quoted answers.
+## Web Search smoke tests
+
+If the websearch server is running in fixture mode, these prompts should
+return the quoted answers.
 
 ### Chat Completions
 
@@ -146,7 +162,7 @@ Expected answer:
 According to the Neighborhood Cat Gazette, the cats in the sunroom prefer saffron cushions because they stay warm in the afternoon light.
 ```
 
-## 5. Run the eval harness
+### Eval harness
 
 ```bash
 cd ../websearch
@@ -162,7 +178,9 @@ TINFOIL_API_KEY=... python3 evals/run_websearch_eval.py \
 For the matrix layout and result analyzer details, see
 `../websearch/evals/WEBSEARCH_EVAL.md`.
 
-## 6. Verified model matrix
+---
+
+## Verified model matrix
 
 These combinations were validated locally:
 
@@ -184,12 +202,11 @@ For the `gpt-oss-120b` Responses API path, the most stable local settings were:
 `qwen3-vl-30b` was not added to the recommended local matrix because
 attestation fetches for its current enclave were failing during this test run.
 
-## 7. Cleanup
+## Cleanup
 
-If you launched both processes in interactive shells, `Ctrl+C` in each is enough.
+If you launched processes in interactive shells, `Ctrl+C` in each is enough.
 
-If they are still running in the background, kill by port rather than by path
-so cleanup works regardless of where you launched the binaries from:
+If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server

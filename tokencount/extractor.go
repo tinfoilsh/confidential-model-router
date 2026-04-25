@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -83,12 +82,6 @@ func (j *JSONTokenExtractor) ExtractUsage() {
 	if err := json.Unmarshal(j.buffer.Bytes(), &resp); err == nil && resp.Usage != nil {
 		resp.Usage.Normalize()
 		j.usage = resp.Usage
-		log.Printf("[TokenExtractor] Model: %s, Tokens - Input: %d, Output: %d, Total: %d",
-			j.model,
-			resp.Usage.PromptTokens,
-			resp.Usage.CompletionTokens,
-			resp.Usage.TotalTokens,
-		)
 	}
 }
 
@@ -267,13 +260,6 @@ func (s *StreamingTokenExtractor) processStream() {
 		if s.usage.TotalTokens == 0 && s.usage.CompletionTokens > 0 {
 			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
 		}
-
-		log.Printf("[StreamingTokenExtractor] Model: %s, Tokens - Input: %d, Output: %d, Total: %d",
-			s.model,
-			s.usage.PromptTokens,
-			s.usage.CompletionTokens,
-			s.usage.TotalTokens,
-		)
 
 		// Call usage handler if provided
 		if s.usageHandler != nil {
