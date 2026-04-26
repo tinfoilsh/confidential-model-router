@@ -89,6 +89,7 @@ models:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
       - gemma4-31b-inf6.tinfoil.containers.tinfoil.dev
+      - gemma4-31b-inf9.tinfoil.containers.tinfoil.dev
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
