@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -251,20 +253,36 @@ func main() {
 
 	apiKey := mustEnv("TINFOIL_API_KEY")
 
-	fmt.Printf("Citation Eval Tool\n")
-	fmt.Printf("==================\n")
-	fmt.Printf("Enclave:    %s\n", *enclaveHost)
-	fmt.Printf("Repo:       %s\n", *repoName)
-	fmt.Printf("Model:      %s\n", *modelName)
+	// Set up log file in logs/ directory.
+	logDir := filepath.Join(".", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		log.Fatalf("create logs dir: %v", err)
+	}
+	logName := fmt.Sprintf("citationeval-%s.md", time.Now().Format("2006-01-02T15-04-05"))
+	logPath := filepath.Join(logDir, logName)
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		log.Fatalf("create log file: %v", err)
+	}
+	defer logFile.Close()
 
-	fmt.Printf("\nVerifying enclave attestation... ")
+	// Tee all output to both stdout and the markdown log file.
+	w := io.MultiWriter(os.Stdout, logFile)
+
+	fmt.Fprintf(w, "# Citation Eval Tool\n\n")
+	fmt.Fprintf(w, "- **Enclave:** %s\n", *enclaveHost)
+	fmt.Fprintf(w, "- **Repo:** %s\n", *repoName)
+	fmt.Fprintf(w, "- **Model:** %s\n", *modelName)
+	fmt.Fprintf(w, "- **Date:** %s\n", time.Now().Format("2006-01-02 15:04:05 MST"))
+
+	fmt.Fprintf(w, "\nVerifying enclave attestation... ")
 	sc := tinfoil.NewSecureClient(*enclaveHost, *repoName)
 	httpClient, err := sc.HTTPClient()
 	if err != nil {
 		log.Fatalf("attestation failed: %v", err)
 	}
 	httpClient.Timeout = 5 * time.Minute
-	fmt.Printf("OK\n")
+	fmt.Fprintf(w, "OK\n")
 
 	baseURL := "https://" + *enclaveHost + "/v1"
 	client := openai.NewClient(
@@ -279,21 +297,23 @@ func main() {
 	}
 
 	totalReqs := len(resultFormats) * len(promptModes) * len(active)
-	fmt.Printf("Model:      %s\n", *modelName)
-	fmt.Printf("Scenarios:  %d\n", len(active))
-	fmt.Printf("Formats:    %d (%s)\n", len(resultFormats), formatNames())
-	fmt.Printf("Prompts:    %d (%s)\n", len(promptModes), promptNames())
-	fmt.Printf("Total reqs: %d\n\n", totalReqs)
+	fmt.Fprintf(w, "- **Scenarios:** %d\n", len(active))
+	fmt.Fprintf(w, "- **Formats:** %d (%s)\n", len(resultFormats), formatNames())
+	fmt.Fprintf(w, "- **Prompts:** %d (%s)\n", len(promptModes), promptNames())
+	fmt.Fprintf(w, "- **Total reqs:** %d\n\n", totalReqs)
 
 	var cells []cell
 	reqNum := 0
+
+	fmt.Fprintf(w, "## Individual Results\n\n")
 
 	for _, rf := range resultFormats {
 		for _, mode := range promptModes {
 			for _, sc := range active {
 				reqNum++
-				fmt.Printf("─── [%d/%d] format=%s prompt=%s query=%q ───\n",
-					reqNum, totalReqs, rf.Name, mode.Name, truncate(sc.Query, 40))
+				fmt.Fprintf(w, "### [%d/%d] format=%s prompt=%s\n\n",
+					reqNum, totalReqs, rf.Name, mode.Name)
+				fmt.Fprintf(w, "**Query:** %s\n\n", sc.Query)
 
 				toolOutput := rf.Format(sc.Results)
 				content, rawJSON, err := runQuery(context.Background(), client, mode.System, sc, toolOutput)
@@ -308,32 +328,32 @@ func main() {
 				}
 
 				if err != nil {
-					fmt.Printf("ERROR: %v\n\n", err)
+					fmt.Fprintf(w, "**ERROR:** %v\n\n", err)
 					cells = append(cells, c)
 					continue
 				}
 
 				if *rawOutput {
-					fmt.Printf("Raw JSON:\n%s\n\n", rawJSON)
+					fmt.Fprintf(w, "**Raw JSON:**\n```json\n%s\n```\n\n", rawJSON)
 				}
 
-				fmt.Printf("Response:\n%s\n\n", content)
+				fmt.Fprintf(w, "**Response:**\n\n> %s\n\n", strings.ReplaceAll(content, "\n", "\n> "))
 
 				// Scan for citation patterns.
-				fmt.Printf("Patterns found:\n")
+				fmt.Fprintf(w, "**Patterns found:**\n\n")
 				found := false
 				for j, p := range patterns {
 					matches := p.Re.FindAllString(content, -1)
 					c.Counts[j] = len(matches)
 					if len(matches) > 0 {
 						found = true
-						fmt.Printf("  %-30s  %d match(es)  e.g. %s\n", p.Name, len(matches), truncate(matches[0], 80))
+						fmt.Fprintf(w, "- `%s` — %d match(es), e.g. `%s`\n", p.Name, len(matches), truncate(matches[0], 80))
 					}
 				}
 				if !found {
-					fmt.Printf("  (none)\n")
+					fmt.Fprintf(w, "- _(none)_\n")
 				}
-				fmt.Println()
+				fmt.Fprintf(w, "\n")
 
 				cells = append(cells, c)
 			}
@@ -341,26 +361,26 @@ func main() {
 	}
 
 	// Print aggregate matrix: one table per result format.
-	fmt.Printf("═══ Aggregate Matrix ═══\n\n")
+	fmt.Fprintf(w, "## Aggregate Matrix\n\n")
 
 	for _, rf := range resultFormats {
-		fmt.Printf("── format=%s ──\n", rf.Name)
+		fmt.Fprintf(w, "### format=%s\n\n", rf.Name)
 
 		// Header row.
-		fmt.Printf("%-30s", "Pattern")
+		fmt.Fprintf(w, "| %-30s", "Pattern")
 		for _, mode := range promptModes {
-			fmt.Printf(" | %13s", mode.Name)
+			fmt.Fprintf(w, " | %s", mode.Name)
 		}
-		fmt.Println()
-		fmt.Printf("%s", strings.Repeat("-", 30))
+		fmt.Fprintf(w, " |\n")
+		fmt.Fprintf(w, "|%s", strings.Repeat("-", 32))
 		for range promptModes {
-			fmt.Printf("-|-%s", strings.Repeat("-", 13))
+			fmt.Fprintf(w, "|%s", strings.Repeat("-", len("  cite-markdown  ")))
 		}
-		fmt.Println()
+		fmt.Fprintf(w, "|\n")
 
 		// One row per pattern, summing across queries for each prompt mode.
 		for j, p := range patterns {
-			fmt.Printf("%-30s", p.Name)
+			fmt.Fprintf(w, "| %-30s", p.Name)
 			for _, mode := range promptModes {
 				total := 0
 				for _, c := range cells {
@@ -368,18 +388,18 @@ func main() {
 						total += c.Counts[j]
 					}
 				}
-				fmt.Printf(" | %13d", total)
+				fmt.Fprintf(w, " | %d", total)
 			}
-			fmt.Println()
+			fmt.Fprintf(w, " |\n")
 		}
-		fmt.Println()
+		fmt.Fprintf(w, "\n")
 	}
 
 	// Per-cell detail with first examples.
-	fmt.Printf("═══ Per-Combo Detail ═══\n\n")
+	fmt.Fprintf(w, "## Per-Combo Detail\n\n")
 	for _, rf := range resultFormats {
 		for _, mode := range promptModes {
-			fmt.Printf("── format=%s prompt=%s ──\n", rf.Name, mode.Name)
+			fmt.Fprintf(w, "### format=%s prompt=%s\n\n", rf.Name, mode.Name)
 			for _, p := range patterns {
 				total := 0
 				var example string
@@ -396,11 +416,13 @@ func main() {
 				if example == "" {
 					example = "-"
 				}
-				fmt.Printf("  %-28s  %3d  e.g. %s\n", p.Name, total, truncate(example, 60))
+				fmt.Fprintf(w, "- `%s` — %d — e.g. `%s`\n", p.Name, total, truncate(example, 60))
 			}
-			fmt.Println()
+			fmt.Fprintf(w, "\n")
 		}
 	}
+
+	fmt.Fprintf(w, "---\n\n_Log written to `%s`_\n", logPath)
 }
 
 // runQuery builds a prefilled conversation (user → assistant tool_call → tool result)
