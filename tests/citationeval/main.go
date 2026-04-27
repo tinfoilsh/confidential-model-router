@@ -217,22 +217,46 @@ var promptModes = []promptMode{
 
 // Citation pattern definitions.
 type patternDef struct {
-	Name string
-	Re   *regexp.Regexp
+	Name    string
+	Re      *regexp.Regexp
+	Exclude *regexp.Regexp // if set, subtract matches that also match this pattern
 }
+
+// findMatches returns matches for the pattern, excluding any that match Exclude.
+func (p patternDef) findMatches(text string) []string {
+	all := p.Re.FindAllString(text, -1)
+	if p.Exclude == nil {
+		return all
+	}
+	filtered := make([]string, 0, len(all))
+	for _, m := range all {
+		if !p.Exclude.MatchString(m) {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
+}
+
+var (
+	harmonyRe  = regexp.MustCompile(`\x{3010}\d+\x{2020}L\d+(-L\d+)?\x{3011}`)
+	markdownRe = regexp.MustCompile(`\[[^\]]+\]\(https?://[^\s)]+\)`)
+	bracketRe  = regexp.MustCompile(`\x{3010}[^\x{3011}]+\x{3011}`)
+)
 
 var patterns = []patternDef{
 	{
 		Name: "Harmony 【N†LX】",
-		Re:   regexp.MustCompile(`\x{3010}\d+\x{2020}L\d+(-L\d+)?\x{3011}`),
+		Re:   harmonyRe,
 	},
 	{
 		Name: "Markdown [label](url)",
-		Re:   regexp.MustCompile(`\[[^\]]+\]\(https?://[^\s)]+\)`),
+		Re:   markdownRe,
 	},
 	{
 		Name: "Other 【...】",
-		Re:   regexp.MustCompile(`\x{3010}[^\x{3011}]+\x{3011}`),
+		Re:   bracketRe,
+		// Exclude matches that are already counted as Harmony.
+		Exclude: harmonyRe,
 	},
 }
 
@@ -342,7 +366,7 @@ func main() {
 				fmt.Fprintf(w, "**Patterns found:**\n\n")
 				found := false
 				for j, p := range patterns {
-					matches := p.Re.FindAllString(content, -1)
+					matches := p.findMatches(content)
 					c.Counts[j] = len(matches)
 					if len(matches) > 0 {
 						found = true
@@ -406,7 +430,7 @@ func main() {
 					if c.Format != rf.Name || c.Prompt != mode.Name {
 						continue
 					}
-					matches := p.Re.FindAllString(c.Content, -1)
+					matches := p.findMatches(c.Content)
 					total += len(matches)
 					if example == "" && len(matches) > 0 {
 						example = matches[0]
