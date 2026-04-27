@@ -21,7 +21,6 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/shared"
 	tinfoil "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
@@ -463,30 +462,12 @@ func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc
 	// Tool returns search results.
 	messages = append(messages, openai.ToolMessage(toolOutput, toolCallID))
 
-	// Declare the search tool so the chat template handles the history correctly.
-	searchTool := openai.ChatCompletionToolUnionParam{
-		OfFunction: &openai.ChatCompletionFunctionToolParam{
-			Function: shared.FunctionDefinitionParam{
-				Name:        "search",
-				Description: openai.String("Search the web for information."),
-				Parameters: shared.FunctionParameters{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "The search query.",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		},
-	}
-
+	// Don't include the tools array — we want the model to generate text,
+	// not call tools again. The tool_call/tool messages in the history are
+	// still there for context. (debug.go test 5 confirmed this works.)
 	params := openai.ChatCompletionNewParams{
 		Model:    openai.ChatModel(*modelName),
 		Messages: messages,
-		Tools:    []openai.ChatCompletionToolUnionParam{searchTool},
 	}
 
 	completion, err := client.Chat.Completions.New(ctx, params)
@@ -503,7 +484,18 @@ func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc
 		return "", rawJSON, fmt.Errorf("no choices in response")
 	}
 
-	return completion.Choices[0].Message.Content, rawJSON, nil
+	content = completion.Choices[0].Message.Content
+
+	// Diagnostic: if content is empty, check if the model returned tool calls.
+	if content == "" && len(completion.Choices[0].Message.ToolCalls) > 0 {
+		names := make([]string, len(completion.Choices[0].Message.ToolCalls))
+		for i, tc := range completion.Choices[0].Message.ToolCalls {
+			names[i] = tc.Function.Name
+		}
+		return "", rawJSON, fmt.Errorf("model returned tool call(s) instead of text: %s", strings.Join(names, ", "))
+	}
+
+	return content, rawJSON, nil
 }
 
 func formatNames() string {
