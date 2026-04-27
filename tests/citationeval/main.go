@@ -24,7 +24,7 @@ import (
 )
 
 var (
-	enclaveHost = flag.String("enclave", "gpt-oss-120b-0.inf9.tinfoil.sh", "enclave hostname")
+	enclaveHost = flag.String("enclave", "gpt-oss-120b-0.inf6.tinfoil.sh", "enclave hostname")
 	repoName    = flag.String("repo", "tinfoilsh/confidential-gpt-oss-120b", "GitHub repo for attestation")
 	modelName   = flag.String("model", "gpt-oss-120b", "model identifier")
 	numQueries  = flag.Int("queries", 0, "number of eval queries to run (0 = all)")

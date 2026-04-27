@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	defaultEnclave = "gpt-oss-120b-0.inf9.tinfoil.sh"
+	defaultEnclave = "gpt-oss-120b-0.inf6.tinfoil.sh"
 	defaultRepo    = "tinfoilsh/confidential-gpt-oss-120b"
 	defaultModel   = "gpt-oss-120b"
 )
