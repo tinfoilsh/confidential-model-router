@@ -84,6 +84,55 @@ type toolCallSource struct {
 	title string
 }
 
+// publicToolErrorReason returns a short, opaque status string safe to
+// ship to clients via `web_search_call.reason`.
+const (
+	publicToolErrorReasonString = "tool_error"
+	blockedToolErrorReason      = "blocked_by_safety_filter"
+)
+
+func publicToolErrorReason(toolName string, err error) string {
+	if err == nil {
+		return ""
+	}
+	debugLogf("toolruntime: %s tool call failed: %v", toolName, err)
+	if isToolCallBlocked(err) {
+		return blockedToolErrorReason
+	}
+	return publicToolErrorReasonString
+}
+
+// isToolCallBlocked reports whether the MCP tool error came from a PII or
+// prompt-injection safeguard.
+func isToolCallBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "blocked by safety filter")
+}
+
+// failureStatusFor picks the web_search_call status string to surface for
+// a non-nil MCP error.
+func failureStatusFor(err error) string {
+	if isToolCallBlocked(err) {
+		return "blocked"
+	}
+	return "failed"
+}
+
+// toolOutputSourcesToToolCallSources converts citations.ToolOutputSource
+// to the toolCallSource type used by the events/progress system.
+func toolOutputSourcesToToolCallSources(sources []citations.ToolOutputSource) []toolCallSource {
+	if len(sources) == 0 {
+		return nil
+	}
+	result := make([]toolCallSource, len(sources))
+	for i, s := range sources {
+		result[i] = toolCallSource{url: s.URL, title: s.Title}
+	}
+	return result
+}
+
 // statusForRecord maps a recorded router tool call to the web_search_call
 // status surfaced to clients. "blocked" is reserved for PII or prompt
 // injection safeguards so client UIs can surface a distinct affordance for
