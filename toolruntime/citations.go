@@ -22,6 +22,7 @@ type citationSource struct {
 type citationState struct {
 	nextIndex int
 	sources   []citationSource
+	harmony   bool // when true, format tool output with cursors/line numbers and parse 【N†LX】 citations
 }
 
 // record registers a source the router surfaced to the model in a tool output
@@ -444,6 +445,9 @@ func formatSearchToolOutput(raw any, citations *citationState) string {
 	if len(results) == 0 {
 		return "No safe search results were found."
 	}
+	if citations != nil && citations.harmony {
+		return formatHarmonySearchToolOutput(results, citations)
+	}
 
 	var out strings.Builder
 	for _, rawResult := range results {
@@ -477,10 +481,51 @@ func formatSearchToolOutput(raw any, citations *citationState) string {
 	return strings.TrimSpace(out.String())
 }
 
+// formatHarmonySearchToolOutput formats search results with numbered cursors
+// and line numbers so gpt-oss can cite them using its trained Harmony format:
+// 【cursor†Lstart-Lend】.
+func formatHarmonySearchToolOutput(results []any, citations *citationState) string {
+	var out strings.Builder
+	for _, rawResult := range results {
+		result, _ := rawResult.(map[string]any)
+		if result == nil {
+			continue
+		}
+
+		title := strings.TrimSpace(stringValue(result["title"]))
+		url := strings.TrimSpace(stringValue(result["url"]))
+		content := strings.TrimSpace(stringValue(result["content"]))
+		published := strings.TrimSpace(stringValue(result["published_date"]))
+		cursor := citations.record(url, title)
+
+		if title == "" {
+			title = "Search result"
+		}
+		fmt.Fprintf(&out, "[%d] %s\n", cursor, title)
+		if url != "" {
+			fmt.Fprintf(&out, "URL: %s\n", url)
+		}
+		if published != "" {
+			fmt.Fprintf(&out, "Published: %s\n", published)
+		}
+		if content != "" {
+			lines := strings.Split(content, "\n")
+			for i, line := range lines {
+				fmt.Fprintf(&out, "L%d: %s\n", i+1, line)
+			}
+		}
+		out.WriteString("\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
 func formatFetchToolOutput(raw any, citations *citationState) string {
 	pages, _ := raw.([]any)
 	if len(pages) == 0 {
 		return ""
+	}
+	if citations != nil && citations.harmony {
+		return formatHarmonyFetchToolOutput(pages, citations)
 	}
 
 	var out strings.Builder
@@ -500,6 +545,33 @@ func formatFetchToolOutput(raw any, citations *citationState) string {
 		if content != "" {
 			out.WriteString(content)
 			out.WriteString("\n")
+		}
+		out.WriteString("\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func formatHarmonyFetchToolOutput(pages []any, citations *citationState) string {
+	var out strings.Builder
+	for _, rawPage := range pages {
+		page, _ := rawPage.(map[string]any)
+		if page == nil {
+			continue
+		}
+
+		url := strings.TrimSpace(stringValue(page["url"]))
+		content := strings.TrimSpace(stringValue(page["content"]))
+		cursor := citations.record(url, "Fetched page")
+
+		fmt.Fprintf(&out, "[%d] Fetched page\n", cursor)
+		if url != "" {
+			fmt.Fprintf(&out, "URL: %s\n", url)
+		}
+		if content != "" {
+			lines := strings.Split(content, "\n")
+			for i, line := range lines {
+				fmt.Fprintf(&out, "L%d: %s\n", i+1, line)
+			}
 		}
 		out.WriteString("\n")
 	}
