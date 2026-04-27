@@ -30,62 +30,157 @@ var (
 	rawOutput  = flag.Bool("raw", false, "print full raw response JSON")
 )
 
-// scenario is a user query paired with fake search results the model should cite.
+// searchResult is a single result from a search tool call.
+type searchResult struct {
+	Title   string
+	URL     string
+	Content string // may be multi-line
+}
+
+// scenario is a user query paired with fake search results.
 type scenario struct {
 	Query       string
-	SearchQuery string // what the "tool" searched for
-	Results     string // fake tool output with URLs and snippets
+	SearchQuery string
+	Results     []searchResult
 }
 
 var scenarios = []scenario{
 	{
 		Query:       "What are the latest headlines today?",
 		SearchQuery: "latest headlines today",
-		Results: `[1] "Global Climate Summit Reaches Historic Agreement" - https://www.reuters.com/world/climate-summit-agreement-2026
-World leaders at the 2026 Global Climate Summit in Berlin reached a historic agreement to cut emissions by 50% by 2035, with binding commitments from all major economies.
-
-[2] "Tech Giants Report Record Q1 Earnings" - https://www.bloomberg.com/news/tech-q1-earnings-2026
-Major technology companies including Apple, Microsoft, and Alphabet reported better-than-expected first quarter results, driven by AI infrastructure spending.
-
-[3] "NBA Playoffs: Celtics Advance to Conference Finals" - https://www.espn.com/nba/story/celtics-advance-2026
-The Boston Celtics defeated the Philadelphia 76ers 112-98 in Game 6 to advance to the Eastern Conference Finals.`,
+		Results: []searchResult{
+			{
+				Title:   "Global Climate Summit Reaches Historic Agreement",
+				URL:     "https://www.reuters.com/world/climate-summit-agreement-2026",
+				Content: "World leaders at the 2026 Global Climate Summit in Berlin reached a historic agreement to cut emissions by 50% by 2035, with binding commitments from all major economies.",
+			},
+			{
+				Title:   "Tech Giants Report Record Q1 Earnings",
+				URL:     "https://www.bloomberg.com/news/tech-q1-earnings-2026",
+				Content: "Major technology companies including Apple, Microsoft, and Alphabet reported better-than-expected first quarter results, driven by AI infrastructure spending.",
+			},
+			{
+				Title:   "NBA Playoffs: Celtics Advance to Conference Finals",
+				URL:     "https://www.espn.com/nba/story/celtics-advance-2026",
+				Content: "The Boston Celtics defeated the Philadelphia 76ers 112-98 in Game 6 to advance to the Eastern Conference Finals.",
+			},
+		},
 	},
 	{
 		Query:       "Who won the most recent NBA game?",
 		SearchQuery: "most recent NBA game results",
-		Results: `[1] "Celtics 112, 76ers 98 - Game 6 Recap" - https://www.espn.com/nba/recap/_/gameId/401656789
-Jayson Tatum scored 34 points and grabbed 11 rebounds as the Boston Celtics eliminated the Philadelphia 76ers with a 112-98 victory in Game 6 of their Eastern Conference semifinal series.
-
-[2] "NBA Playoffs Bracket 2026" - https://www.nba.com/playoffs/2026/bracket
-Full playoff bracket and results. Eastern Conference: Celtics vs 76ers (Celtics win 4-2). Western Conference: Thunder vs Nuggets (series tied 3-3).
-
-[3] "Thunder-Nuggets Game 6 Preview" - https://www.espn.com/nba/preview/_/gameId/401656790
-The Oklahoma City Thunder host the Denver Nuggets in a decisive Game 6, with the winner advancing to the Western Conference Finals.`,
+		Results: []searchResult{
+			{
+				Title:   "Celtics 112, 76ers 98 - Game 6 Recap",
+				URL:     "https://www.espn.com/nba/recap/_/gameId/401656789",
+				Content: "Jayson Tatum scored 34 points and grabbed 11 rebounds as the Boston Celtics eliminated the Philadelphia 76ers with a 112-98 victory in Game 6 of their Eastern Conference semifinal series.",
+			},
+			{
+				Title:   "NBA Playoffs Bracket 2026",
+				URL:     "https://www.nba.com/playoffs/2026/bracket",
+				Content: "Full playoff bracket and results. Eastern Conference: Celtics vs 76ers (Celtics win 4-2). Western Conference: Thunder vs Nuggets (series tied 3-3).",
+			},
+			{
+				Title:   "Thunder-Nuggets Game 6 Preview",
+				URL:     "https://www.espn.com/nba/preview/_/gameId/401656790",
+				Content: "The Oklahoma City Thunder host the Denver Nuggets in a decisive Game 6, with the winner advancing to the Western Conference Finals.",
+			},
+		},
 	},
 	{
 		Query:       "What is the current price of Bitcoin?",
 		SearchQuery: "current bitcoin price",
-		Results: `[1] "Bitcoin Price Today" - https://www.coindesk.com/price/bitcoin
-Bitcoin (BTC) is currently trading at $94,521.30, up 2.3% in the last 24 hours. Market cap: $1.87 trillion. 24h volume: $28.4 billion.
-
-[2] "Bitcoin Surges Past $94K on ETF Inflows" - https://www.coindesk.com/markets/bitcoin-etf-inflows-2026
-Bitcoin climbed above $94,000 on Monday as spot Bitcoin ETFs recorded $1.2 billion in net inflows last week, the highest weekly total since January.
-
-[3] "Crypto Market Overview" - https://www.coingecko.com/en/coins/bitcoin
-Bitcoin price: $94,521.30 USD. 24h change: +2.3%. 7d change: +8.1%. All-time high: $109,114 (Jan 2025).`,
+		Results: []searchResult{
+			{
+				Title:   "Bitcoin Price Today",
+				URL:     "https://www.coindesk.com/price/bitcoin",
+				Content: "Bitcoin (BTC) is currently trading at $94,521.30, up 2.3% in the last 24 hours. Market cap: $1.87 trillion. 24h volume: $28.4 billion.",
+			},
+			{
+				Title:   "Bitcoin Surges Past $94K on ETF Inflows",
+				URL:     "https://www.coindesk.com/markets/bitcoin-etf-inflows-2026",
+				Content: "Bitcoin climbed above $94,000 on Monday as spot Bitcoin ETFs recorded $1.2 billion in net inflows last week, the highest weekly total since January.",
+			},
+			{
+				Title:   "Crypto Market Overview",
+				URL:     "https://www.coingecko.com/en/coins/bitcoin",
+				Content: "Bitcoin price: $94,521.30 USD. 24h change: +2.3%. 7d change: +8.1%. All-time high: $109,114 (Jan 2025).",
+			},
+		},
 	},
 	{
 		Query:       "Summarize the top 3 results for 'climate change 2026'",
 		SearchQuery: "climate change 2026",
-		Results: `[1] "2026 Global Climate Report: Temperatures Hit New Record" - https://www.nature.com/articles/climate-report-2026
-The World Meteorological Organization confirmed that 2025 was the hottest year on record, with global mean temperature 1.55°C above pre-industrial levels. The report warns that without immediate action, 2°C will be breached by 2040.
-
-[2] "Climate Change 2026: Policy Progress and Gaps" - https://www.unep.org/resources/climate-change-2026-policy
-A comprehensive UN Environment Programme report finds that current national pledges would reduce emissions by only 15% by 2030, far short of the 43% needed. However, renewable energy deployment accelerated by 35% in 2025.
-
-[3] "How Climate Change Is Reshaping Agriculture in 2026" - https://www.bbc.com/news/science-environment-climate-agriculture-2026
-Extreme weather events in 2025 caused $180 billion in agricultural losses worldwide. Farmers in Southeast Asia and sub-Saharan Africa were disproportionately affected, with crop yields falling 20-30% in some regions.`,
+		Results: []searchResult{
+			{
+				Title:   "2026 Global Climate Report: Temperatures Hit New Record",
+				URL:     "https://www.nature.com/articles/climate-report-2026",
+				Content: "The World Meteorological Organization confirmed that 2025 was the hottest year on record, with global mean temperature 1.55°C above pre-industrial levels.\nThe report warns that without immediate action, 2°C will be breached by 2040.",
+			},
+			{
+				Title:   "Climate Change 2026: Policy Progress and Gaps",
+				URL:     "https://www.unep.org/resources/climate-change-2026-policy",
+				Content: "A comprehensive UN Environment Programme report finds that current national pledges would reduce emissions by only 15% by 2030, far short of the 43% needed.\nHowever, renewable energy deployment accelerated by 35% in 2025.",
+			},
+			{
+				Title:   "How Climate Change Is Reshaping Agriculture in 2026",
+				URL:     "https://www.bbc.com/news/science-environment-climate-agriculture-2026",
+				Content: "Extreme weather events in 2025 caused $180 billion in agricultural losses worldwide.\nFarmers in Southeast Asia and sub-Saharan Africa were disproportionately affected, with crop yields falling 20-30% in some regions.",
+			},
+		},
 	},
+}
+
+// formatStandard renders results the way the router does in standard mode.
+//
+//	Source: <title>
+//	URL: <url>
+//	<content>
+func formatStandard(results []searchResult) string {
+	var b strings.Builder
+	for i, r := range results {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "Source: %s\n", r.Title)
+		fmt.Fprintf(&b, "URL: %s\n", r.URL)
+		b.WriteString(r.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// formatHarmony renders results the way the router does in harmony mode,
+// with numbered cursors and per-line labels.
+//
+//	[1] <title>
+//	URL: <url>
+//	L1: <line 1>
+//	L2: <line 2>
+func formatHarmony(results []searchResult) string {
+	var b strings.Builder
+	for i, r := range results {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "[%d] %s\n", i+1, r.Title)
+		fmt.Fprintf(&b, "URL: %s\n", r.URL)
+		for j, line := range strings.Split(r.Content, "\n") {
+			fmt.Fprintf(&b, "L%d: %s\n", j+1, line)
+		}
+	}
+	return b.String()
+}
+
+// resultFormat pairs a name with a formatter.
+type resultFormat struct {
+	Name   string
+	Format func([]searchResult) string
+}
+
+var resultFormats = []resultFormat{
+	{Name: "standard", Format: formatStandard},
+	{Name: "harmony", Format: formatHarmony},
 }
 
 // promptMode defines a system prompt strategy to test.
@@ -139,8 +234,9 @@ var patterns = []patternDef{
 	},
 }
 
-// cell holds results for one (prompt, query) combination.
+// cell holds results for one (format, prompt, query) combination.
 type cell struct {
+	Format  string
 	Prompt  string
 	Query   string
 	Content string
@@ -166,122 +262,137 @@ func main() {
 		active = active[:*numQueries]
 	}
 
+	totalReqs := len(resultFormats) * len(promptModes) * len(active)
 	fmt.Printf("Citation Eval Tool\n")
 	fmt.Printf("==================\n")
 	fmt.Printf("Endpoint:   %s\n", *baseURL)
 	fmt.Printf("Model:      %s\n", *modelName)
 	fmt.Printf("Scenarios:  %d\n", len(active))
-	fmt.Printf("Prompts:    %d\n", len(promptModes))
-	fmt.Printf("Total reqs: %d\n\n", len(active)*len(promptModes))
+	fmt.Printf("Formats:    %d (%s)\n", len(resultFormats), formatNames())
+	fmt.Printf("Prompts:    %d (%s)\n", len(promptModes), promptNames())
+	fmt.Printf("Total reqs: %d\n\n", totalReqs)
 
 	var cells []cell
+	reqNum := 0
 
-	for _, mode := range promptModes {
-		for _, sc := range active {
-			fmt.Printf("─── prompt=%s | query=%q ───\n", mode.Name, truncate(sc.Query, 50))
-
-			content, rawJSON, err := runQuery(context.Background(), client, mode.System, sc)
-			c := cell{
-				Prompt:  mode.Name,
-				Query:   sc.Query,
-				Content: content,
-				RawJSON: rawJSON,
-				Err:     err,
-				Counts:  make([]int, len(patterns)),
-			}
-
-			if err != nil {
-				fmt.Printf("ERROR: %v\n\n", err)
-				cells = append(cells, c)
-				continue
-			}
-
-			if *rawOutput {
-				fmt.Printf("Raw JSON:\n%s\n\n", rawJSON)
-			}
-
-			fmt.Printf("Response:\n%s\n\n", content)
-
-			// Scan for citation patterns.
-			fmt.Printf("Patterns found:\n")
-			found := false
-			for j, p := range patterns {
-				matches := p.Re.FindAllString(content, -1)
-				c.Counts[j] = len(matches)
-				if len(matches) > 0 {
-					found = true
-					fmt.Printf("  %-30s  %d match(es)  e.g. %s\n", p.Name, len(matches), truncate(matches[0], 80))
-				}
-			}
-			if !found {
-				fmt.Printf("  (none)\n")
-			}
-			fmt.Println()
-
-			cells = append(cells, c)
-		}
-	}
-
-	// Print aggregate matrix: rows=patterns, columns=prompt modes.
-	fmt.Printf("═══ Aggregate Matrix ═══\n\n")
-
-	// Header row.
-	fmt.Printf("%-30s", "Pattern")
-	for _, mode := range promptModes {
-		fmt.Printf(" | %13s", mode.Name)
-	}
-	fmt.Println()
-	fmt.Printf("%s", strings.Repeat("-", 30))
-	for range promptModes {
-		fmt.Printf("-|-%s", strings.Repeat("-", 13))
-	}
-	fmt.Println()
-
-	// One row per pattern, summing counts across queries for each prompt mode.
-	for j, p := range patterns {
-		fmt.Printf("%-30s", p.Name)
+	for _, rf := range resultFormats {
 		for _, mode := range promptModes {
-			total := 0
-			for _, c := range cells {
-				if c.Prompt == mode.Name {
-					total += c.Counts[j]
-				}
-			}
-			fmt.Printf(" | %13d", total)
-		}
-		fmt.Println()
-	}
-	fmt.Println()
+			for _, sc := range active {
+				reqNum++
+				fmt.Printf("─── [%d/%d] format=%s prompt=%s query=%q ───\n",
+					reqNum, totalReqs, rf.Name, mode.Name, truncate(sc.Query, 40))
 
-	// Per-prompt breakdown with first examples.
-	fmt.Printf("═══ Per-Prompt Detail ═══\n\n")
-	for _, mode := range promptModes {
-		fmt.Printf("── %s ──\n", mode.Name)
-		for _, p := range patterns {
-			total := 0
-			var example string
-			for _, c := range cells {
-				if c.Prompt != mode.Name {
+				toolOutput := rf.Format(sc.Results)
+				content, rawJSON, err := runQuery(context.Background(), client, mode.System, sc, toolOutput)
+				c := cell{
+					Format:  rf.Name,
+					Prompt:  mode.Name,
+					Query:   sc.Query,
+					Content: content,
+					RawJSON: rawJSON,
+					Err:     err,
+					Counts:  make([]int, len(patterns)),
+				}
+
+				if err != nil {
+					fmt.Printf("ERROR: %v\n\n", err)
+					cells = append(cells, c)
 					continue
 				}
-				matches := p.Re.FindAllString(c.Content, -1)
-				total += len(matches)
-				if example == "" && len(matches) > 0 {
-					example = matches[0]
+
+				if *rawOutput {
+					fmt.Printf("Raw JSON:\n%s\n\n", rawJSON)
 				}
+
+				fmt.Printf("Response:\n%s\n\n", content)
+
+				// Scan for citation patterns.
+				fmt.Printf("Patterns found:\n")
+				found := false
+				for j, p := range patterns {
+					matches := p.Re.FindAllString(content, -1)
+					c.Counts[j] = len(matches)
+					if len(matches) > 0 {
+						found = true
+						fmt.Printf("  %-30s  %d match(es)  e.g. %s\n", p.Name, len(matches), truncate(matches[0], 80))
+					}
+				}
+				if !found {
+					fmt.Printf("  (none)\n")
+				}
+				fmt.Println()
+
+				cells = append(cells, c)
 			}
-			if example == "" {
-				example = "-"
-			}
-			fmt.Printf("  %-28s  %3d  e.g. %s\n", p.Name, total, truncate(example, 60))
+		}
+	}
+
+	// Print aggregate matrix: one table per result format.
+	fmt.Printf("═══ Aggregate Matrix ═══\n\n")
+
+	for _, rf := range resultFormats {
+		fmt.Printf("── format=%s ──\n", rf.Name)
+
+		// Header row.
+		fmt.Printf("%-30s", "Pattern")
+		for _, mode := range promptModes {
+			fmt.Printf(" | %13s", mode.Name)
 		}
 		fmt.Println()
+		fmt.Printf("%s", strings.Repeat("-", 30))
+		for range promptModes {
+			fmt.Printf("-|-%s", strings.Repeat("-", 13))
+		}
+		fmt.Println()
+
+		// One row per pattern, summing across queries for each prompt mode.
+		for j, p := range patterns {
+			fmt.Printf("%-30s", p.Name)
+			for _, mode := range promptModes {
+				total := 0
+				for _, c := range cells {
+					if c.Format == rf.Name && c.Prompt == mode.Name {
+						total += c.Counts[j]
+					}
+				}
+				fmt.Printf(" | %13d", total)
+			}
+			fmt.Println()
+		}
+		fmt.Println()
+	}
+
+	// Per-cell detail with first examples.
+	fmt.Printf("═══ Per-Combo Detail ═══\n\n")
+	for _, rf := range resultFormats {
+		for _, mode := range promptModes {
+			fmt.Printf("── format=%s prompt=%s ──\n", rf.Name, mode.Name)
+			for _, p := range patterns {
+				total := 0
+				var example string
+				for _, c := range cells {
+					if c.Format != rf.Name || c.Prompt != mode.Name {
+						continue
+					}
+					matches := p.Re.FindAllString(c.Content, -1)
+					total += len(matches)
+					if example == "" && len(matches) > 0 {
+						example = matches[0]
+					}
+				}
+				if example == "" {
+					example = "-"
+				}
+				fmt.Printf("  %-28s  %3d  e.g. %s\n", p.Name, total, truncate(example, 60))
+			}
+			fmt.Println()
+		}
 	}
 }
 
 // runQuery builds a prefilled conversation (user → assistant tool_call → tool result)
 // and sends it to the model so it generates the final answer with citations.
-func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc scenario) (content string, rawJSON string, err error) {
+func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc scenario, toolOutput string) (content string, rawJSON string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 
@@ -315,7 +426,7 @@ func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc
 	})
 
 	// Tool returns search results.
-	messages = append(messages, openai.ToolMessage(sc.Results, toolCallID))
+	messages = append(messages, openai.ToolMessage(toolOutput, toolCallID))
 
 	// Declare the search tool so the chat template handles the history correctly.
 	searchTool := openai.ChatCompletionToolUnionParam{
@@ -358,6 +469,22 @@ func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc
 	}
 
 	return completion.Choices[0].Message.Content, rawJSON, nil
+}
+
+func formatNames() string {
+	names := make([]string, len(resultFormats))
+	for i, f := range resultFormats {
+		names[i] = f.Name
+	}
+	return strings.Join(names, ", ")
+}
+
+func promptNames() string {
+	names := make([]string, len(promptModes))
+	for i, m := range promptModes {
+		names[i] = m.Name
+	}
+	return strings.Join(names, ", ")
 }
 
 func truncate(s string, maxLen int) string {
