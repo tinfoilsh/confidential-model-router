@@ -19,18 +19,6 @@ import (
 
 const maxToolIterations = 10
 
-// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
-// the model can fan out client-owned tool calls. Router-owned tools are
-// still dispatched serially inside runToolLoop to keep citation numbering
-// and streaming event order deterministic. A caller-provided value is
-// honored unchanged.
-func applyParallelToolCallsPolicy(reqBody map[string]any) {
-	if _, ok := reqBody["parallel_tool_calls"]; ok {
-		return
-	}
-	reqBody["parallel_tool_calls"] = true
-}
-
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
 // Responses) behind a single interface so the shared driver can walk the
 // iteration, usage-accumulation, and finalize logic without caring which
@@ -279,102 +267,6 @@ func executeRouterToolCall(
 	}
 	toolCalls.record(record)
 	return output
-}
-
-// toolResultErrorMessage extracts a human-readable error message from a
-// CallToolResult whose `IsError` flag is set.
-func toolResultErrorMessage(result *mcp.CallToolResult) string {
-	if result == nil {
-		return ""
-	}
-	var parts []string
-	for _, content := range result.Content {
-		if textContent, ok := content.(*mcp.TextContent); ok {
-			if trimmed := strings.TrimSpace(textContent.Text); trimmed != "" {
-				parts = append(parts, trimmed)
-			}
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// callTool invokes an MCP tool and returns the text output plus any
-// structured content the server returned. The caller is responsible for
-// formatting structured content (e.g. via formatStructuredToolOutput)
-// when citation-aware formatting is needed.
-func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
-	start := time.Now()
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      name,
-		Arguments: arguments,
-	})
-	if err != nil {
-		debugLogf("toolruntime:mcp.error tool=%s elapsed=%s args=%s err=%v", name, time.Since(start), debugPreview(arguments, 400), err)
-		return "", nil, err
-	}
-	if result.IsError {
-		message := toolResultErrorMessage(result)
-		debugLogf("toolruntime:mcp.tool_error tool=%s elapsed=%s args=%s message=%q", name, time.Since(start), debugPreview(arguments, 400), message)
-		if message == "" {
-			message = "tool call failed"
-		}
-		return "", nil, errors.New(message)
-	}
-	if debugEnabled {
-		hasStructured := result.StructuredContent != nil
-		textParts := 0
-		for _, content := range result.Content {
-			if _, ok := content.(*mcp.TextContent); ok {
-				textParts++
-			}
-		}
-		debugLogf("toolruntime:mcp.ok tool=%s elapsed=%s structured=%t text_parts=%d structured_preview=%s",
-			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
-	}
-	if result.StructuredContent != nil {
-		body, marshalErr := json.Marshal(result.StructuredContent)
-		if marshalErr == nil {
-			return string(body), result.StructuredContent, nil
-		}
-	}
-	var parts []string
-	for _, content := range result.Content {
-		if textContent, ok := content.(*mcp.TextContent); ok {
-			parts = append(parts, textContent.Text)
-		}
-	}
-	return strings.Join(parts, "\n"), nil, nil
-}
-
-// applyStructuredFormat tries to format structured tool output with
-// citation-aware formatting. Returns the original text unchanged when
-// there is no structured content or the tool is not a router tool.
-func applyStructuredFormat(name, text string, structured any, state *citations.State) string {
-	if structured != nil {
-		if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
-			return formatted
-		}
-	}
-	return text
-}
-
-func formatStructuredToolOutput(name string, raw any, state *citations.State) string {
-	content, _ := raw.(map[string]any)
-	if len(content) == 0 {
-		return ""
-	}
-
-	switch {
-	case isRouterSearchToolName(name):
-		return citations.FormatSearchOutput(content["results"], state)
-	case isRouterFetchToolName(name):
-		if formatted := citations.FormatFetchOutput(content["pages"], state); formatted != "" {
-			return formatted
-		}
-		return citations.FormatFetchFailures(content["results"])
-	default:
-		return ""
-	}
 }
 
 // chatLoopAdapter drives /v1/chat/completions: it owns the OpenAI-compatible
@@ -673,4 +565,116 @@ func (a *responsesLoopAdapter) applyToolOutputs(_ map[string]any, state any, out
 
 func (a *responsesLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[string]any {
 	return forcedFinalResponsesRequest(reqBody)
+}
+
+// ---------------------------------------------------------------------------
+// Unexported helpers
+// ---------------------------------------------------------------------------
+
+// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
+// the model can fan out client-owned tool calls. Router-owned tools are
+// still dispatched serially inside runToolLoop to keep citation numbering
+// and streaming event order deterministic. A caller-provided value is
+// honored unchanged.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
+// toolResultErrorMessage extracts a human-readable error message from a
+// CallToolResult whose `IsError` flag is set.
+func toolResultErrorMessage(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			if trimmed := strings.TrimSpace(textContent.Text); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// callTool invokes an MCP tool and returns the text output plus any
+// structured content the server returned. The caller is responsible for
+// formatting structured content (e.g. via applyStructuredFormat) when
+// citation-aware formatting is needed.
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
+	start := time.Now()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      name,
+		Arguments: arguments,
+	})
+	if err != nil {
+		debugLogf("toolruntime:mcp.error tool=%s elapsed=%s args=%s err=%v", name, time.Since(start), debugPreview(arguments, 400), err)
+		return "", nil, err
+	}
+	if result.IsError {
+		message := toolResultErrorMessage(result)
+		debugLogf("toolruntime:mcp.tool_error tool=%s elapsed=%s args=%s message=%q", name, time.Since(start), debugPreview(arguments, 400), message)
+		if message == "" {
+			message = "tool call failed"
+		}
+		return "", nil, errors.New(message)
+	}
+	if debugEnabled {
+		hasStructured := result.StructuredContent != nil
+		textParts := 0
+		for _, content := range result.Content {
+			if _, ok := content.(*mcp.TextContent); ok {
+				textParts++
+			}
+		}
+		debugLogf("toolruntime:mcp.ok tool=%s elapsed=%s structured=%t text_parts=%d structured_preview=%s",
+			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
+	}
+	if result.StructuredContent != nil {
+		body, marshalErr := json.Marshal(result.StructuredContent)
+		if marshalErr == nil {
+			return string(body), result.StructuredContent, nil
+		}
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			parts = append(parts, textContent.Text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil, nil
+}
+
+// applyStructuredFormat tries to format structured tool output with
+// citation-aware formatting. Returns the original text unchanged when
+// there is no structured content or the tool is not a router tool.
+func applyStructuredFormat(name, text string, structured any, state *citations.State) string {
+	if structured != nil {
+		if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
+			return formatted
+		}
+	}
+	return text
+}
+
+func formatStructuredToolOutput(name string, raw any, state *citations.State) string {
+	content, _ := raw.(map[string]any)
+	if len(content) == 0 {
+		return ""
+	}
+
+	switch {
+	case isRouterSearchToolName(name):
+		return citations.FormatSearchOutput(content["results"], state)
+	case isRouterFetchToolName(name):
+		if formatted := citations.FormatFetchOutput(content["pages"], state); formatted != "" {
+			return formatted
+		}
+		return citations.FormatFetchFailures(content["results"])
+	default:
+		return ""
+	}
 }
