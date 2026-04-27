@@ -400,6 +400,7 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 			continue
 		}
 		content := stringValue(message["content"])
+		content = citations.resolveHarmonyCitations(content)
 		if normalized := normalizeCitationLinks(content); normalized != content {
 			content = normalized
 		}
@@ -443,6 +444,7 @@ func attachResponsesOutput(body map[string]any, citations *citationState, toolCa
 				continue
 			}
 			text := stringValue(contentMap["text"])
+			text = citations.resolveHarmonyCitations(text)
 			if normalized := normalizeCitationLinks(text); normalized != text {
 				contentMap["text"] = normalized
 				text = normalized

@@ -70,6 +70,43 @@ func normalizeCitationLinks(text string) string {
 	return fullwidthBracketedLinkPattern.ReplaceAllString(text, "[$1]($2)")
 }
 
+// harmonyCitationPattern matches the Harmony citation format gpt-oss produces:
+// 【cursor†Lstart-Lend】 or 【cursor†Lstart】. The cursor is the 1-based
+// result number matching the [N] prefix in formatHarmonySearchToolOutput.
+// The line references are captured but not used for URL resolution — the
+// cursor alone identifies the source.
+var harmonyCitationPattern = regexp.MustCompile(`\x{3010}(\d+)†L\d+(?:-L\d+)?\x{3011}`)
+
+// resolveHarmonyCitations rewrites Harmony-format citations like 【3†L5-L8】
+// into standard markdown links [title](url) by looking up the cursor number
+// in the citationState's recorded sources. Unresolved cursors (no matching
+// source) are left unchanged so the model's output is not silently corrupted.
+func (c *citationState) resolveHarmonyCitations(text string) string {
+	if c == nil || !c.harmony || !strings.ContainsRune(text, '\u3010') {
+		return text
+	}
+	return harmonyCitationPattern.ReplaceAllStringFunc(text, func(match string) string {
+		sub := harmonyCitationPattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		cursor := 0
+		for _, ch := range sub[1] {
+			cursor = cursor*10 + int(ch-'0')
+		}
+		for _, source := range c.sources {
+			if source.index == cursor {
+				title := source.title
+				if title == "" {
+					title = "Source"
+				}
+				return fmt.Sprintf("[%s](%s)", title, source.url)
+			}
+		}
+		return match
+	})
+}
+
 var toolOutputURLPattern = regexp.MustCompile(`(?m)^URL:\s*(\S+)`)
 
 // extractToolOutputURLs pulls the `URL: ...` lines the router embeds into each
