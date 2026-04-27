@@ -84,11 +84,12 @@ func executeToolWithProgress(
 		handle := emitter.open(id, action)
 		emitter.phase(handle, "response.web_search_call.in_progress")
 		emitter.phase(handle, "response.web_search_call.searching")
-		output, err := callTool(ctx, session, dispatchName, call.arguments, state)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 		if err != nil {
 			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
 			return "", err
 		}
+		output = applyStructuredFormat(call.name, output, structured, state)
 		sources := toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 		emitter.phase(handle, "response.web_search_call.completed")
 		emitter.close(handle, action, "completed", "", sources)
@@ -96,7 +97,11 @@ func executeToolWithProgress(
 	case isRouterFetchToolName(call.name):
 		urls := fetchArgumentURLs(call.arguments)
 		if len(urls) == 0 {
-			return callTool(ctx, session, dispatchName, call.arguments, state)
+			output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+			if err != nil {
+				return "", err
+			}
+			return applyStructuredFormat(call.name, output, structured, state), nil
 		}
 		handles := make([]toolProgressHandle, len(urls))
 		actions := make([]map[string]any, len(urls))
@@ -106,7 +111,7 @@ func executeToolWithProgress(
 			handles[i] = emitter.open(id, actions[i])
 			emitter.phase(handles[i], "response.web_search_call.in_progress")
 		}
-		output, err := callTool(ctx, session, dispatchName, call.arguments, state)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
 			status := failureStatusFor(err)
@@ -115,13 +120,18 @@ func executeToolWithProgress(
 			}
 			return "", err
 		}
+		output = applyStructuredFormat(call.name, output, structured, state)
 		for i := range urls {
 			emitter.phase(handles[i], "response.web_search_call.completed")
 			emitter.close(handles[i], actions[i], "completed", "", nil)
 		}
 		return output, nil
 	default:
-		return callTool(ctx, session, dispatchName, call.arguments, state)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+		if err != nil {
+			return "", err
+		}
+		return applyStructuredFormat(call.name, output, structured, state), nil
 	}
 }
 
@@ -191,7 +201,6 @@ func resolveStreamingRouterToolCall(
 	call toolCall,
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
-	_ *citations.State,
 	toolCalls *toolCallLog,
 	executor func(ctx context.Context, call toolCall) (string, error),
 	tracePhase, traceID string,

@@ -257,7 +257,8 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, state)
+	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments)
+	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
 		name:      call.name,
 		arguments: call.arguments,
@@ -297,7 +298,11 @@ func toolResultErrorMessage(result *mcp.CallToolResult) string {
 	return strings.Join(parts, "\n")
 }
 
-func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, state *citations.State) (string, error) {
+// callTool invokes an MCP tool and returns the text output plus any
+// structured content the server returned. The caller is responsible for
+// formatting structured content (e.g. via formatStructuredToolOutput)
+// when citation-aware formatting is needed.
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
 	start := time.Now()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      name,
@@ -305,7 +310,7 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 	})
 	if err != nil {
 		debugLogf("toolruntime:mcp.error tool=%s elapsed=%s args=%s err=%v", name, time.Since(start), debugPreview(arguments, 400), err)
-		return "", err
+		return "", nil, err
 	}
 	if result.IsError {
 		message := toolResultErrorMessage(result)
@@ -313,7 +318,7 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 		if message == "" {
 			message = "tool call failed"
 		}
-		return "", errors.New(message)
+		return "", nil, errors.New(message)
 	}
 	if debugEnabled {
 		hasStructured := result.StructuredContent != nil
@@ -327,12 +332,9 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
 	}
 	if result.StructuredContent != nil {
-		if formatted := formatStructuredToolOutput(name, result.StructuredContent, state); formatted != "" {
-			return formatted, nil
-		}
-		body, err := json.Marshal(result.StructuredContent)
-		if err == nil {
-			return string(body), nil
+		body, marshalErr := json.Marshal(result.StructuredContent)
+		if marshalErr == nil {
+			return string(body), result.StructuredContent, nil
 		}
 	}
 	var parts []string
@@ -341,7 +343,19 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 			parts = append(parts, textContent.Text)
 		}
 	}
-	return strings.Join(parts, "\n"), nil
+	return strings.Join(parts, "\n"), nil, nil
+}
+
+// applyStructuredFormat tries to format structured tool output with
+// citation-aware formatting. Returns the original text unchanged when
+// there is no structured content or the tool is not a router tool.
+func applyStructuredFormat(name, text string, structured any, state *citations.State) string {
+	if structured != nil {
+		if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
+			return formatted
+		}
+	}
+	return text
 }
 
 func formatStructuredToolOutput(name string, raw any, state *citations.State) string {

@@ -785,7 +785,7 @@ func runChatStreaming(
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
-				ctx, call, searchOpts, toolSchemas, streamer.citations, streamer.toolCalls,
+				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
 				func(ctx context.Context, call toolCall) (string, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
