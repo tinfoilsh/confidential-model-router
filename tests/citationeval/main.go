@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -21,13 +20,15 @@ import (
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
+	tinfoil "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
 var (
-	baseURL    = flag.String("base-url", "https://gpt-oss-120b-0.inf9.tinfoil.sh/v1", "enclave base URL (raw vLLM endpoint)")
-	modelName  = flag.String("model", "gpt-oss-120b", "model identifier")
-	numQueries = flag.Int("queries", 0, "number of eval queries to run (0 = all)")
-	rawOutput  = flag.Bool("raw", false, "print full raw response JSON")
+	enclaveHost = flag.String("enclave", "gpt-oss-120b-0.inf9.tinfoil.sh", "enclave hostname")
+	repoName    = flag.String("repo", "tinfoilsh/confidential-gpt-oss-120b", "GitHub repo for attestation")
+	modelName   = flag.String("model", "gpt-oss-120b", "model identifier")
+	numQueries  = flag.Int("queries", 0, "number of eval queries to run (0 = all)")
+	rawOutput   = flag.Bool("raw", false, "print full raw response JSON")
 )
 
 // searchResult is a single result from a search tool call.
@@ -250,10 +251,25 @@ func main() {
 
 	apiKey := mustEnv("TINFOIL_API_KEY")
 
-	httpClient := &http.Client{Timeout: 5 * time.Minute}
+	fmt.Printf("Citation Eval Tool\n")
+	fmt.Printf("==================\n")
+	fmt.Printf("Enclave:    %s\n", *enclaveHost)
+	fmt.Printf("Repo:       %s\n", *repoName)
+	fmt.Printf("Model:      %s\n", *modelName)
+
+	fmt.Printf("\nVerifying enclave attestation... ")
+	sc := tinfoil.NewSecureClient(*enclaveHost, *repoName)
+	httpClient, err := sc.HTTPClient()
+	if err != nil {
+		log.Fatalf("attestation failed: %v", err)
+	}
+	httpClient.Timeout = 5 * time.Minute
+	fmt.Printf("OK\n")
+
+	baseURL := "https://" + *enclaveHost + "/v1"
 	client := openai.NewClient(
 		option.WithAPIKey(apiKey),
-		option.WithBaseURL(*baseURL),
+		option.WithBaseURL(baseURL),
 		option.WithHTTPClient(httpClient),
 	)
 
@@ -263,9 +279,6 @@ func main() {
 	}
 
 	totalReqs := len(resultFormats) * len(promptModes) * len(active)
-	fmt.Printf("Citation Eval Tool\n")
-	fmt.Printf("==================\n")
-	fmt.Printf("Endpoint:   %s\n", *baseURL)
 	fmt.Printf("Model:      %s\n", *modelName)
 	fmt.Printf("Scenarios:  %d\n", len(active))
 	fmt.Printf("Formats:    %d (%s)\n", len(resultFormats), formatNames())
