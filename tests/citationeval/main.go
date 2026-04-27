@@ -1,4 +1,8 @@
 // Verify what citation format gpt-oss produces under different prompting strategies.
+//
+// We construct prefilled conversations: user question → assistant tool_call → tool result with
+// fake search snippets → then let the model generate the final response. This hits
+// the raw vLLM endpoint directly and shows how the model cites sources natively.
 
 package main
 
@@ -16,21 +20,72 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 var (
-	baseURL    = flag.String("base-url", "http://localhost:8089/v1", "router base URL")
+	baseURL    = flag.String("base-url", "https://gpt-oss-120b-0.inf9.tinfoil.sh/v1", "enclave base URL (raw vLLM endpoint)")
 	modelName  = flag.String("model", "gpt-oss-120b", "model identifier")
-	numQueries = flag.Int("queries", 4, "number of eval queries to run (max 4)")
+	numQueries = flag.Int("queries", 0, "number of eval queries to run (0 = all)")
 	rawOutput  = flag.Bool("raw", false, "print full raw response JSON")
 )
 
-// Queries designed to trigger web search and citations.
-var evalQueries = []string{
-	"What are the latest headlines today?",
-	"Who won the most recent NBA game?",
-	"What is the current price of Bitcoin?",
-	"Summarize the top 3 results for 'climate change 2026'",
+// scenario is a user query paired with fake search results the model should cite.
+type scenario struct {
+	Query       string
+	SearchQuery string // what the "tool" searched for
+	Results     string // fake tool output with URLs and snippets
+}
+
+var scenarios = []scenario{
+	{
+		Query:       "What are the latest headlines today?",
+		SearchQuery: "latest headlines today",
+		Results: `[1] "Global Climate Summit Reaches Historic Agreement" - https://www.reuters.com/world/climate-summit-agreement-2026
+World leaders at the 2026 Global Climate Summit in Berlin reached a historic agreement to cut emissions by 50% by 2035, with binding commitments from all major economies.
+
+[2] "Tech Giants Report Record Q1 Earnings" - https://www.bloomberg.com/news/tech-q1-earnings-2026
+Major technology companies including Apple, Microsoft, and Alphabet reported better-than-expected first quarter results, driven by AI infrastructure spending.
+
+[3] "NBA Playoffs: Celtics Advance to Conference Finals" - https://www.espn.com/nba/story/celtics-advance-2026
+The Boston Celtics defeated the Philadelphia 76ers 112-98 in Game 6 to advance to the Eastern Conference Finals.`,
+	},
+	{
+		Query:       "Who won the most recent NBA game?",
+		SearchQuery: "most recent NBA game results",
+		Results: `[1] "Celtics 112, 76ers 98 - Game 6 Recap" - https://www.espn.com/nba/recap/_/gameId/401656789
+Jayson Tatum scored 34 points and grabbed 11 rebounds as the Boston Celtics eliminated the Philadelphia 76ers with a 112-98 victory in Game 6 of their Eastern Conference semifinal series.
+
+[2] "NBA Playoffs Bracket 2026" - https://www.nba.com/playoffs/2026/bracket
+Full playoff bracket and results. Eastern Conference: Celtics vs 76ers (Celtics win 4-2). Western Conference: Thunder vs Nuggets (series tied 3-3).
+
+[3] "Thunder-Nuggets Game 6 Preview" - https://www.espn.com/nba/preview/_/gameId/401656790
+The Oklahoma City Thunder host the Denver Nuggets in a decisive Game 6, with the winner advancing to the Western Conference Finals.`,
+	},
+	{
+		Query:       "What is the current price of Bitcoin?",
+		SearchQuery: "current bitcoin price",
+		Results: `[1] "Bitcoin Price Today" - https://www.coindesk.com/price/bitcoin
+Bitcoin (BTC) is currently trading at $94,521.30, up 2.3% in the last 24 hours. Market cap: $1.87 trillion. 24h volume: $28.4 billion.
+
+[2] "Bitcoin Surges Past $94K on ETF Inflows" - https://www.coindesk.com/markets/bitcoin-etf-inflows-2026
+Bitcoin climbed above $94,000 on Monday as spot Bitcoin ETFs recorded $1.2 billion in net inflows last week, the highest weekly total since January.
+
+[3] "Crypto Market Overview" - https://www.coingecko.com/en/coins/bitcoin
+Bitcoin price: $94,521.30 USD. 24h change: +2.3%. 7d change: +8.1%. All-time high: $109,114 (Jan 2025).`,
+	},
+	{
+		Query:       "Summarize the top 3 results for 'climate change 2026'",
+		SearchQuery: "climate change 2026",
+		Results: `[1] "2026 Global Climate Report: Temperatures Hit New Record" - https://www.nature.com/articles/climate-report-2026
+The World Meteorological Organization confirmed that 2025 was the hottest year on record, with global mean temperature 1.55°C above pre-industrial levels. The report warns that without immediate action, 2°C will be breached by 2040.
+
+[2] "Climate Change 2026: Policy Progress and Gaps" - https://www.unep.org/resources/climate-change-2026-policy
+A comprehensive UN Environment Programme report finds that current national pledges would reduce emissions by only 15% by 2030, far short of the 43% needed. However, renewable energy deployment accelerated by 35% in 2025.
+
+[3] "How Climate Change Is Reshaping Agriculture in 2026" - https://www.bbc.com/news/science-environment-climate-agriculture-2026
+Extreme weather events in 2025 caused $180 billion in agricultural losses worldwide. Farmers in Southeast Asia and sub-Saharan Africa were disproportionately affected, with crop yields falling 20-30% in some regions.`,
+	},
 }
 
 // promptMode defines a system prompt strategy to test.
@@ -97,7 +152,7 @@ type cell struct {
 func main() {
 	flag.Parse()
 
-	apiKey := mustEnv("OPENAI_API_KEY")
+	apiKey := mustEnv("TINFOIL_API_KEY")
 
 	httpClient := &http.Client{Timeout: 5 * time.Minute}
 	client := openai.NewClient(
@@ -106,28 +161,29 @@ func main() {
 		option.WithHTTPClient(httpClient),
 	)
 
-	queries := evalQueries
-	if *numQueries < len(queries) {
-		queries = queries[:*numQueries]
+	active := scenarios
+	if *numQueries > 0 && *numQueries < len(active) {
+		active = active[:*numQueries]
 	}
 
 	fmt.Printf("Citation Eval Tool\n")
 	fmt.Printf("==================\n")
-	fmt.Printf("Endpoint: %s\n", *baseURL)
-	fmt.Printf("Model:    %s\n", *modelName)
-	fmt.Printf("Queries:  %d\n", len(queries))
-	fmt.Printf("Prompts:  %d\n\n", len(promptModes))
+	fmt.Printf("Endpoint:   %s\n", *baseURL)
+	fmt.Printf("Model:      %s\n", *modelName)
+	fmt.Printf("Scenarios:  %d\n", len(active))
+	fmt.Printf("Prompts:    %d\n", len(promptModes))
+	fmt.Printf("Total reqs: %d\n\n", len(active)*len(promptModes))
 
 	var cells []cell
 
 	for _, mode := range promptModes {
-		for _, query := range queries {
-			fmt.Printf("─── prompt=%s | query=%q ───\n", mode.Name, truncate(query, 50))
+		for _, sc := range active {
+			fmt.Printf("─── prompt=%s | query=%q ───\n", mode.Name, truncate(sc.Query, 50))
 
-			content, rawJSON, err := runQuery(context.Background(), client, mode.System, query)
+			content, rawJSON, err := runQuery(context.Background(), client, mode.System, sc)
 			c := cell{
 				Prompt:  mode.Name,
-				Query:   query,
+				Query:   sc.Query,
 				Content: content,
 				RawJSON: rawJSON,
 				Err:     err,
@@ -172,12 +228,12 @@ func main() {
 	// Header row.
 	fmt.Printf("%-30s", "Pattern")
 	for _, mode := range promptModes {
-		fmt.Printf(" | %10s", mode.Name)
+		fmt.Printf(" | %13s", mode.Name)
 	}
 	fmt.Println()
 	fmt.Printf("%s", strings.Repeat("-", 30))
 	for range promptModes {
-		fmt.Printf("-|-%s", strings.Repeat("-", 10))
+		fmt.Printf("-|-%s", strings.Repeat("-", 13))
 	}
 	fmt.Println()
 
@@ -191,7 +247,7 @@ func main() {
 					total += c.Counts[j]
 				}
 			}
-			fmt.Printf(" | %10d", total)
+			fmt.Printf(" | %13d", total)
 		}
 		fmt.Println()
 	}
@@ -223,22 +279,68 @@ func main() {
 	}
 }
 
-func runQuery(ctx context.Context, client openai.Client, systemPrompt, query string) (content string, rawJSON string, err error) {
+// runQuery builds a prefilled conversation (user → assistant tool_call → tool result)
+// and sends it to the model so it generates the final answer with citations.
+func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc scenario) (content string, rawJSON string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 
+	const toolCallID = "call_eval_001"
+
 	var messages []openai.ChatCompletionMessageParamUnion
+
+	// Optional system prompt.
 	if systemPrompt != "" {
 		messages = append(messages, openai.SystemMessage(systemPrompt))
 	}
-	messages = append(messages, openai.UserMessage(query))
+
+	// User asks a question.
+	messages = append(messages, openai.UserMessage(sc.Query))
+
+	// Assistant decided to call the search tool.
+	messages = append(messages, openai.ChatCompletionMessageParamUnion{
+		OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+			ToolCalls: []openai.ChatCompletionMessageToolCallUnionParam{
+				{
+					OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+						ID: toolCallID,
+						Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+							Name:      "search",
+							Arguments: fmt.Sprintf(`{"query":"%s"}`, sc.SearchQuery),
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// Tool returns search results.
+	messages = append(messages, openai.ToolMessage(sc.Results, toolCallID))
+
+	// Declare the search tool so the chat template handles the history correctly.
+	searchTool := openai.ChatCompletionToolUnionParam{
+		OfFunction: &openai.ChatCompletionFunctionToolParam{
+			Function: shared.FunctionDefinitionParam{
+				Name:        "search",
+				Description: openai.String("Search the web for information."),
+				Parameters: shared.FunctionParameters{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "The search query.",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+	}
 
 	params := openai.ChatCompletionNewParams{
 		Model:    openai.ChatModel(*modelName),
 		Messages: messages,
-		WebSearchOptions: openai.ChatCompletionNewParamsWebSearchOptions{
-			SearchContextSize: "medium",
-		},
+		Tools:    []openai.ChatCompletionToolUnionParam{searchTool},
 	}
 
 	completion, err := client.Chat.Completions.New(ctx, params)
