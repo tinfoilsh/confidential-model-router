@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -213,51 +212,93 @@ var promptModes = []promptMode{
 			"keep query parameters verbatim, and do not append punctuation, whitespace, zero-width characters, or any other character after the URL before the closing parenthesis. " +
 			"Never invent URLs, never paraphrase URLs, and never wrap the link in any other brackets, braces, or quotation marks.",
 	},
+	{
+		Name: "cite-harmony",
+		System: "Each search result is numbered with a cursor like [1], [2], etc. and its content is split into lines. " +
+			"When you cite a source, use the Harmony citation format: 【cursor†Lstart-Lend】 where cursor is the result number and Lstart-Lend is the line range. " +
+			"For example, 【3†L5-L8】 cites lines 5 through 8 of result 3. For a single line, use 【2†L4】. " +
+			"Reference 1-2 sources per claim. Never invent citations.",
+	},
 }
 
-// Citation pattern definitions.
-type patternDef struct {
-	Name    string
-	Re      *regexp.Regexp
-	Exclude *regexp.Regexp // if set, subtract matches that also match this pattern
+// ── Outcome classification ──
+
+// outcome is the classification of a single model response.
+type outcome string
+
+const (
+	outcomeNoResponse  outcome = "no_response"
+	outcomeNoCitations outcome = "no_citations"
+	outcomeHarmony     outcome = "harmony"
+	outcomeMarkdown    outcome = "markdown"
+	outcomeOther       outcome = "other"
+	outcomeError       outcome = "error"
+)
+
+// All possible outcomes in display order.
+var allOutcomes = []outcome{
+	outcomeNoResponse,
+	outcomeNoCitations,
+	outcomeHarmony,
+	outcomeMarkdown,
+	outcomeOther,
+	outcomeError,
 }
 
-// findMatches returns matches for the pattern, excluding any that match Exclude.
-func (p patternDef) findMatches(text string) []string {
-	all := p.Re.FindAllString(text, -1)
-	if p.Exclude == nil {
-		return all
+func outcomeLabel(o outcome) string {
+	switch o {
+	case outcomeNoResponse:
+		return "No response"
+	case outcomeNoCitations:
+		return "No citations"
+	case outcomeHarmony:
+		return "Harmony 【N†LX】"
+	case outcomeMarkdown:
+		return "Markdown [label](url)"
+	case outcomeOther:
+		return "Other"
+	case outcomeError:
+		return "Error"
+	default:
+		return string(o)
 	}
-	filtered := make([]string, 0, len(all))
-	for _, m := range all {
-		if !p.Exclude.MatchString(m) {
-			filtered = append(filtered, m)
-		}
-	}
-	return filtered
 }
 
+// Detection regexes.
 var (
 	harmonyRe  = regexp.MustCompile(`\x{3010}\d+\x{2020}L\d+(-L\d+)?\x{3011}`)
 	markdownRe = regexp.MustCompile(`\[[^\]]+\]\(https?://[^\s)]+\)`)
-	bracketRe  = regexp.MustCompile(`\x{3010}[^\x{3011}]+\x{3011}`)
+	// "Other" patterns: 【url】, 【anything】, bare URLs not inside markdown links
+	otherBracketRe = regexp.MustCompile(`\x{3010}[^\x{3011}]+\x{3011}`)
+	bareURLRe      = regexp.MustCompile(`(?:^|[\s(])https?://[^\s)>\]]+`)
 )
 
-var patterns = []patternDef{
-	{
-		Name: "Harmony 【N†LX】",
-		Re:   harmonyRe,
-	},
-	{
-		Name: "Markdown [label](url)",
-		Re:   markdownRe,
-	},
-	{
-		Name: "Other 【...】",
-		Re:   bracketRe,
-		// Exclude matches that are already counted as Harmony.
-		Exclude: harmonyRe,
-	},
+// classify determines the outcome for a single response.
+func classify(content string, err error) (outcome, string) {
+	if err != nil {
+		return outcomeError, err.Error()
+	}
+	if strings.TrimSpace(content) == "" {
+		return outcomeNoResponse, ""
+	}
+
+	// Check patterns in priority order.
+	if m := harmonyRe.FindString(content); m != "" {
+		return outcomeHarmony, m
+	}
+	if m := markdownRe.FindString(content); m != "" {
+		return outcomeMarkdown, m
+	}
+	// Other bracket citations (【url】, 【title】, etc.)
+	if m := otherBracketRe.FindString(content); m != "" {
+		return outcomeOther, m
+	}
+	// Bare URLs that aren't inside markdown links (rough heuristic)
+	if m := bareURLRe.FindString(content); m != "" {
+		return outcomeOther, strings.TrimSpace(m)
+	}
+
+	return outcomeNoCitations, ""
 }
 
 // cell holds results for one (format, prompt, query) combination.
@@ -268,7 +309,29 @@ type cell struct {
 	Content string
 	RawJSON string
 	Err     error
-	Counts  []int // one per pattern
+	Outcome outcome
+	Example string // first match example for the outcome
+}
+
+// cellJSON is the JSON-serializable version of cell.
+type cellJSON struct {
+	Format  string `json:"format"`
+	Prompt  string `json:"prompt"`
+	Query   string `json:"query"`
+	Content string `json:"content"`
+	RawJSON string `json:"raw_json,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Outcome string `json:"outcome"`
+	Example string `json:"example,omitempty"`
+}
+
+// resultsJSON is the top-level structure for results.json.
+type resultsJSON struct {
+	Enclave  string     `json:"enclave"`
+	Repo     string     `json:"repo"`
+	Model    string     `json:"model"`
+	Date     string     `json:"date"`
+	Results  []cellJSON `json:"results"`
 }
 
 func main() {
@@ -276,27 +339,20 @@ func main() {
 
 	apiKey := mustEnv("TINFOIL_API_KEY")
 
-	// Set up log file in logs/ directory.
-	logDir := filepath.Join(".", "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		log.Fatalf("create logs dir: %v", err)
+	// Set up output directory: logs/<datetime>/
+	runTime := time.Now()
+	runDir := filepath.Join(".", "logs", runTime.Format("2006-01-02T15-04-05"))
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		log.Fatalf("create run dir: %v", err)
 	}
-	logName := fmt.Sprintf("citationeval-%s.md", time.Now().Format("2006-01-02T15-04-05"))
-	logPath := filepath.Join(logDir, logName)
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		log.Fatalf("create log file: %v", err)
-	}
-	defer logFile.Close()
 
-	// Tee all output to both stdout and the markdown log file.
-	w := io.MultiWriter(os.Stdout, logFile)
+	w := os.Stdout
 
 	fmt.Fprintf(w, "# Citation Eval Tool\n\n")
 	fmt.Fprintf(w, "- **Enclave:** %s\n", *enclaveHost)
 	fmt.Fprintf(w, "- **Repo:** %s\n", *repoName)
 	fmt.Fprintf(w, "- **Model:** %s\n", *modelName)
-	fmt.Fprintf(w, "- **Date:** %s\n", time.Now().Format("2006-01-02 15:04:05 MST"))
+	fmt.Fprintf(w, "- **Date:** %s\n", runTime.Format("2006-01-02 15:04:05 MST"))
 
 	fmt.Fprintf(w, "\nVerifying enclave attestation... ")
 	sc := tinfoil.NewSecureClient(*enclaveHost, *repoName)
@@ -340,6 +396,8 @@ func main() {
 
 				toolOutput := rf.Format(sc.Results)
 				content, rawJSON, err := runQuery(context.Background(), client, mode.System, sc, toolOutput)
+				o, example := classify(content, err)
+
 				c := cell{
 					Format:  rf.Name,
 					Prompt:  mode.Name,
@@ -347,7 +405,8 @@ func main() {
 					Content: content,
 					RawJSON: rawJSON,
 					Err:     err,
-					Counts:  make([]int, len(patterns)),
+					Outcome: o,
+					Example: example,
 				}
 
 				if err != nil {
@@ -360,92 +419,114 @@ func main() {
 					fmt.Fprintf(w, "**Raw JSON:**\n```json\n%s\n```\n\n", rawJSON)
 				}
 
-				fmt.Fprintf(w, "**Response:**\n\n> %s\n\n", strings.ReplaceAll(content, "\n", "\n> "))
+				if strings.TrimSpace(content) == "" {
+					fmt.Fprintf(w, "**Response:** _(empty)_\n\n")
+				} else {
+					fmt.Fprintf(w, "**Response:**\n\n> %s\n\n", strings.ReplaceAll(content, "\n", "\n> "))
+				}
 
-				// Scan for citation patterns.
-				fmt.Fprintf(w, "**Patterns found:**\n\n")
-				found := false
-				for j, p := range patterns {
-					matches := p.findMatches(content)
-					c.Counts[j] = len(matches)
-					if len(matches) > 0 {
-						found = true
-						fmt.Fprintf(w, "- `%s` — %d match(es), e.g. `%s`\n", p.Name, len(matches), truncate(matches[0], 80))
-					}
+				fmt.Fprintf(w, "**Outcome:** %s", outcomeLabel(o))
+				if example != "" {
+					fmt.Fprintf(w, " — e.g. `%s`", truncate(example, 80))
 				}
-				if !found {
-					fmt.Fprintf(w, "- _(none)_\n")
-				}
-				fmt.Fprintf(w, "\n")
+				fmt.Fprintf(w, "\n\n")
 
 				cells = append(cells, c)
 			}
 		}
 	}
 
-	// Print aggregate matrix: one table per result format.
-	fmt.Fprintf(w, "## Aggregate Matrix\n\n")
-
-	for _, rf := range resultFormats {
-		fmt.Fprintf(w, "### format=%s\n\n", rf.Name)
-
-		// Header row.
-		fmt.Fprintf(w, "| %-30s", "Pattern")
-		for _, mode := range promptModes {
-			fmt.Fprintf(w, " | %s", mode.Name)
+	// ── Write results.json ──
+	resultsPath := filepath.Join(runDir, "results.json")
+	{
+		rj := resultsJSON{
+			Enclave: *enclaveHost,
+			Repo:    *repoName,
+			Model:   *modelName,
+			Date:    runTime.Format("2006-01-02 15:04:05 MST"),
 		}
-		fmt.Fprintf(w, " |\n")
-		fmt.Fprintf(w, "|%s", strings.Repeat("-", 32))
-		for range promptModes {
-			fmt.Fprintf(w, "|%s", strings.Repeat("-", len("  cite-markdown  ")))
+		for _, c := range cells {
+			cj := cellJSON{
+				Format:  c.Format,
+				Prompt:  c.Prompt,
+				Query:   c.Query,
+				Content: c.Content,
+				Outcome: string(c.Outcome),
+				Example: c.Example,
+			}
+			if *rawOutput {
+				cj.RawJSON = c.RawJSON
+			}
+			if c.Err != nil {
+				cj.Error = c.Err.Error()
+			}
+			rj.Results = append(rj.Results, cj)
 		}
-		fmt.Fprintf(w, "|\n")
+		jsonBytes, _ := json.MarshalIndent(rj, "", "  ")
+		if err := os.WriteFile(resultsPath, jsonBytes, 0o644); err != nil {
+			log.Fatalf("write results.json: %v", err)
+		}
+	}
 
-		// One row per pattern, summing across queries for each prompt mode.
-		for j, p := range patterns {
-			fmt.Fprintf(w, "| %-30s", p.Name)
+	// ── Write agg.md (aggregate matrix) ──
+	aggPath := filepath.Join(runDir, "agg.md")
+	{
+		var agg strings.Builder
+		fmt.Fprintf(&agg, "# Citation Eval — Aggregate Matrix\n\n")
+		fmt.Fprintf(&agg, "- **Enclave:** %s\n", *enclaveHost)
+		fmt.Fprintf(&agg, "- **Model:** %s\n", *modelName)
+		fmt.Fprintf(&agg, "- **Date:** %s\n", runTime.Format("2006-01-02 15:04:05 MST"))
+		fmt.Fprintf(&agg, "- **Scenarios:** %d\n\n", len(active))
+
+		for _, rf := range resultFormats {
+			formatTotal := 0
+			for _, c := range cells {
+				if c.Format == rf.Name {
+					formatTotal++
+				}
+			}
+			fmt.Fprintf(&agg, "## format=%s (%d)\n\n", rf.Name, formatTotal)
+
+			// Header.
+			fmt.Fprintf(&agg, "| Outcome")
 			for _, mode := range promptModes {
-				total := 0
-				for _, c := range cells {
-					if c.Format == rf.Name && c.Prompt == mode.Name {
-						total += c.Counts[j]
-					}
-				}
-				fmt.Fprintf(w, " | %d", total)
+				fmt.Fprintf(&agg, " | %s", mode.Name)
 			}
-			fmt.Fprintf(w, " |\n")
+			fmt.Fprintf(&agg, " |\n")
+
+			// Separator.
+			fmt.Fprintf(&agg, "|---")
+			for range promptModes {
+				fmt.Fprintf(&agg, "|---")
+			}
+			fmt.Fprintf(&agg, "|\n")
+
+			// Rows.
+			for _, o := range allOutcomes {
+				fmt.Fprintf(&agg, "| %s", outcomeLabel(o))
+				for _, mode := range promptModes {
+					count := 0
+					for _, c := range cells {
+						if c.Format == rf.Name && c.Prompt == mode.Name && c.Outcome == o {
+							count++
+						}
+					}
+					fmt.Fprintf(&agg, " | %d", count)
+				}
+				fmt.Fprintf(&agg, " |\n")
+			}
+			fmt.Fprintf(&agg, "\n")
 		}
-		fmt.Fprintf(w, "\n")
+
+		if err := os.WriteFile(aggPath, []byte(agg.String()), 0o644); err != nil {
+			log.Fatalf("write agg.md: %v", err)
+		}
+
+		// Also print the aggregate matrix to stdout.
+		fmt.Fprintf(w, "\n%s", agg.String())
 	}
 
-	// Per-cell detail with first examples.
-	fmt.Fprintf(w, "## Per-Combo Detail\n\n")
-	for _, rf := range resultFormats {
-		for _, mode := range promptModes {
-			fmt.Fprintf(w, "### format=%s prompt=%s\n\n", rf.Name, mode.Name)
-			for _, p := range patterns {
-				total := 0
-				var example string
-				for _, c := range cells {
-					if c.Format != rf.Name || c.Prompt != mode.Name {
-						continue
-					}
-					matches := p.findMatches(c.Content)
-					total += len(matches)
-					if example == "" && len(matches) > 0 {
-						example = matches[0]
-					}
-				}
-				if example == "" {
-					example = "-"
-				}
-				fmt.Fprintf(w, "- `%s` — %d — e.g. `%s`\n", p.Name, total, truncate(example, 60))
-			}
-			fmt.Fprintf(w, "\n")
-		}
-	}
-
-	fmt.Fprintf(w, "---\n\n_Log written to `%s`_\n", logPath)
+	fmt.Fprintf(w, "---\n\nResults saved to `%s`\n", runDir)
 }
 
 // runQuery builds a prefilled conversation (user → assistant tool_call → tool result)
