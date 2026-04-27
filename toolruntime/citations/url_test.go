@@ -1,10 +1,10 @@
-package toolruntime
+package citations
 
 import (
 	"testing"
 )
 
-func TestNormalizeCitationURL(t *testing.T) {
+func TestNormalizeURL(t *testing.T) {
 	cases := []struct {
 		name     string
 		inputs   []string
@@ -97,9 +97,9 @@ func TestNormalizeCitationURL(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, input := range tc.inputs {
-				got := normalizeCitationURL(input)
+				got := NormalizeURL(input)
 				if got != tc.expected {
-					t.Errorf("normalizeCitationURL(%q) = %q, want %q", input, got, tc.expected)
+					t.Errorf("NormalizeURL(%q) = %q, want %q", input, got, tc.expected)
 				}
 			}
 		})
@@ -107,32 +107,32 @@ func TestNormalizeCitationURL(t *testing.T) {
 }
 
 func TestMatchesForToleratesURLDifferences(t *testing.T) {
-	state := &citationState{nextIndex: 1}
-	state.record("https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402", "AP News")
+	state := &State{NextIndex: 1}
+	state.Record("https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402", "AP News")
 
 	text := "Pipeline repairs are complete [Source: AP News](https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402/)."
-	matches := state.matchesFor(text)
+	matches := state.MatchesFor(text)
 
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 annotation, got %d", len(matches))
 	}
-	if matches[0].source.url != "https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402" {
-		t.Errorf("annotation carries normalized url %q instead of the recorded url", matches[0].source.url)
+	if matches[0].Source.URL != "https://apnews.com/article/ukraine-druzhba-pipeline-7dfc9574bf95a69eda13b1440171e402/" {
+		t.Errorf("annotation carries url %q instead of the model's url", matches[0].Source.URL)
 	}
-	if matches[0].source.title != "AP News" {
-		t.Errorf("annotation title = %q, want %q", matches[0].source.title, "AP News")
+	if matches[0].Source.Title != "AP News" {
+		t.Errorf("annotation title = %q, want %q", matches[0].Source.Title, "AP News")
 	}
 }
 
 func TestResolveSourceToleratesURLDifferences(t *testing.T) {
-	state := &citationState{nextIndex: 1}
-	state.record("https://example.com/article", "Example")
+	state := &State{NextIndex: 1}
+	state.Record("https://example.com/article", "Example")
 
-	got, ok := state.resolveSource("https://www.example.com/article/?utm_source=test")
+	got, ok := state.ResolveSource("https://www.example.com/article/?utm_source=test")
 	if !ok {
-		t.Fatal("expected resolveSource to match via normalization")
+		t.Fatal("expected ResolveSource to match via normalization")
 	}
-	if got.url != "https://example.com/article" {
-		t.Errorf("resolveSource returned url %q, want the recorded url", got.url)
+	if got.URL != "https://example.com/article" {
+		t.Errorf("ResolveSource returned url %q, want the recorded url", got.URL)
 	}
 }

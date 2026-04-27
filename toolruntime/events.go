@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // Tinfoil-event marker constants. The router emits opt-in progress
@@ -384,8 +386,8 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 // computes url_citation annotations, and prepends any enabled tinfoil-event
 // marker families. Adding a new marker type is one if-block in the prefix
 // builder; the choice iteration and annotation shift happen exactly once.
-func attachChatOutput(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
-	if body == nil || citations == nil {
+func attachChatOutput(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	if body == nil || state == nil {
 		return
 	}
 	records := toolCalls.list()
@@ -400,11 +402,11 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 			continue
 		}
 		content := stringValue(message["content"])
-		content = citations.resolveHarmonyCitations(content)
-		if normalized := normalizeCitationLinks(content); normalized != content {
+		content = state.ResolveHarmonyCitations(content)
+		if normalized := citations.NormalizeLinks(content); normalized != content {
 			content = normalized
 		}
-		annotations := citations.nestedAnnotationsFor(content)
+		annotations := state.NestedAnnotationsFor(content)
 
 		var prefix string
 		if eventFlags.webSearch {
@@ -413,7 +415,7 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 
 		if prefix != "" {
 			content = prefix + content
-			shiftNestedAnnotationIndices(annotations, utf8.RuneCountInString(prefix))
+			citations.ShiftNestedAnnotationIndices(annotations, utf8.RuneCountInString(prefix))
 		}
 		message["content"] = content
 		if len(annotations) > 0 {
@@ -427,8 +429,8 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 // items for every recorded router-owned call. Adding a new output-item type
 // is one call to its builder; the annotation walk and the prepend happen
 // exactly once.
-func attachResponsesOutput(body map[string]any, citations *citationState, toolCalls *toolCallLog, includeActionSources bool) {
-	if body == nil || citations == nil {
+func attachResponsesOutput(body map[string]any, state *citations.State, toolCalls *toolCallLog, includeActionSources bool) {
+	if body == nil || state == nil {
 		return
 	}
 	outputItems, _ := body["output"].([]any)
@@ -444,12 +446,12 @@ func attachResponsesOutput(body map[string]any, citations *citationState, toolCa
 				continue
 			}
 			text := stringValue(contentMap["text"])
-			text = citations.resolveHarmonyCitations(text)
-			if normalized := normalizeCitationLinks(text); normalized != text {
+			text = state.ResolveHarmonyCitations(text)
+			if normalized := citations.NormalizeLinks(text); normalized != text {
 				contentMap["text"] = normalized
 				text = normalized
 			}
-			annotations := citations.flatAnnotationsFor(text)
+			annotations := state.FlatAnnotationsFor(text)
 			if len(annotations) > 0 {
 				contentMap["annotations"] = annotations
 			}

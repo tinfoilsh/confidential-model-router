@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -182,7 +183,7 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		},
 		header: make(http.Header),
 	}
-	citations := &citationState{}
+	citState := &citations.State{}
 	toolCalls := &toolCallLog{}
 	toolCalls.record(toolCallRecord{
 		name:      "search",
@@ -195,7 +196,7 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		CompletionTokens: 11,
 		TotalTokens:      18,
 	})
-	adapter.attachCitations(response.body, citations, toolCalls, tinfoilEventFlags{})
+	adapter.attachCitations(response.body, citState, toolCalls, tinfoilEventFlags{})
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -228,7 +229,7 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		},
 		header: make(http.Header),
 	}
-	citations := &citationState{}
+	citState := &citations.State{}
 	toolCalls := &toolCallLog{}
 	toolCalls.record(toolCallRecord{
 		name:       "search",
@@ -244,7 +245,7 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		CompletionTokens: 11,
 		TotalTokens:      18,
 	})
-	adapter.attachCitations(response.body, citations, toolCalls, tinfoilEventFlags{})
+	adapter.attachCitations(response.body, citState, toolCalls, tinfoilEventFlags{})
 
 	usage := usageFromRaw(response.body["usage"])
 	if usage == nil {
@@ -336,7 +337,7 @@ func TestPrependChatPromptAddsCurrentDateContext(t *testing.T) {
 }
 
 func TestFormatStructuredToolOutputLabelsSearchResults(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	formatted := formatStructuredToolOutput("search", map[string]any{
 		"results": []any{
 			map[string]any{
@@ -367,13 +368,13 @@ func TestFormatStructuredToolOutputLabelsSearchResults(t *testing.T) {
 	if strings.Contains(formatted, "【") {
 		t.Fatalf("tool output should not include numbered markers, got %q", formatted)
 	}
-	if len(state.sources) != 2 {
-		t.Fatalf("expected 2 recorded sources, got %d", len(state.sources))
+	if len(state.Sources) != 2 {
+		t.Fatalf("expected 2 recorded sources, got %d", len(state.Sources))
 	}
 }
 
 func TestFormatStructuredToolOutputLabelsFetchPages(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	formatted := formatStructuredToolOutput("fetch", map[string]any{
 		"pages": []any{
 			map[string]any{
@@ -391,8 +392,8 @@ func TestFormatStructuredToolOutputLabelsFetchPages(t *testing.T) {
 	if strings.Contains(formatted, "【") {
 		t.Fatalf("tool output should not include numbered markers, got %q", formatted)
 	}
-	if len(state.sources) != 1 {
-		t.Fatalf("expected 1 recorded source, got %d", len(state.sources))
+	if len(state.Sources) != 1 {
+		t.Fatalf("expected 1 recorded source, got %d", len(state.Sources))
 	}
 }
 

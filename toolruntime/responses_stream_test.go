@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // newTestResponsesStreamer builds a responsesStreamer backed by an
@@ -25,13 +27,13 @@ func newTestResponsesStreamer(t *testing.T) (*responsesStreamer, *httptest.Respo
 			w:                     rec,
 			flusher:               rec,
 			usageMetricsRequested: true,
-			citations:             &citationState{nextIndex: 1},
+			citations:             &citations.State{NextIndex: 1},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 			model:                 "gpt-oss-120b",
 			headersWritten:        true,
 		},
-		emitters:              map[itemContentKey]*citationEmitter{},
+		emitters:              map[itemContentKey]*citations.Emitter{},
 		functionCallArguments: map[int]*strings.Builder{},
 		responseID:            "resp_test",
 		createdAt:             1700000000,
@@ -127,8 +129,8 @@ func TestResponsesStreamerFinalizeEmitsCompletedEvent(t *testing.T) {
 
 func TestResponsesStreamerAnnotationsResolveInline(t *testing.T) {
 	streamer, rec := newTestResponsesStreamer(t)
-	streamer.citations.sources = []citationSource{
-		{index: 1, url: "https://example.com/a", title: "A"},
+	streamer.citations.Sources = []citations.Source{
+		{Index: 1, URL: "https://example.com/a", Title: "A"},
 	}
 	streamer.outputIndexMap[0] = 0
 
@@ -253,8 +255,8 @@ func TestResponsesStreamerForwardsClientOwnedFunctionCall(t *testing.T) {
 // stream see.
 func TestResponsesStreamerFinalizeAttachesAnnotationsToCompletedOutput(t *testing.T) {
 	streamer, rec := newTestResponsesStreamer(t)
-	streamer.citations.sources = []citationSource{
-		{index: 1, url: "https://example.com/a", title: "A"},
+	streamer.citations.Sources = []citations.Source{
+		{Index: 1, URL: "https://example.com/a", Title: "A"},
 	}
 	// Simulate an item captured at output_item.done carrying a fullwidth
 	// bracketed citation link that the live emitter would have normalized
@@ -436,9 +438,9 @@ func TestResponsesStreamerClientOwnedFunctionCallReassemblesArguments(t *testing
 // (item_id, content_index) pair, not reset per batch.
 func TestResponsesStreamerAnnotationIndexMonotonic(t *testing.T) {
 	streamer, rec := newTestResponsesStreamer(t)
-	streamer.citations.sources = []citationSource{
-		{index: 1, url: "https://example.com/a", title: "A"},
-		{index: 2, url: "https://example.com/b", title: "B"},
+	streamer.citations.Sources = []citations.Source{
+		{Index: 1, URL: "https://example.com/a", Title: "A"},
+		{Index: 2, URL: "https://example.com/b", Title: "B"},
 	}
 	streamer.outputIndexMap[0] = 0
 
@@ -602,13 +604,13 @@ func TestResponsesStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 		streamBase: streamBase{
 			w:              w,
 			flusher:        w,
-			citations:      &citationState{nextIndex: 1},
+			citations:      &citations.State{NextIndex: 1},
 			toolCalls:      &toolCallLog{},
 			usageTotals:    &usageAccumulator{},
 			model:          "gpt-oss-120b",
 			headersWritten: true,
 		},
-		emitters:              map[itemContentKey]*citationEmitter{},
+		emitters:              map[itemContentKey]*citations.Emitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		outputIndexMap:        map[int]int{},

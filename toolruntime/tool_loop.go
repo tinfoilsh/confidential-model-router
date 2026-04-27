@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 const maxToolIterations = 10
@@ -83,7 +84,7 @@ type toolLoopAdapter interface {
 
 	// attachCitations resolves inline markdown links and surfaces
 	// router-owned tool progress in the surface-specific shape.
-	attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
+	attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
@@ -126,7 +127,7 @@ func runToolLoop(
 ) (*upstreamJSONResponse, error) {
 	reqBody := adapter.buildInitialRequest()
 	usageTotals := usageAccumulator{}
-	citations := citationState{nextIndex: 1, harmony: harmony}
+	citeState := citations.State{NextIndex: 1, Harmony: harmony}
 	toolCalls := toolCallLog{}
 	opts := adapter.options()
 	toolSchemas := adapter.schemas()
@@ -162,7 +163,7 @@ func runToolLoop(
 			}
 			dl.WriteFinish("stop (no router tool calls)")
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
+			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -170,7 +171,7 @@ func runToolLoop(
 		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
-			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, &toolCalls, adapter.tracePhase(i), adapter.traceID())
+			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citeState, &toolCalls, adapter.tracePhase(i), adapter.traceID())
 			dl.WriteToolExec(call.name, call.arguments, output, time.Since(tstart), "")
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
@@ -187,7 +188,7 @@ func runToolLoop(
 			}
 			adapter.stripRouterToolCallsFromResponse(response)
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
+			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -207,7 +208,7 @@ func runToolLoop(
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
-	adapter.attachCitations(finalResponse.body, &citations, &toolCalls, eventFlags)
+	adapter.attachCitations(finalResponse.body, &citeState, &toolCalls, eventFlags)
 	return finalResponse, nil
 }
 
@@ -230,7 +231,7 @@ func executeRouterToolCall(
 	call toolCall,
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
-	citations *citationState,
+	state *citations.State,
 	toolCalls *toolCallLog,
 	tracePhase, traceID string,
 ) string {
@@ -253,7 +254,7 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, citations)
+	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, state)
 	record := toolCallRecord{
 		name:      call.name,
 		arguments: call.arguments,
@@ -265,8 +266,8 @@ func executeRouterToolCall(
 		output = humanizeToolArgError(call.name, err, call.arguments)
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
-		record.resultURLs = extractToolOutputURLs(output)
-		record.resultSources = extractToolOutputSources(output)
+		record.resultURLs = citations.ExtractToolOutputURLs(output)
+		record.resultSources = toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
@@ -327,8 +328,8 @@ func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *toke
 	}
 }
 
-func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
-	attachChatOutput(body, citations, toolCalls, eventFlags)
+func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	attachChatOutput(body, state, toolCalls, eventFlags)
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
@@ -501,8 +502,8 @@ func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage 
 	}
 }
 
-func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, _ tinfoilEventFlags) {
-	attachResponsesOutput(body, citations, toolCalls, a.opts.includeActionSources)
+func (a *responsesLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, _ tinfoilEventFlags) {
+	attachResponsesOutput(body, state, toolCalls, a.opts.includeActionSources)
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {

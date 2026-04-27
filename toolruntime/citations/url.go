@@ -1,4 +1,4 @@
-package toolruntime
+package citations
 
 import (
 	"net/url"
@@ -26,7 +26,7 @@ var citationTrackingParams = map[string]struct{}{
 	"ref_src":      {},
 }
 
-// normalizeCitationURL reduces a URL to a canonical form used as the
+// NormalizeURL reduces a URL to a canonical form used as the
 // citation-match key. The returned string identifies the same resource
 // across the cosmetic differences that real-world search output and
 // model-emitted markdown disagree on: trailing slashes, `www.` host
@@ -42,7 +42,7 @@ var citationTrackingParams = map[string]struct{}{
 // Inputs that do not parse as URLs are returned unchanged so the lookup
 // falls back to exact-string equality for those pathological cases
 // instead of silently collapsing distinct strings.
-func normalizeCitationURL(raw string) string {
+func NormalizeURL(raw string) string {
 	raw = stripInvisibleRunes(raw)
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

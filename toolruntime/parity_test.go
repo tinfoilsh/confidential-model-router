@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // TestChatAndResponsesParityOnSameToolCalls pins that a canonical set of
@@ -20,9 +22,9 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 
 	const assistantText = "The sky is blue [Example](https://example.com/article)."
 
-	buildState := func() (*citationState, *toolCallLog) {
-		c := &citationState{nextIndex: 1}
-		c.record("https://example.com/article", "Example")
+	buildState := func() (*citations.State, *toolCallLog) {
+		c := &citations.State{NextIndex: 1}
+		c.Record("https://example.com/article", "Example")
 		tc := &toolCallLog{}
 		tc.record(toolCallRecord{
 			name:      "search",
