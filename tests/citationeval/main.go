@@ -567,6 +567,13 @@ func runQuery(ctx context.Context, client openai.Client, systemPrompt string, sc
 	// Tool returns search results.
 	messages = append(messages, openai.ToolMessage(toolOutput, toolCallID))
 
+	// Nudge the model to answer using the results rather than calling tools again.
+	// Without this, some prompt modes cause the model to emit another tool call
+	// because the chat template still "knows" about tools from the history.
+	messages = append(messages, openai.SystemMessage(
+		"Answer the user's question using the search results above. Do not call any more tools.",
+	))
+
 	// Don't include the tools array — we want the model to generate text,
 	// not call tools again. The tool_call/tool messages in the history are
 	// still there for context. (debug.go test 5 confirmed this works.)
