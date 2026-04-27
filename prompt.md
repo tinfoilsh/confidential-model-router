@@ -12,7 +12,7 @@ Source: `buildContextMessage()` in `prompt.go:259`
 
 ---
 
-## 2. Router prompt system message (prepended second)
+## 2. How to use tools system message (prepended second)
 
 > You may use the router_search and router_fetch tools when current web information would improve the answer. Use router_search first to discover sources, then router_fetch specific URLs only when you need deeper detail.
 
@@ -38,6 +38,6 @@ Source: `routedToolDescription()` in `prompt.go:185`
 
 ## 4. Forced-final system message (appended at end of messages, only when max iterations hit)
 
-> You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best possible answer using only the information already gathered.
+> You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer to the user.
 
 Source: `finalAnswerInstructionText` in `prompt.go:16`
