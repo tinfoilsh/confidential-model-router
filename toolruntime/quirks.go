@@ -1,5 +1,4 @@
 // Package-private router-side defenses against known upstream bugs in the
-// Package-private router-side defenses against known upstream bugs in the
 // tool-calling streaming decoders of specific models and inference stacks.
 // Repairs are isolated in this file so the whole set can be removed once
 // upstream fixes (vLLM Enforcer, Kimi chat templates, Gemma URL wrapping)
