@@ -1,4 +1,4 @@
-// Verify that gpt-oss outputs Harmony prompts by default
+// Verify what citation format gpt-oss produces under different prompting strategies.
 
 package main
 
@@ -21,7 +21,7 @@ import (
 var (
 	baseURL    = flag.String("base-url", "http://localhost:8089/v1", "router base URL")
 	modelName  = flag.String("model", "gpt-oss-120b", "model identifier")
-	numQueries = flag.Int("queries", 5, "number of eval queries to run")
+	numQueries = flag.Int("queries", 4, "number of eval queries to run (max 4)")
 	rawOutput  = flag.Bool("raw", false, "print full raw response JSON")
 )
 
@@ -30,15 +30,43 @@ var evalQueries = []string{
 	"What are the latest headlines today?",
 	"Who won the most recent NBA game?",
 	"What is the current price of Bitcoin?",
-	"What happened at the OpenAI dev day?",
 	"Summarize the top 3 results for 'climate change 2026'",
+}
+
+// promptMode defines a system prompt strategy to test.
+type promptMode struct {
+	Name   string
+	System string // empty means no system message
+}
+
+var promptModes = []promptMode{
+	{
+		Name:   "none",
+		System: "",
+	},
+	{
+		Name: "cite",
+		System: "When responding, cite your sources inline. Reference 1-2 sources per claim. " +
+			"Copy URLs character-for-character from the tool output. " +
+			"Never invent or paraphrase URLs.",
+	},
+	{
+		Name: "cite-markdown",
+		System: "Attach sources by embedding a clickable markdown link to the original URL directly after the sentence it supports. " +
+			"Format every citation exactly like this example, copying the punctuation characters verbatim: " +
+			"The sky is blue [Example page](https://example.com/article). " +
+			"The opening bracket is ASCII 0x5B, the closing bracket is ASCII 0x5D, and the URL is wrapped in ASCII parentheses 0x28 and 0x29. " +
+			"Reference 1-2 sources per claim; do not reference every source on every sentence. " +
+			"Copy the URL character-for-character from the tool output: preserve or omit a trailing slash exactly as the tool emitted it, " +
+			"keep query parameters verbatim, and do not append punctuation, whitespace, zero-width characters, or any other character after the URL before the closing parenthesis. " +
+			"Never invent URLs, never paraphrase URLs, and never wrap the link in any other brackets, braces, or quotation marks.",
+	},
 }
 
 // Citation pattern definitions.
 type patternDef struct {
-	Name    string
-	Re      *regexp.Regexp
-	Example string
+	Name string
+	Re   *regexp.Regexp
 }
 
 var patterns = []patternDef{
@@ -56,10 +84,14 @@ var patterns = []patternDef{
 	},
 }
 
-// patternResult tracks matches for a single pattern across all queries.
-type patternResult struct {
-	Count   int
-	Example string
+// cell holds results for one (prompt, query) combination.
+type cell struct {
+	Prompt  string
+	Query   string
+	Content string
+	RawJSON string
+	Err     error
+	Counts  []int // one per pattern
 }
 
 func main() {
@@ -79,74 +111,131 @@ func main() {
 		queries = queries[:*numQueries]
 	}
 
-	// Aggregate results across all queries.
-	aggregate := make([]patternResult, len(patterns))
-
 	fmt.Printf("Citation Eval Tool\n")
 	fmt.Printf("==================\n")
 	fmt.Printf("Endpoint: %s\n", *baseURL)
 	fmt.Printf("Model:    %s\n", *modelName)
-	fmt.Printf("Queries:  %d\n\n", len(queries))
+	fmt.Printf("Queries:  %d\n", len(queries))
+	fmt.Printf("Prompts:  %d\n\n", len(promptModes))
 
-	for i, query := range queries {
-		fmt.Printf("─── Query %d/%d ───\n", i+1, len(queries))
-		fmt.Printf("Q: %s\n\n", query)
+	var cells []cell
 
-		content, rawJSON, err := runQuery(context.Background(), client, query)
-		if err != nil {
-			fmt.Printf("ERROR: %v\n\n", err)
-			continue
-		}
+	for _, mode := range promptModes {
+		for _, query := range queries {
+			fmt.Printf("─── prompt=%s | query=%q ───\n", mode.Name, truncate(query, 50))
 
-		if *rawOutput {
-			fmt.Printf("Raw JSON:\n%s\n\n", rawJSON)
-		}
+			content, rawJSON, err := runQuery(context.Background(), client, mode.System, query)
+			c := cell{
+				Prompt:  mode.Name,
+				Query:   query,
+				Content: content,
+				RawJSON: rawJSON,
+				Err:     err,
+				Counts:  make([]int, len(patterns)),
+			}
 
-		fmt.Printf("Response:\n%s\n\n", content)
+			if err != nil {
+				fmt.Printf("ERROR: %v\n\n", err)
+				cells = append(cells, c)
+				continue
+			}
 
-		// Scan for citation patterns.
-		fmt.Printf("Patterns found:\n")
-		found := false
-		for j, p := range patterns {
-			matches := p.Re.FindAllString(content, -1)
-			if len(matches) > 0 {
-				found = true
-				fmt.Printf("  %-30s  %d match(es)  e.g. %s\n", p.Name, len(matches), truncate(matches[0], 80))
-				aggregate[j].Count += len(matches)
-				if aggregate[j].Example == "" {
-					aggregate[j].Example = matches[0]
+			if *rawOutput {
+				fmt.Printf("Raw JSON:\n%s\n\n", rawJSON)
+			}
+
+			fmt.Printf("Response:\n%s\n\n", content)
+
+			// Scan for citation patterns.
+			fmt.Printf("Patterns found:\n")
+			found := false
+			for j, p := range patterns {
+				matches := p.Re.FindAllString(content, -1)
+				c.Counts[j] = len(matches)
+				if len(matches) > 0 {
+					found = true
+					fmt.Printf("  %-30s  %d match(es)  e.g. %s\n", p.Name, len(matches), truncate(matches[0], 80))
 				}
 			}
+			if !found {
+				fmt.Printf("  (none)\n")
+			}
+			fmt.Println()
+
+			cells = append(cells, c)
 		}
-		if !found {
-			fmt.Printf("  (none)\n")
+	}
+
+	// Print aggregate matrix: rows=patterns, columns=prompt modes.
+	fmt.Printf("═══ Aggregate Matrix ═══\n\n")
+
+	// Header row.
+	fmt.Printf("%-30s", "Pattern")
+	for _, mode := range promptModes {
+		fmt.Printf(" | %10s", mode.Name)
+	}
+	fmt.Println()
+	fmt.Printf("%s", strings.Repeat("-", 30))
+	for range promptModes {
+		fmt.Printf("-|-%s", strings.Repeat("-", 10))
+	}
+	fmt.Println()
+
+	// One row per pattern, summing counts across queries for each prompt mode.
+	for j, p := range patterns {
+		fmt.Printf("%-30s", p.Name)
+		for _, mode := range promptModes {
+			total := 0
+			for _, c := range cells {
+				if c.Prompt == mode.Name {
+					total += c.Counts[j]
+				}
+			}
+			fmt.Printf(" | %10d", total)
 		}
 		fmt.Println()
 	}
-
-	// Print aggregate summary table.
-	fmt.Printf("═══ Aggregate Summary ═══\n\n")
-	fmt.Printf("%-30s | %5s | %s\n", "Pattern", "Count", "Example")
-	fmt.Printf("%s-|-%s-|-%s\n", strings.Repeat("-", 30), strings.Repeat("-", 5), strings.Repeat("-", 40))
-	for j, p := range patterns {
-		example := aggregate[j].Example
-		if example == "" {
-			example = "-"
-		}
-		fmt.Printf("%-30s | %5d | %s\n", p.Name, aggregate[j].Count, truncate(example, 60))
-	}
 	fmt.Println()
+
+	// Per-prompt breakdown with first examples.
+	fmt.Printf("═══ Per-Prompt Detail ═══\n\n")
+	for _, mode := range promptModes {
+		fmt.Printf("── %s ──\n", mode.Name)
+		for _, p := range patterns {
+			total := 0
+			var example string
+			for _, c := range cells {
+				if c.Prompt != mode.Name {
+					continue
+				}
+				matches := p.Re.FindAllString(c.Content, -1)
+				total += len(matches)
+				if example == "" && len(matches) > 0 {
+					example = matches[0]
+				}
+			}
+			if example == "" {
+				example = "-"
+			}
+			fmt.Printf("  %-28s  %3d  e.g. %s\n", p.Name, total, truncate(example, 60))
+		}
+		fmt.Println()
+	}
 }
 
-func runQuery(ctx context.Context, client openai.Client, query string) (content string, rawJSON string, err error) {
+func runQuery(ctx context.Context, client openai.Client, systemPrompt, query string) (content string, rawJSON string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 
+	var messages []openai.ChatCompletionMessageParamUnion
+	if systemPrompt != "" {
+		messages = append(messages, openai.SystemMessage(systemPrompt))
+	}
+	messages = append(messages, openai.UserMessage(query))
+
 	params := openai.ChatCompletionNewParams{
-		Model: openai.ChatModel(*modelName),
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.UserMessage(query),
-		},
+		Model:    openai.ChatModel(*modelName),
+		Messages: messages,
 		WebSearchOptions: openai.ChatCompletionNewParamsWebSearchOptions{
 			SearchContextSize: "medium",
 		},
