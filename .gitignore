@@ -9,6 +9,4 @@ ext.yml
 tuf-repo-cdn.sigstore.dev.json
 router
 logs/
-
-
 .DS_Store
