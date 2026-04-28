@@ -243,6 +243,133 @@ func TestEmitter_PreservesTextAcrossMultiplePushes(t *testing.T) {
 	}
 }
 
+func TestEmitter_HarmonyTokenResolvesToMarkdownLink(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	emitter := NewEmitter(state)
+
+	content, annotations := emitter.Push("claim\u30101\u2020L1-L3\u3011 done")
+	final, finalAnn := emitter.Flush()
+	got := content + final
+	want := "claim[Source A](https://example.com/a) done"
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	all := append(annotations, finalAnn...)
+	if len(all) != 1 {
+		t.Fatalf("annotations = %v, want one", all)
+	}
+	if all[0].StartIndex != runeLen("claim[") || all[0].EndIndex != runeLen("claim[Source A") {
+		t.Fatalf("annotation span = (%d,%d)", all[0].StartIndex, all[0].EndIndex)
+	}
+	if all[0].Source.URL != "https://example.com/a" {
+		t.Fatalf("annotation URL = %q", all[0].Source.URL)
+	}
+}
+
+func TestEmitter_HarmonyBareCursorResolves(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	emitter := NewEmitter(state)
+
+	content, annotations := emitter.Push("see\u30101\u3011.")
+	final, finalAnn := emitter.Flush()
+	got := content + final
+	want := "see[Source A](https://example.com/a)."
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	all := append(annotations, finalAnn...)
+	if len(all) != 1 {
+		t.Fatalf("annotations = %v, want one", all)
+	}
+}
+
+func TestEmitter_HarmonyUnresolvedCursorPassesThrough(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	emitter := NewEmitter(state)
+
+	content, annotations := emitter.Push("claim\u301099\u3011 done")
+	final, _ := emitter.Flush()
+	got := content + final
+	want := "claim\u301099\u3011 done"
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	if len(annotations) != 0 {
+		t.Fatalf("expected no annotations, got %v", annotations)
+	}
+}
+
+func TestEmitter_HarmonySplitAcrossChunks(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	emitter := NewEmitter(state)
+
+	chunks := []string{"pre ", "\u3010", "1", "\u2020L1", "-L3", "\u3011", " tail"}
+	var content string
+	var annotations []Annotation
+	for _, chunk := range chunks {
+		c, a := emitter.Push(chunk)
+		content += c
+		annotations = append(annotations, a...)
+	}
+	finalContent, finalAnn := emitter.Flush()
+	content += finalContent
+	annotations = append(annotations, finalAnn...)
+
+	want := "pre [Source A](https://example.com/a) tail"
+	if content != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+	if len(annotations) != 1 {
+		t.Fatalf("annotations = %v, want one", annotations)
+	}
+	if annotations[0].StartIndex != runeLen("pre [") || annotations[0].EndIndex != runeLen("pre [Source A") {
+		t.Fatalf("annotation span = (%d,%d)", annotations[0].StartIndex, annotations[0].EndIndex)
+	}
+}
+
+func TestEmitter_HarmonyMultipleTokens(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	state.Record("https://example.com/b", "Source B")
+	emitter := NewEmitter(state)
+
+	content, annotations := emitter.Push("first\u30101\u3011 second\u30102\u2020L4\u3011.")
+	final, finalAnn := emitter.Flush()
+	got := content + final
+	want := "first[Source A](https://example.com/a) second[Source B](https://example.com/b)."
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	all := append(annotations, finalAnn...)
+	if len(all) != 2 {
+		t.Fatalf("annotations = %v, want two", all)
+	}
+	if all[0].Source.URL != "https://example.com/a" || all[1].Source.URL != "https://example.com/b" {
+		t.Fatalf("annotation URLs = %q, %q", all[0].Source.URL, all[1].Source.URL)
+	}
+}
+
+func TestEmitter_HarmonyDisabledLeavesTokensUntouched(t *testing.T) {
+	state := &State{NextIndex: 1}
+	state.Record("https://example.com/a", "Source A")
+	emitter := NewEmitter(state)
+
+	content, annotations := emitter.Push("claim\u30101\u2020L1\u3011.")
+	final, _ := emitter.Flush()
+	got := content + final
+	want := "claim\u30101\u2020L1\u3011."
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	if len(annotations) != 0 {
+		t.Fatalf("expected no annotations, got %v", annotations)
+	}
+}
+
 func TestFindNextLinkOpen(t *testing.T) {
 	runes := []rune("abc[de\u3010fg")
 	idx, ok := findNextLinkOpen(runes, 0)

@@ -68,7 +68,10 @@ func (e *Emitter) Text() []rune { return e.text }
 // Buffered reports how many runes are still held by the link-completion buffer.
 func (e *Emitter) Buffered() int { return len(e.text) - e.flushedRunes }
 
+// Match links. On LinkOpen, keep adding to buffer until LinkClosed or failure.
 func (e *Emitter) drain(final bool) (string, []Annotation) {
+	e.resolveHarmonyTokens()
+
 	var (
 		contentBuilder strings.Builder
 		annotations    []Annotation
@@ -115,6 +118,21 @@ func (e *Emitter) drain(final bool) (string, []Annotation) {
 	}
 
 	return contentBuilder.String(), annotations
+}
+
+// resolveHarmonyTokens rewrites complete Harmony-format citations (【N†L...】)
+// in the unflushed buffer suffix into ASCII markdown links. The regular
+// link-match path then picks them up and emits annotations.
+func (e *Emitter) resolveHarmonyTokens() {
+	if e.state == nil || !e.state.Harmony || e.flushedRunes >= len(e.text) {
+		return
+	}
+	suffix := string(e.text[e.flushedRunes:])
+	resolved := e.state.ResolveHarmonyCitations(suffix)
+	if resolved == suffix {
+		return
+	}
+	e.text = append(e.text[:e.flushedRunes], []rune(resolved)...)
 }
 
 // findNextLinkOpen returns the index of the next opening bracket that could
