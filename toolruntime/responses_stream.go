@@ -876,7 +876,7 @@ func runResponsesStreaming(
 			w:                     w,
 			flusher:               flusher,
 			usageMetricsRequested: usageMetricsRequested,
-			citations:             &citations.State{NextIndex: 1},
+			citations:             &citations.State{NextIndex: 1, Harmony: isHarmonyModel(modelName)},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 		},
