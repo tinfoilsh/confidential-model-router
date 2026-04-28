@@ -43,7 +43,9 @@ func FormatSearchOutput(raw any, state *State) string {
 		url := strings.TrimSpace(stringValue(result["url"]))
 		content := strings.TrimSpace(stringValue(result["content"]))
 		published := strings.TrimSpace(stringValue(result["published_date"]))
-		state.Record(url, title)
+		if state != nil {
+			state.Record(url, title)
+		}
 
 		if title == "" {
 			title = "Search result"
@@ -122,7 +124,9 @@ func FormatFetchOutput(raw any, state *State) string {
 
 		url := strings.TrimSpace(stringValue(page["url"]))
 		content := strings.TrimSpace(stringValue(page["content"]))
-		state.Record(url, "Fetched page")
+		if state != nil {
+			state.Record(url, "Fetched page")
+		}
 		out.WriteString("Source: Fetched page\n")
 		if url != "" {
 			fmt.Fprintf(&out, "URL: %s\n", url)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -57,9 +58,9 @@ func (c *State) ResolveHarmonyCitations(text string) string {
 		if len(sub) < 2 {
 			return match
 		}
-		cursor := 0
-		for _, ch := range sub[1] {
-			cursor = cursor*10 + int(ch-'0')
+		cursor, err := strconv.Atoi(sub[1])
+		if err != nil {
+			return match
 		}
 		for _, source := range c.Sources {
 			if source.Index == cursor {
