@@ -343,6 +343,86 @@ func TestMatchesForToleratesURLDifferences(t *testing.T) {
 	}
 }
 
+func TestFormatSearchOutput(t *testing.T) {
+	results := []any{
+		map[string]any{
+			"title":   "Climate Article",
+			"url":     "https://example.com/climate",
+			"content": "Global temps are rising.",
+		},
+		map[string]any{
+			"title":   "Tech Article",
+			"url":     "https://example.com/tech",
+			"content": "AI is advancing rapidly.",
+		},
+	}
+	state := &State{NextIndex: 1}
+	got := FormatSearchOutput(results, state)
+
+	if !strings.Contains(got, "Source: Climate Article") {
+		t.Errorf("missing first source header in output:\n%s", got)
+	}
+	if !strings.Contains(got, "URL: https://example.com/tech") {
+		t.Errorf("missing second URL in output:\n%s", got)
+	}
+	if len(state.Sources) != 2 {
+		t.Errorf("expected 2 recorded sources, got %d", len(state.Sources))
+	}
+	if state.Sources[0].Title != "Climate Article" {
+		t.Errorf("first source title = %q", state.Sources[0].Title)
+	}
+}
+
+func TestFormatSearchOutputEmpty(t *testing.T) {
+	got := FormatSearchOutput([]any{}, &State{NextIndex: 1})
+	if got != "No safe search results were found." {
+		t.Errorf("unexpected empty output = %q", got)
+	}
+}
+
+func TestFormatHarmonySearchOutput(t *testing.T) {
+	results := []any{
+		map[string]any{
+			"title":   "Article One",
+			"url":     "https://example.com/one",
+			"content": "Line one.\nLine two.",
+		},
+	}
+	state := &State{NextIndex: 1, Harmony: true}
+	got := FormatSearchOutput(results, state)
+
+	if !strings.Contains(got, "[1] Article One") {
+		t.Errorf("missing harmony cursor header:\n%s", got)
+	}
+	if !strings.Contains(got, "L1: Line one.") || !strings.Contains(got, "L2: Line two.") {
+		t.Errorf("missing line-numbered content:\n%s", got)
+	}
+	if len(state.Sources) != 1 || state.Sources[0].Index != 1 {
+		t.Errorf("expected 1 source with index 1, got %+v", state.Sources)
+	}
+}
+
+func TestFormatFetchOutput(t *testing.T) {
+	pages := []any{
+		map[string]any{
+			"url":     "https://example.com/page",
+			"content": "Page body text.",
+		},
+	}
+	state := &State{NextIndex: 1}
+	got := FormatFetchOutput(pages, state)
+
+	if !strings.Contains(got, "Source: Fetched page") {
+		t.Errorf("missing source header:\n%s", got)
+	}
+	if !strings.Contains(got, "URL: https://example.com/page") {
+		t.Errorf("missing URL:\n%s", got)
+	}
+	if len(state.Sources) != 1 || state.Sources[0].Title != "Fetched page" {
+		t.Errorf("unexpected recorded sources: %+v", state.Sources)
+	}
+}
+
 func TestResolveSourceToleratesURLDifferences(t *testing.T) {
 	state := &State{NextIndex: 1}
 	state.Record("https://example.com/article", "Example")
