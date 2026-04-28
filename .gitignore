@@ -1,8 +1,6 @@
 .idea/
 .env 
 confidential-model-router
-citationeval
-loadtest
 proxy
 proxyctl
 ext.yml
@@ -10,3 +8,7 @@ tuf-repo-cdn.sigstore.dev.json
 router
 logs/
 .DS_Store
+
+# binaries
+tests/citationeval/citationeval
+test/loadtest/loadtest
