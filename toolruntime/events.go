@@ -452,9 +452,7 @@ func attachChatOutput(body map[string]any, state *citations.State, toolCalls *to
 		}
 		content := stringValue(message["content"])
 		content = state.ResolveHarmonyCitations(content)
-		if normalized := citations.NormalizeLinks(content); normalized != content {
-			content = normalized
-		}
+		content = citations.NormalizeLinks(content)
 		annotations := state.NestedAnnotationsFor(content)
 
 		var prefix string
@@ -496,10 +494,8 @@ func attachResponsesOutput(body map[string]any, state *citations.State, toolCall
 			}
 			text := stringValue(contentMap["text"])
 			text = state.ResolveHarmonyCitations(text)
-			if normalized := citations.NormalizeLinks(text); normalized != text {
-				contentMap["text"] = normalized
-				text = normalized
-			}
+			text = citations.NormalizeLinks(text)
+			contentMap["text"] = text
 			annotations := state.FlatAnnotationsFor(text)
 			if len(annotations) > 0 {
 				contentMap["annotations"] = annotations

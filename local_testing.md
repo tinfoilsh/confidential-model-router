@@ -47,11 +47,11 @@ models:
   gemma4-31b:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
-      - gemma4-31b.inf9.tinfoil.sh
+      - gemma4-31b.inf6.tinfoil.sh
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gpt-oss-120b-0.inf9.tinfoil.sh
+      - gpt-oss-120b-0.inf6.tinfoil.sh
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6
     enclaves:
