@@ -5,11 +5,17 @@ import (
 	"strings"
 )
 
-// StringValue extracts a string from an any-typed value, returning ""
-// if the value is not a string. Exported because callers in toolruntime
-// already have their own stringValue but the format functions here need
-// the same helper.
-func StringValue(v any) string {
+// Instructions is the system prompt text that tells the model how to format
+// inline citations as markdown links. The citations package parses the
+// links the model produces in response.
+const Instructions = "Attach sources by embedding a clickable markdown link to the original URL directly after the sentence it supports. Format every citation exactly like this example, copying the punctuation characters verbatim: The sky is blue [Example page](https://example.com/article). The opening bracket is ASCII 0x5B, the closing bracket is ASCII 0x5D, and the URL is wrapped in ASCII parentheses 0x28 and 0x29. Reference 1-2 sources per claim; do not reference every source on every sentence. Copy the URL character-for-character from the tool output: preserve or omit a trailing slash exactly as the tool emitted it, keep query parameters verbatim, and do not append punctuation, whitespace, zero-width characters, or any other character after the URL before the closing parenthesis. Never invent URLs, never paraphrase URLs, and never wrap the link in any other brackets, braces, or quotation marks."
+
+// HarmonyInstructions is the system prompt text for Harmony-mode citation
+// format (gpt-oss). The model cites using 【cursor†Lstart-Lend】 tokens
+// which ResolveHarmonyCitations rewrites into markdown links.
+const HarmonyInstructions = "Each search result is numbered with a cursor like [1], [2], etc. and its content is split into lines. When you cite a source, use the Harmony citation format: 【cursor†Lstart-Lend】 where cursor is the result number and Lstart-Lend is the line range. For example, 【3†L5-L8】 cites lines 5 through 8 of result 3. For a single line, use 【2†L4】. Reference 1-2 sources per claim. Never invent citations."
+
+func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
 }
@@ -33,10 +39,10 @@ func FormatSearchOutput(raw any, state *State) string {
 			continue
 		}
 
-		title := strings.TrimSpace(StringValue(result["title"]))
-		url := strings.TrimSpace(StringValue(result["url"]))
-		content := strings.TrimSpace(StringValue(result["content"]))
-		published := strings.TrimSpace(StringValue(result["published_date"]))
+		title := strings.TrimSpace(stringValue(result["title"]))
+		url := strings.TrimSpace(stringValue(result["url"]))
+		content := strings.TrimSpace(stringValue(result["content"]))
+		published := strings.TrimSpace(stringValue(result["published_date"]))
 		state.Record(url, title)
 
 		if title == "" {
@@ -69,10 +75,10 @@ func formatHarmonySearchOutput(results []any, state *State) string {
 			continue
 		}
 
-		title := strings.TrimSpace(StringValue(result["title"]))
-		url := strings.TrimSpace(StringValue(result["url"]))
-		content := strings.TrimSpace(StringValue(result["content"]))
-		published := strings.TrimSpace(StringValue(result["published_date"]))
+		title := strings.TrimSpace(stringValue(result["title"]))
+		url := strings.TrimSpace(stringValue(result["url"]))
+		content := strings.TrimSpace(stringValue(result["content"]))
+		published := strings.TrimSpace(stringValue(result["published_date"]))
 		cursor := state.Record(url, title)
 
 		if title == "" {
@@ -114,8 +120,8 @@ func FormatFetchOutput(raw any, state *State) string {
 			continue
 		}
 
-		url := strings.TrimSpace(StringValue(page["url"]))
-		content := strings.TrimSpace(StringValue(page["content"]))
+		url := strings.TrimSpace(stringValue(page["url"]))
+		content := strings.TrimSpace(stringValue(page["content"]))
 		state.Record(url, "Fetched page")
 		out.WriteString("Source: Fetched page\n")
 		if url != "" {
@@ -138,8 +144,8 @@ func formatHarmonyFetchOutput(pages []any, state *State) string {
 			continue
 		}
 
-		url := strings.TrimSpace(StringValue(page["url"]))
-		content := strings.TrimSpace(StringValue(page["content"]))
+		url := strings.TrimSpace(stringValue(page["url"]))
+		content := strings.TrimSpace(stringValue(page["content"]))
 		cursor := state.Record(url, "Fetched page")
 
 		fmt.Fprintf(&out, "[%d] Fetched page\n", cursor)
@@ -170,12 +176,12 @@ func FormatFetchFailures(raw any) string {
 		if result == nil {
 			continue
 		}
-		status := strings.TrimSpace(StringValue(result["status"]))
+		status := strings.TrimSpace(stringValue(result["status"]))
 		if status == "completed" {
 			continue
 		}
-		url := strings.TrimSpace(StringValue(result["url"]))
-		errText := strings.TrimSpace(StringValue(result["error"]))
+		url := strings.TrimSpace(stringValue(result["url"]))
+		errText := strings.TrimSpace(stringValue(result["error"]))
 		switch {
 		case url != "" && errText != "":
 			lines = append(lines, fmt.Sprintf("Fetch failed for %s: %s", url, errText))
