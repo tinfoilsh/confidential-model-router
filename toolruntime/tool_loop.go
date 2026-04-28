@@ -2,8 +2,11 @@ package toolruntime
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -11,21 +14,10 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 const maxToolIterations = 10
-
-// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
-// the model can fan out client-owned tool calls. Router-owned tools are
-// still dispatched serially inside runToolLoop to keep citation numbering
-// and streaming event order deterministic. A caller-provided value is
-// honored unchanged.
-func applyParallelToolCallsPolicy(reqBody map[string]any) {
-	if _, ok := reqBody["parallel_tool_calls"]; ok {
-		return
-	}
-	reqBody["parallel_tool_calls"] = true
-}
 
 // toolLoopAdapter abstracts the two OpenAI surfaces (Chat Completions and
 // Responses) behind a single interface so the shared driver can walk the
@@ -83,7 +75,7 @@ type toolLoopAdapter interface {
 
 	// attachCitations resolves inline markdown links and surfaces
 	// router-owned tool progress in the surface-specific shape.
-	attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
+	attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags)
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
@@ -121,11 +113,12 @@ func runToolLoop(
 	requestHeaders http.Header,
 	adapter toolLoopAdapter,
 	eventFlags tinfoilEventFlags,
+	harmony bool,
 	dl *devLog,
 ) (*upstreamJSONResponse, error) {
 	reqBody := adapter.buildInitialRequest()
 	usageTotals := usageAccumulator{}
-	citations := citationState{nextIndex: 1}
+	citeState := citations.State{NextIndex: 1, Harmony: harmony}
 	toolCalls := toolCallLog{}
 	opts := adapter.options()
 	toolSchemas := adapter.schemas()
@@ -161,7 +154,7 @@ func runToolLoop(
 			}
 			dl.WriteFinish("stop (no router tool calls)")
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
+			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -169,7 +162,7 @@ func runToolLoop(
 		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
-			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citations, &toolCalls, adapter.tracePhase(i), adapter.traceID())
+			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citeState, &toolCalls, adapter.tracePhase(i), adapter.traceID())
 			dl.WriteToolExec(call.name, call.arguments, output, time.Since(tstart), "")
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
@@ -186,7 +179,7 @@ func runToolLoop(
 			}
 			adapter.stripRouterToolCallsFromResponse(response)
 			adapter.applyUsage(response, usageTotals.Usage())
-			adapter.attachCitations(response.body, &citations, &toolCalls, eventFlags)
+			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, nil
 		}
 
@@ -206,7 +199,7 @@ func runToolLoop(
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
-	adapter.attachCitations(finalResponse.body, &citations, &toolCalls, eventFlags)
+	adapter.attachCitations(finalResponse.body, &citeState, &toolCalls, eventFlags)
 	return finalResponse, nil
 }
 
@@ -229,7 +222,7 @@ func executeRouterToolCall(
 	call toolCall,
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
-	citations *citationState,
+	state *citations.State,
 	toolCalls *toolCallLog,
 	tracePhase, traceID string,
 ) string {
@@ -252,7 +245,8 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, citations)
+	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments)
+	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
 		name:      call.name,
 		arguments: call.arguments,
@@ -264,8 +258,8 @@ func executeRouterToolCall(
 		output = humanizeToolArgError(call.name, err, call.arguments)
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
-		record.resultURLs = extractToolOutputURLs(output)
-		record.resultSources = extractToolOutputSources(output)
+		record.resultURLs = citations.ExtractToolOutputURLs(output)
+		record.resultSources = toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
@@ -326,8 +320,8 @@ func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *toke
 	}
 }
 
-func (a *chatLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
-	attachChatOutput(body, citations, toolCalls, eventFlags)
+func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	attachChatOutput(body, state, toolCalls, eventFlags)
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
@@ -500,8 +494,8 @@ func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage 
 	}
 }
 
-func (a *responsesLoopAdapter) attachCitations(body map[string]any, citations *citationState, toolCalls *toolCallLog, _ tinfoilEventFlags) {
-	attachResponsesOutput(body, citations, toolCalls, a.opts.includeActionSources)
+func (a *responsesLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, _ tinfoilEventFlags) {
+	attachResponsesOutput(body, state, toolCalls, a.opts.includeActionSources)
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
@@ -571,4 +565,118 @@ func (a *responsesLoopAdapter) applyToolOutputs(_ map[string]any, state any, out
 
 func (a *responsesLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[string]any {
 	return forcedFinalResponsesRequest(reqBody)
+}
+
+// ---------------------------------------------------------------------------
+// Unexported helpers
+// ---------------------------------------------------------------------------
+
+// applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
+// the model can fan out client-owned tool calls. Router-owned tools are
+// still dispatched serially inside runToolLoop to keep citation numbering
+// and streaming event order deterministic. A caller-provided value is
+// honored unchanged.
+func applyParallelToolCallsPolicy(reqBody map[string]any) {
+	if _, ok := reqBody["parallel_tool_calls"]; ok {
+		return
+	}
+	reqBody["parallel_tool_calls"] = true
+}
+
+// toolResultErrorMessage extracts a human-readable error message from a
+// CallToolResult whose `IsError` flag is set.
+func toolResultErrorMessage(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			if trimmed := strings.TrimSpace(textContent.Text); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// callTool invokes an MCP tool and returns the text output plus any
+// structured content the server returned. The caller is responsible for
+// formatting structured content (e.g. via applyStructuredFormat) when
+// citation-aware formatting is needed.
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
+	start := time.Now()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      name,
+		Arguments: arguments,
+	})
+	if err != nil {
+		debugLogf("toolruntime:mcp.error tool=%s elapsed=%s args=%s err=%v", name, time.Since(start), debugPreview(arguments, 400), err)
+		return "", nil, err
+	}
+	if result.IsError {
+		message := toolResultErrorMessage(result)
+		debugLogf("toolruntime:mcp.tool_error tool=%s elapsed=%s args=%s message=%q", name, time.Since(start), debugPreview(arguments, 400), message)
+		if message == "" {
+			message = "tool call failed"
+		}
+		return "", nil, errors.New(message)
+	}
+	if debugEnabled {
+		hasStructured := result.StructuredContent != nil
+		textParts := 0
+		for _, content := range result.Content {
+			if _, ok := content.(*mcp.TextContent); ok {
+				textParts++
+			}
+		}
+		debugLogf("toolruntime:mcp.ok tool=%s elapsed=%s structured=%t text_parts=%d structured_preview=%s",
+			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
+	}
+	if result.StructuredContent != nil {
+		return "", result.StructuredContent, nil
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			parts = append(parts, textContent.Text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil, nil
+}
+
+// applyStructuredFormat formats structured tool output with citation-aware
+// formatting when available. Falls back to JSON-marshaling the structured
+// content, then to the plain text output from callTool.
+func applyStructuredFormat(name, text string, structured any, state *citations.State) string {
+	if structured == nil {
+		return text
+	}
+	if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
+		return formatted
+	}
+	body, err := json.Marshal(structured)
+	if err != nil {
+		return text
+	}
+	return string(body)
+}
+
+func formatStructuredToolOutput(name string, raw any, state *citations.State) string {
+	content, _ := raw.(map[string]any)
+	if len(content) == 0 {
+		return ""
+	}
+
+	switch {
+	case isRouterSearchToolName(name):
+		return citations.FormatSearchOutput(content["results"], state)
+	case isRouterFetchToolName(name):
+		if formatted := citations.FormatFetchOutput(content["pages"], state); formatted != "" {
+			return formatted
+		}
+		return citations.FormatFetchFailures(content["results"])
+	default:
+		return ""
+	}
 }

@@ -134,7 +134,8 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		defer dl.Close()
 	}
 
-	promptResult := buildRouterPrompt()
+	harmony := isHarmonyModel(modelName)
+	promptResult := buildRouterPrompt(harmony)
 
 	streaming := isStream(body)
 	switch r.URL.Path {
@@ -145,7 +146,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, dl)
+		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -159,7 +160,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, dl)
+		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -219,14 +220,14 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 // Loop wrappers
 // ---------------------------------------------------------------------------
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, dl *devLog) (*upstreamJSONResponse, error) {
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
 	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders)
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, dl)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, dl *devLog) (*upstreamJSONResponse, error) {
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
 	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools())
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, dl)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
 }
 
 // ---------------------------------------------------------------------------

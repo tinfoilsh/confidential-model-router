@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // newTestResponsesStreamerForSpecEvents is a minimal factory mirroring
@@ -18,13 +20,13 @@ func newTestResponsesStreamerForSpecEvents(t *testing.T) (*responsesStreamer, *h
 			w:                     rec,
 			flusher:               rec,
 			usageMetricsRequested: true,
-			citations:             &citationState{nextIndex: 1},
+			citations:             &citations.State{NextIndex: 1},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 			model:                 "gpt-oss-120b",
 			headersWritten:        true,
 		},
-		emitters:              map[itemContentKey]*citationEmitter{},
+		emitters:              map[itemContentKey]*citations.Emitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            map[string]struct{}{routerSearchToolName: {}, routerFetchToolName: {}},

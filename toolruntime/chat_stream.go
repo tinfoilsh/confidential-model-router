@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // chatStreamer owns one logical chat.completion.chunk stream across
@@ -25,7 +26,7 @@ type chatStreamer struct {
 	// eventFlags tracks which tinfoil-event marker families the
 	// caller opted into via the `X-Tinfoil-Events` header.
 	eventFlags tinfoilEventFlags
-	emitter    *citationEmitter
+	emitter    *citations.Emitter
 
 	// roleEmitted defers the initial assistant role-delta chunk until
 	// the first upstream frame, so it can carry upstream's identity.
@@ -303,7 +304,7 @@ func (s *chatStreamer) ensureRoleEmitted() {
 // emitter and writes whatever the emitter releases to the client as a
 // content delta plus any annotation chunks for links that just resolved.
 func (s *chatStreamer) emitContentDelta(fragment string) {
-	contentChunk, annotations := s.emitter.push(fragment)
+	contentChunk, annotations := s.emitter.Push(fragment)
 	if contentChunk != "" {
 		s.writeChunk(map[string]any{
 			"choices": []any{
@@ -359,7 +360,7 @@ func (s *chatStreamer) emitReasoningDelta(delta map[string]any) {
 // flushCitations drains any trailing content still held back by the
 // emitter at end-of-stream so the user sees every rune the model produced.
 func (s *chatStreamer) flushCitations() {
-	contentChunk, annotations := s.emitter.flush()
+	contentChunk, annotations := s.emitter.Flush()
 	if contentChunk != "" {
 		s.writeChunk(map[string]any{
 			"choices": []any{
@@ -718,7 +719,7 @@ func runChatStreaming(
 			w:                     w,
 			flusher:               flusher,
 			usageMetricsRequested: usageMetricsRequested,
-			citations:             &citationState{nextIndex: 1},
+			citations:             &citations.State{NextIndex: 1, Harmony: isHarmonyModel(modelName)},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 		},
@@ -726,7 +727,7 @@ func runChatStreaming(
 		eventFlags:           eventFlags,
 		emitter:              nil,
 	}
-	streamer.emitter = newCitationEmitter(streamer.citations)
+	streamer.emitter = citations.NewEmitter(streamer.citations)
 
 	for i := 0; i < maxToolIterations; i++ {
 		if msgs, ok := reqBody["messages"].([]any); ok {
@@ -784,7 +785,7 @@ func runChatStreaming(
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
-				ctx, call, searchOpts, toolSchemas, streamer.citations, streamer.toolCalls,
+				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
 				func(ctx context.Context, call toolCall) (string, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
@@ -860,20 +861,20 @@ func rawToolCallMatchesParsed(source map[string]any, call toolCall) bool {
 	return true
 }
 
-// nestedAnnotationsFromMatches converts the internal citationAnnotation
-// slice into the nested url_citation shape documented by OpenAI for Chat
+// nestedAnnotationsFromMatches converts the citations.Annotation slice
+// into the nested url_citation shape documented by OpenAI for Chat
 // Completions responses so SDKs and UIs that already consume the final
 // non-streaming annotation format keep working unchanged.
-func nestedAnnotationsFromMatches(matches []citationAnnotation) []any {
+func nestedAnnotationsFromMatches(matches []citations.Annotation) []any {
 	out := make([]any, 0, len(matches))
 	for _, match := range matches {
 		citation := map[string]any{
-			"url":         match.source.url,
-			"start_index": match.startIndex,
-			"end_index":   match.endIndex,
+			"url":         match.Source.URL,
+			"start_index": match.StartIndex,
+			"end_index":   match.EndIndex,
 		}
-		if match.source.title != "" {
-			citation["title"] = match.source.title
+		if match.Source.Title != "" {
+			citation["title"] = match.Source.Title
 		}
 		out = append(out, map[string]any{
 			"type":         "url_citation",

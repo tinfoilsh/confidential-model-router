@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // responsesStreamer owns the SSE stream sent back to the client across a
@@ -67,7 +68,7 @@ type responsesStreamer struct {
 	// emitters is one citationEmitter per (item_id, content_index)
 	// tuple, so interleaved content parts index citations against the
 	// correct text stream.
-	emitters map[itemContentKey]*citationEmitter
+	emitters map[itemContentKey]*citations.Emitter
 
 	// annotationCounts is the next `annotation_index` per
 	// (item_id, content_index) stream; the Responses event contract
@@ -534,11 +535,11 @@ func (s *responsesStreamer) handleOutputTextDelta(event map[string]any) {
 	key := itemContentKey{itemID: itemID, contentIndex: contentIndex}
 	emitter, exists := s.emitters[key]
 	if !exists {
-		emitter = newCitationEmitter(s.citations)
+		emitter = citations.NewEmitter(s.citations)
 		s.emitters[key] = emitter
 	}
 	delta := stringValue(event["delta"])
-	contentChunk, annotations := emitter.push(delta)
+	contentChunk, annotations := emitter.Push(delta)
 	if contentChunk != "" {
 		s.emitEvent("response.output_text.delta", map[string]any{
 			"type":          "response.output_text.delta",
@@ -569,7 +570,7 @@ func (s *responsesStreamer) handleOutputTextDone(event map[string]any) {
 	contentIndex := int(numberValue(event["content_index"]))
 	key := itemContentKey{itemID: itemID, contentIndex: contentIndex}
 	if emitter, ok := s.emitters[key]; ok {
-		contentChunk, annotations := emitter.flush()
+		contentChunk, annotations := emitter.Flush()
 		if contentChunk != "" {
 			s.emitEvent("response.output_text.delta", map[string]any{
 				"type":          "response.output_text.delta",
@@ -594,7 +595,7 @@ func (s *responsesStreamer) handleOutputTextDone(event map[string]any) {
 // per (item_id, content_index) pair so clients can use it to dedupe or
 // order annotations across the full text stream, not just within the
 // single push/flush batch that happened to resolve them.
-func (s *responsesStreamer) emitAnnotationEvents(matches []citationAnnotation, outputIndex int, itemID string, contentIndex int) {
+func (s *responsesStreamer) emitAnnotationEvents(matches []citations.Annotation, outputIndex int, itemID string, contentIndex int) {
 	if len(matches) == 0 {
 		return
 	}
@@ -605,12 +606,12 @@ func (s *responsesStreamer) emitAnnotationEvents(matches []citationAnnotation, o
 	for _, match := range matches {
 		annotation := map[string]any{
 			"type":        "url_citation",
-			"url":         match.source.url,
-			"start_index": match.startIndex,
-			"end_index":   match.endIndex,
+			"url":         match.Source.URL,
+			"start_index": match.StartIndex,
+			"end_index":   match.EndIndex,
 		}
-		if match.source.title != "" {
-			annotation["title"] = match.source.title
+		if match.Source.Title != "" {
+			annotation["title"] = match.Source.Title
 		}
 		annotationIndex := s.annotationCounts[key]
 		s.annotationCounts[key] = annotationIndex + 1
@@ -727,7 +728,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	// that (item_id, content_index). Anything still in s.emitters is
 	// necessarily empty; clearing the map ensures we do not leak state
 	// across requests if the streamer is ever reused.
-	s.emitters = map[itemContentKey]*citationEmitter{}
+	s.emitters = map[itemContentKey]*citations.Emitter{}
 
 	usage := result.usage
 	if usage == nil {
@@ -875,11 +876,11 @@ func runResponsesStreaming(
 			w:                     w,
 			flusher:               flusher,
 			usageMetricsRequested: usageMetricsRequested,
-			citations:             &citationState{nextIndex: 1},
+			citations:             &citations.State{NextIndex: 1, Harmony: isHarmonyModel(modelName)},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 		},
-		emitters:              map[itemContentKey]*citationEmitter{},
+		emitters:              map[itemContentKey]*citations.Emitter{},
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            ownedTools,
@@ -920,7 +921,7 @@ func runResponsesStreaming(
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
-				ctx, call, searchOpts, toolSchemas, streamer.citations, streamer.toolCalls,
+				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
 				func(ctx context.Context, call toolCall) (string, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},

@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // toolProgressEmitter abstracts the surface-specific way a streamer
@@ -66,7 +68,7 @@ type toolProgressHandle struct {
 func executeToolWithProgress(
 	ctx context.Context,
 	registry *sessionRegistry,
-	citations *citationState,
+	state *citations.State,
 	emitter toolProgressEmitter,
 	call toolCall,
 ) (string, error) {
@@ -82,19 +84,24 @@ func executeToolWithProgress(
 		handle := emitter.open(id, action)
 		emitter.phase(handle, "response.web_search_call.in_progress")
 		emitter.phase(handle, "response.web_search_call.searching")
-		output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 		if err != nil {
 			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
 			return "", err
 		}
-		sources := extractToolOutputSources(output)
+		output = applyStructuredFormat(call.name, output, structured, state)
+		sources := toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 		emitter.phase(handle, "response.web_search_call.completed")
 		emitter.close(handle, action, "completed", "", sources)
 		return output, nil
 	case isRouterFetchToolName(call.name):
 		urls := fetchArgumentURLs(call.arguments)
 		if len(urls) == 0 {
-			return callTool(ctx, session, dispatchName, call.arguments, citations)
+			output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+			if err != nil {
+				return "", err
+			}
+			return applyStructuredFormat(call.name, output, structured, state), nil
 		}
 		handles := make([]toolProgressHandle, len(urls))
 		actions := make([]map[string]any, len(urls))
@@ -104,7 +111,7 @@ func executeToolWithProgress(
 			handles[i] = emitter.open(id, actions[i])
 			emitter.phase(handles[i], "response.web_search_call.in_progress")
 		}
-		output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 		if err != nil {
 			reason := publicToolErrorReason(call.name, err)
 			status := failureStatusFor(err)
@@ -113,13 +120,18 @@ func executeToolWithProgress(
 			}
 			return "", err
 		}
+		output = applyStructuredFormat(call.name, output, structured, state)
 		for i := range urls {
 			emitter.phase(handles[i], "response.web_search_call.completed")
 			emitter.close(handles[i], actions[i], "completed", "", nil)
 		}
 		return output, nil
 	default:
-		return callTool(ctx, session, dispatchName, call.arguments, citations)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+		if err != nil {
+			return "", err
+		}
+		return applyStructuredFormat(call.name, output, structured, state), nil
 	}
 }
 
@@ -189,7 +201,6 @@ func resolveStreamingRouterToolCall(
 	call toolCall,
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
-	citations *citationState,
 	toolCalls *toolCallLog,
 	executor func(ctx context.Context, call toolCall) (string, error),
 	tracePhase, traceID string,
@@ -214,8 +225,8 @@ func resolveStreamingRouterToolCall(
 		output = humanizeToolArgError(call.name, err, call.arguments)
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
-		record.resultURLs = extractToolOutputURLs(output)
-		record.resultSources = extractToolOutputSources(output)
+		record.resultURLs = citations.ExtractToolOutputURLs(output)
+		record.resultSources = toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))

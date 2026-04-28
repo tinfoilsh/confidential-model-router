@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // streamBase holds the state and helpers shared by every SSE streamer
@@ -32,7 +33,7 @@ type streamBase struct {
 	// close.
 	usageMetricsRequested bool
 
-	citations   *citationState
+	citations   *citations.State
 	toolCalls   *toolCallLog
 	usageTotals *usageAccumulator
 

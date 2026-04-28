@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // Tinfoil-event marker constants. The router emits opt-in progress
@@ -80,6 +82,55 @@ type toolCallRecord struct {
 type toolCallSource struct {
 	url   string
 	title string
+}
+
+// publicToolErrorReason returns a short, opaque status string safe to
+// ship to clients via `web_search_call.reason`.
+const (
+	publicToolErrorReasonString = "tool_error"
+	blockedToolErrorReason      = "blocked_by_safety_filter"
+)
+
+func publicToolErrorReason(toolName string, err error) string {
+	if err == nil {
+		return ""
+	}
+	debugLogf("toolruntime: %s tool call failed: %v", toolName, err)
+	if isToolCallBlocked(err) {
+		return blockedToolErrorReason
+	}
+	return publicToolErrorReasonString
+}
+
+// isToolCallBlocked reports whether the MCP tool error came from a PII or
+// prompt-injection safeguard.
+func isToolCallBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "blocked by safety filter")
+}
+
+// failureStatusFor picks the web_search_call status string to surface for
+// a non-nil MCP error.
+func failureStatusFor(err error) string {
+	if isToolCallBlocked(err) {
+		return "blocked"
+	}
+	return "failed"
+}
+
+// toolOutputSourcesToToolCallSources converts citations.ToolOutputSource
+// to the toolCallSource type used by the events/progress system.
+func toolOutputSourcesToToolCallSources(sources []citations.ToolOutputSource) []toolCallSource {
+	if len(sources) == 0 {
+		return nil
+	}
+	result := make([]toolCallSource, len(sources))
+	for i, s := range sources {
+		result[i] = toolCallSource{url: s.URL, title: s.Title}
+	}
+	return result
 }
 
 // statusForRecord maps a recorded router tool call to the web_search_call
@@ -384,8 +435,8 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 // computes url_citation annotations, and prepends any enabled tinfoil-event
 // marker families. Adding a new marker type is one if-block in the prefix
 // builder; the choice iteration and annotation shift happen exactly once.
-func attachChatOutput(body map[string]any, citations *citationState, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
-	if body == nil || citations == nil {
+func attachChatOutput(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
+	if body == nil || state == nil {
 		return
 	}
 	records := toolCalls.list()
@@ -400,10 +451,9 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 			continue
 		}
 		content := stringValue(message["content"])
-		if normalized := normalizeCitationLinks(content); normalized != content {
-			content = normalized
-		}
-		annotations := citations.nestedAnnotationsFor(content)
+		content = state.ResolveHarmonyCitations(content)
+		content = citations.NormalizeLinks(content)
+		annotations := state.NestedAnnotationsFor(content)
 
 		var prefix string
 		if eventFlags.webSearch {
@@ -412,7 +462,7 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 
 		if prefix != "" {
 			content = prefix + content
-			shiftNestedAnnotationIndices(annotations, utf8.RuneCountInString(prefix))
+			citations.ShiftNestedAnnotationIndices(annotations, utf8.RuneCountInString(prefix))
 		}
 		message["content"] = content
 		if len(annotations) > 0 {
@@ -426,8 +476,8 @@ func attachChatOutput(body map[string]any, citations *citationState, toolCalls *
 // items for every recorded router-owned call. Adding a new output-item type
 // is one call to its builder; the annotation walk and the prepend happen
 // exactly once.
-func attachResponsesOutput(body map[string]any, citations *citationState, toolCalls *toolCallLog, includeActionSources bool) {
-	if body == nil || citations == nil {
+func attachResponsesOutput(body map[string]any, state *citations.State, toolCalls *toolCallLog, includeActionSources bool) {
+	if body == nil || state == nil {
 		return
 	}
 	outputItems, _ := body["output"].([]any)
@@ -443,11 +493,10 @@ func attachResponsesOutput(body map[string]any, citations *citationState, toolCa
 				continue
 			}
 			text := stringValue(contentMap["text"])
-			if normalized := normalizeCitationLinks(text); normalized != text {
-				contentMap["text"] = normalized
-				text = normalized
-			}
-			annotations := citations.flatAnnotationsFor(text)
+			text = state.ResolveHarmonyCitations(text)
+			text = citations.NormalizeLinks(text)
+			contentMap["text"] = text
+			annotations := state.FlatAnnotationsFor(text)
 			if len(annotations) > 0 {
 				contentMap["annotations"] = annotations
 			}

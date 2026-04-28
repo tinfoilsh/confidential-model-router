@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // TestExecuteRouterToolCallDispatchesToCorrectProfile pins the
@@ -56,7 +57,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			citations := &citationState{nextIndex: 1}
+			citState := &citations.State{NextIndex: 1}
 			toolCalls := &toolCallLog{}
 			output := executeRouterToolCall(
 				context.Background(),
@@ -64,7 +65,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 				toolCall{name: tc.callName, arguments: map[string]any{}},
 				webSearchOptions{},
 				nil,
-				citations,
+				citState,
 				toolCalls,
 				"test",
 				"",
@@ -93,7 +94,7 @@ func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 	}
 	defer registry.CloseAll()
 
-	citations := &citationState{nextIndex: 1}
+	citState := &citations.State{NextIndex: 1}
 	toolCalls := &toolCallLog{}
 	output := executeRouterToolCall(
 		context.Background(),
@@ -101,7 +102,7 @@ func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 		toolCall{name: "nonexistent_tool", arguments: map[string]any{}},
 		webSearchOptions{},
 		nil,
-		citations,
+		citState,
 		toolCalls,
 		"test",
 		"",

@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // newTestChatStreamer builds a chatStreamer backed by an httptest recorder,
@@ -21,7 +23,7 @@ func newTestChatStreamer(t *testing.T) (*chatStreamer, *httptest.ResponseRecorde
 			w:                     rec,
 			flusher:               rec,
 			usageMetricsRequested: true,
-			citations:             &citationState{nextIndex: 1},
+			citations:             &citations.State{NextIndex: 1},
 			toolCalls:             &toolCallLog{},
 			usageTotals:           &usageAccumulator{},
 			model:                 "gpt-oss-120b",
@@ -31,7 +33,7 @@ func newTestChatStreamer(t *testing.T) (*chatStreamer, *httptest.ResponseRecorde
 		id:                   "chatcmpl_test",
 		created:              1700000000,
 	}
-	streamer.emitter = newCitationEmitter(streamer.citations)
+	streamer.emitter = citations.NewEmitter(streamer.citations)
 	return streamer, rec
 }
 
@@ -149,8 +151,8 @@ func TestChatStreamerFinalizeForcesToolCallsFinishReason(t *testing.T) {
 
 func TestChatStreamerEmitContentDeltaForwardsAnnotations(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.citations.sources = []citationSource{
-		{index: 1, url: "https://example.com/a", title: "A"},
+	streamer.citations.Sources = []citations.Source{
+		{Index: 1, URL: "https://example.com/a", Title: "A"},
 	}
 	streamer.emitContentDelta("See ")
 	streamer.emitContentDelta("[A](https://example.com/a)")
@@ -436,7 +438,7 @@ func TestChatStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 		streamBase: streamBase{
 			w:              w,
 			flusher:        w,
-			citations:      &citationState{nextIndex: 1},
+			citations:      &citations.State{NextIndex: 1},
 			toolCalls:      &toolCallLog{},
 			usageTotals:    &usageAccumulator{},
 			headersWritten: true,
@@ -445,7 +447,7 @@ func TestChatStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 		id:      "cmpl",
 		created: 1,
 	}
-	streamer.emitter = newCitationEmitter(streamer.citations)
+	streamer.emitter = citations.NewEmitter(streamer.citations)
 
 	// A long upstream stream; if writeErr is not respected the pump would
 	// keep iterating. We assert it stops fast and returns the write error.
@@ -479,8 +481,8 @@ func TestChatStreamerPumpAbortsOnClientDisconnect(t *testing.T) {
 // the emitter).
 func TestChatStreamerPumpResolvesMarkdownAnnotations(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.citations.sources = []citationSource{
-		{index: 1, url: "https://example.com/a", title: "A"},
+	streamer.citations.Sources = []citations.Source{
+		{Index: 1, URL: "https://example.com/a", Title: "A"},
 	}
 	upstream := strings.Join([]string{
 		`data: {"id":"up_1","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,

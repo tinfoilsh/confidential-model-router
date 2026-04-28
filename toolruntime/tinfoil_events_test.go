@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // TestTinfoilEventsEnabledHeaderParsing pins the header gate: the marker
@@ -138,14 +140,14 @@ func TestExtractToolOutputSourcesPairsSourceAndURL(t *testing.T) {
 		"duplicate url should be ignored",
 	}, "\n")
 
-	sources := extractToolOutputSources(output)
+	sources := citations.ExtractToolOutputSources(output)
 	if len(sources) != 2 {
 		t.Fatalf("expected 2 unique sources, got %d: %#v", len(sources), sources)
 	}
-	if sources[0].url != "https://one.example" || sources[0].title != "First Hit" {
+	if sources[0].URL != "https://one.example" || sources[0].Title != "First Hit" {
 		t.Fatalf("first source mismatch: %#v", sources[0])
 	}
-	if sources[1].url != "https://no-title.example" || sources[1].title != "" {
+	if sources[1].URL != "https://no-title.example" || sources[1].Title != "" {
 		t.Fatalf("second source mismatch: %#v", sources[1])
 	}
 }
@@ -285,8 +287,8 @@ func TestTinfoilEventMarkersForRecordsMapsBlocked(t *testing.T) {
 // the companion url_citation annotation indices are rune-shifted so spans
 // keep pointing at the right substrings of the combined content.
 func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
-	state := &citationState{nextIndex: 1}
-	state.record("https://example.com/page", "Example page")
+	state := &citations.State{NextIndex: 1}
+	state.Record("https://example.com/page", "Example page")
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
@@ -333,7 +335,7 @@ func TestAttachChatCitationsInjectsMarkersWhenEnabled(t *testing.T) {
 // callers that do not set the header never see markers, even when the
 // router ran router-owned tools that would have produced progress.
 func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 	body := map[string]any{
@@ -359,8 +361,8 @@ func TestAttachChatCitationsSkipsMarkersWhenDisabled(t *testing.T) {
 // router-owned tool calls, and the spec web_search_call output items
 // carry all progress information for the client.
 func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
-	state := &citationState{nextIndex: 1}
-	state.record("https://example.com/page", "Example page")
+	state := &citations.State{NextIndex: 1}
+	state.Record("https://example.com/page", "Example page")
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
@@ -422,7 +424,7 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 // vendor-extension sidecar so Tinfoil-aware clients can distinguish a
 // safety-filter block from a generic failure.
 func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{
 		name:        "search",
@@ -476,7 +478,7 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 // items minimal: no `_tinfoil` field when there is nothing worth
 // surfacing beyond the spec envelope.
 func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
@@ -500,7 +502,7 @@ func TestAttachResponsesCitationsSuccessfulCallOmitsTinfoilSidecar(t *testing.T)
 // output_text is never mutated with tinfoil-event markers on the
 // Responses path, regardless of recorded tool calls.
 func TestAttachResponsesCitationsLeavesPristineText(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 
