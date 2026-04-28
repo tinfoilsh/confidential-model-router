@@ -69,6 +69,7 @@ func (e *Emitter) Text() []rune { return e.text }
 func (e *Emitter) Buffered() int { return len(e.text) - e.flushedRunes }
 
 // Match links. On LinkOpen, keep adding to buffer until LinkClosed or failure.
+// The open-bracket buffering done by LinkIncomplete is also what holds partial harmony tokens until resolveHarmonyTokens can rewrite them
 func (e *Emitter) drain(final bool) (string, []Annotation) {
 	e.resolveHarmonyTokens()
 
