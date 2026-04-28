@@ -127,67 +127,14 @@ func executeToolWithProgress(
 
 	switch {
 	case isRouterSearchToolName(call.name):
-		id := "ws_" + uuid.NewString()
-		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		handle := emitter.open(id, action)
-		emitter.phase(handle, "response.web_search_call.in_progress")
-		emitter.phase(handle, "response.web_search_call.searching")
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-		if err != nil {
-			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
-			return "", err
-		}
-		output = applyStructuredFormat(call.name, output, structured, state)
-		sources := toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
-		emitter.phase(handle, "response.web_search_call.completed")
-		emitter.close(handle, action, "completed", "", sources)
-		return output, nil
-	case isRouterFetchToolName(call.name):
-		urls := fetchArgumentURLs(call.arguments)
-		if len(urls) == 0 {
-			output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-			if err != nil {
-				return "", err
-			}
-			return applyStructuredFormat(call.name, output, structured, state), nil
-		}
-		handles := make([]toolProgressHandle, len(urls))
-		actions := make([]map[string]any, len(urls))
-		for i, url := range urls {
-			id := "ws_" + uuid.NewString()
-			actions[i] = map[string]any{"type": "open_page", "url": url}
-			handles[i] = emitter.open(id, actions[i])
-			emitter.phase(handles[i], "response.web_search_call.in_progress")
-		}
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-		if err != nil {
-			reason := publicToolErrorReason(call.name, err)
-			status := failureStatusFor(err)
-			for i := range urls {
-				emitter.close(handles[i], actions[i], status, reason, nil)
-			}
-			return "", err
-		}
-		output = applyStructuredFormat(call.name, output, structured, state)
-		for i := range urls {
-			emitter.phase(handles[i], "response.web_search_call.completed")
-			emitter.close(handles[i], actions[i], "completed", "", nil)
-		}
-		return output, nil
-	default:
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-		if err != nil {
-			return "", err
-		}
-		return applyStructuredFormat(call.name, output, structured, state), nil
 		details := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		return executeSingleToolWithProgress(ctx, session, citations, emitter, call, dispatchName, phases, details)
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, details)
 
 	case isRouterFetchToolName(call.name):
-		return executeFetchWithProgress(ctx, session, citations, emitter, call, dispatchName, phases)
+		return executeFetchWithProgress(ctx, session, state, emitter, call, dispatchName, phases)
 
 	default:
-		return executeSingleToolWithProgress(ctx, session, citations, emitter, call, dispatchName, phases, call.arguments)
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, call.arguments)
 	}
 }
 
@@ -198,7 +145,7 @@ func executeToolWithProgress(
 func executeSingleToolWithProgress(
 	ctx context.Context,
 	session *mcp.ClientSession,
-	citations *citationState,
+	state *citations.State,
 	emitter toolProgressEmitter,
 	call toolCall,
 	dispatchName string,
@@ -211,7 +158,7 @@ func executeSingleToolWithProgress(
 		emitter.phase(handle, phase)
 	}
 
-	output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 	if err != nil {
 		result := toolProgressResult{}
 		if !isWebSearchTool(call.name) {
@@ -220,11 +167,12 @@ func executeSingleToolWithProgress(
 		emitter.close(handle, call.name, details, result, failureStatusFor(err), publicToolErrorReason(call.name, err))
 		return "", err
 	}
+	output = applyStructuredFormat(call.name, output, structured, state)
 
 	emitter.phase(handle, phases.completedPhase)
 	result := toolProgressResult{
 		output:  output,
-		sources: extractToolOutputSources(output),
+		sources: toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output)),
 	}
 	emitter.close(handle, call.name, details, result, "completed", "")
 	return output, nil
@@ -235,7 +183,7 @@ func executeSingleToolWithProgress(
 func executeFetchWithProgress(
 	ctx context.Context,
 	session *mcp.ClientSession,
-	citations *citationState,
+	state *citations.State,
 	emitter toolProgressEmitter,
 	call toolCall,
 	dispatchName string,
@@ -243,7 +191,11 @@ func executeFetchWithProgress(
 ) (string, error) {
 	urls := fetchArgumentURLs(call.arguments)
 	if len(urls) == 0 {
-		return callTool(ctx, session, dispatchName, call.arguments, citations)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+		if err != nil {
+			return "", err
+		}
+		return applyStructuredFormat(call.name, output, structured, state), nil
 	}
 
 	handles := make([]toolProgressHandle, len(urls))
@@ -257,7 +209,7 @@ func executeFetchWithProgress(
 		}
 	}
 
-	output, err := callTool(ctx, session, dispatchName, call.arguments, citations)
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 	if err != nil {
 		reason := publicToolErrorReason(call.name, err)
 		status := failureStatusFor(err)
@@ -266,6 +218,7 @@ func executeFetchWithProgress(
 		}
 		return "", err
 	}
+	output = applyStructuredFormat(call.name, output, structured, state)
 
 	for i := range urls {
 		emitter.phase(handles[i], phases.completedPhase)

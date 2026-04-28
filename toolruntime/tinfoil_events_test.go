@@ -713,7 +713,7 @@ func TestCodeInterpreterCallEventBlocked(t *testing.T) {
 // code-execution tool calls produce code_interpreter_call output items
 // on the Responses path, prepended alongside web_search_call items.
 func TestAttachResponsesCitationsPrependsCodeInterpreterCallItem(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "search", arguments: map[string]any{"query": "q"}})
 	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
@@ -742,7 +742,7 @@ func TestAttachResponsesCitationsPrependsCodeInterpreterCallItem(t *testing.T) {
 // code-execution markers are prepended to assistant content when the
 // code_execution event flag is set.
 func TestAttachChatCitationsInjectsCodeExecMarkersWhenEnabled(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
 
@@ -769,7 +769,7 @@ func TestAttachChatCitationsInjectsCodeExecMarkersWhenEnabled(t *testing.T) {
 // TestAttachChatCitationsSkipsCodeExecMarkersWhenDisabled pins that
 // code-execution markers are NOT emitted when only webSearch is enabled.
 func TestAttachChatCitationsSkipsCodeExecMarkersWhenDisabled(t *testing.T) {
-	state := &citationState{nextIndex: 1}
+	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{name: "bash", arguments: map[string]any{"command": "ls"}, output: "file.txt"})
 
