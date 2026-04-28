@@ -634,10 +634,7 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 			name, time.Since(start), hasStructured, textParts, debugPreview(result.StructuredContent, 500))
 	}
 	if result.StructuredContent != nil {
-		body, marshalErr := json.Marshal(result.StructuredContent)
-		if marshalErr == nil {
-			return string(body), result.StructuredContent, nil
-		}
+		return "", result.StructuredContent, nil
 	}
 	var parts []string
 	for _, content := range result.Content {
@@ -648,16 +645,21 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 	return strings.Join(parts, "\n"), nil, nil
 }
 
-// applyStructuredFormat tries to format structured tool output with
-// citation-aware formatting. Returns the original text unchanged when
-// there is no structured content or the tool is not a router tool.
+// applyStructuredFormat formats structured tool output with citation-aware
+// formatting when available. Falls back to JSON-marshaling the structured
+// content, then to the plain text output from callTool.
 func applyStructuredFormat(name, text string, structured any, state *citations.State) string {
-	if structured != nil {
-		if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
-			return formatted
-		}
+	if structured == nil {
+		return text
 	}
-	return text
+	if formatted := formatStructuredToolOutput(name, structured, state); formatted != "" {
+		return formatted
+	}
+	body, err := json.Marshal(structured)
+	if err != nil {
+		return text
+	}
+	return string(body)
 }
 
 func formatStructuredToolOutput(name string, raw any, state *citations.State) string {
