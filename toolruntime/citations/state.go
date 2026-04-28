@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 )
 
+// --- Types, recording, and extraction ---
+
 // Source tracks one URL the router surfaced to the model in a tool output.
 // Index is the 1-based cursor number assigned when the source was recorded.
 type Source struct {
@@ -41,38 +43,6 @@ func (c *State) Record(url, title string) int {
 	return index
 }
 
-// MarkdownLinkPattern matches inline markdown links of the form
-// `[visible text](https://example.com)` so the router can map the rendered
-// link span back to a recorded source URL.
-var MarkdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s)]+)\)`)
-
-// fullwidthBracketedLinkPattern matches the near-markdown shape that some
-// web-search tuned models emit when they slip from ASCII brackets into
-// fullwidth lenticular brackets: `【visible text】(https://example.com)`.
-// It also accepts the mixed-bracket variant `【visible text](https://...)`
-// observed from gpt-oss when it improvises a citation outside the harmony
-// browser tool training distribution.
-var fullwidthBracketedLinkPattern = regexp.MustCompile(`\x{3010}([^\x{3011}\]]+)[\x{3011}\]]\((https?://[^\s)]+)\)`)
-
-// NormalizeLinks rewrites `【label】(url)` (and the `【label](url)`
-// mixed-bracket shape) occurrences in the model's final content into ASCII
-// markdown `[label](url)` so every consumer renders a clickable link
-// regardless of which bracket style the model produced.
-func NormalizeLinks(text string) string {
-	if text == "" || !strings.ContainsRune(text, '\u3010') {
-		return text
-	}
-	return fullwidthBracketedLinkPattern.ReplaceAllString(text, "[$1]($2)")
-}
-
-// harmonyCitationPattern matches the Harmony citation format gpt-oss produces:
-// 【cursor†Lstart-Lend】, 【cursor†Lstart】, or bare 【cursor】. The cursor
-// is the 1-based result number matching the [N] prefix in
-// FormatHarmonySearchOutput. The line-range suffix is optional because the
-// model sometimes drops it (e.g. 【1】 instead of 【1†L1-L3】) and the
-// router only needs the cursor number to resolve the source.
-var harmonyCitationPattern = regexp.MustCompile(`\x{3010}(\d+)(?:†L\d+(?:-L\d+)?)?\x{3011}`)
-
 // ResolveHarmonyCitations rewrites Harmony-format citations like 【3†L5-L8】
 // or bare 【3】 into standard markdown links [title](url) by looking up the
 // cursor number in the State's recorded sources. Unresolved cursors (no
@@ -104,6 +74,15 @@ func (c *State) ResolveHarmonyCitations(text string) string {
 	})
 }
 
+// ToolOutputSource is a {url, title} pair extracted from router-formatted
+// tool output. This is separate from Source (which carries an Index for
+// cursor-based citation resolution) because extraction happens after
+// formatting and the cursor is not needed at the extraction site.
+type ToolOutputSource struct {
+	URL   string
+	Title string
+}
+
 var toolOutputURLPattern = regexp.MustCompile(`(?m)^URL:\s*(\S+)`)
 
 // ExtractToolOutputURLs pulls the `URL: ...` lines the router embeds into each
@@ -131,15 +110,6 @@ func ExtractToolOutputURLs(output string) []string {
 		urls = append(urls, url)
 	}
 	return urls
-}
-
-// ToolOutputSource is a {url, title} pair extracted from router-formatted
-// tool output. This is separate from Source (which carries an Index for
-// cursor-based citation resolution) because extraction happens after
-// formatting and the cursor is not needed at the extraction site.
-type ToolOutputSource struct {
-	URL   string
-	Title string
 }
 
 // ExtractToolOutputSources pulls the `{Source, URL}` pairs the router
@@ -179,6 +149,40 @@ func ExtractToolOutputSources(output string) []ToolOutputSource {
 		return nil
 	}
 	return sources
+}
+
+// --- Link matching and annotations ---
+
+// MarkdownLinkPattern matches inline markdown links of the form
+// `[visible text](https://example.com)` so the router can map the rendered
+// link span back to a recorded source URL.
+var MarkdownLinkPattern = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s)]+)\)`)
+
+// fullwidthBracketedLinkPattern matches the near-markdown shape that some
+// web-search tuned models emit when they slip from ASCII brackets into
+// fullwidth lenticular brackets: `【visible text】(https://example.com)`.
+// It also accepts the mixed-bracket variant `【visible text](https://...)`
+// observed from gpt-oss when it improvises a citation outside the harmony
+// browser tool training distribution.
+var fullwidthBracketedLinkPattern = regexp.MustCompile(`\x{3010}([^\x{3011}\]]+)[\x{3011}\]]\((https?://[^\s)]+)\)`)
+
+// harmonyCitationPattern matches the Harmony citation format gpt-oss produces:
+// 【cursor†Lstart-Lend】, 【cursor†Lstart】, or bare 【cursor】. The cursor
+// is the 1-based result number matching the [N] prefix in
+// FormatHarmonySearchOutput. The line-range suffix is optional because the
+// model sometimes drops it (e.g. 【1】 instead of 【1†L1-L3】) and the
+// router only needs the cursor number to resolve the source.
+var harmonyCitationPattern = regexp.MustCompile(`\x{3010}(\d+)(?:†L\d+(?:-L\d+)?)?\x{3011}`)
+
+// NormalizeLinks rewrites `【label】(url)` (and the `【label](url)`
+// mixed-bracket shape) occurrences in the model's final content into ASCII
+// markdown `[label](url)` so every consumer renders a clickable link
+// regardless of which bracket style the model produced.
+func NormalizeLinks(text string) string {
+	if text == "" || !strings.ContainsRune(text, '\u3010') {
+		return text
+	}
+	return fullwidthBracketedLinkPattern.ReplaceAllString(text, "[$1]($2)")
 }
 
 // AnnotationMatch records a single inline markdown link whose URL matched a
@@ -242,32 +246,29 @@ func (c *State) MatchesFor(text string) []AnnotationMatch {
 	return matches
 }
 
-// byteToRuneIndex translates byte offsets into rune (code point) offsets for
-// a given string. It caches the last lookup so sequential calls stay linear.
-type byteToRuneIndex struct {
-	text     string
-	lastByte int
-	lastRune int
-}
-
-func newByteToRuneIndex(text string) *byteToRuneIndex {
-	return &byteToRuneIndex{text: text}
-}
-
-func (b *byteToRuneIndex) convert(byteOffset int) int {
-	if byteOffset <= b.lastByte {
-		b.lastByte = 0
-		b.lastRune = 0
+// ResolveSource returns the most informative recorded source for the given
+// URL, or (zero, false) when the URL was never registered during the tool
+// loop. The URL comparison is done on the normalized form.
+func (c *State) ResolveSource(url string) (Source, bool) {
+	if c == nil || url == "" {
+		return Source{}, false
 	}
-	for b.lastByte < byteOffset && b.lastByte < len(b.text) {
-		_, size := utf8.DecodeRuneInString(b.text[b.lastByte:])
-		if size == 0 {
-			break
+	target := NormalizeURL(url)
+	if target == "" {
+		return Source{}, false
+	}
+	var best Source
+	found := false
+	for _, source := range c.Sources {
+		if NormalizeURL(source.URL) != target {
+			continue
 		}
-		b.lastByte += size
-		b.lastRune++
+		if !found || (best.Title == "" && source.Title != "") {
+			best = source
+			found = true
+		}
 	}
-	return b.lastRune
+	return best, found
 }
 
 // NestedAnnotationsFor returns annotations in the Chat Completions API shape:
@@ -320,31 +321,6 @@ func (c *State) FlatAnnotationsFor(text string) []any {
 	return annotations
 }
 
-// ResolveSource returns the most informative recorded source for the given
-// URL, or (zero, false) when the URL was never registered during the tool
-// loop. The URL comparison is done on the normalized form.
-func (c *State) ResolveSource(url string) (Source, bool) {
-	if c == nil || url == "" {
-		return Source{}, false
-	}
-	target := NormalizeURL(url)
-	if target == "" {
-		return Source{}, false
-	}
-	var best Source
-	found := false
-	for _, source := range c.Sources {
-		if NormalizeURL(source.URL) != target {
-			continue
-		}
-		if !found || (best.Title == "" && source.Title != "") {
-			best = source
-			found = true
-		}
-	}
-	return best, found
-}
-
 // ShiftNestedAnnotationIndices shifts every `start_index` / `end_index`
 // on a nested-shape url_citation by `offset` runes.
 func ShiftNestedAnnotationIndices(annotations []any, offset int) {
@@ -387,6 +363,34 @@ func ShiftFlatAnnotationIndices(annotations []any, offset int) {
 			ann["end_index"] = end + offset
 		}
 	}
+}
+
+// byteToRuneIndex translates byte offsets into rune (code point) offsets for
+// a given string. It caches the last lookup so sequential calls stay linear.
+type byteToRuneIndex struct {
+	text     string
+	lastByte int
+	lastRune int
+}
+
+func newByteToRuneIndex(text string) *byteToRuneIndex {
+	return &byteToRuneIndex{text: text}
+}
+
+func (b *byteToRuneIndex) convert(byteOffset int) int {
+	if byteOffset <= b.lastByte {
+		b.lastByte = 0
+		b.lastRune = 0
+	}
+	for b.lastByte < byteOffset && b.lastByte < len(b.text) {
+		_, size := utf8.DecodeRuneInString(b.text[b.lastByte:])
+		if size == 0 {
+			break
+		}
+		b.lastByte += size
+		b.lastRune++
+	}
+	return b.lastRune
 }
 
 // --- URL normalization ---
