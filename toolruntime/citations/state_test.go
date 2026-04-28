@@ -139,6 +139,67 @@ func TestNormalizeLinksRewritesMixedBrackets(t *testing.T) {
 	}
 }
 
+func TestResolveHarmonyCitations(t *testing.T) {
+	state := &State{NextIndex: 1, Harmony: true}
+	state.Record("https://example.com/a", "Source A")
+	state.Record("https://example.com/b", "Source B")
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "full harmony with line range",
+			input: "claim【1†L1-L3】.",
+			want:  "claim[Source A](https://example.com/a).",
+		},
+		{
+			name:  "full harmony single line",
+			input: "claim【2†L4】.",
+			want:  "claim[Source B](https://example.com/b).",
+		},
+		{
+			name:  "bare cursor",
+			input: "claim【1】.",
+			want:  "claim[Source A](https://example.com/a).",
+		},
+		{
+			name:  "bare cursor second source",
+			input: "claim【2】.",
+			want:  "claim[Source B](https://example.com/b).",
+		},
+		{
+			name:  "mixed bare and full",
+			input: "first【1】 second【2†L1-L2】.",
+			want:  "first[Source A](https://example.com/a) second[Source B](https://example.com/b).",
+		},
+		{
+			name:  "unknown cursor unchanged",
+			input: "claim【99】.",
+			want:  "claim【99】.",
+		},
+		{
+			name:  "not harmony when disabled",
+			input: "claim【1†L1】.",
+			want:  "claim【1†L1】.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := state
+			if tt.name == "not harmony when disabled" {
+				s = &State{NextIndex: 1, Harmony: false}
+				s.Record("https://example.com/a", "Source A")
+			}
+			if got := s.ResolveHarmonyCitations(tt.input); got != tt.want {
+				t.Errorf("ResolveHarmonyCitations(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMarkdownCitationsUseCodePointOffsets(t *testing.T) {
 	state := &State{NextIndex: 1}
 	state.Record("https://example.com/page", "Page")

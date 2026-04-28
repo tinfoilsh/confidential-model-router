@@ -15,3 +15,9 @@ Unit / mock integration tests are colocated.
 
 Bigger tests are in tests/. Also evaluations. Many of the models have different ways of doing things.
 To get empiricial results on what models like doing what, it's encouraged to build out a simple eval in tests/
+
+### CitationEval
+
+1. Harmony is ~ [N*L1-L3]. This makes it different than all other citation techniques, which don't return line levels.
+   1. However - the openAI API spec doesn't actually return this!
+2. Sometimes harmony fails to put lines. This seems fine & we should allow it.

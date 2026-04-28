@@ -64,14 +64,18 @@ func NormalizeLinks(text string) string {
 }
 
 // harmonyCitationPattern matches the Harmony citation format gpt-oss produces:
-// 【cursor†Lstart-Lend】 or 【cursor†Lstart】. The cursor is the 1-based
-// result number matching the [N] prefix in FormatHarmonySearchOutput.
-var harmonyCitationPattern = regexp.MustCompile(`\x{3010}(\d+)†L\d+(?:-L\d+)?\x{3011}`)
+// 【cursor†Lstart-Lend】, 【cursor†Lstart】, or bare 【cursor】. The cursor
+// is the 1-based result number matching the [N] prefix in
+// FormatHarmonySearchOutput. The line-range suffix is optional because the
+// model sometimes drops it (e.g. 【1】 instead of 【1†L1-L3】) and the
+// router only needs the cursor number to resolve the source.
+var harmonyCitationPattern = regexp.MustCompile(`\x{3010}(\d+)(?:†L\d+(?:-L\d+)?)?\x{3011}`)
 
 // ResolveHarmonyCitations rewrites Harmony-format citations like 【3†L5-L8】
-// into standard markdown links [title](url) by looking up the cursor number
-// in the State's recorded sources. Unresolved cursors (no matching
-// source) are left unchanged so the model's output is not silently corrupted.
+// or bare 【3】 into standard markdown links [title](url) by looking up the
+// cursor number in the State's recorded sources. Unresolved cursors (no
+// matching source) are left unchanged so the model's output is not silently
+// corrupted.
 func (c *State) ResolveHarmonyCitations(text string) string {
 	if c == nil || !c.Harmony || !strings.ContainsRune(text, '\u3010') {
 		return text
