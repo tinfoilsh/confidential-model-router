@@ -8,6 +8,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -18,31 +19,43 @@ import (
 // / `response.web_search_call.*` / `response.output_item.done` events.
 //
 // The interface is deliberately minimal so executeToolWithProgress can
-// drive both surfaces from one code path. Implementations capture any
-// per-call state (e.g. the Responses `output_index`) on the value they
-// return from open() and pass back into phase() / close() so the shared
-// driver never needs to know which wire format is in flight.
+// drive both surfaces from one code path. Implementations switch on
+// toolName to decide the wire format (web_search_call vs
+// code_interpreter_call). The handle returned by open() carries
+// opaque per-call state (e.g. the Responses output_index) so the
+// shared driver never needs to know which surface is in flight.
 type toolProgressEmitter interface {
-	// open announces that a router-owned tool call has begun. The
-	// returned handle is opaque to the driver and passed back into
-	// phase / close so surface-specific state (e.g. the Responses
-	// output_index) can flow through without the driver knowing
-	// about it.
-	open(id string, action map[string]any) toolProgressHandle
+	// open announces that a router-owned tool call has begun.
+	// toolName tells the implementation which event type to emit
+	// (web_search_call for search/fetch, code_interpreter_call for
+	// everything else). details is the public-facing description:
+	// the action map for web search, the arguments for code exec.
+	open(id, toolName string, details map[string]any) toolProgressHandle
 
-	// phase emits a spec-defined intermediate progress envelope for
-	// the call. On the Chat surface (which has no spec intermediate
-	// phases) this is a no-op.
+	// phase emits a spec-defined intermediate progress envelope.
+	// On the Chat surface this is a no-op (Chat has no spec phases).
 	phase(handle toolProgressHandle, phase string)
 
-	// close emits the terminal progress frame for the call. status
-	// is one of "completed" / "failed" / "blocked"; reason is the
-	// opaque router error code surfaced to clients on non-success.
-	// sources carries the ordered {url, title} pairs this specific
-	// call produced so clients can attribute citations to the search
-	// that surfaced them. May be nil on non-search calls or error
-	// terminations where no sources are available.
-	close(handle toolProgressHandle, action map[string]any, status, reason string, sources []toolCallSource)
+	// close emits the terminal progress frame for a tool call.
+	// result carries surface-specific metadata: .output for code
+	// exec (the tool's text result), .sources for web search (the
+	// URL/title pairs the search produced). Each implementation
+	// picks the fields it needs and ignores the rest.
+	close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string)
+
+	// emitInlineContent surfaces text as regular assistant content
+	// (not a marker) on streaming surfaces that support it. Used by
+	// the present tool to render a file inline in the chat. Surfaces
+	// without an inline-content channel may treat this as a no-op.
+	emitInlineContent(text string)
+}
+
+// toolProgressResult carries the terminal metadata for a tool call.
+// Web search populates sources; code exec populates output. Each
+// emitter implementation reads the fields relevant to its tool type.
+type toolProgressResult struct {
+	output  string           // code exec: the tool's text output
+	sources []toolCallSource // web search: URL/title pairs
 }
 
 // toolProgressHandle is the opaque per-call handle returned by
@@ -54,17 +67,56 @@ type toolProgressHandle struct {
 	outputIndex int
 }
 
+// toolPhaseConfig describes the progress phases a tool kind emits
+// around its MCP call. The idPrefix seeds the item ID; preCallPhases
+// are emitted before calling the tool; completedPhase is emitted
+// after a successful call, before close.
+type toolPhaseConfig struct {
+	idPrefix       string
+	preCallPhases  []string
+	completedPhase string
+}
+
+// toolPhaseConfigs maps tool names to their progress phase
+// configuration. Adding a new tool kind is a one-line addition.
+var toolPhaseConfigs = map[string]toolPhaseConfig{
+	"search": {
+		idPrefix:       "ws_",
+		preCallPhases:  []string{"response.web_search_call.in_progress", "response.web_search_call.searching"},
+		completedPhase: "response.web_search_call.completed",
+	},
+	"fetch": {
+		idPrefix:       "ws_",
+		preCallPhases:  []string{"response.web_search_call.in_progress"},
+		completedPhase: "response.web_search_call.completed",
+	},
+}
+
+// defaultToolPhaseConfig is used for any tool not in toolPhaseConfigs
+// (i.e. code execution tools).
+var defaultToolPhaseConfig = toolPhaseConfig{
+	idPrefix:       "ci_",
+	preCallPhases:  []string{"response.code_interpreter_call.in_progress", "response.code_interpreter_call.interpreting"},
+	completedPhase: "response.code_interpreter_call.completed",
+}
+
+func toolPhasesFor(name string) toolPhaseConfig {
+	dispatch := dispatchRouterToolName(name)
+	if cfg, ok := toolPhaseConfigs[dispatch]; ok {
+		return cfg
+	}
+	return defaultToolPhaseConfig
+}
+
 // executeToolWithProgress runs a single router-owned tool call and
-// surfaces progress via the supplied emitter. Search and fetch are the
-// two tools that ship router-owned progress: search emits one
-// in_progress/completed (or failed/blocked) pair; fetch emits one pair
-// per URL so clients can correlate each open_page action with its
-// terminal status. Every other tool call is delegated to the MCP session
-// without any progress envelopes.
+// surfaces progress via the supplied emitter. Search and code-exec
+// tools follow the same single-handle pattern (open, phases, call,
+// close); fetch is special because it opens one handle per URL but
+// makes a single MCP call for all of them.
 //
-// Errors from callTool are returned verbatim; the caller turns them into
-// the humanized payload the upstream model sees via humanizeToolArgError
-// (matching the non-streaming contract in executeRouterToolCall).
+// Errors from callTool are returned verbatim; the caller turns them
+// into the humanized payload the upstream model sees via
+// humanizeToolArgError.
 func executeToolWithProgress(
 	ctx context.Context,
 	registry *sessionRegistry,
@@ -77,98 +129,168 @@ func executeToolWithProgress(
 		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
 	}
 	dispatchName := registry.dispatchName(call.name)
+	phases := toolPhasesFor(call.name)
+
 	switch {
 	case isRouterSearchToolName(call.name):
-		id := "ws_" + uuid.NewString()
-		action := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		handle := emitter.open(id, action)
-		emitter.phase(handle, "response.web_search_call.in_progress")
-		emitter.phase(handle, "response.web_search_call.searching")
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-		if err != nil {
-			emitter.close(handle, action, failureStatusFor(err), publicToolErrorReason(call.name, err), nil)
-			return "", err
-		}
-		output = applyStructuredFormat(call.name, output, structured, state)
-		sources := toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
-		emitter.phase(handle, "response.web_search_call.completed")
-		emitter.close(handle, action, "completed", "", sources)
-		return output, nil
+		details := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, details)
+
 	case isRouterFetchToolName(call.name):
-		urls := fetchArgumentURLs(call.arguments)
-		if len(urls) == 0 {
-			output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-			if err != nil {
-				return "", err
-			}
-			return applyStructuredFormat(call.name, output, structured, state), nil
-		}
-		handles := make([]toolProgressHandle, len(urls))
-		actions := make([]map[string]any, len(urls))
-		for i, url := range urls {
-			id := "ws_" + uuid.NewString()
-			actions[i] = map[string]any{"type": "open_page", "url": url}
-			handles[i] = emitter.open(id, actions[i])
-			emitter.phase(handles[i], "response.web_search_call.in_progress")
-		}
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
-		if err != nil {
-			reason := publicToolErrorReason(call.name, err)
-			status := failureStatusFor(err)
-			for i := range urls {
-				emitter.close(handles[i], actions[i], status, reason, nil)
-			}
-			return "", err
-		}
-		output = applyStructuredFormat(call.name, output, structured, state)
-		for i := range urls {
-			emitter.phase(handles[i], "response.web_search_call.completed")
-			emitter.close(handles[i], actions[i], "completed", "", nil)
-		}
-		return output, nil
+		return executeFetchWithProgress(ctx, session, state, emitter, call, dispatchName, phases)
+
 	default:
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, call.arguments)
+	}
+}
+
+// executeSingleToolWithProgress handles the common single-handle
+// pattern shared by search and code-exec tools: open one handle,
+// emit pre-call phases, call the tool, emit completed phase on
+// success, then close.
+func executeSingleToolWithProgress(
+	ctx context.Context,
+	session *mcp.ClientSession,
+	state *citations.State,
+	emitter toolProgressEmitter,
+	call toolCall,
+	dispatchName string,
+	phases toolPhaseConfig,
+	details map[string]any,
+) (string, error) {
+	id := phases.idPrefix + uuid.NewString()
+	handle := emitter.open(id, call.name, details)
+	for _, phase := range phases.preCallPhases {
+		emitter.phase(handle, phase)
+	}
+
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+	if err != nil {
+		result := toolProgressResult{}
+		if !isWebSearchTool(call.name) {
+			result.output = err.Error()
+		}
+		emitter.close(handle, call.name, details, result, failureStatusFor(err), publicToolErrorReason(call.name, err))
+		return "", err
+	}
+	output = applyStructuredFormat(call.name, output, structured, state)
+
+	// The present tool's output is a fenced markdown code block. Surface it
+	// as inline assistant content so the user sees the file rendered in the
+	// chat alongside the regular tool-call indicator.
+	if isPresentTool(call.name) {
+		emitter.emitInlineContent("\n\n" + output + "\n\n")
+	}
+
+	emitter.phase(handle, phases.completedPhase)
+	result := toolProgressResult{
+		output:  output,
+		sources: toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output)),
+	}
+	emitter.close(handle, call.name, details, result, "completed", "")
+	return output, nil
+}
+
+// executeFetchWithProgress handles the fetch-specific multi-handle
+// pattern: one handle per URL, but a single MCP call for all of them.
+func executeFetchWithProgress(
+	ctx context.Context,
+	session *mcp.ClientSession,
+	state *citations.State,
+	emitter toolProgressEmitter,
+	call toolCall,
+	dispatchName string,
+	phases toolPhaseConfig,
+) (string, error) {
+	urls := fetchArgumentURLs(call.arguments)
+	if len(urls) == 0 {
 		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
 		if err != nil {
 			return "", err
 		}
 		return applyStructuredFormat(call.name, output, structured, state), nil
 	}
+
+	handles := make([]toolProgressHandle, len(urls))
+	details := make([]map[string]any, len(urls))
+	for i, url := range urls {
+		id := phases.idPrefix + uuid.NewString()
+		details[i] = map[string]any{"type": "open_page", "url": url}
+		handles[i] = emitter.open(id, call.name, details[i])
+		for _, phase := range phases.preCallPhases {
+			emitter.phase(handles[i], phase)
+		}
+	}
+
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+	if err != nil {
+		reason := publicToolErrorReason(call.name, err)
+		status := failureStatusFor(err)
+		for i := range urls {
+			emitter.close(handles[i], call.name, details[i], toolProgressResult{}, status, reason)
+		}
+		return "", err
+	}
+	output = applyStructuredFormat(call.name, output, structured, state)
+
+	for i := range urls {
+		emitter.phase(handles[i], phases.completedPhase)
+		emitter.close(handles[i], call.name, details[i], toolProgressResult{}, "completed", "")
+	}
+	return output, nil
 }
 
 // chatToolProgressEmitter surfaces router-owned tool progress on the
 // Chat Completions streaming surface as `<tinfoil-event>` markers
 // carried inside assistant content deltas. Intermediate spec phases
-// (in_progress / searching / completed) are folded into the terminal
-// marker because the Chat marker format only surfaces the final state;
-// the opt-in marker contract is one in_progress + one terminal marker
-// per call, matching what tinfoilEventMarkersForRecords emits on the
-// non-streaming path.
+// are no-ops because the Chat marker format only surfaces the final
+// state; the contract is one in_progress + one terminal marker per
+// call, matching tinfoilEventMarkersForRecords on the non-streaming path.
 type chatToolProgressEmitter struct {
 	streamer *chatStreamer
 }
 
-func (c *chatToolProgressEmitter) open(id string, action map[string]any) toolProgressHandle {
-	c.streamer.emitTinfoilEventMarker(id, "in_progress", action, "", nil)
+func (c *chatToolProgressEmitter) open(id, toolName string, details map[string]any) toolProgressHandle {
+	if isWebSearchTool(toolName) {
+		c.streamer.emitTinfoilEventMarker(id, "in_progress", details, "", nil)
+	} else {
+		c.streamer.emitTinfoilToolCallMarker(id, "in_progress", toolName, details, "")
+	}
 	return toolProgressHandle{id: id}
 }
 
 func (c *chatToolProgressEmitter) phase(toolProgressHandle, string) {}
 
-func (c *chatToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string, sources []toolCallSource) {
-	c.streamer.emitTinfoilEventMarker(handle.id, status, action, reason, sources)
+func (c *chatToolProgressEmitter) emitInlineContent(text string) {
+	if text == "" {
+		return
+	}
+	c.streamer.emitContentDelta(text)
+}
+
+func (c *chatToolProgressEmitter) close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string) {
+	if isWebSearchTool(toolName) {
+		c.streamer.emitTinfoilEventMarker(handle.id, status, details, reason, result.sources)
+	} else {
+		c.streamer.emitTinfoilToolCallMarker(handle.id, status, toolName, nil, result.output)
+	}
 }
 
 // responsesToolProgressEmitter surfaces router-owned tool progress on
 // the Responses streaming surface as the spec-defined event envelopes
-// OpenAI documents: response.output_item.added carrying a web_search_call
-// item, followed by response.web_search_call.{in_progress,searching,
-// completed} phase events, terminated by response.output_item.done.
+// OpenAI documents: response.output_item.added, phase events, and
+// response.output_item.done.
 type responsesToolProgressEmitter struct {
 	streamer *responsesStreamer
 }
 
-func (r *responsesToolProgressEmitter) open(id string, action map[string]any) toolProgressHandle {
-	outputIndex := r.streamer.openWebSearchCallItem(id, action)
+func (r *responsesToolProgressEmitter) open(id, toolName string, details map[string]any) toolProgressHandle {
+	var outputIndex int
+	if isWebSearchTool(toolName) {
+		outputIndex = r.streamer.openWebSearchCallItem(id, details)
+	} else {
+		outputIndex = r.streamer.openCodeInterpreterCallItem(id, toolName, details)
+	}
 	return toolProgressHandle{id: id, outputIndex: outputIndex}
 }
 
@@ -176,8 +298,16 @@ func (r *responsesToolProgressEmitter) phase(handle toolProgressHandle, phase st
 	r.streamer.emitToolCallPhase(phase, handle.id, handle.outputIndex)
 }
 
-func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, action map[string]any, status, reason string, _ []toolCallSource) {
-	r.streamer.closeWebSearchCallItem(handle.id, handle.outputIndex, action, status, reason)
+// Responses has no inline-content slot outside an output_text item, so
+// the present tool's content rides only in the tool result on this surface.
+func (r *responsesToolProgressEmitter) emitInlineContent(string) {}
+
+func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string) {
+	if isWebSearchTool(toolName) {
+		r.streamer.closeWebSearchCallItem(handle.id, handle.outputIndex, details, status, reason)
+	} else {
+		r.streamer.closeCodeInterpreterCallItem(handle.id, handle.outputIndex, toolName, result.output, status, reason)
+	}
 }
 
 // resolveStreamingRouterToolCall runs the per-iteration argument-coercion,
@@ -232,6 +362,7 @@ func resolveStreamingRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
+	record.output = output
 	toolCalls.record(record)
 	return output
 }

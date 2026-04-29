@@ -265,6 +265,7 @@ func executeRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
+	record.output = output
 	toolCalls.record(record)
 	return output
 }
@@ -327,6 +328,7 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
 	reqBody := cloneJSONMap(a.body)
 	delete(reqBody, "web_search_options")
+	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
 	delete(reqBody, "stream_options")
 	delete(reqBody, "pii_check_options")

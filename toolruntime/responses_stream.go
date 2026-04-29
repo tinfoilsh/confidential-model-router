@@ -257,6 +257,7 @@ func (s *responsesStreamer) pumpUpstream(reader *sseReader, isFirst bool) (respo
 				s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": usage}})
 			}
 		case "response.failed", "response.incomplete":
+			terminalSeen = true
 			if usage := extractResponsesUsage(event); usage != nil {
 				result.usage = usage
 				s.aggregatedUsage = usage
@@ -685,10 +686,11 @@ func (s *responsesStreamer) openWebSearchCallItem(id string, action map[string]a
 	return outputIndex
 }
 
-// emitToolCallPhase emits a progress envelope for a web_search_call
-// item in the shape OpenAI's spec defines: {item_id, output_index,
-// type}. The eventType determines the specific phase (e.g.
-// response.web_search_call.searching).
+// emitToolCallPhase emits a progress envelope for a tool call item
+// (web_search_call or code_interpreter_call) in the shape OpenAI's
+// spec defines: {item_id, output_index, type}. The eventType
+// determines which family (e.g. response.web_search_call.searching
+// or response.code_interpreter_call.interpreting).
 func (s *responsesStreamer) emitToolCallPhase(eventType, itemID string, outputIndex int) {
 	s.emitEvent(eventType, map[string]any{
 		"type":         eventType,
@@ -706,6 +708,43 @@ func (s *responsesStreamer) emitToolCallPhase(eventType, itemID string, outputIn
 // render a distinct affordance for safety-filter blocks.
 func (s *responsesStreamer) closeWebSearchCallItem(id string, outputIndex int, action map[string]any, status, errorCode string) {
 	item := webSearchCallEvent(id, status, errorCode, action)
+	s.emitEvent("response.output_item.done", map[string]any{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item":         item,
+	})
+}
+
+// openCodeInterpreterCallItem emits response.output_item.added for a
+// router-owned code_interpreter_call item and returns the output_index
+// the client will see for it. Mirrors openWebSearchCallItem for the
+// code-execution tool family.
+func (s *responsesStreamer) openCodeInterpreterCallItem(id, toolName string, arguments map[string]any) int {
+	outputIndex := s.outputIndex
+	s.outputIndex++
+	code := toolName
+	if len(arguments) > 0 {
+		if argsJSON, err := json.Marshal(arguments); err == nil {
+			code = toolName + ": " + string(argsJSON)
+		}
+	}
+	s.emitEvent("response.output_item.added", map[string]any{
+		"type":         "response.output_item.added",
+		"output_index": outputIndex,
+		"item": map[string]any{
+			"id":     id,
+			"type":   "code_interpreter_call",
+			"status": "in_progress",
+			"code":   code,
+		},
+	})
+	return outputIndex
+}
+
+// closeCodeInterpreterCallItem emits response.output_item.done for a
+// router-owned code_interpreter_call item with the given terminal status.
+func (s *responsesStreamer) closeCodeInterpreterCallItem(id string, outputIndex int, toolName, output, status, errorCode string) {
+	item := codeInterpreterCallEvent(id, status, toolName, nil, output, errorCode)
 	s.emitEvent("response.output_item.done", map[string]any{
 		"type":         "response.output_item.done",
 		"output_index": outputIndex,

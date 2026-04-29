@@ -135,7 +135,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 
 	harmony := isHarmonyModel(modelName)
-	promptResult := buildRouterPrompt(harmony)
+	promptResult := buildRouterPrompt(harmony, registry.profileNames())
 
 	streaming := isStream(body)
 	switch r.URL.Path {
@@ -203,6 +203,9 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
+	}
+	if sessionID := r.Header.Get("X-Session-Id"); sessionID != "" {
+		headers.Set("X-Session-Id", sessionID)
 	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,

@@ -438,6 +438,45 @@ func TestDetectToolProfiles(t *testing.T) {
 			},
 			want: []string{"web_search"},
 		},
+		{
+			name: "chat completions with code_execution_options",
+			path: "/v1/chat/completions",
+			body: map[string]any{"code_execution_options": map[string]any{}},
+			want: []string{"code_execution"},
+		},
+		{
+			name: "responses with code_execution tool",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{map[string]any{"type": "code_execution"}}},
+			want: []string{"code_execution"},
+		},
+		{
+			name: "both web_search and code_execution",
+			path: "/v1/chat/completions",
+			body: map[string]any{
+				"web_search_options":     map[string]any{},
+				"code_execution_options": map[string]any{},
+			},
+			want: []string{"web_search", "code_execution"},
+		},
+		{
+			name: "responses with both tool types",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{
+				map[string]any{"type": "web_search"},
+				map[string]any{"type": "code_execution"},
+			}},
+			want: []string{"web_search", "code_execution"},
+		},
+		{
+			name: "responses duplicates do not stack code_execution",
+			path: "/v1/responses",
+			body: map[string]any{
+				"code_execution_options": map[string]any{},
+				"tools":                  []any{map[string]any{"type": "code_execution"}},
+			},
+			want: []string{"code_execution"},
+		},
 	}
 
 	for _, tc := range tests {
