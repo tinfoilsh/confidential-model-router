@@ -135,7 +135,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 
 	harmony := isHarmonyModel(modelName)
-	promptResult := buildRouterPrompt(harmony)
+	promptResult := buildRouterPrompt(harmony, registry.profileNames())
 
 	streaming := isStream(body)
 	switch r.URL.Path {

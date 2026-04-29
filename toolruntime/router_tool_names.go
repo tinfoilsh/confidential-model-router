@@ -11,7 +11,8 @@ const (
 
 	mcpPresentToolName = "present"
 
-	webSearchProfileName = "web_search"
+	webSearchProfileName     = "web_search"
+	codeExecutionProfileName = "code_execution"
 )
 
 func outwardRouterToolName(profileName, toolName string) string {
