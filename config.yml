@@ -71,7 +71,7 @@ models:
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6
     enclaves:
-      - kimi-k2-6.tinfoil.containers.tinfoil.dev
+      - kimi-k2-6-inf10.tinfoil.containers.tinfoil.dev
 
   websearch:
     repo: tinfoilsh/confidential-websearch
