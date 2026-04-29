@@ -42,6 +42,12 @@ type toolProgressEmitter interface {
 	// URL/title pairs the search produced). Each implementation
 	// picks the fields it needs and ignores the rest.
 	close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string)
+
+	// emitInlineContent surfaces text as regular assistant content
+	// (not a marker) on streaming surfaces that support it. Used by
+	// the present tool to render a file inline in the chat. Surfaces
+	// without an inline-content channel may treat this as a no-op.
+	emitInlineContent(text string)
 }
 
 // toolProgressResult carries the terminal metadata for a tool call.
@@ -169,6 +175,13 @@ func executeSingleToolWithProgress(
 	}
 	output = applyStructuredFormat(call.name, output, structured, state)
 
+	// The present tool's output is a fenced markdown code block. Surface it
+	// as inline assistant content so the user sees the file rendered in the
+	// chat alongside the regular tool-call indicator.
+	if isPresentTool(call.name) {
+		emitter.emitInlineContent("\n\n" + output + "\n\n")
+	}
+
 	emitter.phase(handle, phases.completedPhase)
 	result := toolProgressResult{
 		output:  output,
@@ -248,6 +261,13 @@ func (c *chatToolProgressEmitter) open(id, toolName string, details map[string]a
 
 func (c *chatToolProgressEmitter) phase(toolProgressHandle, string) {}
 
+func (c *chatToolProgressEmitter) emitInlineContent(text string) {
+	if text == "" {
+		return
+	}
+	c.streamer.emitContentDelta(text)
+}
+
 func (c *chatToolProgressEmitter) close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string) {
 	if isWebSearchTool(toolName) {
 		c.streamer.emitTinfoilEventMarker(handle.id, status, details, reason, result.sources)
@@ -277,6 +297,10 @@ func (r *responsesToolProgressEmitter) open(id, toolName string, details map[str
 func (r *responsesToolProgressEmitter) phase(handle toolProgressHandle, phase string) {
 	r.streamer.emitToolCallPhase(phase, handle.id, handle.outputIndex)
 }
+
+// Responses has no inline-content slot outside an output_text item, so
+// the present tool's content rides only in the tool result on this surface.
+func (r *responsesToolProgressEmitter) emitInlineContent(string) {}
 
 func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string) {
 	if isWebSearchTool(toolName) {

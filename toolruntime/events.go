@@ -363,6 +363,28 @@ func tinfoilToolCallMarker(id, status, toolName string, arguments map[string]any
 	return "\n" + tinfoilEventOpenTag + string(data) + tinfoilEventCloseTag + "\n"
 }
 
+// presentationPrefixForRecords builds the inline content block prepended
+// to the final assistant message on the non-streaming chat path. The
+// streaming path emits each block chronologically as it executes; the
+// non-streaming path collapses everything into one assistant message,
+// so we surface present output here once at finalize.
+func presentationPrefixForRecords(records []toolCallRecord) string {
+	var b strings.Builder
+	for _, r := range records {
+		if !isPresentTool(r.name) || r.output == "" || r.errorReason != "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(r.output)
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return b.String() + "\n\n"
+}
+
 // tinfoilToolCallMarkersForRecords renders in_progress + terminal marker
 // pairs for code-execution tool calls in the non-streaming path. It
 // skips records whose name is "search" or "fetch" because those are
@@ -595,6 +617,9 @@ func attachChatOutput(body map[string]any, state *citations.State, toolCalls *to
 		if eventFlags.codeExecution {
 			prefix += tinfoilToolCallMarkersForRecords(records)
 		}
+		// Present tool output: regular markdown the user reads directly,
+		// so it is appended unconditionally (not gated on event flags).
+		prefix += presentationPrefixForRecords(records)
 
 		if prefix != "" {
 			content = prefix + content
