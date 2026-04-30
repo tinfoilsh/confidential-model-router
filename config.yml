@@ -41,7 +41,7 @@ models:
   deepseek-v4-pro:
     repo: tinfoilsh/confidential-deepseek-v4-pro
     enclaves:
-      - deepseek-v4-pro.tinfoil.containers.tinfoil.dev
+      - deepseek-v4-pro-inf12.tinfoil.containers.tinfoil.dev
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
