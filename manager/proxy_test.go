@@ -36,6 +36,35 @@ func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 	return setupTestProxyWithModel(t, handler, "test-model")
 }
 
+// TestProxyDirector_RewritesHostHeader ensures the outbound Host header is
+// set to the configured enclave host (not the inbound request's Host). Without
+// this rewrite, subdomain-dispatching enclaves (e.g. confidential-realtime-models)
+// receive Host: <router-public-host> via X-Forwarded-Host and 404.
+func TestProxyDirector_RewritesHostHeader(t *testing.T) {
+	const enclaveHost = "voxtral-tts.realtime.inf9.tinfoil.sh"
+
+	collector := billing.NewCollector("", "", "")
+	t.Cleanup(collector.Stop)
+
+	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, newCircuitBreaker())
+
+	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
+	req.Host = "inference.tinfoil.sh"
+	req.URL.Scheme = "" // mimic the inbound request: scheme/host empty before director runs
+
+	proxy.Director(req)
+
+	if req.Host != enclaveHost {
+		t.Fatalf("req.Host = %q, want %q (Host header must match target so subdomain enclaves can dispatch)", req.Host, enclaveHost)
+	}
+	if req.URL.Host != enclaveHost {
+		t.Fatalf("req.URL.Host = %q, want %q", req.URL.Host, enclaveHost)
+	}
+	if req.URL.Scheme != "https" {
+		t.Fatalf("req.URL.Scheme = %q, want %q", req.URL.Scheme, "https")
+	}
+}
+
 func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
 	proxy := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

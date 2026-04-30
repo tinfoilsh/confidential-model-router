@@ -173,6 +173,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		Scheme: "https",
 		Host:   host,
 	})
+	// Set the outbound Host header to targetso downstream shims see the original host name.
+	defaultDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		defaultDirector(req)
+		req.Host = host
+	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		reason := classifyProxyError(err)
