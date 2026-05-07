@@ -39,6 +39,9 @@ type chatStreamer struct {
 	id             string
 	created        int64
 	identityPinned bool
+
+	ownedTools              map[string]struct{}
+	clientToolCallForwarder *clientToolCallDeltaForwarder
 }
 
 // chatIterationResult summarizes one upstream stream's payload once the
@@ -55,12 +58,11 @@ type chatIterationResult struct {
 	usage        map[string]any
 }
 
-// chatToolCallBuilder assembles OpenAI streaming tool_call deltas into the
-// final tool_call objects. OpenAI emits each function's name and id on
-// the first delta for a given index, and the arguments JSON in
-// incremental string fragments.
+// chatToolCallBuilder assembles OpenAI streaming tool_call deltas into
+// final tool_call objects while forwarding client-owned deltas live.
 type chatToolCallBuilder struct {
-	entries []*chatToolCallEntry
+	entries         []*chatToolCallEntry
+	clientForwarder *clientToolCallDeltaForwarder
 }
 
 type chatToolCallEntry struct {
@@ -70,6 +72,28 @@ type chatToolCallEntry struct {
 	functionName string
 	arguments    []byte
 }
+
+type clientToolCallDeltaForwarder struct {
+	ownedTools            map[string]struct{}
+	emit                  func(map[string]any)
+	stateByUpstreamIndex  map[int]*clientToolCallDeltaState
+	clientIndexByUpstream map[int]int
+	nextClientIndex       int
+	streamedIDs           map[string]bool
+}
+
+type clientToolCallDeltaState struct {
+	pending []map[string]any
+	mode    clientToolCallForwardMode
+}
+
+type clientToolCallForwardMode int
+
+const (
+	clientToolCallForwardPending clientToolCallForwardMode = iota
+	clientToolCallForwardLive
+	clientToolCallForwardDrop
+)
 
 // ---------------------------------------------------------------------------
 // chatIterationResult methods
@@ -97,9 +121,8 @@ func (r *chatIterationResult) assistantMessage() map[string]any {
 
 // runIteration posts one upstream streaming call and drives the SSE pump
 // until the upstream signals done. Content deltas flow through the citation
-// emitter and out to the client immediately. Tool-call deltas accumulate
-// without being forwarded to the client until we know whether they are
-// router-owned or client-owned.
+// emitter. Tool-call deltas are assembled for loop control; client-owned
+// deltas are forwarded once classified.
 func (s *chatStreamer) runIteration(
 	ctx context.Context,
 	em *manager.EnclaveManager,
@@ -124,7 +147,11 @@ func (s *chatStreamer) runIteration(
 // the client sees a terminating error frame rather than a silently
 // truncated completion.
 func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, error) {
-	builder := &chatToolCallBuilder{}
+	forwarder := s.getClientToolCallForwarder()
+	forwarder.resetIteration()
+	builder := &chatToolCallBuilder{
+		clientForwarder: forwarder,
+	}
 	result := chatIterationResult{}
 	doneSeen := false
 	for {
@@ -357,6 +384,32 @@ func (s *chatStreamer) emitReasoningDelta(delta map[string]any) {
 	})
 }
 
+func (s *chatStreamer) getClientToolCallForwarder() *clientToolCallDeltaForwarder {
+	if s.clientToolCallForwarder == nil {
+		s.clientToolCallForwarder = newClientToolCallDeltaForwarder(
+			s.ownedTools,
+			s.emitClientToolCallDelta,
+		)
+	}
+	return s.clientToolCallForwarder
+}
+
+func (s *chatStreamer) emitClientToolCallDelta(forwarded map[string]any) {
+	if len(forwarded) == 0 {
+		return
+	}
+	s.writeChunk(map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []any{forwarded},
+				},
+			},
+		},
+	})
+}
+
 // flushCitations drains any trailing content still held back by the
 // emitter at end-of-stream so the user sees every rune the model produced.
 func (s *chatStreamer) flushCitations() {
@@ -447,10 +500,8 @@ func (s *chatStreamer) emitData(body map[string]any) {
 	s.flusher.Flush()
 }
 
-// finalize emits any remaining buffered citations, forwards client-owned
-// tool_calls the model asked the user to execute, writes the finish-reason
-// chunk and final usage chunk, fires the billing event, and closes the
-// stream with `[DONE]`.
+// finalize flushes citations, sends any unstreamed client tool calls,
+// writes terminal frames, and records billing.
 func (s *chatStreamer) finalize(
 	r *http.Request,
 	em *manager.EnclaveManager,
@@ -467,15 +518,20 @@ func (s *chatStreamer) finalize(
 	s.flushCitations()
 
 	if len(clientToolCalls) > 0 {
-		raw := rawToolCallsFromParsed(clientToolCalls, result.rawToolCalls)
-		s.writeChunk(map[string]any{
-			"choices": []any{
-				map[string]any{
-					"index": 0,
-					"delta": map[string]any{"tool_calls": raw},
-				},
-			},
-		})
+		pending := s.getClientToolCallForwarder().unstreamed(clientToolCalls)
+		if len(pending) > 0 {
+			raw := rawToolCallsFromParsed(pending, result.rawToolCalls)
+			if len(raw) > 0 {
+				s.writeChunk(map[string]any{
+					"choices": []any{
+						map[string]any{
+							"index": 0,
+							"delta": map[string]any{"tool_calls": raw},
+						},
+					},
+				})
+			}
+		}
 	}
 
 	finishReason := result.finishReason
@@ -560,10 +616,7 @@ func (s *chatStreamer) terminateWithError(r *http.Request, em *manager.EnclaveMa
 // chatToolCallBuilder methods
 // ---------------------------------------------------------------------------
 
-// ingest merges one tool_call delta list into the builder's running state.
-// It preserves the original wire-format fragment in s.raw so the assistant
-// message emitted on the next iteration carries bytewise-identical tool
-// calls to whatever upstream produced.
+// ingest merges tool_call fragments and forwards client-owned deltas live.
 func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 	for _, item := range rawCalls {
 		m, _ := item.(map[string]any)
@@ -597,7 +650,116 @@ func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 				entry.arguments = append(entry.arguments, args...)
 			}
 		}
+		b.clientForwarder.ingest(idx, entry.functionName, m)
 	}
+}
+
+func newClientToolCallDeltaForwarder(
+	ownedTools map[string]struct{},
+	emit func(map[string]any),
+) *clientToolCallDeltaForwarder {
+	return &clientToolCallDeltaForwarder{
+		ownedTools:            ownedTools,
+		emit:                  emit,
+		stateByUpstreamIndex:  map[int]*clientToolCallDeltaState{},
+		clientIndexByUpstream: map[int]int{},
+		streamedIDs:           map[string]bool{},
+	}
+}
+
+// resetIteration drops per-iteration classification state so a fresh
+// upstream stream starts with no stale Drop/Live decisions and a fresh
+// client-visible index space. streamedIDs is preserved so finalize can
+// still dedupe against ids that were forwarded live in earlier iterations.
+func (f *clientToolCallDeltaForwarder) resetIteration() {
+	if f == nil {
+		return
+	}
+	f.stateByUpstreamIndex = map[int]*clientToolCallDeltaState{}
+	f.clientIndexByUpstream = map[int]int{}
+	f.nextClientIndex = 0
+}
+
+func (f *clientToolCallDeltaForwarder) ingest(
+	upstreamIndex int,
+	toolName string,
+	rawDelta map[string]any,
+) {
+	if f == nil || f.emit == nil || rawDelta == nil {
+		return
+	}
+	state := f.state(upstreamIndex)
+	switch state.mode {
+	case clientToolCallForwardLive:
+		f.forward(upstreamIndex, rawDelta)
+		return
+	case clientToolCallForwardDrop:
+		return
+	}
+	if toolName == "" {
+		state.pending = append(state.pending, rawDelta)
+		return
+	}
+	if _, isRouterOwned := f.ownedTools[toolName]; isRouterOwned {
+		state.mode = clientToolCallForwardDrop
+		state.pending = nil
+		return
+	}
+	state.mode = clientToolCallForwardLive
+	for _, buffered := range state.pending {
+		f.forward(upstreamIndex, buffered)
+	}
+	state.pending = nil
+	f.forward(upstreamIndex, rawDelta)
+}
+
+func (f *clientToolCallDeltaForwarder) state(upstreamIndex int) *clientToolCallDeltaState {
+	state := f.stateByUpstreamIndex[upstreamIndex]
+	if state == nil {
+		state = &clientToolCallDeltaState{}
+		f.stateByUpstreamIndex[upstreamIndex] = state
+	}
+	return state
+}
+
+func (f *clientToolCallDeltaForwarder) forward(upstreamIndex int, rawDelta map[string]any) {
+	forwarded := map[string]any{"index": f.clientIndex(upstreamIndex)}
+	if id, ok := rawDelta["id"].(string); ok && id != "" {
+		forwarded["id"] = id
+		f.streamedIDs[id] = true
+	}
+	if t, ok := rawDelta["type"].(string); ok && t != "" {
+		forwarded["type"] = t
+	}
+	if fn, ok := rawDelta["function"].(map[string]any); ok && len(fn) > 0 {
+		forwarded["function"] = fn
+	}
+	f.emit(forwarded)
+}
+
+func (f *clientToolCallDeltaForwarder) clientIndex(upstreamIndex int) int {
+	clientIndex, ok := f.clientIndexByUpstream[upstreamIndex]
+	if ok {
+		return clientIndex
+	}
+	clientIndex = f.nextClientIndex
+	f.clientIndexByUpstream[upstreamIndex] = clientIndex
+	f.nextClientIndex++
+	return clientIndex
+}
+
+func (f *clientToolCallDeltaForwarder) unstreamed(calls []toolCall) []toolCall {
+	if f == nil || len(f.streamedIDs) == 0 {
+		return calls
+	}
+	out := make([]toolCall, 0, len(calls))
+	for _, call := range calls {
+		if call.id != "" && f.streamedIDs[call.id] {
+			continue
+		}
+		out = append(out, call)
+	}
+	return out
 }
 
 // toolCalls returns the assembled tool_call objects as the parsed router
@@ -726,6 +888,7 @@ func runChatStreaming(
 		clientRequestedUsage: clientRequestedUsage,
 		eventFlags:           eventFlags,
 		emitter:              nil,
+		ownedTools:           ownedTools,
 	}
 	streamer.emitter = citations.NewEmitter(streamer.citations)
 
@@ -756,9 +919,6 @@ func runChatStreaming(
 
 		dl.WriteStreamedTurn(i+1, result.usage, result.reasoning, result.content)
 
-		// Mid-turn client tool_calls are intentionally dropped; only the
-		// final turn (no router tool calls to resolve) forwards them to
-		// the client. This preserves parity with runChatLoop.
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		if debugEnabled {
 			toolNames := make([]string, 0, len(result.toolCalls))
@@ -821,12 +981,8 @@ func runChatStreaming(
 	return streamer.finalize(r, em, modelName, result, nil)
 }
 
-// rawToolCallsFromParsed filters the streamed raw tool_calls down to the
-// client-owned ones and re-indexes them starting at zero so the final
-// stream chunk emits a delta.tool_calls array in the shape clients expect:
-// contiguous `index` values identifying positions in the client-visible
-// tool_calls list. The `id`, `type`, and `function` fields are preserved
-// byte-for-byte from what upstream produced.
+// rawToolCallsFromParsed keeps raw calls matching parsed client calls and
+// reindexes them into client-visible order.
 func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
 	filtered := make([]any, 0, len(parsed))
 	next := 0
