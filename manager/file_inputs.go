@@ -16,6 +16,27 @@ import (
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
+// FileConversionMode is one of the modes accepted by /v1/convert/file. The
+// empty string keeps the upstream default ("text").
+type FileConversionMode string
+
+const (
+	FileConversionModeText   FileConversionMode = "text"
+	FileConversionModeVision FileConversionMode = "vision"
+	FileConversionModeImages FileConversionMode = "images"
+	FileConversionModeRaw    FileConversionMode = "raw"
+	FileConversionModeVLM    FileConversionMode = "vlm"
+)
+
+func (m FileConversionMode) IsValid() bool {
+	switch m {
+	case "", FileConversionModeText, FileConversionModeVision,
+		FileConversionModeImages, FileConversionModeRaw, FileConversionModeVLM:
+		return true
+	}
+	return false
+}
+
 type FileConversionError struct {
 	StatusCode int
 	Message    string
@@ -25,43 +46,71 @@ func (e *FileConversionError) Error() string {
 	return e.Message
 }
 
+type ConvertedPage struct {
+	Page      int    `json:"page"`
+	Text      string `json:"text"`
+	Image     string `json:"image"`
+	IsScanned bool   `json:"is_scanned"`
+}
+
+type ConvertedFile struct {
+	MDContent string
+	Pages     []ConvertedPage
+}
+
 type docUploadResponse struct {
 	Document struct {
-		MDContent string `json:"md_content"`
+		MDContent string          `json:"md_content"`
+		Pages     []ConvertedPage `json:"pages"`
 	} `json:"document"`
 }
 
-func parseDocUploadMarkdown(respBody []byte) (string, error) {
+func parseDocUploadResponse(respBody []byte, mode FileConversionMode) (*ConvertedFile, error) {
 	var parsed docUploadResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "invalid document processing response",
 		}
 	}
 
-	if strings.TrimSpace(parsed.Document.MDContent) == "" {
-		return "", &FileConversionError{
+	out := &ConvertedFile{
+		MDContent: parsed.Document.MDContent,
+		Pages:     parsed.Document.Pages,
+	}
+
+	if mode == FileConversionModeImages {
+		if len(out.Pages) == 0 {
+			return nil, &FileConversionError{
+				StatusCode: http.StatusBadGateway,
+				Message:    "document processing returned no pages",
+			}
+		}
+		return out, nil
+	}
+
+	if strings.TrimSpace(out.MDContent) == "" {
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "document processing returned empty content",
 		}
 	}
-
-	return parsed.Document.MDContent, nil
+	return out, nil
 }
 
-// ConvertFileToMarkdown sends an uploaded file to the private doc-upload enclave
-// and returns the extracted markdown content.
-func (em *EnclaveManager) ConvertFileToMarkdown(
+// ConvertFile sends an uploaded file to the private doc-upload enclave with
+// the given mode and returns the parsed result.
+func (em *EnclaveManager) ConvertFile(
 	ctx context.Context,
 	authHeader string,
 	filename string,
 	contentType string,
 	data []byte,
-) (string, error) {
+	mode FileConversionMode,
+) (*ConvertedFile, error) {
 	model, found := em.GetModel("doc-upload")
 	if !found {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "document processing backend is not configured",
 		}
@@ -69,7 +118,7 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 
 	enclave := model.NextEnclave(nil)
 	if enclave == nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "document processing backend is unavailable",
 		}
@@ -85,38 +134,38 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 	}
 	part, err := writer.CreatePart(headers)
 	if err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusInternalServerError,
 			Message:    "failed to build document upload request",
 		}
 	}
 	if _, err := part.Write(data); err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusInternalServerError,
 			Message:    "failed to build document upload request",
 		}
 	}
 	if err := writer.WriteField("to_format", "md"); err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusInternalServerError,
 			Message:    "failed to build document upload request",
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusInternalServerError,
 			Message:    "failed to finalize document upload request",
 		}
 	}
 
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		"https://"+enclave.host+"/v1/convert/file",
-		bytes.NewReader(body.Bytes()),
-	)
+	url := "https://" + enclave.host + "/v1/convert/file"
+	if mode != "" {
+		url += "?mode=" + string(mode)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusInternalServerError,
 			Message:    "failed to create document upload request",
 		}
@@ -140,7 +189,7 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "document processing request failed",
 		}
@@ -149,7 +198,7 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,
 			Message:    "failed to read document processing response",
 		}
@@ -159,13 +208,13 @@ func (em *EnclaveManager) ConvertFileToMarkdown(
 		if message == "" {
 			message = "document processing failed"
 		}
-		return "", &FileConversionError{
+		return nil, &FileConversionError{
 			StatusCode: resp.StatusCode,
 			Message:    message,
 		}
 	}
 
-	return parseDocUploadMarkdown(respBody)
+	return parseDocUploadResponse(respBody, mode)
 }
 
 func escapeMultipartFilename(filename string) string {

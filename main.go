@@ -454,9 +454,9 @@ func main() {
 					rewritten := false
 					switch r.URL.Path {
 					case "/v1/responses":
-						rewritten, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"))
+						rewritten, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					case "/v1/chat/completions":
-						rewritten, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"))
+						rewritten, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					}
 					if err != nil {
 						var inputErr *fileInputError

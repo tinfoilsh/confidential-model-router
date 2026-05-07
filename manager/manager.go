@@ -40,6 +40,7 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
+	Multimodal        bool                     `json:"multimodal,omitempty"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
 	mu            sync.RWMutex
@@ -49,6 +50,7 @@ type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
 	initConfigURL        string
 	updateConfigURL      string
+	controlPlaneURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
 	requestTracker       *ratelimit.RequestTracker
@@ -422,6 +424,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		models:           &sync.Map{},
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
+		controlPlaneURL:  controlPlaneURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		requestTracker:   ratelimit.NewRequestTracker(),
@@ -503,6 +506,13 @@ func (em *EnclaveManager) sync() error {
 	config, err := config.Load(em.updateConfigURL, false)
 	if err != nil {
 		return fmt.Errorf("failed to fetch config: %v", err)
+	}
+
+	if err := em.refreshModelMetadata(context.Background()); err != nil {
+		log.Warnf("failed to refresh model metadata from control plane: %v", err)
+		em.stateMu.Lock()
+		em.errors = append(em.errors, fmt.Sprintf("model metadata refresh: %v", err))
+		em.stateMu.Unlock()
 	}
 
 	// Fetch hardware measurements
