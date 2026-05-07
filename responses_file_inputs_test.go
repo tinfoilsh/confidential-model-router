@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-type rewriteRunner func(context.Context, map[string]any, string, fileInputProcessor) (bool, error)
+type rewriteRunner func(context.Context, map[string]any, string, *rewriteContext) (bool, error)
 
 type rewriteTestCase struct {
 	name                string
@@ -17,8 +20,22 @@ type rewriteTestCase struct {
 	buildTextPart       func(text string) any
 	contentParts        func(body map[string]any) []any
 	expectedTextType    string
+	expectedImageType   string
 	expectedFileIDError string
 	expectedFieldName   string
+}
+
+func responsesImagePartURL(part any) string {
+	m, _ := part.(map[string]any)
+	url, _ := m["image_url"].(string)
+	return url
+}
+
+func chatImagePartURL(part any) string {
+	m, _ := part.(map[string]any)
+	inner, _ := m["image_url"].(map[string]any)
+	url, _ := inner["url"].(string)
+	return url
 }
 
 var rewriteTestCases = []rewriteTestCase{
@@ -59,6 +76,7 @@ var rewriteTestCases = []rewriteTestCase{
 			return body["input"].([]any)[0].(map[string]any)["content"].([]any)
 		},
 		expectedTextType:    "input_text",
+		expectedImageType:   "input_image",
 		expectedFileIDError: "Only input_file.file_data is supported on this endpoint.",
 		expectedFieldName:   "input_file.file_data",
 	},
@@ -103,9 +121,43 @@ var rewriteTestCases = []rewriteTestCase{
 			return body["messages"].([]any)[0].(map[string]any)["content"].([]any)
 		},
 		expectedTextType:    "text",
+		expectedImageType:   "image_url",
 		expectedFileIDError: "Only file.file_data is supported on this endpoint.",
 		expectedFieldName:   "file.file_data",
 	},
+}
+
+func newRC(visionCapable bool, process fileInputProcessor) *rewriteContext {
+	return &rewriteContext{
+		isMultimodal: func(string) bool { return visionCapable },
+		model:        "test-model",
+		process:      process,
+	}
+}
+
+func nopProcessor(t *testing.T) fileInputProcessor {
+	t.Helper()
+	return func(context.Context, string, string, string, []byte, manager.FileConversionMode) (*manager.ConvertedFile, error) {
+		t.Fatal("processor should not be called")
+		return nil, nil
+	}
+}
+
+func injectTinfoilMode(part map[string]any, value string) {
+	if file, ok := part["file"].(map[string]any); ok {
+		file[tinfoilModeFieldName] = value
+		return
+	}
+	part[tinfoilModeFieldName] = value
+}
+
+func tinfoilModeFieldLeaked(part map[string]any) bool {
+	if file, ok := part["file"].(map[string]any); ok {
+		_, ok := file[tinfoilModeFieldName]
+		return ok
+	}
+	_, ok := part[tinfoilModeFieldName]
+	return ok
 }
 
 func TestRewriteBase64FilesWithProcessorText(t *testing.T) {
@@ -117,15 +169,7 @@ func TestRewriteBase64FilesWithProcessorText(t *testing.T) {
 				tc.buildTextPart("Summarize it."),
 			)
 
-			rewritten, err := tc.run(
-				context.Background(),
-				body,
-				"Bearer test-key",
-				func(_ context.Context, _, _, _ string, _ []byte) (string, error) {
-					t.Fatal("processor should not be called for text/plain input")
-					return "", nil
-				},
-			)
+			rewritten, err := tc.run(context.Background(), body, "Bearer test-key", newRC(false, nopProcessor(t)))
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -146,15 +190,7 @@ func TestRewriteBase64FilesWithProcessorRejectsFileID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := tc.buildBody(tc.buildFileIDPart("file-123"))
 
-			_, err := tc.run(
-				context.Background(),
-				body,
-				"Bearer test-key",
-				func(_ context.Context, _, _, _ string, _ []byte) (string, error) {
-					t.Fatal("processor should not be called")
-					return "", nil
-				},
-			)
+			_, err := tc.run(context.Background(), body, "Bearer test-key", newRC(false, nopProcessor(t)))
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -212,15 +248,7 @@ func TestRewriteBase64FilesUsesContextSpecificDecodeErrors(t *testing.T) {
 				t.Run(test.name, func(t *testing.T) {
 					body := tc.buildBody(tc.buildFileDataPart("notes.txt", test.fileData))
 
-					_, err := tc.run(
-						context.Background(),
-						body,
-						"Bearer test-key",
-						func(_ context.Context, _, _, _ string, _ []byte) (string, error) {
-							t.Fatal("processor should not be called")
-							return "", nil
-						},
-					)
+					_, err := tc.run(context.Background(), body, "Bearer test-key", newRC(false, nopProcessor(t)))
 					if err == nil {
 						t.Fatal("expected an error")
 					}
@@ -242,27 +270,27 @@ func TestRewriteBase64FilesUsesProcessorForBinaryFiles(t *testing.T) {
 			)
 
 			called := false
-			rewritten, err := tc.run(
-				context.Background(),
-				body,
-				"Bearer test-key",
-				func(_ context.Context, authHeader, filename, contentType string, data []byte) (string, error) {
-					called = true
-					if authHeader != "Bearer test-key" {
-						t.Fatalf("expected auth header to be forwarded, got %q", authHeader)
-					}
-					if filename != "scan.pdf" {
-						t.Fatalf("expected scan.pdf, got %q", filename)
-					}
-					if contentType != "application/pdf" {
-						t.Fatalf("expected application/pdf, got %q", contentType)
-					}
-					if string(data) != "%PDF" {
-						t.Fatalf("unexpected payload: %q", string(data))
-					}
-					return "converted markdown", nil
-				},
-			)
+			rc := newRC(false, func(_ context.Context, authHeader, filename, contentType string, data []byte, mode manager.FileConversionMode) (*manager.ConvertedFile, error) {
+				called = true
+				if authHeader != "Bearer test-key" {
+					t.Fatalf("expected auth header to be forwarded, got %q", authHeader)
+				}
+				if filename != "scan.pdf" {
+					t.Fatalf("expected scan.pdf, got %q", filename)
+				}
+				if contentType != "application/pdf" {
+					t.Fatalf("expected application/pdf, got %q", contentType)
+				}
+				if string(data) != "%PDF" {
+					t.Fatalf("unexpected payload: %q", string(data))
+				}
+				if mode != manager.FileConversionModeText {
+					t.Fatalf("expected default text mode for non-multimodal model, got %q", mode)
+				}
+				return &manager.ConvertedFile{MDContent: "converted markdown"}, nil
+			})
+
+			rewritten, err := tc.run(context.Background(), body, "Bearer test-key", rc)
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -275,6 +303,127 @@ func TestRewriteBase64FilesUsesProcessorForBinaryFiles(t *testing.T) {
 
 			content := tc.contentParts(body)
 			assertTextPart(t, content[0], tc.expectedTextType, "[Attached file: scan.pdf]\n\nconverted markdown")
+		})
+	}
+}
+
+func TestRewriteBase64FilesHonorsTinfoilModeOverride(t *testing.T) {
+	for _, tc := range rewriteTestCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			part := tc.buildFileDataPart("scan.pdf", "data:application/pdf;base64,"+base64.StdEncoding.EncodeToString([]byte("%PDF"))).(map[string]any)
+			injectTinfoilMode(part, "vlm")
+			body := tc.buildBody(part)
+
+			seen := manager.FileConversionMode("")
+			rc := newRC(false, func(_ context.Context, _, _, _ string, _ []byte, mode manager.FileConversionMode) (*manager.ConvertedFile, error) {
+				seen = mode
+				return &manager.ConvertedFile{MDContent: "ocr text"}, nil
+			})
+
+			if _, err := tc.run(context.Background(), body, "Bearer test-key", rc); err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+			if seen != manager.FileConversionModeVLM {
+				t.Fatalf("expected vlm mode to reach processor, got %q", seen)
+			}
+			if tinfoilModeFieldLeaked(part) {
+				t.Fatal("tinfoil_mode leaked into outgoing body")
+			}
+		})
+	}
+}
+
+func TestRewriteBase64FilesRejectsImagesModeOnTextOnlyModel(t *testing.T) {
+	for _, tc := range rewriteTestCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			part := tc.buildFileDataPart("scan.pdf", "data:application/pdf;base64,"+base64.StdEncoding.EncodeToString([]byte("%PDF"))).(map[string]any)
+			injectTinfoilMode(part, "images")
+			body := tc.buildBody(part)
+
+			_, err := tc.run(context.Background(), body, "Bearer test-key", newRC(false, nopProcessor(t)))
+			if err == nil {
+				t.Fatal("expected images-on-text-only to error")
+			}
+			var inputErr *fileInputError
+			if !errors.As(err, &inputErr) {
+				t.Fatalf("expected fileInputError, got %T", err)
+			}
+			if inputErr.StatusCode != 400 {
+				t.Fatalf("expected status 400, got %d", inputErr.StatusCode)
+			}
+		})
+	}
+}
+
+func TestRewriteBase64FilesRejectsUnknownTinfoilMode(t *testing.T) {
+	for _, tc := range rewriteTestCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			part := tc.buildFileDataPart("scan.pdf", "data:application/pdf;base64,"+base64.StdEncoding.EncodeToString([]byte("%PDF"))).(map[string]any)
+			injectTinfoilMode(part, "supercharged")
+			body := tc.buildBody(part)
+
+			_, err := tc.run(context.Background(), body, "Bearer test-key", newRC(false, nopProcessor(t)))
+			if err == nil {
+				t.Fatal("expected unknown tinfoil_mode to error")
+			}
+			var inputErr *fileInputError
+			if !errors.As(err, &inputErr) {
+				t.Fatalf("expected fileInputError, got %T", err)
+			}
+			if inputErr.StatusCode != 400 {
+				t.Fatalf("expected status 400, got %d", inputErr.StatusCode)
+			}
+		})
+	}
+}
+
+func TestRewriteBase64FilesEmitsMultimodalContentForImagesMode(t *testing.T) {
+	for _, tc := range rewriteTestCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			part := tc.buildFileDataPart("doc.pdf", "data:application/pdf;base64,"+base64.StdEncoding.EncodeToString([]byte("%PDF"))).(map[string]any)
+			injectTinfoilMode(part, "images")
+			body := tc.buildBody(part)
+
+			rc := newRC(true, func(_ context.Context, _, _, _ string, _ []byte, mode manager.FileConversionMode) (*manager.ConvertedFile, error) {
+				if mode != manager.FileConversionModeImages {
+					t.Fatalf("expected images mode, got %q", mode)
+				}
+				return &manager.ConvertedFile{
+					Pages: []manager.ConvertedPage{
+						{Page: 1, Text: "page one text", Image: "AAA="},
+						{Page: 2, IsScanned: true, Image: "BBB="},
+					},
+				}, nil
+			})
+
+			if _, err := tc.run(context.Background(), body, "Bearer test-key", rc); err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+
+			parts := tc.contentParts(body)
+			if len(parts) != 5 {
+				t.Fatalf("expected file header + 2*(text+image) = 5 parts, got %d", len(parts))
+			}
+			assertTextPart(t, parts[0], tc.expectedTextType, "[Attached file: doc.pdf]")
+			assertTextPart(t, parts[1], tc.expectedTextType, "Page 1:\npage one text")
+			assertPartType(t, parts[2], tc.expectedImageType)
+			assertTextPart(t, parts[3], tc.expectedTextType, "Page 2 (scanned):")
+			assertPartType(t, parts[4], tc.expectedImageType)
+
+			urlGetter := responsesImagePartURL
+			if tc.name == "chat_completions" {
+				urlGetter = chatImagePartURL
+			}
+			if got := urlGetter(parts[2]); got != "data:image/png;base64,AAA=" {
+				t.Fatalf("page 1 image url = %q", got)
+			}
+			if got := urlGetter(parts[4]); got != "data:image/png;base64,BBB=" {
+				t.Fatalf("page 2 image url = %q", got)
+			}
 		})
 	}
 }

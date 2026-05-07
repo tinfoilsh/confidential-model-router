@@ -75,7 +75,80 @@ func TestSanitizeMultipartContentType(t *testing.T) {
 	}
 }
 
-func TestParseDocUploadMarkdown(t *testing.T) {
+func TestParseDocUploadResponseImagesMode(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		expectedMD    string
+		expectedPages int
+		expectedError string
+	}{
+		{
+			name:          "valid_with_text_and_pages",
+			body:          `{"document":{"md_content":"page text","pages":[{"page":1,"image":"data:image/png;base64,AAA","is_scanned":false}]}}`,
+			expectedMD:    "page text",
+			expectedPages: 1,
+		},
+		{
+			name:          "valid_with_pages_only",
+			body:          `{"document":{"md_content":"","pages":[{"page":1,"image":"data:image/png;base64,AAA","is_scanned":true}]}}`,
+			expectedMD:    "",
+			expectedPages: 1,
+		},
+		{
+			name:          "missing_pages_in_images_mode",
+			body:          `{"document":{"md_content":"only text"}}`,
+			expectedError: "document processing returned no pages",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDocUploadResponse([]byte(tt.body), FileConversionModeImages)
+			if tt.expectedError != "" {
+				if err == nil || err.Error() != tt.expectedError {
+					t.Fatalf("expected %q, got %v", tt.expectedError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.MDContent != tt.expectedMD {
+				t.Fatalf("MDContent=%q, want %q", got.MDContent, tt.expectedMD)
+			}
+			if len(got.Pages) != tt.expectedPages {
+				t.Fatalf("len(Pages)=%d, want %d", len(got.Pages), tt.expectedPages)
+			}
+		})
+	}
+}
+
+func TestFileConversionModeIsValid(t *testing.T) {
+	for _, mode := range []FileConversionMode{
+		"",
+		FileConversionModeText,
+		FileConversionModeVision,
+		FileConversionModeImages,
+		FileConversionModeRaw,
+		FileConversionModeVLM,
+	} {
+		if !mode.IsValid() {
+			t.Errorf("expected %q to be a valid mode", mode)
+		}
+	}
+	for _, mode := range []FileConversionMode{
+		"text-mode",
+		"AUTO",
+		"unknown",
+	} {
+		if mode.IsValid() {
+			t.Errorf("expected %q to be invalid", mode)
+		}
+	}
+}
+
+func TestParseDocUploadResponseTextMode(t *testing.T) {
 	tests := []struct {
 		name          string
 		body          string
@@ -110,13 +183,13 @@ func TestParseDocUploadMarkdown(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseDocUploadMarkdown([]byte(tt.body))
+			got, err := parseDocUploadResponse([]byte(tt.body), FileConversionModeText)
 			if tt.expectedError == "" {
 				if err != nil {
-					t.Fatalf("parseDocUploadMarkdown returned unexpected error: %v", err)
+					t.Fatalf("parseDocUploadResponse returned unexpected error: %v", err)
 				}
-				if got != tt.expected {
-					t.Fatalf("parseDocUploadMarkdown() = %q, want %q", got, tt.expected)
+				if got.MDContent != tt.expected {
+					t.Fatalf("MDContent = %q, want %q", got.MDContent, tt.expected)
 				}
 				return
 			}

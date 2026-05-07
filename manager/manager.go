@@ -47,8 +47,10 @@ type Model struct {
 
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
+	multimodalModels     sync.Map  // sticky set of multimodal chat model names
 	initConfigURL        string
 	updateConfigURL      string
+	controlPlaneURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
 	requestTracker       *ratelimit.RequestTracker
@@ -422,6 +424,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		models:           &sync.Map{},
 		initConfigURL:    initConfigURL,
 		updateConfigURL:  updateConfigURL,
+		controlPlaneURL:  controlPlaneURL,
 		sigstoreClient:   sigstoreClient,
 		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		requestTracker:   ratelimit.NewRequestTracker(),
@@ -504,6 +507,8 @@ func (em *EnclaveManager) sync() error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch config: %v", err)
 	}
+
+	em.refreshMultimodalModels()
 
 	// Fetch hardware measurements
 	hwMeasurements, err := em.sigstoreClient.LatestHardwareMeasurements()
