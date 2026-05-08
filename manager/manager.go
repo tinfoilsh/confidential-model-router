@@ -53,6 +53,7 @@ type EnclaveManager struct {
 	controlPlaneURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
+	usageContextSecret   string
 	requestTracker       *ratelimit.RequestTracker
 	refreshInterval      time.Duration
 	stateMu              sync.Mutex
@@ -99,6 +100,13 @@ func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
 	if em.billingCollector != nil {
 		em.billingCollector.AddEvent(event)
 	}
+}
+
+// UsageContextSecret returns the HMAC secret used to sign usage-context
+// headers attached to outbound MCP tool calls. The empty string means no
+// signing should be attempted.
+func (em *EnclaveManager) UsageContextSecret() string {
+	return em.usageContextSecret
 }
 
 // GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
@@ -399,7 +407,7 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
 	}
@@ -421,14 +429,15 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	}
 
 	em := &EnclaveManager{
-		models:           &sync.Map{},
-		initConfigURL:    initConfigURL,
-		updateConfigURL:  updateConfigURL,
-		controlPlaneURL:  controlPlaneURL,
-		sigstoreClient:   sigstoreClient,
-		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
-		requestTracker:   ratelimit.NewRequestTracker(),
-		refreshInterval:  refreshInterval,
+		models:             &sync.Map{},
+		initConfigURL:      initConfigURL,
+		updateConfigURL:    updateConfigURL,
+		controlPlaneURL:    controlPlaneURL,
+		sigstoreClient:     sigstoreClient,
+		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		usageContextSecret: usageContextSecret,
+		requestTracker:     ratelimit.NewRequestTracker(),
+		refreshInterval:    refreshInterval,
 	}
 
 	for modelName, modelConfig := range cfg.Models {
