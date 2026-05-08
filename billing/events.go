@@ -79,6 +79,12 @@ func (c *Collector) AddEvent(event Event) {
 	}
 
 	if c.reporter != nil {
+		inputTokens := int64(event.PromptTokens)
+		outputTokens := int64(event.CompletionTokens)
+		if inputTokens == 0 && outputTokens == 0 && event.TotalTokens > 0 {
+			inputTokens = int64(event.TotalTokens)
+		}
+
 		c.reporter.AddEvent(contract.Event{
 			RequestID:  event.RequestID,
 			OccurredAt: event.Timestamp,
@@ -89,8 +95,8 @@ func (c *Collector) AddEvent(event Event) {
 			},
 			CustomerRequests: 1,
 			Meters: []contract.Meter{
-				{Name: contract.MeterInputTokens, Quantity: int64(event.PromptTokens)},
-				{Name: contract.MeterOutputTokens, Quantity: int64(event.CompletionTokens)},
+				{Name: contract.MeterInputTokens, Quantity: inputTokens},
+				{Name: contract.MeterOutputTokens, Quantity: outputTokens},
 			},
 			Attributes: map[string]string{
 				"model":     event.Model,
