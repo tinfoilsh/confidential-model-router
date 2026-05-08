@@ -9,11 +9,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
+	"github.com/tinfoilsh/usage-reporting-go/contract"
+	"github.com/tinfoilsh/usage-reporting-go/usagecontext"
 )
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -889,5 +892,61 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 	}
 	if stringValue(choice["finish_reason"]) != "tool_calls" {
 		t.Fatalf("expected finish_reason normalized to tool_calls, got %#v", choice["finish_reason"])
+	}
+}
+
+// TestToolSessionHeadersSignsUsageContext asserts that outbound MCP tool
+// session headers carry a usage-context signed with BillCustomerRequest=false
+// and ParentService=router, so downstream tool services do not re-bill the
+// customer request the router has already counted.
+func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
+	const secret = "tool-session-secret"
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	headers, err := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{}, secret, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("build tool session headers: %v", err)
+	}
+
+	got, ok, err := usagecontext.FromHeaders(headers, secret, now, time.Minute)
+	if err != nil {
+		t.Fatalf("parse usage context: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected signed usage context to be present")
+	}
+	if got.RootRequestID != "req-1" {
+		t.Fatalf("root request id mismatch: got %q want req-1", got.RootRequestID)
+	}
+	if got.ParentService != contract.ServiceRouter {
+		t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, contract.ServiceRouter)
+	}
+	if got.BillCustomerRequest {
+		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=false")
+	}
+}
+
+// TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty guards against the
+// router silently signing tool sessions with an empty secret if startup
+// validation is bypassed in tests; the helper must skip signing rather than
+// produce a zero-secret HMAC.
+func TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty(t *testing.T) {
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	headers, err := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{}, "", func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("build tool session headers: %v", err)
+	}
+
+	if _, ok, err := usagecontext.FromHeaders(headers, "irrelevant", now, time.Minute); err != nil || ok {
+		t.Fatalf("expected no usage context when secret is empty (ok=%v err=%v)", ok, err)
 	}
 }
