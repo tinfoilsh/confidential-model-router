@@ -54,17 +54,14 @@ func maskAPIKey(apiKey string) string {
 func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector {
 	endpoint := ""
 	if controlPlaneURL != "" {
-		endpoint = strings.TrimRight(controlPlaneURL, "/") + "/api/internal/usage-reports"
+		endpoint = strings.TrimRight(controlPlaneURL, "/") + contract.IngestionPath
 	}
 
 	c := &Collector{
 		reporter: usageclient.New(usageclient.Config{
-			Endpoint: endpoint,
-			Reporter: contract.Reporter{
-				ID:      reporterID,
-				Service: "router",
-			},
-			Secret: reporterSecret,
+			Endpoint:   endpoint,
+			ReporterID: reporterID,
+			Secret:     reporterSecret,
 		}),
 	}
 	return c
@@ -89,13 +86,13 @@ func (c *Collector) AddEvent(event Event) {
 			OccurredAt: event.Timestamp,
 			APIKey:     event.APIKey,
 			Operation: contract.Operation{
-				Service: "router",
-				Name:    "model_request",
+				Service: contract.ServiceRouter,
+				Name:    contract.OperationRouterModelRequest,
 			},
+			CustomerRequests: 1,
 			Meters: []contract.Meter{
-				{Name: "input_tokens", Quantity: int64(event.PromptTokens)},
-				{Name: "output_tokens", Quantity: int64(event.CompletionTokens)},
-				{Name: "requests", Quantity: 1},
+				{Name: contract.MeterInputTokens, Quantity: int64(event.PromptTokens)},
+				{Name: contract.MeterOutputTokens, Quantity: int64(event.CompletionTokens)},
 			},
 			Attributes: map[string]string{
 				"model":     event.Model,
@@ -116,7 +113,7 @@ func (c *Collector) AddEvent(event Event) {
 func (c *Collector) Stop() {
 	c.stopOnce.Do(func() {
 		if c.reporter != nil {
-			_ = c.reporter.Stop(context.Background())
+			c.reporter.Stop(context.Background())
 		}
 	})
 }
