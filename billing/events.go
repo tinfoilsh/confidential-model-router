@@ -47,10 +47,8 @@ func maskAPIKey(apiKey string) string {
 
 // NewCollector creates a new billing event collector.
 //
-// Events are delivered to the signed /api/internal/usage-reports ingestion
-// endpoint. The legacy [DEPRECATED] /api/shim/collect-shadow path must never
-// be used from the router: it is unauthenticated and scheduled for removal
-// once tfshim is migrated off it.
+// Events are delivered to the signed usage-reports ingestion endpoint
+// using the shared usage-reporting client.
 func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector {
 	endpoint := ""
 	if controlPlaneURL != "" {
