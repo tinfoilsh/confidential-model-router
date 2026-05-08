@@ -12,6 +12,9 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
+// Tests treat search as router-owned, matching production.
+var testOwnedTools = map[string]struct{}{"search": {}}
+
 // newTestChatStreamer builds a chatStreamer backed by an httptest recorder,
 // pre-flipped into "headers written" state so tests can exercise chunk
 // emission without driving a real upstream request.
@@ -32,6 +35,7 @@ func newTestChatStreamer(t *testing.T) (*chatStreamer, *httptest.ResponseRecorde
 		clientRequestedUsage: true,
 		id:                   "chatcmpl_test",
 		created:              1700000000,
+		ownedTools:           testOwnedTools,
 	}
 	streamer.emitter = citations.NewEmitter(streamer.citations)
 	return streamer, rec
@@ -81,6 +85,132 @@ func TestChatStreamerPumpEmitsContentAndToolCalls(t *testing.T) {
 	}
 	if usage["prompt_tokens"].(int) != 3 || usage["completion_tokens"].(int) != 2 {
 		t.Fatalf("unexpected aggregated usage: %#v", usage)
+	}
+}
+
+func TestChatStreamerPumpForwardsClientToolCallDeltasLive(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"go\"}"}},{"index":1,"id":"call_widget","type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\",\"source\":{\"type\":\"markdown\",\"markdown\":\"# Hi\"}}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	reader := newSSEReader(strings.NewReader(upstream))
+
+	result, err := streamer.pumpUpstream(reader)
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	if len(result.toolCalls) != 2 || result.toolCalls[0].name != "search" || result.toolCalls[1].name != "render_artifact_preview" {
+		t.Fatalf("unexpected buffered tool calls: %#v", result.toolCalls)
+	}
+	forwarder := streamer.getClientToolCallForwarder()
+	if !forwarder.streamedIDs["call_widget"] {
+		t.Fatalf("expected call_widget to be marked streamed live")
+	}
+	got, ok := forwarder.clientIndexByUpstream[1]
+	if !ok {
+		t.Fatalf("expected upstream widget index 1 to be recorded in clientIndexByUpstream")
+	}
+	if got != 0 {
+		t.Fatalf("expected upstream widget index 1 to map to client index 0, got %d", got)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, `"id":"call_search"`) {
+		t.Fatalf("router-owned search call should not be forwarded, got %s", body)
+	}
+	if !strings.Contains(body, `"id":"call_widget"`) {
+		t.Fatalf("expected live tool_call delta carrying call id, got %s", body)
+	}
+	if !strings.Contains(body, `"name":"render_artifact_preview"`) {
+		t.Fatalf("expected live tool_call delta carrying tool name, got %s", body)
+	}
+	if !strings.Contains(body, `"arguments":"{\"title\":\"Demo"`) {
+		t.Fatalf("expected first live argument fragment, got %s", body)
+	}
+	if !strings.Contains(body, `\"source\":{\"type\":\"markdown\"`) {
+		t.Fatalf("expected continued argument fragment, got %s", body)
+	}
+}
+
+func TestChatStreamerPumpResetsForwarderStateBetweenIterations(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+
+	iter1 := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"go\"}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(iter1))); err != nil {
+		t.Fatalf("iter1 pumpUpstream returned error: %v", err)
+	}
+
+	rec.Body.Reset()
+
+	iter2 := strings.Join([]string{
+		`data: {"id":"up_2","created":1700000002,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_widget","type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo\"}"}}]}}]}`,
+		`data: {"id":"up_2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(iter2))); err != nil {
+		t.Fatalf("iter2 pumpUpstream returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"id":"call_widget"`) {
+		t.Fatalf("expected widget delta to be forwarded live in iter2, got %s", body)
+	}
+	if !strings.Contains(body, `"name":"render_artifact_preview"`) {
+		t.Fatalf("expected widget tool name to be forwarded live in iter2, got %s", body)
+	}
+	forwarder := streamer.getClientToolCallForwarder()
+	if !forwarder.streamedIDs["call_widget"] {
+		t.Fatalf("expected widget id to be tracked across iterations")
+	}
+	if forwarder.streamedIDs["call_search"] {
+		t.Fatalf("router-owned search must never be marked as streamed: %v", forwarder.streamedIDs)
+	}
+}
+
+func TestChatStreamerFinalizeSkipsAlreadyStreamedClientToolCalls(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.getClientToolCallForwarder().streamedIDs["call_widget"] = true
+	result := chatIterationResult{
+		finishReason: "tool_calls",
+		rawToolCalls: []any{
+			map[string]any{
+				"id":   "call_widget",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "render_artifact_preview",
+					"arguments": `{"title":"Demo"}`,
+				},
+			},
+		},
+	}
+	clientToolCalls := []toolCall{
+		{id: "call_widget", name: "render_artifact_preview", arguments: map[string]any{"title": "Demo"}},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if err := streamer.finalize(req, nil, "gpt-oss-120b", result, clientToolCalls); err != nil {
+		t.Fatalf("finalize returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, `"name":"render_artifact_preview"`) {
+		t.Fatalf("finalize must not re-emit tool_calls already streamed live, got %s", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("expected finish_reason tool_calls, got %s", body)
 	}
 }
 
