@@ -6,58 +6,15 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
-	"github.com/tinfoilsh/usage-reporting-go/usagecontext"
 )
-
-func TestToolSessionHeadersIncludeSignedUsageContext(t *testing.T) {
-	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	req.Header.Set("Authorization", "Bearer tk_test")
-
-	headers, err := toolSessionHeaders(req, "request-1", "gpt-oss-120b", map[string]any{"stream": true}, safetyOptIns{}, "secret", func() time.Time {
-		return now
-	})
-	if err != nil {
-		t.Fatalf("build tool session headers: %v", err)
-	}
-	if got := headers.Get(toolcontext.HeaderRequestID); got != "request-1" {
-		t.Fatalf("request id header mismatch: got %q want %q", got, "request-1")
-	}
-	if got := headers.Get(toolcontext.HeaderStreaming); got != "true" {
-		t.Fatalf("streaming header mismatch: got %q want true", got)
-	}
-	if got := headers.Get("Authorization"); got != "Bearer tk_test" {
-		t.Fatalf("authorization header mismatch: got %q", got)
-	}
-
-	ctx, ok, err := usagecontext.FromHeaders(headers, "secret", now, time.Minute)
-	if err != nil {
-		t.Fatalf("verify usage context headers: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected usage context headers to be present")
-	}
-	if ctx.RootRequestID != "request-1" {
-		t.Fatalf("root request id mismatch: got %q want request-1", ctx.RootRequestID)
-	}
-	if ctx.ParentService != toolRuntimeServiceName {
-		t.Fatalf("parent service mismatch: got %q want %q", ctx.ParentService, toolRuntimeServiceName)
-	}
-	if ctx.CustomerRequestCount == nil || *ctx.CustomerRequestCount != 0 {
-		t.Fatalf("customer request count mismatch: got %+v want pointer to 0", ctx.CustomerRequestCount)
-	}
-}
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
 	replaced := replaceRouterOwnedResponsesTools([]any{

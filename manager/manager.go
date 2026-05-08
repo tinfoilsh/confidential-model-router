@@ -53,7 +53,6 @@ type EnclaveManager struct {
 	controlPlaneURL      string
 	sigstoreClient       *sigstore.Client
 	billingCollector     *billing.Collector
-	usageReporterSecret  string
 	requestTracker       *ratelimit.RequestTracker
 	refreshInterval      time.Duration
 	stateMu              sync.Mutex
@@ -100,10 +99,6 @@ func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
 	if em.billingCollector != nil {
 		em.billingCollector.AddEvent(event)
 	}
-}
-
-func (em *EnclaveManager) UsageReporterSecret() string {
-	return em.usageReporterSecret
 }
 
 // GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
@@ -426,15 +421,14 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	}
 
 	em := &EnclaveManager{
-		models:              &sync.Map{},
-		initConfigURL:       initConfigURL,
-		updateConfigURL:     updateConfigURL,
-		controlPlaneURL:     controlPlaneURL,
-		sigstoreClient:      sigstoreClient,
-		billingCollector:    billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
-		usageReporterSecret: usageReporterSecret,
-		requestTracker:      ratelimit.NewRequestTracker(),
-		refreshInterval:     refreshInterval,
+		models:           &sync.Map{},
+		initConfigURL:    initConfigURL,
+		updateConfigURL:  updateConfigURL,
+		controlPlaneURL:  controlPlaneURL,
+		sigstoreClient:   sigstoreClient,
+		billingCollector: billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		requestTracker:   ratelimit.NewRequestTracker(),
+		refreshInterval:  refreshInterval,
 	}
 
 	for modelName, modelConfig := range cfg.Models {
