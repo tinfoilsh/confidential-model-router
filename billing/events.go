@@ -97,9 +97,6 @@ func (c *Collector) AddEvent(event Event) {
 				{Name: "output_tokens", Quantity: int64(event.CompletionTokens)},
 				{Name: "requests", Quantity: 1},
 			},
-			Counters: []contract.Counter{
-				{Name: contract.CounterCustomerRequests, Quantity: 1},
-			},
 			Attributes: map[string]string{
 				"model":     event.Model,
 				"route":     event.RequestPath,
