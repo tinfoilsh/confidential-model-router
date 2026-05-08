@@ -92,3 +92,55 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 		t.Errorf("streaming attribute mismatch: got %q", got.Attributes["streaming"])
 	}
 }
+
+func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
+	bodies := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		bodies <- buf
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := NewCollector(server.URL, "router-test", "test-secret")
+	defer c.Stop()
+
+	c.AddEvent(Event{
+		Timestamp:   time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
+		Model:       "gpt-oss-120b",
+		TotalTokens: 18,
+		RequestID:   "req-1",
+		APIKey:      "tk_test",
+	})
+
+	c.reporter.Flush(context.Background())
+
+	var body []byte
+	select {
+	case body = <-bodies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for billing event delivery")
+	}
+
+	var batch contract.Batch
+	if err := json.Unmarshal(body, &batch); err != nil {
+		t.Fatalf("decode batch: %v", err)
+	}
+	if len(batch.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(batch.Events))
+	}
+
+	meters := make(map[string]int64)
+	for _, m := range batch.Events[0].Meters {
+		meters[m.Name] = m.Quantity
+	}
+	if meters[contract.MeterInputTokens] != 18 {
+		t.Errorf("input_tokens mismatch: got %d want 18", meters[contract.MeterInputTokens])
+	}
+	if meters[contract.MeterOutputTokens] != 0 {
+		t.Errorf("output_tokens mismatch: got %d want 0", meters[contract.MeterOutputTokens])
+	}
+}
