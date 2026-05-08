@@ -18,6 +18,8 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+	"github.com/tinfoilsh/usage-reporting-go/contract"
+	"github.com/tinfoilsh/usage-reporting-go/usagecontext"
 )
 
 // ---------------------------------------------------------------------------
@@ -190,6 +192,28 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 		requestID = uuid.NewString()
 	}
 
+	headers, err := toolSessionHeaders(r, requestID, modelName, body, safety, em.UsageContextSecret(), time.Now)
+	if err != nil {
+		return nil, err
+	}
+	httpClient.Transport = &headerRoundTripper{
+		base:    httpClient.Transport,
+		headers: headers,
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "router-tool-runtime", Version: "v1"}, nil)
+	return client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   endpoint,
+		HTTPClient: httpClient,
+	}, nil)
+}
+
+// toolSessionHeaders builds the per-request HTTP headers attached to an
+// outbound MCP tool session. When usageContextSecret is set, it also signs a
+// usage-context header carrying BillCustomerRequest=false so the downstream
+// tool service treats the call as part of the router's already-counted
+// customer request and does not double-bill it.
+func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[string]any, safety safetyOptIns, usageContextSecret string, now func() time.Time) (http.Header, error) {
 	headers := make(http.Header)
 	headers.Set(toolcontext.HeaderRequestID, requestID)
 	headers.Set(toolcontext.HeaderModel, modelName)
@@ -204,16 +228,17 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
 	}
-	httpClient.Transport = &headerRoundTripper{
-		base:    httpClient.Transport,
-		headers: headers,
+	if usageContextSecret != "" {
+		if err := usagecontext.SetHeaders(headers, usagecontext.Context{
+			RootRequestID:       requestID,
+			ParentService:       contract.ServiceRouter,
+			BillCustomerRequest: false,
+			IssuedAt:            now().UTC(),
+		}, usageContextSecret); err != nil {
+			return nil, fmt.Errorf("sign tool usage context: %w", err)
+		}
 	}
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "router-tool-runtime", Version: "v1"}, nil)
-	return client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:   endpoint,
-		HTTPClient: httpClient,
-	}, nil)
+	return headers, nil
 }
 
 // ---------------------------------------------------------------------------
