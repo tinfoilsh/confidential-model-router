@@ -79,6 +79,7 @@ DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
 UPDATE_CONFIG_URL=/tmp/model-router-local.yml \
 USAGE_REPORTER_SECRET=test-secret \
+USAGE_CONTEXT_SECRET=test-context-secret \
 go run -tags toolruntime_debug .
 ```
 

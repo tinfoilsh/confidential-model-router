@@ -13,6 +13,7 @@ containers:
       - CONTROL_PLANE_URL: "https://api.tinfoil.sh"
     secrets:
       - USAGE_REPORTER_SECRET
+      - USAGE_CONTEXT_SECRET
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s
