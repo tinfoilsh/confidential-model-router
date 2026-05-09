@@ -906,6 +906,7 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer tk_test")
 
 	headers, err := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{}, secret, func() time.Time { return now })
 	if err != nil {
@@ -922,8 +923,17 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	if got.RootRequestID != "req-1" {
 		t.Fatalf("root request id mismatch: got %q want req-1", got.RootRequestID)
 	}
+	if got.ContextID != "req-1" {
+		t.Fatalf("context id mismatch: got %q want req-1", got.ContextID)
+	}
 	if got.ParentService != contract.ServiceRouter {
 		t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, contract.ServiceRouter)
+	}
+	if !usagecontext.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
+		t.Fatalf("api key hash does not match forwarded authorization")
+	}
+	if got.Depth != 1 {
+		t.Fatalf("depth mismatch: got %d want 1", got.Depth)
 	}
 	if got.BillCustomerRequest {
 		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=false")
