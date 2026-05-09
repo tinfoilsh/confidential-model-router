@@ -225,13 +225,20 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 	if safety.injection != nil {
 		headers.Set(toolcontext.HeaderInjectionCheck, strconv.FormatBool(*safety.injection))
 	}
+	apiKey := ""
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
+		if strings.HasPrefix(auth, "Bearer ") {
+			apiKey = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		}
 	}
 	if usageContextSecret != "" {
 		if err := usagecontext.SetHeaders(headers, usagecontext.Context{
+			ContextID:           requestID,
 			RootRequestID:       requestID,
 			ParentService:       contract.ServiceRouter,
+			APIKeyHash:          usagecontext.HashAPIKey(apiKey),
+			Depth:               1,
 			BillCustomerRequest: false,
 			IssuedAt:            now().UTC(),
 		}, usageContextSecret); err != nil {
