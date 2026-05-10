@@ -77,6 +77,11 @@ models:
     repo: tinfoilsh/confidential-kimi-k2-6
     enclaves:
       - kimi-k2-6-inf10.tinfoil.containers.tinfoil.dev
+    rate_limit:
+      max_requests_per_minute: 4
+    overload:
+      max_requests_waiting: 16
+      retry_after_minutes: 1
 
   websearch:
     repo: tinfoilsh/confidential-websearch
