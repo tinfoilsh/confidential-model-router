@@ -323,8 +323,26 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			}
 			if int64(len(bodyBytes)) > maxUsageMetricsBodyBytes {
 				log.WithField("max_bytes", maxUsageMetricsBodyBytes).
-					Warn("Usage metrics extraction skipped: response body exceeds limit")
-				resp.Body = withPrefixedBody(bodyBytes, resp.Body)
+					Info("Usage metrics extraction using trailer for oversized response body")
+				addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
+				if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+					wrapper.EnableTrailer()
+				}
+				resp.Header.Del("Content-Length")
+				resp.ContentLength = -1
+				resp.Body = newStreamingJSONUsageReadCloser(withPrefixedBody(bodyBytes, resp.Body), func(usage *tokencount.Usage) {
+					usageHandler(usage)
+					if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+						wrapper.SetUsage(usage)
+					}
+				})
+				if billingCollector != nil && apiKey != "" {
+					resp.Body = &billingCloser{
+						ReadCloser:    resp.Body,
+						handlerCalled: &handlerCalled,
+						emitEvent:     emitZeroTokenEvent,
+					}
+				}
 				return nil
 			}
 			resp.Body.Close()

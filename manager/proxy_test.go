@@ -2,15 +2,18 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/usage-reporting-go/contract"
 )
 
 func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
@@ -85,6 +88,83 @@ func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
 	want := "prompt=69,completion=20,total=89"
 	if got != want {
 		t.Fatalf("usage header = %q, want %q", got, want)
+	}
+}
+
+func TestProxyUsageMetrics_OversizedResponseExtractsUsageTrailer(t *testing.T) {
+	batches := make(chan contract.Batch, 1)
+	usageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var batch contract.Batch
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Errorf("decode usage batch: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		batches <- batch
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer usageServer.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", int(maxUsageMetricsBodyBytes)+1)))
+		_, _ = w.Write([]byte(`","usage":{"prompt_tokens":123,"completion_tokens":45,"total_tokens":168}}`))
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	collector := billing.NewCollector(usageServer.URL, "router-test", "test-secret")
+	defer collector.Stop()
+
+	proxy := newProxy(backendURL.Host, "", "doc-upload", collector, newCircuitBreaker())
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = backendURL.Scheme
+		req.URL.Host = backendURL.Host
+	}
+	proxy.Transport = http.DefaultTransport
+
+	req := httptest.NewRequest("POST", "/v1/convert/file", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	rec := httptest.NewRecorder()
+	wrapper := &usageMetricsWriter{ResponseWriter: rec}
+	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
+	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
+	if wrapper.TrailerEnabled() {
+		wrapper.WriteTrailer()
+	}
+
+	result := rec.Result()
+	if got, want := result.Trailer.Get(UsageMetricsResponseHeader), "prompt=123,completion=45,total=168"; got != want {
+		t.Fatalf("usage trailer = %q, want %q", got, want)
+	}
+
+	select {
+	case batch := <-batches:
+		if len(batch.Events) != 1 {
+			t.Fatalf("expected one billing event, got %d", len(batch.Events))
+		}
+		event := batch.Events[0]
+		if event.CustomerRequests != 1 {
+			t.Fatalf("customer requests mismatch: got %d want 1", event.CustomerRequests)
+		}
+		if len(event.Meters) != 2 {
+			t.Fatalf("expected input/output token meters, got %#v", event.Meters)
+		}
+		if event.Meters[0].Quantity != 123 {
+			t.Fatalf("input token meter mismatch: got %d want 123", event.Meters[0].Quantity)
+		}
+		if event.Meters[1].Quantity != 45 {
+			t.Fatalf("output token meter mismatch: got %d want 45", event.Meters[1].Quantity)
+		}
+		if event.Attributes["model"] != "doc-upload" {
+			t.Fatalf("model attribute mismatch: got %q want doc-upload", event.Attributes["model"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for billing event")
 	}
 }
 
