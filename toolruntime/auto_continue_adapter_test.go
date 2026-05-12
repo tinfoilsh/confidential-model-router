@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -255,5 +256,103 @@ func TestResponsesAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
 	first := output[0].(map[string]any)
 	if stringValue(first["name"]) != "render_stat_cards" {
 		t.Fatalf("expected auto-continue function_call first, got %#v", first)
+	}
+}
+
+func TestChatAdapterMixedTurnCanonicalisesAutoContinueCalls(t *testing.T) {
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}
+	response := &upstreamJSONResponse{body: map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []any{
+						map[string]any{
+							"id":   "call_widget",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "render_stat_cards",
+								"arguments": `{"stats":"[{\"label\":\"a\",\"value\":1}]"}`,
+							},
+						},
+						map[string]any{
+							"id":   "call_external",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "get_order",
+								"arguments": `{"id":"123"}`,
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		},
+	}}
+	choice := response.body["choices"].([]any)[0].(map[string]any)
+	state := choice["message"]
+	items := adapter.autoContinueResponseItems(state, []toolCall{{id: "call_widget", name: "render_stat_cards"}})
+
+	adapter.stripRouterToolCallsFromResponse(response)
+	adapter.attachAutoContinueResponseItems(response, items)
+
+	message := choice["message"].(map[string]any)
+	calls := message["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("expected canonicalized render call plus external call, got %#v", calls)
+	}
+	widgetFn := calls[0].(map[string]any)["function"].(map[string]any)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stringValue(widgetFn["arguments"])), &parsed); err != nil {
+		t.Fatalf("canonicalized arguments are invalid JSON: %v", err)
+	}
+	if _, ok := parsed["stats"].([]any); !ok {
+		t.Fatalf("stats should be a native array, got %T", parsed["stats"])
+	}
+	externalFn := calls[1].(map[string]any)["function"].(map[string]any)
+	if stringValue(externalFn["name"]) != "get_order" {
+		t.Fatalf("expected external call to remain second, got %#v", externalFn)
+	}
+}
+
+func TestResponsesAdapterMixedTurnCanonicalisesAutoContinueCalls(t *testing.T) {
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter.autoContinueTools = map[string]struct{}{"render_chart": {}}
+	state := []any{
+		map[string]any{
+			"id":        "fc_widget",
+			"type":      "function_call",
+			"name":      "render_chart",
+			"call_id":   "call_widget",
+			"arguments": `{"series":"[{\"label\":\"Q1\",\"value\":10}]"}`,
+		},
+		map[string]any{
+			"id":        "fc_external",
+			"type":      "function_call",
+			"name":      "get_order",
+			"call_id":   "call_external",
+			"arguments": `{"id":"123"}`,
+		},
+	}
+	response := &upstreamJSONResponse{body: map[string]any{"output": append([]any{}, state...)}}
+	items := adapter.autoContinueResponseItems(state, []toolCall{{id: "call_widget", name: "render_chart"}})
+
+	adapter.stripRouterToolCallsFromResponse(response)
+	adapter.attachAutoContinueResponseItems(response, items)
+
+	output := response.body["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("expected canonicalized render item plus external item, got %#v", output)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stringValue(output[0].(map[string]any)["arguments"])), &parsed); err != nil {
+		t.Fatalf("canonicalized arguments are invalid JSON: %v", err)
+	}
+	if _, ok := parsed["series"].([]any); !ok {
+		t.Fatalf("series should be a native array, got %T", parsed["series"])
+	}
+	if stringValue(output[1].(map[string]any)["name"]) != "get_order" {
+		t.Fatalf("expected external item to remain second, got %#v", output[1])
 	}
 }

@@ -1,5 +1,12 @@
 package toolruntime
 
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+)
+
 // Auto-continue client tools.
 //
 // The OpenAI tool-call protocol was designed for *function* tools — ones
@@ -174,6 +181,119 @@ func extractAndStripAutoContinueResponsesTools(rawTools any) map[string]struct{}
 		return nil
 	}
 	return out
+}
+
+// canonicalizeAutoContinueArguments normalises a tool-call `arguments`
+// payload before the router carries it back to the client. Some upstream
+// providers (notably DeepSeek-V4-Pro on non-streaming responses) emit
+// nested arrays and objects as JSON-encoded strings, e.g.
+// `{"stats":"[{\"label\":\"a\"}]"}` instead of `{"stats":[{"label":"a"}]}`.
+// Client widget schemas reject the stringified shape, which surfaces to
+// the user as "couldn't display this widget".
+//
+// vLLM's `--enable-auto-tool-choice` path does not run guided decoding
+// over function arguments, so OpenAI-style `strict: true` cannot fix the
+// quirk at the source today. Doing the unwrap once on the router lets
+// every client (web, iOS, future surfaces) stay shape-agnostic instead
+// of duplicating the same workaround.
+//
+// The transform is intentionally narrow:
+//   - only applied to arguments produced by tools the caller flagged with
+//     `x-tinfoil-tool-auto-continue: true` (`filterChatRawToolCalls` and
+//     `filterResponsesOutputItemsForToolCalls` are the only call sites);
+//   - only unwraps strings that look structurally like JSON arrays or
+//     objects (leading `{` / `[` after trimming);
+//   - leaves the input untouched on any parse failure;
+//   - idempotent: already-canonical arguments round-trip unchanged.
+//
+// Removal criteria: this function and `deepUnwrapJSONStrings` can be
+// deleted once every upstream provider the router serves emits tool-call
+// `arguments` with native JSON types for nested arrays/objects. Concretely
+// that means either:
+//  1. vLLM's `--enable-auto-tool-choice` runs guided decoding over function
+//     arguments (so `strict: true` on the tool schema constrains the shape
+//     at the source), and every served model is migrated onto that path; or
+//  2. the affected models (DeepSeek-V4-Pro and any future variants that
+//     exhibit the same stringification quirk) are retired or replaced.
+//
+// When removing, also drop the call sites in `filterChatRawToolCalls` /
+// `filterResponsesOutputItemsForToolCalls` and the canonicaliser tests in
+// `auto_continue_test.go`.
+func canonicalizeAutoContinueArguments(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return raw
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return raw
+	}
+	decoded, err := decodeJSONValue(trimmed)
+	if err != nil {
+		return raw
+	}
+	unwrapped := deepUnwrapJSONStrings(decoded)
+	encoded, err := json.Marshal(unwrapped)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+// deepUnwrapJSONStrings walks a value decoded from a tool-call arguments
+// payload and replaces any string whose contents are themselves valid JSON
+// for an array or object with the decoded structure. Plain strings,
+// numbers, bools, and nulls pass through unchanged. Map keys are not
+// rewritten.
+//
+// Removal criteria: see `canonicalizeAutoContinueArguments`. This helper
+// has no other call sites and goes away with it.
+func deepUnwrapJSONStrings(value any) any {
+	switch v := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return v
+		}
+		if trimmed[0] != '{' && trimmed[0] != '[' {
+			return v
+		}
+		nested, err := decodeJSONValue(trimmed)
+		if err != nil {
+			return v
+		}
+		return deepUnwrapJSONStrings(nested)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = deepUnwrapJSONStrings(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			out[k] = deepUnwrapJSONStrings(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func decodeJSONValue(raw string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return decoded, nil
 }
 
 // splitClientToolCalls separates plain client-owned tool calls from the
