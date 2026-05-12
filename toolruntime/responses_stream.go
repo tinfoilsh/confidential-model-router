@@ -79,6 +79,10 @@ type responsesStreamer struct {
 	// iteration for echoing in the synthesized response.completed event.
 	finalOutput []any
 
+	// persistedOutput carries client-visible items from internal
+	// auto-continue continuations into the final response.completed snapshot.
+	persistedOutput []any
+
 	// aggregatedUsage is the last non-nil usage block observed.
 	aggregatedUsage map[string]any
 
@@ -750,7 +754,9 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	// instead of (or in addition to) the live delta stream must see a
 	// terminal payload that is byte-for-byte comparable to the
 	// non-streaming response.
-	completedBody := map[string]any{"output": append([]any{}, s.finalOutput...)}
+	completedOutput := append([]any{}, s.persistedOutput...)
+	completedOutput = append(completedOutput, s.finalOutput...)
+	completedBody := map[string]any{"output": completedOutput}
 	// The Responses streaming path surfaces web_search progress via the
 	// spec-defined `response.web_search_call.*` events fired live from
 	// executeTool and via the prepended `web_search_call` output items
@@ -866,6 +872,7 @@ func runResponsesStreaming(
 	stripRouterOwnedIncludes(base)
 	base["stream"] = true
 	applyParallelToolCallsPolicy(base)
+	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 
@@ -907,16 +914,19 @@ func runResponsesStreaming(
 		dl.WriteStreamedTurn(i+1, result.usage, "", "")
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
-		if len(routerToolCalls) == 0 {
+		autoContinueCalls, externalClientCalls := splitClientToolCalls(autoContinueTools, clientToolCalls)
+		// Terminal turn: nothing for the router to resolve and no
+		// auto-continue calls to auto-acknowledge.
+		if len(routerToolCalls) == 0 && len(autoContinueCalls) == 0 {
 			dl.WriteFinish("stop (no router tool calls)")
 			return streamer.finalize(r, em, modelName, result)
 		}
 
 		dl.WriteToolCalls(routerToolCalls)
-		mixedTurn := len(clientToolCalls) > 0
+		mixedTurn := len(externalClientCalls) > 0
 		var toolOutputs []any
 		if !mixedTurn {
-			toolOutputs = make([]any, 0, len(routerToolCalls))
+			toolOutputs = make([]any, 0, len(routerToolCalls)+len(autoContinueCalls))
 		}
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
@@ -936,11 +946,24 @@ func runResponsesStreaming(
 				})
 			}
 		}
+		// Auto-continue client tool calls: inject a synthetic
+		// function_call_output so the model can continue producing
+		// the prose that surrounds the rendered widget.
+		if !mixedTurn {
+			for _, call := range autoContinueCalls {
+				toolOutputs = append(toolOutputs, map[string]any{
+					"type":    "function_call_output",
+					"call_id": call.id,
+					"output":  autoContinueToolResult,
+				})
+			}
+		}
 		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
 			return streamer.finalize(r, em, modelName, result)
 		}
 
+		streamer.persistedOutput = append(streamer.persistedOutput, filterResponsesOutputItemsForToolCalls(result.outputItems, autoContinueCalls)...)
 		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(result.outputItems)...)
 		accumulatedInput = append(accumulatedInput, toolOutputs...)
 		reqBody = cloneJSONMap(base)

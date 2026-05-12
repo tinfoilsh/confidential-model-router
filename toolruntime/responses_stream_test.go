@@ -571,6 +571,38 @@ func TestResponsesStreamerFinalOutputResetsPerIteration(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamerCompletedOutputKeepsPersistedAutoContinueCalls(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+	streamer.persistedOutput = []any{
+		map[string]any{
+			"id":        "fc_widget",
+			"type":      "function_call",
+			"name":      "render_stat_cards",
+			"call_id":   "call_widget",
+			"arguments": `{"stats":[]}`,
+		},
+	}
+	streamer.finalOutput = []any{
+		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
+	}
+
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+	if err := streamer.finalize(req, nil, "gpt-oss-120b", responsesIterationResult{}); err != nil {
+		t.Fatalf("finalize returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"id":"fc_widget"`) {
+		t.Fatalf("expected persisted auto-continue call in completed output, got %s", body)
+	}
+	if !strings.Contains(body, `"id":"msg_final"`) {
+		t.Fatalf("expected final message in completed output, got %s", body)
+	}
+	if strings.Index(body, `"id":"fc_widget"`) > strings.Index(body, `"id":"msg_final"`) {
+		t.Fatalf("expected auto-continue call before final message, got %s", body)
+	}
+}
+
 // TestResponsesStreamerMalformedJSONFailsStream pins that a malformed
 // upstream SSE frame terminates the stream with an upstreamError
 // instead of silently dropping the chunk -- matching the non-streaming

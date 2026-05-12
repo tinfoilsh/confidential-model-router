@@ -180,6 +180,38 @@ func TestChatStreamerPumpResetsForwarderStateBetweenIterations(t *testing.T) {
 	}
 }
 
+func TestChatStreamerClientToolCallIndexesAreMonotonicAcrossIterations(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+
+	iter1 := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_widget_1","type":"function","function":{"name":"render_stat_cards","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(iter1))); err != nil {
+		t.Fatalf("iter1 pumpUpstream returned error: %v", err)
+	}
+
+	iter2 := strings.Join([]string{
+		`data: {"id":"up_2","created":1700000002,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_widget_2","type":"function","function":{"name":"render_chart","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(iter2))); err != nil {
+		t.Fatalf("iter2 pumpUpstream returned error: %v", err)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"id":"call_widget_1","index":0`) {
+		t.Fatalf("expected first widget at client index 0, got %s", body)
+	}
+	if !strings.Contains(body, `"id":"call_widget_2","index":1`) {
+		t.Fatalf("expected second widget at client index 1, got %s", body)
+	}
+}
+
 func TestChatStreamerFinalizeSkipsAlreadyStreamedClientToolCalls(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.getClientToolCallForwarder().streamedIDs["call_widget"] = true

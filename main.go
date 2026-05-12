@@ -448,9 +448,10 @@ func main() {
 				// Detect which built-in tool profiles this request
 				// activates. The router runs the tool loop locally
 				// against one MCP session per active profile; zero
-				// profiles means no router-owned tools, so the
-				// request falls through to the plain proxy path.
+				// profiles and no auto-continue tools means no router-owned
+				// work, so the request falls through to the plain proxy path.
 				activeProfiles := detectToolProfiles(r.URL.Path, body)
+				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
 				bodyModified := false
@@ -536,7 +537,7 @@ func main() {
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-				if len(activeProfiles) > 0 {
+				if len(activeProfiles) > 0 || hasAutoContinueTools {
 					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,

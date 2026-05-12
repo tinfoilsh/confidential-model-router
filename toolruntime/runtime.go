@@ -137,7 +137,10 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 
 	harmony := isHarmonyModel(modelName)
-	promptResult := buildRouterPrompt(harmony)
+	var promptResult *mcp.GetPromptResult
+	if len(profiles) > 0 {
+		promptResult = buildRouterPrompt(harmony)
+	}
 
 	streaming := isStream(body)
 	switch r.URL.Path {
