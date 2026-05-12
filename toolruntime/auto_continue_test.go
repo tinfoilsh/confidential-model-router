@@ -1,8 +1,10 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -155,6 +157,154 @@ func TestSplitClientToolCalls(t *testing.T) {
 func TestSplitClientToolCallsEmpty(t *testing.T) {
 	if d, e := splitClientToolCalls(nil, nil); d != nil || e != nil {
 		t.Fatalf("expected nil, nil for empty inputs; got %v, %v", d, e)
+	}
+}
+
+// TestCanonicalizeAutoContinueArgumentsUnwrapsDeepSeekShape verifies the
+// concrete DeepSeek-V4-Pro non-streaming quirk captured during validation:
+// nested arrays/objects emitted as JSON-encoded strings. Round-tripping
+// through the canonicaliser must yield native arrays/objects so client
+// widget schemas accept them.
+func TestCanonicalizeAutoContinueArgumentsUnwrapsDeepSeekShape(t *testing.T) {
+	raw := `{"stats":"[{\"label\":\"Human trials\",\"value\":\"20+\"}]"}`
+	got := canonicalizeAutoContinueArguments(raw)
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("canonicalised arguments not valid JSON: %v (raw=%s)", err, got)
+	}
+	stats, ok := parsed["stats"].([]any)
+	if !ok {
+		t.Fatalf("expected stats to be a native array, got %T (%v)", parsed["stats"], parsed["stats"])
+	}
+	if len(stats) != 1 {
+		t.Fatalf("expected one stat row, got %d (%v)", len(stats), stats)
+	}
+	row, _ := stats[0].(map[string]any)
+	if stringValue(row["label"]) != "Human trials" || stringValue(row["value"]) != "20+" {
+		t.Fatalf("row contents mangled: %v", row)
+	}
+}
+
+// TestCanonicalizeAutoContinueArgumentsIdempotent guarantees clean inputs
+// pass through unchanged so the unwrap can run on every auto-continue
+// response without risking silent shape changes for compliant providers.
+func TestCanonicalizeAutoContinueArgumentsIdempotent(t *testing.T) {
+	clean := `{"series":[{"label":"Q1","value":10},{"label":"Q2","value":15}]}`
+	once := canonicalizeAutoContinueArguments(clean)
+	twice := canonicalizeAutoContinueArguments(once)
+
+	var a, b any
+	if err := json.Unmarshal([]byte(once), &a); err != nil {
+		t.Fatalf("first pass not valid JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(twice), &b); err != nil {
+		t.Fatalf("second pass not valid JSON: %v", err)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("not idempotent: once=%s twice=%s", once, twice)
+	}
+}
+
+// TestCanonicalizeAutoContinueArgumentsLeavesNonJSONAlone covers the
+// invariant that anything outside the JSON-object/array prefix is returned
+// verbatim. Avoids surprising downstream consumers when a tool emits a
+// malformed payload the router cannot reason about.
+func TestCanonicalizeAutoContinueArgumentsLeavesNonJSONAlone(t *testing.T) {
+	cases := []string{
+		"",
+		"plain text",
+		"{ unclosed",
+		`"already a string"`,
+	}
+	for _, in := range cases {
+		if got := canonicalizeAutoContinueArguments(in); got != in {
+			t.Errorf("canonicalise(%q) = %q; want unchanged", in, got)
+		}
+	}
+}
+
+// TestCanonicalizeAutoContinueArgumentsRecursive checks the helper unwraps
+// JSON-encoded strings nested several levels deep, which can happen when a
+// stringified array contains stringified objects.
+func TestCanonicalizeAutoContinueArgumentsRecursive(t *testing.T) {
+	raw := `{"outer":"{\"inner\":\"[1,2,3]\"}"}`
+	got := canonicalizeAutoContinueArguments(raw)
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("not valid JSON: %v (raw=%s)", err, got)
+	}
+	outer, _ := parsed["outer"].(map[string]any)
+	inner, _ := outer["inner"].([]any)
+	if len(inner) != 3 {
+		t.Fatalf("expected inner array of length 3, got %v", outer)
+	}
+}
+
+func TestCanonicalizeAutoContinueArgumentsPreservesLargeNumbers(t *testing.T) {
+	const large = "9007199254740993"
+	raw := `{"id":` + large + `,"nested":"{\"id\":` + large + `}"}`
+	got := canonicalizeAutoContinueArguments(raw)
+	if !strings.Contains(got, `"id":`+large) {
+		t.Fatalf("top-level number was not preserved: %s", got)
+	}
+	if !strings.Contains(got, `"nested":{"id":`+large+`}`) {
+		t.Fatalf("nested number was not preserved: %s", got)
+	}
+}
+
+// TestFilterChatRawToolCallsCanonicalisesArguments confirms the unwrap
+// runs as the auto-continue payload is shaped for the final response.
+func TestFilterChatRawToolCallsCanonicalisesArguments(t *testing.T) {
+	rawCalls := []any{
+		map[string]any{
+			"id":   "c1",
+			"type": "function",
+			"function": map[string]any{
+				"name":      "render_stat_cards",
+				"arguments": `{"stats":"[{\"label\":\"a\",\"value\":1}]"}`,
+			},
+		},
+	}
+	got := filterChatRawToolCalls(rawCalls, []toolCall{{id: "c1", name: "render_stat_cards"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one filtered call, got %d", len(got))
+	}
+	call := got[0].(map[string]any)
+	fn := call["function"].(map[string]any)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stringValue(fn["arguments"])), &parsed); err != nil {
+		t.Fatalf("filtered arguments not valid JSON: %v", err)
+	}
+	if _, ok := parsed["stats"].([]any); !ok {
+		t.Fatalf("stats should be a native array, got %T", parsed["stats"])
+	}
+}
+
+// TestFilterResponsesOutputItemsCanonicalisesArguments mirrors the chat
+// test for the /v1/responses output-items shape.
+func TestFilterResponsesOutputItemsCanonicalisesArguments(t *testing.T) {
+	items := []any{
+		map[string]any{
+			"id":        "fc1",
+			"type":      "function_call",
+			"name":      "render_chart",
+			"call_id":   "c1",
+			"arguments": `{"series":"[{\"label\":\"Q1\",\"value\":10}]"}`,
+		},
+	}
+	got := filterResponsesOutputItemsForToolCalls(items, []toolCall{{id: "c1", name: "render_chart"}})
+	if len(got) != 1 {
+		t.Fatalf("expected one filtered item, got %d", len(got))
+	}
+	item := got[0].(map[string]any)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stringValue(item["arguments"])), &parsed); err != nil {
+		t.Fatalf("filtered arguments not valid JSON: %v", err)
+	}
+	if _, ok := parsed["series"].([]any); !ok {
+		t.Fatalf("series should be a native array, got %T", parsed["series"])
 	}
 }
 

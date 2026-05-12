@@ -205,8 +205,9 @@ func runToolLoop(
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s mixed_turn iterations=%d (router+external client calls in one turn; finalizing without replay)", traceID, adapter.tracePhase(i), i+1)
 			}
+			currentAutoContinueItems := adapter.autoContinueResponseItems(state, autoContinueCalls)
 			adapter.stripRouterToolCallsFromResponse(response)
-			adapter.attachAutoContinueResponseItems(response, autoContinueResponseItems)
+			adapter.attachAutoContinueResponseItems(response, append(autoContinueResponseItems, currentAutoContinueItems...))
 			adapter.applyUsage(response, usageTotals.Usage())
 			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, nil
@@ -304,16 +305,16 @@ func executeRouterToolCall(
 // messages history shape, the trace id threaded through debug logs, and the
 // per-iteration assistant-history sanitization quirk.
 type chatLoopAdapter struct {
-	body             map[string]any
-	prompt           *mcp.GetPromptResult
-	tools            []*mcp.Tool
-	ownedTools       map[string]struct{}
+	body              map[string]any
+	prompt            *mcp.GetPromptResult
+	tools             []*mcp.Tool
+	ownedTools        map[string]struct{}
 	autoContinueTools map[string]struct{}
-	modelName        string
-	requestHeaders   http.Header
-	tid              string
-	opts             webSearchOptions
-	toolSchemas      map[string]*jsonschema.Schema
+	modelName         string
+	requestHeaders    http.Header
+	tid               string
+	opts              webSearchOptions
+	toolSchemas       map[string]*jsonschema.Schema
 }
 
 func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header) *chatLoopAdapter {
@@ -485,6 +486,9 @@ func (a *chatLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSO
 		if _, ok := a.ownedTools[name]; ok {
 			continue
 		}
+		if _, ok := a.autoContinueTools[name]; ok {
+			continue
+		}
 		filtered = append(filtered, raw)
 	}
 	message["tool_calls"] = filtered
@@ -518,15 +522,15 @@ func (a *chatLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[string]
 // list that threads every prior output back into each subsequent turn, plus
 // the `include` opt-in for `action.sources` on web_search_call items.
 type responsesLoopAdapter struct {
-	body             map[string]any
-	prompt           *mcp.GetPromptResult
-	tools            []*mcp.Tool
-	ownedTools       map[string]struct{}
+	body              map[string]any
+	prompt            *mcp.GetPromptResult
+	tools             []*mcp.Tool
+	ownedTools        map[string]struct{}
 	autoContinueTools map[string]struct{}
-	base             map[string]any
-	accumulatedInput []any
-	opts             webSearchOptions
-	toolSchemas      map[string]*jsonschema.Schema
+	base              map[string]any
+	accumulatedInput  []any
+	opts              webSearchOptions
+	toolSchemas       map[string]*jsonschema.Schema
 }
 
 func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) *responsesLoopAdapter {
@@ -627,6 +631,9 @@ func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstre
 			if _, ok := a.ownedTools[stringValue(item["name"])]; ok {
 				continue
 			}
+			if _, ok := a.autoContinueTools[stringValue(item["name"])]; ok {
+				continue
+			}
 		}
 		filtered = append(filtered, rawItem)
 	}
@@ -670,7 +677,13 @@ func filterChatRawToolCalls(rawCalls []any, calls []toolCall) []any {
 		if !matchesAnyToolCall(stringValue(call["id"]), stringValue(function["name"]), calls) {
 			continue
 		}
-		out = append(out, cloneJSONMap(call))
+		cloned := cloneJSONMap(call)
+		if clonedFn, ok := cloned["function"].(map[string]any); ok {
+			if args, ok := clonedFn["arguments"].(string); ok {
+				clonedFn["arguments"] = canonicalizeAutoContinueArguments(args)
+			}
+		}
+		out = append(out, cloned)
 	}
 	return out
 }
@@ -696,7 +709,11 @@ func filterResponsesOutputItemsForToolCalls(outputItems []any, calls []toolCall)
 		if !matchesAnyToolCall(callID, stringValue(item["name"]), calls) {
 			continue
 		}
-		out = append(out, cloneJSONMap(item))
+		cloned := cloneJSONMap(item)
+		if args, ok := cloned["arguments"].(string); ok {
+			cloned["arguments"] = canonicalizeAutoContinueArguments(args)
+		}
+		out = append(out, cloned)
 	}
 	return out
 }
