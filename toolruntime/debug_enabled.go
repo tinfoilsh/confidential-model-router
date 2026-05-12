@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
 
 // debugEnabled is a compile-time true constant when the toolruntime_debug
@@ -106,7 +104,7 @@ type devLog struct {
 // base name so a client-controlled access token value cannot escape the
 // logs/ directory. Returns nil on any error so callers never have to
 // nil-check beyond the initial open.
-func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, routerOpts *toolcontext.RouterOptions) *devLog {
+func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, routerOpts *RouterOptions) *devLog {
 	var sid string
 	if routerOpts != nil && routerOpts.CodeExecution != nil {
 		sid = routerOpts.CodeExecution.AccessToken

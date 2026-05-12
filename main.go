@@ -25,7 +25,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -235,7 +234,7 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 //
 // Unknown tool types in /responses' tools[] are ignored so
 // forward-compat requests from newer SDKs do not crash the router.
-func detectToolProfiles(path string, opts *toolcontext.RouterOptions, body map[string]any) []toolprofile.Profile {
+func detectToolProfiles(path string, opts *toolruntime.RouterOptions, body map[string]any) []toolprofile.Profile {
 	var profiles []toolprofile.Profile
 
 	if opts.WebSearch != nil {
@@ -452,7 +451,7 @@ func main() {
 				// place. These fields (code_execution_options,
 				// web_search_options, pii_check_options) are
 				// router-only.
-				routerOpts, err := toolcontext.ExtractRouterOptions(body)
+				routerOpts, err := toolruntime.ExtractRouterOptions(body)
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return

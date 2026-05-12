@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
 func TestExtractModelFromMultipart(t *testing.T) {
@@ -498,7 +498,7 @@ func TestDetectToolProfiles(t *testing.T) {
 			// detectToolProfiles and strips the *_options fields off
 			// body. Mirror that here so the test reflects the real
 			// call sequence.
-			opts, err := toolcontext.ExtractRouterOptions(tc.body)
+			opts, err := toolruntime.ExtractRouterOptions(tc.body)
 			if err != nil {
 				t.Fatalf("ExtractRouterOptions: %v", err)
 			}

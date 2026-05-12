@@ -4,8 +4,6 @@ import (
 	"math"
 	"reflect"
 	"testing"
-
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
 
 // extractAndParseChat runs the router-edge extraction (which strips
@@ -14,7 +12,7 @@ import (
 // Tests use this to exercise the post-strip flow end-to-end.
 func extractAndParseChat(t *testing.T, body map[string]any) webSearchOptions {
 	t.Helper()
-	opts, err := toolcontext.ExtractRouterOptions(body)
+	opts, err := ExtractRouterOptions(body)
 	if err != nil {
 		t.Fatalf("ExtractRouterOptions: %v", err)
 	}
@@ -23,7 +21,7 @@ func extractAndParseChat(t *testing.T, body map[string]any) webSearchOptions {
 
 func extractAndParseResponses(t *testing.T, body map[string]any) webSearchOptions {
 	t.Helper()
-	opts, err := toolcontext.ExtractRouterOptions(body)
+	opts, err := ExtractRouterOptions(body)
 	if err != nil {
 		t.Fatalf("ExtractRouterOptions: %v", err)
 	}
@@ -32,7 +30,7 @@ func extractAndParseResponses(t *testing.T, body map[string]any) webSearchOption
 
 func extractAndParseSafety(t *testing.T, body map[string]any) safetyOptIns {
 	t.Helper()
-	opts, err := toolcontext.ExtractRouterOptions(body)
+	opts, err := ExtractRouterOptions(body)
 	if err != nil {
 		t.Fatalf("ExtractRouterOptions: %v", err)
 	}

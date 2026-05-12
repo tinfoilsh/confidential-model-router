@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
 
 // Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`,
@@ -214,7 +212,7 @@ func (o webSearchOptions) applyToFetchArgs(arguments map[string]any) {
 // from there; the top-level `filters` fallback still lives on body and is
 // read directly. Returns the zero value when no options block was provided
 // so the caller can forward "no options" without special casing.
-func parseChatWebSearchOptions(routerOpts *toolcontext.RouterOptions, body map[string]any) webSearchOptions {
+func parseChatWebSearchOptions(routerOpts *RouterOptions, body map[string]any) webSearchOptions {
 	opts := webSearchOptions{}
 	if routerOpts != nil && routerOpts.WebSearch != nil {
 		if raw := routerOpts.WebSearch.Raw; raw != nil {
@@ -248,7 +246,7 @@ func parseChatWebSearchOptions(routerOpts *toolcontext.RouterOptions, body map[s
 // and those entries are never stripped from body, so we still read them
 // from body. Only the safety opt-in (`pii_check_options`) is lifted at the
 // router edge and read from routerOpts.
-func parseResponsesWebSearchOptions(routerOpts *toolcontext.RouterOptions, body map[string]any) webSearchOptions {
+func parseResponsesWebSearchOptions(routerOpts *RouterOptions, body map[string]any) webSearchOptions {
 	rawTools, _ := body["tools"].([]any)
 	for _, rawTool := range rawTools {
 		tool, _ := rawTool.(map[string]any)
@@ -357,7 +355,7 @@ type safetyOptIns struct {
 // Both Chat Completions and Responses use this same shape, so a single
 // parser covers both routes. A nil pointer means the caller said nothing
 // and the server should apply its own default.
-func parseSafetyOptIns(routerOpts *toolcontext.RouterOptions, body map[string]any) safetyOptIns {
+func parseSafetyOptIns(routerOpts *RouterOptions, body map[string]any) safetyOptIns {
 	opts := safetyOptIns{}
 	if routerOpts != nil && routerOpts.PIICheck != nil {
 		enabled := true

@@ -1,4 +1,4 @@
-package toolcontext
+package toolruntime
 
 import "fmt"
 
@@ -21,9 +21,9 @@ type CodeExecutionOptions struct {
 
 // WebSearchOptions wraps the caller's web_search_options block so it
 // survives the strip-from-body step at the router edge. Raw is the
-// inner object exactly as the caller sent it; toolruntime owns the
-// field-level parsing (search_context_size, user_location, filters,
-// advanced knobs) and reads from Raw at the MCP boundary.
+// inner object exactly as the caller sent it; field-level parsing
+// (search_context_size, user_location, filters, advanced knobs)
+// happens in parseChatWebSearchOptions at the MCP boundary.
 type WebSearchOptions struct {
 	Raw map[string]any
 }

@@ -14,7 +14,6 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -319,7 +318,7 @@ type chatLoopAdapter struct {
 	toolSchemas       map[string]*jsonschema.Schema
 }
 
-func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header, routerOpts *toolcontext.RouterOptions) *chatLoopAdapter {
+func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header, routerOpts *RouterOptions) *chatLoopAdapter {
 	return &chatLoopAdapter{
 		body:           body,
 		prompt:         prompt,
@@ -536,7 +535,7 @@ type responsesLoopAdapter struct {
 	toolSchemas       map[string]*jsonschema.Schema
 }
 
-func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, routerOpts *toolcontext.RouterOptions) *responsesLoopAdapter {
+func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, routerOpts *RouterOptions) *responsesLoopAdapter {
 	return &responsesLoopAdapter{
 		body:        body,
 		prompt:      prompt,

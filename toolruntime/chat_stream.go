@@ -13,7 +13,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -859,7 +858,7 @@ func runChatStreaming(
 	modelName string,
 	requestHeaders http.Header,
 	prompt *mcp.GetPromptResult,
-	routerOpts *toolcontext.RouterOptions,
+	routerOpts *RouterOptions,
 	dl *devLog,
 ) error {
 	flusher, ok := w.(http.Flusher)
