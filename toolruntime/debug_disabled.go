@@ -36,7 +36,7 @@ func debugMessagesSummary([]any, int) string { return "" }
 // debug builds.
 type devLog struct{}
 
-func openDevLog(*http.Request, map[string]any, string, *sessionRegistry, *toolcontext.TinfoilCtx) *devLog {
+func openDevLog(*http.Request, map[string]any, string, *sessionRegistry, *toolcontext.RouterOptions) *devLog {
 	return nil
 }
 func (d *devLog) Close()                                                              {}

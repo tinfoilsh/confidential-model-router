@@ -4,26 +4,11 @@ Tinfoil's confidential inference model router terminates TLS connections (option
 
 ## Request bodies
 
-On the OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/responses`) the router accepts two body shapes:
+The router accepts OpenAI-compatible bodies on `/v1/chat/completions` and `/v1/responses`. A few Tinfoil-specific top-level fields are recognized and stripped before the body is forwarded to the model enclave:
 
-1. **Plain OpenAI**
-
-2. **Tinfoil-wrapped envelope**
-
-   ```json
-   {
-     "tinfoil_ctx": {
-       "accessToken": "...",
-       "encryptionKey": "...",
-       "containerAuthToken": "..."
-     },
-     "payload": {
-       /* the normal OpenAI body */
-     }
-   }
-   ```
-
-   The router lifts `tinfoil_ctx` out at the edge
+- `code_execution_options` — activates the code-execution tool profile. When code execution is requested, this object carries the per-request credentials (`accessToken`, `encryptionKey`, `containerAuthToken`).
+- `web_search_options` — activates the web-search tool profile.
+- `pii_check_options` — activates the PII safety check.
 
 ## Tool Calling
 

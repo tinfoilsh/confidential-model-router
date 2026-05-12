@@ -225,23 +225,23 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 // every profile contributes its MCP session and advertised tools to
 // the single tool loop the router runs against the upstream model.
 //
-// A request "activates" a profile when it asks for that profile's
-// tools by name or, for web_search, via the legacy
-// web_search_options chat-completions shortcut. Unknown tool types
-// in the /responses tools array are ignored so forward-compat
-// requests from newer SDKs do not accidentally crash the router.
-func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile {
+// Activation signals:
+//   - Chat completions: presence of `code_execution_options` /
+//     `web_search_options` on the body, surfaced as typed flags in
+//     RouterOptions (the fields themselves are already stripped by
+//     ExtractRouterOptions before this function runs).
+//   - /responses: tools[] entries with type "web_search" or
+//     "code_execution".
+//
+// Unknown tool types in /responses' tools[] are ignored so
+// forward-compat requests from newer SDKs do not crash the router.
+func detectToolProfiles(path string, opts *toolcontext.RouterOptions, body map[string]any) []toolprofile.Profile {
 	var profiles []toolprofile.Profile
 
-	// web_search_options is the legacy chat-completions shortcut for
-	// activating web_search.
-	if _, ok := body["web_search_options"]; ok {
+	if opts.WebSearchActive {
 		profiles = append(profiles, toolprofile.WebSearch)
 	}
-
-	// code_execution_options is the chat-completions shortcut for
-	// activating code_execution.
-	if _, ok := body["code_execution_options"]; ok {
+	if opts.CodeExecution != nil {
 		profiles = append(profiles, toolprofile.CodeExecution)
 	}
 
@@ -448,15 +448,14 @@ func main() {
 					return
 				}
 
-				// The tinfoil API supports a custom openai api body, that has tinfoil_ctx and payload.
-				// payload is the normal body. Unwrap here so downstream sees the normal openai body
-				tinfoilCtx, unwrappedBody, wrapped, err := toolcontext.ExtractTinfoilCtx(body)
+				// Pull Tinfoil-specific options blobs off the body in
+				// place. These fields (code_execution_options,
+				// web_search_options, pii_check_options) are
+				// router-only.
+				routerOpts, err := toolcontext.ExtractRouterOptions(body)
 				if err != nil {
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
-				}
-				if wrapped {
-					body = unwrappedBody
 				}
 
 				// Extract model name from request body
@@ -476,7 +475,7 @@ func main() {
 				// against one MCP session per active profile; zero
 				// profiles and no auto-continue tools means no router-owned
 				// work, so the request falls through to the plain proxy path.
-				activeProfiles := detectToolProfiles(r.URL.Path, body)
+				activeProfiles := detectToolProfiles(r.URL.Path, routerOpts, body)
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
@@ -531,7 +530,7 @@ func main() {
 						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}
 
-				//  Always e-marshal in case there were any changes
+				// Always re-marshal in case there were any changes
 				bodyBytes, err = json.Marshal(body)
 				if err != nil {
 					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
@@ -544,7 +543,7 @@ func main() {
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
-					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName, tinfoilCtx); err != nil {
+					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,

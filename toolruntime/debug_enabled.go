@@ -106,10 +106,10 @@ type devLog struct {
 // base name so a client-controlled access token value cannot escape the
 // logs/ directory. Returns nil on any error so callers never have to
 // nil-check beyond the initial open.
-func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, tinfoilCtx *toolcontext.TinfoilCtx) *devLog {
+func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, routerOpts *toolcontext.RouterOptions) *devLog {
 	var sid string
-	if tinfoilCtx != nil {
-		sid = tinfoilCtx.AccessToken
+	if routerOpts != nil && routerOpts.CodeExecution != nil {
+		sid = routerOpts.CodeExecution.AccessToken
 	}
 	if sid == "" {
 		sid = "no-session-" + debugTraceID()

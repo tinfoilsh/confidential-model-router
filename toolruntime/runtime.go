@@ -115,11 +115,10 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 // path for requests that activate more than one built-in tool at
 // once.
 //
-// tinfoilCtx carries the per-request code-execution secrets that
-// arrived in the body envelope at the router edge. It is nil for
-// plain (non-wrapped) requests; connectToolSession forwards the
-// values as headers on the attested router→MCP hop.
-func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string, tinfoilCtx *toolcontext.TinfoilCtx) error {
+// routerOpts carries the per-request Tinfoil-specific options
+// extracted from the body at the router edge (see
+// toolcontext.ExtractRouterOptions).
+func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string, routerOpts *toolcontext.RouterOptions) error {
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
@@ -127,7 +126,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	safetyOpts := parseSafetyOptIns(body)
 
 	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
-		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts, tinfoilCtx)
+		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts, routerOpts)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, dial)
 	if err != nil {
@@ -137,7 +136,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 
 	var dl *devLog
 	if em.DebugMode() {
-		dl = openDevLog(r, body, modelName, registry, tinfoilCtx)
+		dl = openDevLog(r, body, modelName, registry, routerOpts)
 		defer dl.Close()
 	}
 
@@ -186,7 +185,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns, tinfoilCtx *toolcontext.TinfoilCtx) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns, routerOpts *toolcontext.RouterOptions) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
 	if err != nil {
 		return nil, err
@@ -202,17 +201,12 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 		return nil, err
 	}
 
-	// Code execution
-	if profile.Name == toolprofile.CodeExecution.Name && tinfoilCtx != nil {
-		if tinfoilCtx.AccessToken != "" {
-			headers.Set(toolcontext.HeaderCodeExecutionAccessToken, tinfoilCtx.AccessToken)
-		}
-		if tinfoilCtx.EncryptionKey != "" {
-			headers.Set(toolcontext.HeaderCodeExecutionEncryptionKey, tinfoilCtx.EncryptionKey)
-		}
-		if tinfoilCtx.ContainerAuthToken != "" {
-			headers.Set(toolcontext.HeaderCodeExecutionContainerAuthToken, tinfoilCtx.ContainerAuthToken)
-		}
+	// Forward credentials extracted from code_execution_options as MCP headers.
+	if profile.Name == toolprofile.CodeExecution.Name && routerOpts.CodeExecution != nil {
+		ce := routerOpts.CodeExecution
+		headers.Set(toolcontext.HeaderCodeExecutionAccessToken, ce.AccessToken)
+		headers.Set(toolcontext.HeaderCodeExecutionEncryptionKey, ce.EncryptionKey)
+		headers.Set(toolcontext.HeaderCodeExecutionContainerAuthToken, ce.ContainerAuthToken)
 	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,
