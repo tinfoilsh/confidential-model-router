@@ -42,17 +42,25 @@ go run .
 
 ### Code Execution (port 7070)
 
-From the `code-execution` repo:
+From the `confidential-code-execution` repo (`Tinfoil/code-execution/confidential-code-execution`):
 
 ```bash
-cd ../code-execution/code-container/orchestrator
+cd ../code-execution/confidential-code-execution
 ADMIN_API_KEY=$TINFOIL_API_KEY \
-python main.py
+go run -tags dev .
 ```
 
-The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) alongside its
-admin endpoints. It manages a pool of sandboxed containers and routes tool
-calls to them.
+`-tags dev` disables the session-auth check (`auth_dev.go`) and the
+attested-TLS hop to the executor (`proxy_dev.go`) so local probes work
+without enclave attestation. The orchestrator still calls the real
+Tinfoil controlplane to provision sandbox containers, so
+`ADMIN_API_KEY` must be a valid controlplane token. Never ship a binary
+built with `-tags dev`.
+
+The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) and
+`GET /metrics`. It manages a pool of sandboxed containers and routes
+tool calls to them by `X-Code-Execution-Access-Token` (one container
+per token, snapshotted+evicted after `IDLE_TIMEOUT=60s`).
 
 ## 2. Create a small router config
 
@@ -197,9 +205,24 @@ For the matrix layout and result analyzer details, see
 
 ## Code Execution smoke tests
 
-Code execution requires an `X-Code-Execution-Access-Token` header so the orchestrator can
-persist a container across multiple tool calls within a conversation. Without
-it, the MCP server rejects tool calls.
+When `code_execution_options` is present, the router validates that all
+three subfields (`accessToken`, `encryptionKey`, `containerAuthToken`)
+are non-empty strings and 400s otherwise.
+
+The router strips the block from the body and re-injects the values as
+`X-Code-Execution-Access-Token`, `X-Code-Execution-Encryption-Key`,
+and `X-Code-Execution-Container-Auth-Token` headers on the outbound
+MCP hop, so the upstream model enclave never sees the credentials.
+
+For local probes the orchestrator runs with `-tags dev` (session-auth
+no-op), so only `accessToken` actually matters
+
+Pick a per-session access token and reuse it across calls in the same
+conversation to hit the same container:
+
+```bash
+TOKEN=local-test-$(date +%s)
+```
 
 ### Chat Completions
 
@@ -207,38 +230,44 @@ it, the MCP server rejects tool calls.
 curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -H "X-Code-Execution-Access-Token: test-session-1" \
-  -d '{
+  -d "$(cat <<EOF
+  {
     "model": "gemma4-31b",
-    "code_execution_options": {},
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "local-test-key",
+      "containerAuthToken": "local-test-container-auth"
+    },
     "messages": [
-      {
-        "role": "user",
-        "content": "Create a new file called test.txt with hello from tinfoil in it"
-      }
+      {"role": "user", "content": "Create a new file called test.txt with hello from tinfoil in it"}
     ],
     "max_tokens": 200
-  }'
+  }
+EOF
+)"
 ```
 
-Test that the session persists (same `X-Code-Execution-Access-Token`, same container):
+Session persists across calls with the same `accessToken`:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -H "X-Code-Execution-Access-Token: test-session-1" \
-  -d '{
+  -d "$(cat <<EOF
+  {
     "model": "gemma4-31b",
-    "code_execution_options": {},
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "local-test-key",
+      "containerAuthToken": "local-test-container-auth"
+    },
     "messages": [
-      {
-        "role": "user",
-        "content": "Use cat to read test.txt. What does it say in it?"
-      }
+      {"role": "user", "content": "Use cat to read test.txt. What does it say in it?"}
     ],
     "max_tokens": 200
-  }'
+  }
+EOF
+)"
 ```
 
 ### Responses
@@ -247,15 +276,22 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
 curl -sS -X POST http://127.0.0.1:8090/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -H "X-Code-Execution-Access-Token: test-session-1" \
-  -d '{
+  -d "$(cat <<EOF
+  {
     "model": "gpt-oss-120b",
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "local-test-key",
+      "containerAuthToken": "local-test-container-auth"
+    },
     "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
     "stream": false,
     "temperature": 0,
     "max_output_tokens": 400,
     "tools": [{"type": "code_execution"}]
-  }'
+  }
+EOF
+)"
 ```
 
 ### Both tools together
@@ -266,30 +302,27 @@ Web search and code execution can be activated in the same request:
 curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -H "X-Code-Execution-Access-Token: test-session-2" \
-  -d '{
+  -d "$(cat <<EOF
+  {
     "model": "gpt-oss-120b",
     "web_search_options": {},
-    "code_execution_options": {},
+    "code_execution_options": {
+      "accessToken": "$TOKEN-mixed",
+      "encryptionKey": "local-test-key",
+      "containerAuthToken": "local-test-container-auth"
+    },
     "messages": [
-      {
-        "role": "user",
-        "content": "Search the web for the current Python version, then use bash to run: python3 --version"
-      }
+      {"role": "user", "content": "Search the web for the current Python version, then use bash to run: python3 --version"}
     ],
     "max_tokens": 300
-  }'
+  }
+EOF
+)"
 ```
 
 ### Session cleanup
 
-After testing, clean up orchestrator sessions to release containers:
-
-```bash
-curl -sS -X POST http://127.0.0.1:7070/cleanup \
-  -H "Content-Type: application/json" \
-  -d '{"sessionId": "test-session-1"}'
-```
+The orchestrator closes containers on shutdown
 
 ---
 
