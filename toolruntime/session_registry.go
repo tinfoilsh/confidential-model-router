@@ -58,14 +58,13 @@ func buildSessionRegistry(
 	profiles []toolprofile.Profile,
 	dial func(context.Context, toolprofile.Profile) (*mcp.ClientSession, error),
 ) (*sessionRegistry, error) {
-	if len(profiles) == 0 {
-		return nil, fmt.Errorf("no tool profiles activated for this request")
-	}
-
 	r := &sessionRegistry{
 		byTool:         make(map[string]*mcp.ClientSession),
 		dispatchByTool: make(map[string]string),
 		owned:          make(map[string]struct{}),
+	}
+	if len(profiles) == 0 {
+		return r, nil
 	}
 
 	for _, profile := range profiles {

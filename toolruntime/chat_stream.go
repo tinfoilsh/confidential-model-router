@@ -518,9 +518,11 @@ func (s *chatStreamer) finalize(
 	s.flushCitations()
 
 	if len(clientToolCalls) > 0 {
-		pending := s.getClientToolCallForwarder().unstreamed(clientToolCalls)
+		forwarder := s.getClientToolCallForwarder()
+		pending := forwarder.unstreamed(clientToolCalls)
 		if len(pending) > 0 {
-			raw := rawToolCallsFromParsed(pending, result.rawToolCalls)
+			raw := rawToolCallsFromParsedAt(pending, result.rawToolCalls, forwarder.nextClientIndex)
+			forwarder.nextClientIndex += len(raw)
 			if len(raw) > 0 {
 				s.writeChunk(map[string]any{
 					"choices": []any{
@@ -668,16 +670,15 @@ func newClientToolCallDeltaForwarder(
 }
 
 // resetIteration drops per-iteration classification state so a fresh
-// upstream stream starts with no stale Drop/Live decisions and a fresh
-// client-visible index space. streamedIDs is preserved so finalize can
-// still dedupe against ids that were forwarded live in earlier iterations.
+// upstream stream starts with no stale Drop/Live decisions. streamedIDs
+// and nextClientIndex are preserved across internal continuations because
+// the client sees one logical stream and tool_call indexes must not collide.
 func (f *clientToolCallDeltaForwarder) resetIteration() {
 	if f == nil {
 		return
 	}
 	f.stateByUpstreamIndex = map[int]*clientToolCallDeltaState{}
 	f.clientIndexByUpstream = map[int]int{}
-	f.nextClientIndex = 0
 }
 
 func (f *clientToolCallDeltaForwarder) ingest(
@@ -860,6 +861,7 @@ func runChatStreaming(
 	reqBody["stream"] = true
 	reqBody["stream_options"] = map[string]any{"include_usage": true}
 	applyParallelToolCallsPolicy(reqBody)
+	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
 
@@ -920,21 +922,29 @@ func runChatStreaming(
 		dl.WriteStreamedTurn(i+1, result.usage, result.reasoning, result.content)
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
+		autoContinueCalls, externalClientCalls := splitClientToolCalls(autoContinueTools, clientToolCalls)
 		if debugEnabled {
 			toolNames := make([]string, 0, len(result.toolCalls))
 			for _, c := range result.toolCalls {
 				toolNames = append(toolNames, c.name)
 			}
-			debugLogf("toolruntime:%s chatstream.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
-				tid, i, time.Since(iterStart), result.finishReason, len(result.toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(result.content, 240))
+			debugLogf("toolruntime:%s chatstream.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d auto_continue=%d external_client=%d tool_names=%v content=%q",
+				tid, i, time.Since(iterStart), result.finishReason, len(result.toolCalls), len(routerToolCalls), len(clientToolCalls), len(autoContinueCalls), len(externalClientCalls), toolNames, debugPreview(result.content, 240))
 		}
-		if len(routerToolCalls) == 0 {
-			debugLogf("toolruntime:%s chatstream.done iterations=%d (no router tool calls)", tid, i+1)
+		// Terminal turn: nothing for the router to resolve and no
+		// auto-continue calls to auto-acknowledge. Surface any external
+		// client tool calls back to the caller as-is.
+		if len(routerToolCalls) == 0 && len(autoContinueCalls) == 0 {
+			debugLogf("toolruntime:%s chatstream.done iterations=%d (no router or auto-continue tool calls)", tid, i+1)
 			dl.WriteFinish(result.finishReason)
-			return streamer.finalize(r, em, modelName, result, clientToolCalls)
+			return streamer.finalize(r, em, modelName, result, externalClientCalls)
 		}
 
-		mixedTurn := len(clientToolCalls) > 0
+		// Mixed turn: real client function tools were requested
+		// alongside router/auto-continue work. Resolve the router work
+		// (citations, etc.) but finalize without replay so the
+		// caller-owned tool_calls survive in the response.
+		mixedTurn := len(externalClientCalls) > 0
 		dl.WriteToolCalls(routerToolCalls)
 		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
 		var messages []any
@@ -960,10 +970,22 @@ func runChatStreaming(
 				})
 			}
 		}
+		// Auto-continue client tool calls: synthesise a constant
+		// "executed" result and fold it into history so the model
+		// can keep generating the prose that surrounds the widget.
+		if !mixedTurn {
+			for _, call := range autoContinueCalls {
+				messages = append(messages, map[string]any{
+					"role":         "tool",
+					"tool_call_id": call.id,
+					"content":      autoContinueToolResult,
+				})
+			}
+		}
 		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
-			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+client calls in one turn; finalizing)", tid, i+1)
-			return streamer.finalize(r, em, modelName, result, clientToolCalls)
+			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+external client calls in one turn; finalizing)", tid, i+1)
+			return streamer.finalize(r, em, modelName, result, externalClientCalls)
 		}
 		reqBody["messages"] = messages
 	}
@@ -984,6 +1006,10 @@ func runChatStreaming(
 // rawToolCallsFromParsed keeps raw calls matching parsed client calls and
 // reindexes them into client-visible order.
 func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
+	return rawToolCallsFromParsedAt(parsed, raw, 0)
+}
+
+func rawToolCallsFromParsedAt(parsed []toolCall, raw []any, startIndex int) []any {
 	filtered := make([]any, 0, len(parsed))
 	next := 0
 	for _, item := range raw {
@@ -992,7 +1018,7 @@ func rawToolCallsFromParsed(parsed []toolCall, raw []any) []any {
 			continue
 		}
 		reindexed := map[string]any{
-			"index":    len(filtered),
+			"index":    startIndex + len(filtered),
 			"id":       source["id"],
 			"type":     source["type"],
 			"function": source["function"],
