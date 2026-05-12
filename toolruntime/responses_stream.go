@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -893,6 +894,7 @@ func runResponsesStreaming(
 	modelName string,
 	requestHeaders http.Header,
 	prompt *mcp.GetPromptResult,
+	routerOpts *toolcontext.RouterOptions,
 	dl *devLog,
 ) error {
 	flusher, ok := w.(http.Flusher)
@@ -900,7 +902,7 @@ func runResponsesStreaming(
 		return fmt.Errorf("streaming not supported")
 	}
 
-	searchOpts := parseResponsesWebSearchOptions(body)
+	searchOpts := parseResponsesWebSearchOptions(routerOpts, body)
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)

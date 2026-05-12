@@ -196,7 +196,7 @@ func TestResponsesAdapterApplyUsageReplacesResponsesTotals(t *testing.T) {
 		header: make(http.Header),
 	}
 
-	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -238,7 +238,7 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		arguments: map[string]any{"query": "cats"},
 	})
 
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -287,7 +287,7 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 
 	adapter := newResponsesLoopAdapter(map[string]any{
 		"include": []any{includeActionSourcesFlag},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -916,7 +916,7 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 		header: make(http.Header),
 	}
 
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{}, nil)
 	adapter.stripRouterToolCallsFromResponse(response)
 
 	choice := response.body["choices"].([]any)[0].(map[string]any)

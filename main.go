@@ -238,7 +238,7 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 func detectToolProfiles(path string, opts *toolcontext.RouterOptions, body map[string]any) []toolprofile.Profile {
 	var profiles []toolprofile.Profile
 
-	if opts.WebSearchActive {
+	if opts.WebSearch != nil {
 		profiles = append(profiles, toolprofile.WebSearch)
 	}
 	if opts.CodeExecution != nil {

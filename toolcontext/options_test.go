@@ -24,7 +24,7 @@ func TestExtractRouterOptions_PlainBodyHasNoOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if opts.CodeExecution != nil || opts.WebSearchActive || opts.PIICheckActive {
+	if opts.CodeExecution != nil || opts.WebSearch != nil || opts.PIICheck != nil {
 		t.Fatalf("plain body must yield empty RouterOptions, got %+v", opts)
 	}
 	if _, ok := body["model"]; !ok {
@@ -57,11 +57,11 @@ func TestExtractRouterOptions_StripsAllOptionFieldsFromBody(t *testing.T) {
 		opts.CodeExecution.ContainerAuthToken != "ctr-c" {
 		t.Fatalf("CodeExecution fields mismatch: %+v", opts.CodeExecution)
 	}
-	if !opts.WebSearchActive {
-		t.Fatalf("WebSearchActive must be true when web_search_options is present")
+	if opts.WebSearch == nil {
+		t.Fatalf("WebSearch must be populated when web_search_options is present")
 	}
-	if !opts.PIICheckActive {
-		t.Fatalf("PIICheckActive must be true when pii_check_options is present")
+	if opts.PIICheck == nil {
+		t.Fatalf("PIICheck must be populated when pii_check_options is present")
 	}
 	for _, field := range []string{"code_execution_options", "web_search_options", "pii_check_options"} {
 		if _, leaked := body[field]; leaked {
@@ -111,6 +111,35 @@ func TestExtractRouterOptions_NonStringCredentialFieldsAreRejected(t *testing.T)
 	}
 }
 
+func TestExtractRouterOptions_WebSearchInnerPayloadIsPreserved(t *testing.T) {
+	// The toolruntime layer parses the inner fields (search_context_size,
+	// user_location, filters, advanced knobs) at the MCP boundary. Here
+	// we just pin that ExtractRouterOptions lifts the inner map verbatim
+	// onto opts.WebSearch.Raw so those parsers find what they expect.
+	body := unmarshal(t, `{
+		"web_search_options": {
+			"search_context_size": "high",
+			"user_location": {"approximate": {"country": "us"}},
+			"filters": {"allowed_domains": ["example.com"]},
+			"max_age_hours": 24
+		}
+	}`)
+
+	opts, err := ExtractRouterOptions(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.WebSearch == nil || opts.WebSearch.Raw == nil {
+		t.Fatalf("WebSearch.Raw must carry the inner web_search_options block")
+	}
+	if got := opts.WebSearch.Raw["search_context_size"]; got != "high" {
+		t.Fatalf("search_context_size mismatch: %v", got)
+	}
+	if _, ok := opts.WebSearch.Raw["filters"]; !ok {
+		t.Fatalf("filters sub-block must be preserved")
+	}
+}
+
 func TestExtractRouterOptions_OnlySomeOptionsPresent(t *testing.T) {
 	body := unmarshal(t, `{
 		"model": "x",
@@ -123,10 +152,10 @@ func TestExtractRouterOptions_OnlySomeOptionsPresent(t *testing.T) {
 	if opts.CodeExecution != nil {
 		t.Fatalf("CodeExecution must be nil when code_execution_options is absent")
 	}
-	if !opts.WebSearchActive {
-		t.Fatalf("WebSearchActive must be true")
+	if opts.WebSearch == nil {
+		t.Fatalf("WebSearch must be populated when web_search_options is present")
 	}
-	if opts.PIICheckActive {
-		t.Fatalf("PIICheckActive must be false when pii_check_options is absent")
+	if opts.PIICheck != nil {
+		t.Fatalf("PIICheck must be nil when pii_check_options is absent")
 	}
 }

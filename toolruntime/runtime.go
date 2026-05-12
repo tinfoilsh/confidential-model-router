@@ -123,7 +123,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventFlags := parseTinfoilEventFlags(r.Header)
-	safetyOpts := parseSafetyOptIns(body)
+	safetyOpts := parseSafetyOptIns(routerOpts, body)
 
 	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
 		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts, routerOpts)
@@ -147,12 +147,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	switch r.URL.Path {
 	case "/v1/chat/completions":
 		if streaming {
-			if err := runChatStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, dl); err != nil {
+			if err := runChatStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, dl); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, harmony, dl)
+		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -161,12 +161,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
 		if streaming {
-			if err := runResponsesStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, dl); err != nil {
+			if err := runResponsesStreaming(ctx, w, r, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, dl); err != nil {
 				return writeUpstreamError(w, err)
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, eventFlags, harmony, dl)
+		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
@@ -264,13 +264,13 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 // Loop wrappers
 // ---------------------------------------------------------------------------
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
-	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders)
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *toolcontext.RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders, routerOpts)
 	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
-	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools())
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *toolcontext.RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), routerOpts)
 	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
 }
 

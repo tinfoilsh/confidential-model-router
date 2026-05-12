@@ -4,7 +4,9 @@ import "fmt"
 
 // Router-only body fields. Each is an OpenAI-compatible-but-Tinfoil-specific
 // options blob: the model router reads and acts on them, then strips them
-// from the body before forwarding to the model enclave.
+// from the body before forwarding to the model enclave. The data flows back
+// in via RouterOptions at the MCP boundary, so the upstream model never sees
+// these fields but the MCP servers still get the caller's preferences.
 const (
 	fieldCodeExecutionOptions = "code_execution_options"
 	fieldWebSearchOptions     = "web_search_options"
@@ -17,10 +19,24 @@ type CodeExecutionOptions struct {
 	ContainerAuthToken string
 }
 
+// WebSearchOptions wraps the caller's web_search_options block so it
+// survives the strip-from-body step at the router edge. Raw is the
+// inner object exactly as the caller sent it; toolruntime owns the
+// field-level parsing (search_context_size, user_location, filters,
+// advanced knobs) and reads from Raw at the MCP boundary.
+type WebSearchOptions struct {
+	Raw map[string]any
+}
+
+// PIICheckOptions is intentionally empty today. The presence of a
+// non-nil pointer is the signal that the caller opted in; the block's
+// contents are reserved for future per-request tuning.
+type PIICheckOptions struct{}
+
 type RouterOptions struct {
-	CodeExecution   *CodeExecutionOptions
-	WebSearchActive bool
-	PIICheckActive  bool
+	CodeExecution *CodeExecutionOptions
+	WebSearch     *WebSearchOptions
+	PIICheck      *PIICheckOptions
 }
 
 // ExtractRouterOptions pulls every router-only options field off the
@@ -32,8 +48,9 @@ type RouterOptions struct {
 // malformed shape returns an error so the router responds 400 with a
 // clear message instead of deferring to the orchestrator.
 //
-// web_search_options and pii_check_options have no credential payload
-// today; their presence is recorded as a boolean and the field stripped.
+// web_search_options and pii_check_options have no validation surface
+// today; their presence and (for web_search) inner payload are lifted
+// into typed wrappers and the body field is stripped.
 func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 	opts := &RouterOptions{}
 
@@ -46,13 +63,14 @@ func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 		delete(body, fieldCodeExecutionOptions)
 	}
 
-	if _, ok := body[fieldWebSearchOptions]; ok {
-		opts.WebSearchActive = true
+	if raw, ok := body[fieldWebSearchOptions]; ok {
+		ws, _ := raw.(map[string]any)
+		opts.WebSearch = &WebSearchOptions{Raw: ws}
 		delete(body, fieldWebSearchOptions)
 	}
 
 	if _, ok := body[fieldPIICheckOptions]; ok {
-		opts.PIICheckActive = true
+		opts.PIICheck = &PIICheckOptions{}
 		delete(body, fieldPIICheckOptions)
 	}
 

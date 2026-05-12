@@ -18,6 +18,7 @@ func TestChatAdapterClassifiesAutoContinueCalls(t *testing.T) {
 		map[string]struct{}{routerSearchToolName: {}},
 		"m",
 		http.Header{},
+		nil,
 	)
 	adapter.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}
 
@@ -85,6 +86,7 @@ func TestChatAdapterAutoContinueDoesNotFinalize(t *testing.T) {
 		nil,
 		"m",
 		http.Header{},
+		nil,
 	)
 	adapter.autoContinueTools = map[string]struct{}{"render_chart": {}}
 
@@ -156,6 +158,7 @@ func TestChatAdapterStripsFlagFromUpstreamRequest(t *testing.T) {
 		nil,
 		"m",
 		http.Header{},
+		nil,
 	)
 
 	req := adapter.buildInitialRequest()
@@ -184,7 +187,7 @@ func TestChatAdapterStripsFlagFromUpstreamRequest(t *testing.T) {
 }
 
 func TestChatAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
 	state := map[string]any{
 		"role": "assistant",
 		"tool_calls": []any{
@@ -230,7 +233,7 @@ func TestChatAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
 }
 
 func TestResponsesAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
-	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil, nil)
 	state := []any{
 		map[string]any{
 			"id":        "fc_widget",
@@ -260,7 +263,7 @@ func TestResponsesAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
 }
 
 func TestChatAdapterMixedTurnCanonicalisesAutoContinueCalls(t *testing.T) {
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
 	adapter.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}
 	response := &upstreamJSONResponse{body: map[string]any{
 		"choices": []any{
@@ -317,7 +320,7 @@ func TestChatAdapterMixedTurnCanonicalisesAutoContinueCalls(t *testing.T) {
 }
 
 func TestResponsesAdapterMixedTurnCanonicalisesAutoContinueCalls(t *testing.T) {
-	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil, nil)
 	adapter.autoContinueTools = map[string]struct{}{"render_chart": {}}
 	state := []any{
 		map[string]any{

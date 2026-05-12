@@ -4,7 +4,40 @@ import (
 	"math"
 	"reflect"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
+
+// extractAndParseChat runs the router-edge extraction (which strips
+// web_search_options / pii_check_options out of body) and then parses
+// the resulting RouterOptions + body the way the real chat path does.
+// Tests use this to exercise the post-strip flow end-to-end.
+func extractAndParseChat(t *testing.T, body map[string]any) webSearchOptions {
+	t.Helper()
+	opts, err := toolcontext.ExtractRouterOptions(body)
+	if err != nil {
+		t.Fatalf("ExtractRouterOptions: %v", err)
+	}
+	return parseChatWebSearchOptions(opts, body)
+}
+
+func extractAndParseResponses(t *testing.T, body map[string]any) webSearchOptions {
+	t.Helper()
+	opts, err := toolcontext.ExtractRouterOptions(body)
+	if err != nil {
+		t.Fatalf("ExtractRouterOptions: %v", err)
+	}
+	return parseResponsesWebSearchOptions(opts, body)
+}
+
+func extractAndParseSafety(t *testing.T, body map[string]any) safetyOptIns {
+	t.Helper()
+	opts, err := toolcontext.ExtractRouterOptions(body)
+	if err != nil {
+		t.Fatalf("ExtractRouterOptions: %v", err)
+	}
+	return parseSafetyOptIns(opts, body)
+}
 
 func TestParseChatWebSearchOptions_AllFields(t *testing.T) {
 	body := map[string]any{
@@ -29,7 +62,7 @@ func TestParseChatWebSearchOptions_AllFields(t *testing.T) {
 			"max_age_hours":        float64(0),
 		},
 	}
-	got := parseChatWebSearchOptions(body)
+	got := extractAndParseChat(t, body)
 	if got.searchContextSize != "high" {
 		t.Errorf("search_context_size = %q, want high", got.searchContextSize)
 	}
@@ -71,7 +104,7 @@ func TestParseChatWebSearchOptions_TopLevelFiltersFallback(t *testing.T) {
 			"excluded_domains": []any{"aggregator.example"},
 		},
 	}
-	got := parseChatWebSearchOptions(body)
+	got := extractAndParseChat(t, body)
 	if want := []string{"python.org"}; !reflect.DeepEqual(got.allowedDomains, want) {
 		t.Errorf("allowed_domains = %v, want %v", got.allowedDomains, want)
 	}
@@ -101,7 +134,7 @@ func TestParseResponsesWebSearchOptions_FromToolEntry(t *testing.T) {
 			},
 		},
 	}
-	got := parseResponsesWebSearchOptions(body)
+	got := extractAndParseResponses(t, body)
 	if got.searchContextSize != "low" {
 		t.Errorf("search_context_size = %q, want low", got.searchContextSize)
 	}
@@ -251,7 +284,7 @@ func TestParseSafetyOptIns_Presence(t *testing.T) {
 		"pii_check_options":              map[string]any{},
 		"prompt_injection_check_options": map[string]any{},
 	}
-	got := parseSafetyOptIns(body)
+	got := extractAndParseSafety(t, body)
 	if got.pii == nil || !*got.pii {
 		t.Errorf("pii opt-in = %v, want pointer to true", got.pii)
 	}
@@ -261,7 +294,7 @@ func TestParseSafetyOptIns_Presence(t *testing.T) {
 }
 
 func TestParseSafetyOptIns_Absence(t *testing.T) {
-	got := parseSafetyOptIns(map[string]any{})
+	got := parseSafetyOptIns(nil, map[string]any{})
 	if got.pii != nil {
 		t.Errorf("pii opt-in = %v, want nil", got.pii)
 	}
@@ -276,7 +309,7 @@ func TestParseChatWebSearchOptions_SafetyOptIns(t *testing.T) {
 		"pii_check_options":              map[string]any{},
 		"prompt_injection_check_options": map[string]any{},
 	}
-	got := parseChatWebSearchOptions(body)
+	got := extractAndParseChat(t, body)
 	if got.piiCheck == nil || !*got.piiCheck {
 		t.Errorf("piiCheck = %v, want pointer to true", got.piiCheck)
 	}
@@ -498,7 +531,7 @@ func TestParseResponsesWebSearchOptions_SafetyOptIns(t *testing.T) {
 		"pii_check_options":              map[string]any{},
 		"prompt_injection_check_options": map[string]any{},
 	}
-	got := parseResponsesWebSearchOptions(body)
+	got := extractAndParseResponses(t, body)
 	if got.piiCheck == nil || !*got.piiCheck {
 		t.Errorf("piiCheck = %v, want pointer to true", got.piiCheck)
 	}
