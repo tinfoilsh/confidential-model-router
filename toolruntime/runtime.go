@@ -114,7 +114,12 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 // session that advertised them. Passing multiple profiles is the
 // path for requests that activate more than one built-in tool at
 // once.
-func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string) error {
+//
+// tinfoilCtx carries the per-request code-execution secrets that
+// arrived in the body envelope at the router edge. It is nil for
+// plain (non-wrapped) requests; connectToolSession forwards the
+// values as headers on the attested router→MCP hop.
+func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string, tinfoilCtx *toolcontext.TinfoilCtx) error {
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
@@ -122,7 +127,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	safetyOpts := parseSafetyOptIns(body)
 
 	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
-		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
+		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts, tinfoilCtx)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, dial)
 	if err != nil {
@@ -132,15 +137,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 
 	var dl *devLog
 	if em.DebugMode() {
-		dl = openDevLog(r, body, modelName, registry)
+		dl = openDevLog(r, body, modelName, registry, tinfoilCtx)
 		defer dl.Close()
 	}
 
 	harmony := isHarmonyModel(modelName)
-	var promptResult *mcp.GetPromptResult
-	if len(profiles) > 0 {
-		promptResult = buildRouterPrompt(harmony)
-	}
+	promptResult := buildRouterPrompt(harmony, registry.profileNames())
 
 	streaming := isStream(body)
 	switch r.URL.Path {
@@ -184,7 +186,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns, tinfoilCtx *toolcontext.TinfoilCtx) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
 	if err != nil {
 		return nil, err
@@ -198,6 +200,19 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	headers, err := toolSessionHeaders(r, requestID, modelName, body, safety, em.UsageContextSecret(), time.Now)
 	if err != nil {
 		return nil, err
+	}
+
+	// Code execution
+	if profile.Name == toolprofile.CodeExecution.Name && tinfoilCtx != nil {
+		if tinfoilCtx.AccessToken != "" {
+			headers.Set(toolcontext.HeaderCodeExecutionAccessToken, tinfoilCtx.AccessToken)
+		}
+		if tinfoilCtx.EncryptionKey != "" {
+			headers.Set(toolcontext.HeaderCodeExecutionEncryptionKey, tinfoilCtx.EncryptionKey)
+		}
+		if tinfoilCtx.ContainerAuthToken != "" {
+			headers.Set(toolcontext.HeaderCodeExecutionContainerAuthToken, tinfoilCtx.ContainerAuthToken)
+		}
 	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,

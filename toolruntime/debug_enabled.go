@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
 
 // debugEnabled is a compile-time true constant when the toolruntime_debug
@@ -101,17 +103,17 @@ type devLog struct {
 // openDevLog derives the session ID from the request, creates the logs/
 // directory (if needed), opens logs/<session-id>.txt in append mode, and
 // writes the initial header block. The session ID is sanitized to its
-// base name so a client-controlled X-Session-Id header cannot escape the
+// base name so a client-controlled access token value cannot escape the
 // logs/ directory. Returns nil on any error so callers never have to
 // nil-check beyond the initial open.
-func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry) *devLog {
-	sid := r.Header.Get("X-Session-Id")
+func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, tinfoilCtx *toolcontext.TinfoilCtx) *devLog {
+	var sid string
+	if tinfoilCtx != nil {
+		sid = tinfoilCtx.AccessToken
+	}
 	if sid == "" {
 		sid = "no-session-" + debugTraceID()
 	}
-	// Defense-in-depth: strip directory components so a malicious
-	// X-Session-Id value like "../../etc/cron.d/evil" cannot write
-	// outside the logs/ directory.
 	sid = filepath.Base(sid)
 
 	dir := "logs"

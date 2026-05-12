@@ -25,6 +25,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -238,10 +239,19 @@ func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile 
 		profiles = append(profiles, toolprofile.WebSearch)
 	}
 
+	// code_execution_options is the chat-completions shortcut for
+	// activating code_execution.
+	if _, ok := body["code_execution_options"]; ok {
+		profiles = append(profiles, toolprofile.CodeExecution)
+	}
+
 	if path == "/v1/responses" {
 		if tools, ok := body["tools"].([]any); ok {
 			seenWebSearch := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
 				return p.Name == toolprofile.WebSearch.Name
+			})
+			seenCodeExecution := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
+				return p.Name == toolprofile.CodeExecution.Name
 			})
 			for _, t := range tools {
 				m, _ := t.(map[string]any)
@@ -251,6 +261,11 @@ func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile 
 					if !seenWebSearch {
 						profiles = append(profiles, toolprofile.WebSearch)
 						seenWebSearch = true
+					}
+				case "code_execution":
+					if !seenCodeExecution {
+						profiles = append(profiles, toolprofile.CodeExecution)
+						seenCodeExecution = true
 					}
 				}
 			}
@@ -433,6 +448,17 @@ func main() {
 					return
 				}
 
+				// The tinfoil API supports a custom openai api body, that has tinfoil_ctx and payload.
+				// payload is the normal body. Unwrap here so downstream sees the normal openai body
+				tinfoilCtx, unwrappedBody, wrapped, err := toolcontext.ExtractTinfoilCtx(body)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if wrapped {
+					body = unwrappedBody
+				}
+
 				// Extract model name from request body
 				modelInterface, ok := body["model"]
 				if !ok {
@@ -454,14 +480,12 @@ func main() {
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
-				bodyModified := false
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
-					rewritten := false
 					switch r.URL.Path {
 					case "/v1/responses":
-						rewritten, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
+						_, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					case "/v1/chat/completions":
-						rewritten, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
+						_, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					}
 					if err != nil {
 						var inputErr *fileInputError
@@ -483,20 +507,16 @@ func main() {
 						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 						return
 					}
-					bodyModified = rewritten
 				}
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
-				_, hadPriority := body["priority"]
 				delete(body, "priority")
 
 				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified = bodyModified || hadPriority
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
 					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
-						bodyModified = true
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{
 							"model": rateLimitModel,
@@ -507,38 +527,24 @@ func main() {
 				// If streaming request, ensure upstream usage is available for billing.
 				if stream, ok := body["stream"].(bool); ok && stream {
 					ensureStreamingUsageOptions(body, r.Header)
-
-					// Re-encode the modified body
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					// Update Content-Length header to match new body size
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
 					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
 						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}
 
-				// Re-encode body if rate limiting modified it (non-streaming path)
-				if bodyModified {
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
+				//  Always e-marshal in case there were any changes
+				bodyBytes, err = json.Marshal(body)
+				if err != nil {
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					return
 				}
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
-					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName); err != nil {
+					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName, tinfoilCtx); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,

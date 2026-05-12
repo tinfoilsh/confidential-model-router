@@ -5,6 +5,8 @@ package toolruntime
 import (
 	"net/http"
 	"time"
+
+	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 )
 
 // debugEnabled is a compile-time false constant in production builds. Every
@@ -34,7 +36,9 @@ func debugMessagesSummary([]any, int) string { return "" }
 // debug builds.
 type devLog struct{}
 
-func openDevLog(*http.Request, map[string]any, string, *sessionRegistry) *devLog      { return nil }
+func openDevLog(*http.Request, map[string]any, string, *sessionRegistry, *toolcontext.TinfoilCtx) *devLog {
+	return nil
+}
 func (d *devLog) Close()                                                              {}
 func (d *devLog) WriteTurn(int, map[string]any)                                       {}
 func (d *devLog) WriteStreamedTurn(int, map[string]any, string, string)               {}
