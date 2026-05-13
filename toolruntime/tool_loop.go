@@ -277,7 +277,7 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments)
+	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, registry.metaFor(call.name))
 	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
 		name:      call.name,
@@ -767,9 +767,10 @@ func toolResultErrorMessage(result *mcp.CallToolResult) string {
 // structured content the server returned. The caller is responsible for
 // formatting structured content (e.g. via applyStructuredFormat) when
 // citation-aware formatting is needed.
-func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, meta mcp.Meta) (text string, structured any, err error) {
 	start := time.Now()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Meta:      meta,
 		Name:      name,
 		Arguments: arguments,
 	})

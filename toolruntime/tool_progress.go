@@ -129,18 +129,19 @@ func executeToolWithProgress(
 		return "", fmt.Errorf("no MCP session registered for tool %q", call.name)
 	}
 	dispatchName := registry.dispatchName(call.name)
+	meta := registry.metaFor(call.name)
 	phases := toolPhasesFor(call.name)
 
 	switch {
 	case isRouterSearchToolName(call.name):
 		details := map[string]any{"type": "search", "query": stringValue(call.arguments["query"])}
-		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, details)
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, meta, phases, details)
 
 	case isRouterFetchToolName(call.name):
-		return executeFetchWithProgress(ctx, session, state, emitter, call, dispatchName, phases)
+		return executeFetchWithProgress(ctx, session, state, emitter, call, dispatchName, meta, phases)
 
 	default:
-		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, phases, call.arguments)
+		return executeSingleToolWithProgress(ctx, session, state, emitter, call, dispatchName, meta, phases, call.arguments)
 	}
 }
 
@@ -155,6 +156,7 @@ func executeSingleToolWithProgress(
 	emitter toolProgressEmitter,
 	call toolCall,
 	dispatchName string,
+	meta mcp.Meta,
 	phases toolPhaseConfig,
 	details map[string]any,
 ) (string, error) {
@@ -164,7 +166,7 @@ func executeSingleToolWithProgress(
 		emitter.phase(handle, phase)
 	}
 
-	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
 	if err != nil {
 		result := toolProgressResult{}
 		if !isWebSearchTool(call.name) {
@@ -200,11 +202,12 @@ func executeFetchWithProgress(
 	emitter toolProgressEmitter,
 	call toolCall,
 	dispatchName string,
+	meta mcp.Meta,
 	phases toolPhaseConfig,
 ) (string, error) {
 	urls := fetchArgumentURLs(call.arguments)
 	if len(urls) == 0 {
-		output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+		output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
 		if err != nil {
 			return "", err
 		}
@@ -222,7 +225,7 @@ func executeFetchWithProgress(
 		}
 	}
 
-	output, structured, err := callTool(ctx, session, dispatchName, call.arguments)
+	output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
 	if err != nil {
 		reason := publicToolErrorReason(call.name, err)
 		status := failureStatusFor(err)

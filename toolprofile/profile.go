@@ -24,3 +24,6 @@ var CodeExecution = Profile{
 	Name:            "code_execution",
 	ToolServerModel: "code-execution",
 }
+
+// CodeExecutionMetaKey is the params._meta sub-key the code-exec mcp accepts.
+const CodeExecutionMetaKey = "tinfoil_code_exec"

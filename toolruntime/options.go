@@ -1,6 +1,12 @@
 package toolruntime
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+)
 
 // Router-only body fields. Each is an OpenAI-compatible-but-Tinfoil-specific
 // options blob: the model router reads and acts on them, then strips them
@@ -104,4 +110,21 @@ func stringField(m map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+// attachRouterOptionsMeta lifts per-request secrets from RouterOptions onto
+// the session registry as mcp.Meta
+func attachRouterOptionsMeta(registry *sessionRegistry, opts *RouterOptions) {
+	if registry == nil || opts == nil {
+		return
+	}
+	if ce := opts.CodeExecution; ce != nil {
+		registry.metaByProfile[toolprofile.CodeExecution.Name] = mcp.Meta{
+			toolprofile.CodeExecutionMetaKey: map[string]any{
+				"accessToken":        ce.AccessToken,
+				"encryptionKey":      ce.EncryptionKey,
+				"containerAuthToken": ce.ContainerAuthToken,
+			},
+		}
+	}
 }

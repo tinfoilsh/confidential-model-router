@@ -126,13 +126,14 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	safetyOpts := parseSafetyOptIns(routerOpts, body)
 
 	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
-		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts, routerOpts)
+		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, dial)
 	if err != nil {
 		return err
 	}
 	defer registry.CloseAll()
+	attachRouterOptionsMeta(registry, routerOpts)
 
 	var dl *devLog
 	if em.DebugMode() {
@@ -185,7 +186,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns, routerOpts *RouterOptions) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
 	if err != nil {
 		return nil, err
@@ -201,13 +202,6 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 		return nil, err
 	}
 
-	// Forward credentials extracted from code_execution_options as MCP headers.
-	if profile.Name == toolprofile.CodeExecution.Name && routerOpts.CodeExecution != nil {
-		ce := routerOpts.CodeExecution
-		headers.Set(toolcontext.HeaderCodeExecutionAccessToken, ce.AccessToken)
-		headers.Set(toolcontext.HeaderCodeExecutionEncryptionKey, ce.EncryptionKey)
-		headers.Set(toolcontext.HeaderCodeExecutionContainerAuthToken, ce.ContainerAuthToken)
-	}
 	httpClient.Transport = &headerRoundTripper{
 		base:    httpClient.Transport,
 		headers: headers,

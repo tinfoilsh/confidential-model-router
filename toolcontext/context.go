@@ -10,9 +10,4 @@ const (
 	HeaderOrgID          = "X-Tinfoil-Tool-Org-Id"
 	HeaderPIICheck       = "X-Tinfoil-Tool-PII-Check"
 	HeaderInjectionCheck = "X-Tinfoil-Tool-Injection-Check"
-
-	// Code-execution per-request secrets
-	HeaderCodeExecutionAccessToken        = "X-Code-Execution-Access-Token"
-	HeaderCodeExecutionEncryptionKey      = "X-Code-Execution-Encryption-Key"
-	HeaderCodeExecutionContainerAuthToken = "X-Code-Execution-Container-Auth-Token"
 )
