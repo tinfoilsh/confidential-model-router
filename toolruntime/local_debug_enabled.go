@@ -17,8 +17,8 @@ import (
 
 // debugEnabled is a compile-time true constant when the toolruntime_debug
 // build tag is set. In production builds (no build tag) this symbol is
-// replaced by a compile-time false constant in debug_disabled.go so every
-// call site is dead-code-eliminated.
+// replaced by a compile-time false constant in local_debug_disabled.go
+// so every call site is dead-code-eliminated.
 const debugEnabled = true
 
 var debugTraceCounter uint64
@@ -90,7 +90,7 @@ func debugMessagesSummary(messages []any, contentMax int) string {
 // methods are nil-safe: a nil *devLog is a no-op, so call sites are
 // unconditional.
 //
-// Production builds get the no-op stub in debug_disabled.go, which the
+// Production builds get the no-op stub in local_debug_disabled.go, which the
 // compiler eliminates entirely, so user content never touches disk in a
 // deployed enclave regardless of the runtime DEBUG flag.
 type devLog struct {
@@ -101,17 +101,17 @@ type devLog struct {
 // openDevLog derives the session ID from the request, creates the logs/
 // directory (if needed), opens logs/<session-id>.txt in append mode, and
 // writes the initial header block. The session ID is sanitized to its
-// base name so a client-controlled X-Session-Id header cannot escape the
+// base name so a client-controlled access token value cannot escape the
 // logs/ directory. Returns nil on any error so callers never have to
 // nil-check beyond the initial open.
-func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry) *devLog {
-	sid := r.Header.Get("X-Session-Id")
+func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, routerOpts *RouterOptions) *devLog {
+	var sid string
+	if routerOpts != nil && routerOpts.CodeExecution != nil {
+		sid = routerOpts.CodeExecution.AccessToken
+	}
 	if sid == "" {
 		sid = "no-session-" + debugTraceID()
 	}
-	// Defense-in-depth: strip directory components so a malicious
-	// X-Session-Id value like "../../etc/cron.d/evil" cannot write
-	// outside the logs/ directory.
 	sid = filepath.Base(sid)
 
 	dir := "logs"

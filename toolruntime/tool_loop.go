@@ -277,7 +277,7 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments)
+	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, registry.metaFor(call.name))
 	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
 		name:      call.name,
@@ -297,6 +297,7 @@ func executeRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
+	record.output = output
 	toolCalls.record(record)
 	return output
 }
@@ -317,7 +318,7 @@ type chatLoopAdapter struct {
 	toolSchemas       map[string]*jsonschema.Schema
 }
 
-func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header) *chatLoopAdapter {
+func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header, routerOpts *RouterOptions) *chatLoopAdapter {
 	return &chatLoopAdapter{
 		body:           body,
 		prompt:         prompt,
@@ -326,7 +327,7 @@ func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools 
 		modelName:      modelName,
 		requestHeaders: requestHeaders,
 		tid:            debugTraceID(),
-		opts:           parseChatWebSearchOptions(body),
+		opts:           parseChatWebSearchOptions(routerOpts, body),
 		toolSchemas:    schemaLookup(tools),
 	}
 }
@@ -360,6 +361,7 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
 	reqBody := cloneJSONMap(a.body)
 	delete(reqBody, "web_search_options")
+	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
 	delete(reqBody, "stream_options")
 	delete(reqBody, "pii_check_options")
@@ -533,13 +535,13 @@ type responsesLoopAdapter struct {
 	toolSchemas       map[string]*jsonschema.Schema
 }
 
-func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}) *responsesLoopAdapter {
+func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, routerOpts *RouterOptions) *responsesLoopAdapter {
 	return &responsesLoopAdapter{
 		body:        body,
 		prompt:      prompt,
 		tools:       tools,
 		ownedTools:  ownedTools,
-		opts:        parseResponsesWebSearchOptions(body),
+		opts:        parseResponsesWebSearchOptions(routerOpts, body),
 		toolSchemas: schemaLookup(tools),
 	}
 }
@@ -765,9 +767,10 @@ func toolResultErrorMessage(result *mcp.CallToolResult) string {
 // structured content the server returned. The caller is responsible for
 // formatting structured content (e.g. via applyStructuredFormat) when
 // citation-aware formatting is needed.
-func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, meta mcp.Meta) (text string, structured any, err error) {
 	start := time.Now()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Meta:      meta,
 		Name:      name,
 		Arguments: arguments,
 	})

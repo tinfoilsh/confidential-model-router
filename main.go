@@ -224,24 +224,33 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 // every profile contributes its MCP session and advertised tools to
 // the single tool loop the router runs against the upstream model.
 //
-// A request "activates" a profile when it asks for that profile's
-// tools by name or, for web_search, via the legacy
-// web_search_options chat-completions shortcut. Unknown tool types
-// in the /responses tools array are ignored so forward-compat
-// requests from newer SDKs do not accidentally crash the router.
-func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile {
+// Activation signals:
+//   - Chat completions: presence of `code_execution_options` /
+//     `web_search_options` on the body, surfaced as typed flags in
+//     RouterOptions (the fields themselves are already stripped by
+//     ExtractRouterOptions before this function runs).
+//   - /responses: tools[] entries with type "web_search" or
+//     "code_execution".
+//
+// Unknown tool types in /responses' tools[] are ignored so
+// forward-compat requests from newer SDKs do not crash the router.
+func detectToolProfiles(path string, opts *toolruntime.RouterOptions, body map[string]any) []toolprofile.Profile {
 	var profiles []toolprofile.Profile
 
-	// web_search_options is the legacy chat-completions shortcut for
-	// activating web_search.
-	if _, ok := body["web_search_options"]; ok {
+	if opts.WebSearch != nil {
 		profiles = append(profiles, toolprofile.WebSearch)
+	}
+	if opts.CodeExecution != nil {
+		profiles = append(profiles, toolprofile.CodeExecution)
 	}
 
 	if path == "/v1/responses" {
 		if tools, ok := body["tools"].([]any); ok {
 			seenWebSearch := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
 				return p.Name == toolprofile.WebSearch.Name
+			})
+			seenCodeExecution := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
+				return p.Name == toolprofile.CodeExecution.Name
 			})
 			for _, t := range tools {
 				m, _ := t.(map[string]any)
@@ -251,6 +260,11 @@ func detectToolProfiles(path string, body map[string]any) []toolprofile.Profile 
 					if !seenWebSearch {
 						profiles = append(profiles, toolprofile.WebSearch)
 						seenWebSearch = true
+					}
+				case "code_execution":
+					if !seenCodeExecution {
+						profiles = append(profiles, toolprofile.CodeExecution)
+						seenCodeExecution = true
 					}
 				}
 			}
@@ -433,6 +447,16 @@ func main() {
 					return
 				}
 
+				// Pull Tinfoil-specific options blobs off the body in
+				// place. These fields (code_execution_options,
+				// web_search_options, pii_check_options) are
+				// router-only.
+				routerOpts, err := toolruntime.ExtractRouterOptions(body)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+
 				// Extract model name from request body
 				modelInterface, ok := body["model"]
 				if !ok {
@@ -450,18 +474,16 @@ func main() {
 				// against one MCP session per active profile; zero
 				// profiles and no auto-continue tools means no router-owned
 				// work, so the request falls through to the plain proxy path.
-				activeProfiles := detectToolProfiles(r.URL.Path, body)
+				activeProfiles := detectToolProfiles(r.URL.Path, routerOpts, body)
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
-				bodyModified := false
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
-					rewritten := false
 					switch r.URL.Path {
 					case "/v1/responses":
-						rewritten, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
+						_, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					case "/v1/chat/completions":
-						rewritten, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
+						_, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					}
 					if err != nil {
 						var inputErr *fileInputError
@@ -483,20 +505,16 @@ func main() {
 						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 						return
 					}
-					bodyModified = rewritten
 				}
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
-				_, hadPriority := body["priority"]
 				delete(body, "priority")
 
 				// Check rate limiting and inject lower vLLM priority if over budget
-				bodyModified = bodyModified || hadPriority
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
 					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
-						bodyModified = true
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{
 							"model": rateLimitModel,
@@ -507,38 +525,24 @@ func main() {
 				// If streaming request, ensure upstream usage is available for billing.
 				if stream, ok := body["stream"].(bool); ok && stream {
 					ensureStreamingUsageOptions(body, r.Header)
-
-					// Re-encode the modified body
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					// Update Content-Length header to match new body size
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
 					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
 						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}
 
-				// Re-encode body if rate limiting modified it (non-streaming path)
-				if bodyModified {
-					newBodyBytes, err := json.Marshal(body)
-					if err != nil {
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
-						return
-					}
-					bodyBytes = newBodyBytes
-					r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-					r.ContentLength = int64(len(bodyBytes))
+				// Always re-marshal in case there were any changes
+				bodyBytes, err = json.Marshal(body)
+				if err != nil {
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					return
 				}
+				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+				r.ContentLength = int64(len(bodyBytes))
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
-					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName); err != nil {
+					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,

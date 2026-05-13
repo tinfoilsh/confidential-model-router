@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
+	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
 func TestExtractModelFromMultipart(t *testing.T) {
@@ -438,11 +439,70 @@ func TestDetectToolProfiles(t *testing.T) {
 			},
 			want: []string{"web_search"},
 		},
+		{
+			name: "chat completions with code_execution_options",
+			path: "/v1/chat/completions",
+			body: map[string]any{"code_execution_options": map[string]any{
+				"accessToken":        "a",
+				"encryptionKey":      "b",
+				"containerAuthToken": "c",
+			}},
+			want: []string{"code_execution"},
+		},
+		{
+			name: "responses with code_execution tool",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{map[string]any{"type": "code_execution"}}},
+			want: []string{"code_execution"},
+		},
+		{
+			name: "both web_search and code_execution",
+			path: "/v1/chat/completions",
+			body: map[string]any{
+				"web_search_options": map[string]any{},
+				"code_execution_options": map[string]any{
+					"accessToken":        "a",
+					"encryptionKey":      "b",
+					"containerAuthToken": "c",
+				},
+			},
+			want: []string{"web_search", "code_execution"},
+		},
+		{
+			name: "responses with both tool types",
+			path: "/v1/responses",
+			body: map[string]any{"tools": []any{
+				map[string]any{"type": "web_search"},
+				map[string]any{"type": "code_execution"},
+			}},
+			want: []string{"web_search", "code_execution"},
+		},
+		{
+			name: "responses duplicates do not stack code_execution",
+			path: "/v1/responses",
+			body: map[string]any{
+				"code_execution_options": map[string]any{
+					"accessToken":        "a",
+					"encryptionKey":      "b",
+					"containerAuthToken": "c",
+				},
+				"tools": []any{map[string]any{"type": "code_execution"}},
+			},
+			want: []string{"code_execution"},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := profileNames(detectToolProfiles(tc.path, tc.body))
+			// In production, ExtractRouterOptions runs before
+			// detectToolProfiles and strips the *_options fields off
+			// body. Mirror that here so the test reflects the real
+			// call sequence.
+			opts, err := toolruntime.ExtractRouterOptions(tc.body)
+			if err != nil {
+				t.Fatalf("ExtractRouterOptions: %v", err)
+			}
+			got := profileNames(detectToolProfiles(tc.path, opts, tc.body))
 			if len(got) != len(tc.want) {
 				t.Fatalf("detectToolProfiles(%s) = %v, want %v", tc.path, got, tc.want)
 			}

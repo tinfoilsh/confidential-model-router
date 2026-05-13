@@ -70,6 +70,51 @@ func TestReplaceRouterOwnedResponsesToolsDedupes(t *testing.T) {
 	}
 }
 
+func TestReplaceRouterOwnedResponsesToolsHandlesCodeExecution(t *testing.T) {
+	replaced := replaceRouterOwnedResponsesTools([]any{
+		map[string]any{"type": "code_execution"},
+		map[string]any{"type": "function", "name": "other"},
+	}, []any{
+		map[string]any{"type": "function", "name": "bash"},
+		map[string]any{"type": "function", "name": "view"},
+	})
+
+	if len(replaced) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(replaced))
+	}
+	if replaced[0].(map[string]any)["name"] != "bash" {
+		t.Fatalf("expected first replacement tool to be bash, got %#v", replaced[0])
+	}
+	if replaced[2].(map[string]any)["name"] != "other" {
+		t.Fatalf("expected pre-existing tool preserved, got %#v", replaced[2])
+	}
+}
+
+func TestReplaceRouterOwnedResponsesToolsMixedTypes(t *testing.T) {
+	replaced := replaceRouterOwnedResponsesTools([]any{
+		map[string]any{"type": "web_search"},
+		map[string]any{"type": "code_execution"},
+		map[string]any{"type": "function", "name": "client_tool"},
+	}, []any{
+		map[string]any{"type": "function", "name": "search"},
+		map[string]any{"type": "function", "name": "bash"},
+	})
+
+	if len(replaced) != 3 {
+		t.Fatalf("expected 3 tools (2 replacements + 1 client), got %d", len(replaced))
+	}
+	names := make([]string, 0, len(replaced))
+	for _, tool := range replaced {
+		m, _ := tool.(map[string]any)
+		if name, ok := m["name"].(string); ok {
+			names = append(names, name)
+		}
+	}
+	if names[0] != "search" || names[1] != "bash" || names[2] != "client_tool" {
+		t.Fatalf("unexpected tool ordering: %v", names)
+	}
+}
+
 func TestParseResponsesToolCalls(t *testing.T) {
 	calls := parseResponsesToolCalls(map[string]any{
 		"output": []any{
@@ -151,7 +196,7 @@ func TestResponsesAdapterApplyUsageReplacesResponsesTotals(t *testing.T) {
 		header: make(http.Header),
 	}
 
-	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil)
+	adapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -193,7 +238,7 @@ func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 		arguments: map[string]any{"query": "cats"},
 	})
 
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -242,7 +287,7 @@ func TestResponsesAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 
 	adapter := newResponsesLoopAdapter(map[string]any{
 		"include": []any{includeActionSourcesFlag},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	adapter.applyUsage(response, &tokencount.Usage{
 		PromptTokens:     7,
 		CompletionTokens: 11,
@@ -871,7 +916,7 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 		header: make(http.Header),
 	}
 
-	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{})
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, map[string]struct{}{routerSearchToolName: {}}, "m", http.Header{}, nil)
 	adapter.stripRouterToolCallsFromResponse(response)
 
 	choice := response.body["choices"].([]any)[0].(map[string]any)

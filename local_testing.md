@@ -4,16 +4,21 @@ This is the router-centric runbook for testing router-owned tool loops
 end-to-end. The router talks to real model enclaves for generation but sends
 MCP tool traffic to local servers.
 
-One tool profile is currently supported:
+Two tool profiles are currently supported:
 
 - **Web Search** — `confidential-websearch` MCP server
+- **Code Execution** — `confidential-code-execution` MCP server (orchestrator)
 
-## 1. Start the local MCP server
+You can run either or both depending on what you're testing.
+
+## 1. Start local MCP servers
+
+Start whichever servers you need. Each listens on its own port.
 
 ### Web Search (port 8091)
 
 For standalone bring-up and direct MCP probes, see
-`local_testing.md` in the `confidential-websearch` repo.
+`../websearch/local_testing.md`.
 
 #### Fixture mode
 
@@ -35,19 +40,40 @@ LISTEN_ADDR=127.0.0.1:8091 \
 go run .
 ```
 
+### Code Execution (port 7070)
+
+From the `confidential-code-execution` repo (`Tinfoil/code-execution/confidential-code-execution`):
+
+```bash
+cd ../code-execution/confidential-code-execution
+ADMIN_API_KEY=$TINFOIL_API_KEY \
+go run -tags dev .
+```
+
+`-tags dev` disables the session-auth check (`auth_dev.go`) and the
+attested-TLS hop to the executor (`proxy_dev.go`) so local probes work
+without enclave attestation. The orchestrator still calls the real
+Tinfoil controlplane to provision sandbox containers, so
+`ADMIN_API_KEY` must be a valid controlplane token. Never ship a binary
+built with `-tags dev`.
+
+The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) and
+`GET /metrics`. It manages a pool of sandboxed containers and routes
+tool calls to them by the `accessToken` carried in
+`params._meta.tinfoil_code_exec` (one container per token,
+snapshotted+evicted after `IDLE_TIMEOUT=60s`).
+
 ## 2. Create a small router config
 
 Create a temporary config with the models you want to exercise:
 
-_note that kimi may not work_
-
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'
 models:
-  gemma4-31b:
-    repo: tinfoilsh/confidential-gemma4-31b
+  gpt-oss-120b:
+    repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gemma4-31b.inf6.tinfoil.sh
+      - gpt-oss-120b.inf6.tinfoil.sh
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
@@ -56,7 +82,6 @@ models:
     repo: tinfoilsh/confidential-kimi-k2-6
     enclaves:
       - kimi-k2-6.tinfoil.containers.tinfoil.dev
-
 EOF
 ```
 
@@ -74,6 +99,7 @@ variables for whichever MCP servers you started in step 1:
 ```bash
 DEBUG=1 \
 LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
+LOCAL_MCP_ENDPOINT_CODE_EXECUTION=http://127.0.0.1:7070/mcp \
 PORT=8090 \
 DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
@@ -86,28 +112,40 @@ go run -tags toolruntime_debug .
 `LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP
 model hit a local MCP server instead of the attested deployment. The model
 name is upper-cased with non-alphanumeric characters replaced by underscores,
-so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are
-only honored when debug mode is enabled (via `DEBUG=1` or the `--debug` flag),
-which prevents a misconfigured production deployment from silently downgrading
-to a non-attested HTTP endpoint.
+so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH` and `code-execution`
+becomes `LOCAL_MCP_ENDPOINT_CODE_EXECUTION`. These overrides are only honored
+when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which
+prevents a misconfigured production deployment from silently downgrading to a
+non-attested HTTP endpoint.
 
-### Toolruntime debug build tag
+### Toolruntime tracing
 
-All heavyweight debugging — per-request `toolruntime:<tid>` trace logging
-**and** the per-session devlog (`logs/<session-id>.txt`) — is gated at compile
-time by the `toolruntime_debug` build tag. Without the tag, `debugEnabled` is
-a compile-time `false` constant and every debug call site (including the
-`devLog` type and all extraction helpers that touch user content) is eliminated
-by the Go compiler. Production TEE images carry zero debug code and can never
-write user content to disk, regardless of the runtime `DEBUG` flag.
+The per-request `toolruntime:<tid>` tracing emitted by `debugLogf` is gated
+purely at compile time by the `toolruntime_debug` build tag. Without the tag,
+`debugEnabled` is a compile-time `false` constant and every call site is
+eliminated by the Go compiler, so production TEE images carry zero debug code:
 
-- `go run .` / `go build .`: debug code is compiled out.
-- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: debug code is compiled in.
+- `go run .` / `go build .` (default, and `go build -tags prod .`): tracing is compiled out.
+- `go run -tags toolruntime_debug .` / `go build -tags toolruntime_debug .`: tracing is compiled in and always on.
 
-If you want `toolruntime:<tid> ...` trace lines and `logs/*.txt` session files
-in this runbook, build with the tag as shown above. Otherwise you will still
-see `DEBUG=1` router logs but none of the per-iteration tool-loop trace or
-session-level devlog output.
+If you want the `toolruntime:<tid> ...` lines in this runbook, build with the
+tag as shown above. Otherwise you will still see `DEBUG=1` router logs but
+none of the per-iteration tool-loop trace.
+
+### Curl Test
+
+Confirm the router is alive!
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Say hi in 5 words."}],
+    "max_tokens": 32
+  }'
+```
 
 ---
 
@@ -123,7 +161,7 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
   -d '{
-    "model": "gemma4-31b",
+    "model": "gpt-oss-120b",
     "web_search_options": {},
     "messages": [
       {
@@ -181,11 +219,114 @@ For the matrix layout and result analyzer details, see
 
 ---
 
+## Code Execution smoke tests
+
+Every code-execution call carries three credentials in
+`code_execution_options` (plus the Tinfoil API key on `Authorization`).
+
+Format constraints, enforced downstream of the router (in confidential-code-execution)
+
+- `accessToken` and `containerAuthToken` must be **64 hex chars**
+  (32 random bytes).
+- `encryptionKey` must be **base64url** (no padding).
+
+For local probes, `containerAuthToken` and `encryptionKey` can be any
+fixed random values — paste these into your shell once and reuse:
+
+```bash
+export CTR_AUTH=48bb95e712bf133be055845c4fc0a9dab692e88a615b70415c85949596a3491d
+export KEY=JMgMq_e9BDVnXvD_ptgUWmJsCHCNRrIjl3M6Wadcgvs
+```
+
+`accessToken` identifies the sandbox container, so generate one fresh
+per test session and **reuse it across every call in that session** to
+land on the same container:
+
+```bash
+export TOKEN=$(openssl rand -hex 32)
+```
+
+### Chat Completions
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d "$(cat <<EOF
+  {
+    "model": "gpt-oss-120b",
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
+    },
+    "messages": [
+      {"role": "user", "content": "Create a new file called test.txt with hello from tinfoil in it"}
+    ],
+    "max_tokens": 200
+  }
+EOF
+)"
+```
+
+Session persists across calls with the same `accessToken`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d "$(cat <<EOF
+  {
+    "model": "gpt-oss-120b",
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
+    },
+    "messages": [
+      {"role": "user", "content": "Use cat to read test.txt. What does it say in it?"}
+    ],
+    "max_tokens": 200
+  }
+EOF
+)"
+```
+
+### Responses
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d "$(cat <<EOF
+  {
+    "model": "gpt-oss-120b",
+    "code_execution_options": {
+      "accessToken": "$TOKEN",
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
+    },
+    "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
+    "stream": false,
+    "temperature": 0,
+    "max_output_tokens": 400,
+    "tools": [{"type": "code_execution"}]
+  }
+EOF
+)"
+```
+
+### Session cleanup
+
+The orchestrator closes containers on shutdown
+
+---
+
 ## Verified model matrix
 
 These combinations were validated locally:
 
-- `gemma4-31b`
+- `gpt-oss-120b`
   - `/v1/chat/completions`
   - non-streaming and streaming
 - `gpt-oss-120b`
@@ -211,5 +352,6 @@ If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server
+lsof -ti tcp:7070 | xargs kill   # code execution orchestrator
 lsof -ti tcp:8090 | xargs kill   # model-router
 ```

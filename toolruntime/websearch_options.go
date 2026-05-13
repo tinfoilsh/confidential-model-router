@@ -206,17 +206,22 @@ func (o webSearchOptions) applyToFetchArgs(arguments map[string]any) {
 }
 
 // parseChatWebSearchOptions extracts OpenAI's documented web_search_options
-// fields plus the sibling `filters` block from a Chat Completions request body.
-// Returns the zero value when the block is missing so the caller can forward
-// "no options" without special casing.
-func parseChatWebSearchOptions(body map[string]any) webSearchOptions {
+// fields plus the sibling `filters` block for a Chat Completions request.
+// The inner web_search_options block is lifted onto routerOpts.WebSearch at
+// the router edge (so it survives the strip-from-body step) and read back
+// from there; the top-level `filters` fallback still lives on body and is
+// read directly. Returns the zero value when no options block was provided
+// so the caller can forward "no options" without special casing.
+func parseChatWebSearchOptions(routerOpts *RouterOptions, body map[string]any) webSearchOptions {
 	opts := webSearchOptions{}
-	if raw, ok := body["web_search_options"].(map[string]any); ok {
-		opts.searchContextSize = stringValue(raw["search_context_size"])
-		opts.userLocationCountry = extractUserLocationCountry(raw["user_location"])
-		opts.allowedDomains = extractAllowedDomains(raw["filters"])
-		opts.excludedDomains = extractExcludedDomains(raw["filters"])
-		applyAdvancedSearchFields(&opts, raw)
+	if routerOpts != nil && routerOpts.WebSearch != nil {
+		if raw := routerOpts.WebSearch.Raw; raw != nil {
+			opts.searchContextSize = stringValue(raw["search_context_size"])
+			opts.userLocationCountry = extractUserLocationCountry(raw["user_location"])
+			opts.allowedDomains = extractAllowedDomains(raw["filters"])
+			opts.excludedDomains = extractExcludedDomains(raw["filters"])
+			applyAdvancedSearchFields(&opts, raw)
+		}
 	}
 	if filters, ok := body["filters"].(map[string]any); ok {
 		if len(opts.allowedDomains) == 0 {
@@ -226,16 +231,22 @@ func parseChatWebSearchOptions(body map[string]any) webSearchOptions {
 			opts.excludedDomains = extractDomainListFromFilterMap(filters, "excluded_domains")
 		}
 	}
-	opts.piiCheck = parseSafetyOptIn(body["pii_check_options"])
+	if routerOpts != nil && routerOpts.PIICheck != nil {
+		enabled := true
+		opts.piiCheck = &enabled
+	}
 	opts.injectionCheck = parseSafetyOptIn(body["prompt_injection_check_options"])
 	opts.includeActionSources = parseIncludeActionSources(body)
 	return opts
 }
 
 // parseResponsesWebSearchOptions mirrors parseChatWebSearchOptions for the
-// Responses API, where options live on the `tools[{type:"web_search", ...}]`
-// entries rather than a sibling block.
-func parseResponsesWebSearchOptions(body map[string]any) webSearchOptions {
+// Responses API, where the web_search options live on the
+// `tools[{type:"web_search", ...}]` entries rather than a sibling block —
+// and those entries are never stripped from body, so we still read them
+// from body. Only the safety opt-in (`pii_check_options`) is lifted at the
+// router edge and read from routerOpts.
+func parseResponsesWebSearchOptions(routerOpts *RouterOptions, body map[string]any) webSearchOptions {
 	rawTools, _ := body["tools"].([]any)
 	for _, rawTool := range rawTools {
 		tool, _ := rawTool.(map[string]any)
@@ -252,7 +263,10 @@ func parseResponsesWebSearchOptions(body map[string]any) webSearchOptions {
 		opts.allowedDomains = extractAllowedDomains(tool["filters"])
 		opts.excludedDomains = extractExcludedDomains(tool["filters"])
 		applyAdvancedSearchFields(&opts, tool)
-		opts.piiCheck = parseSafetyOptIn(body["pii_check_options"])
+		if routerOpts != nil && routerOpts.PIICheck != nil {
+			enabled := true
+			opts.piiCheck = &enabled
+		}
 		opts.injectionCheck = parseSafetyOptIn(body["prompt_injection_check_options"])
 		opts.includeActionSources = parseIncludeActionSources(body)
 		return opts
@@ -333,15 +347,22 @@ type safetyOptIns struct {
 	injection *bool
 }
 
-// parseSafetyOptIns pulls the caller-provided PII and prompt-injection opt-ins
-// off the top-level request body. Both Chat Completions and Responses expose
-// the controls as top-level keys (`pii_check_options`,
-// `prompt_injection_check_options`) so a single parser covers both routes.
-func parseSafetyOptIns(body map[string]any) safetyOptIns {
-	return safetyOptIns{
-		pii:       parseSafetyOptIn(body["pii_check_options"]),
-		injection: parseSafetyOptIn(body["prompt_injection_check_options"]),
+// parseSafetyOptIns pulls the caller's PII and prompt-injection opt-ins
+// from the right sources. `pii_check_options` is lifted into RouterOptions
+// at the router edge and stripped from body (so its inner contents are
+// preserved on routerOpts.PIICheck rather than the body); the
+// prompt-injection block stays on body today and is read from there.
+// Both Chat Completions and Responses use this same shape, so a single
+// parser covers both routes. A nil pointer means the caller said nothing
+// and the server should apply its own default.
+func parseSafetyOptIns(routerOpts *RouterOptions, body map[string]any) safetyOptIns {
+	opts := safetyOptIns{}
+	if routerOpts != nil && routerOpts.PIICheck != nil {
+		enabled := true
+		opts.pii = &enabled
 	}
+	opts.injection = parseSafetyOptIn(body["prompt_injection_check_options"])
+	return opts
 }
 
 // extractUserLocationCountry pulls the ISO 3166-1 alpha-2 country code out of
