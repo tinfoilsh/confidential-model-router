@@ -59,8 +59,9 @@ built with `-tags dev`.
 
 The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) and
 `GET /metrics`. It manages a pool of sandboxed containers and routes
-tool calls to them by `X-Code-Execution-Access-Token` (one container
-per token, snapshotted+evicted after `IDLE_TIMEOUT=60s`).
+tool calls to them by the `accessToken` carried in
+`params._meta.tinfoil_code_exec` (one container per token,
+snapshotted+evicted after `IDLE_TIMEOUT=60s`).
 
 ## 2. Create a small router config
 
