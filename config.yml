@@ -14,9 +14,9 @@ models:
       - doc-upload.tinfoil.containers.tinfoil.dev
 
   whisper-large-v3-turbo:
-    repo: tinfoilsh/confidential-whisper-large-v3
+    repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - whisper.inf6.tinfoil.sh
+      - whisper-large-v3-turbo.realtime.inf9.tinfoil.sh
 
   voxtral-small-24b:
     repo: tinfoilsh/confidential-voxtral-small-24b
