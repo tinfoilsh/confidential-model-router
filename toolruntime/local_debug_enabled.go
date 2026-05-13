@@ -17,8 +17,8 @@ import (
 
 // debugEnabled is a compile-time true constant when the toolruntime_debug
 // build tag is set. In production builds (no build tag) this symbol is
-// replaced by a compile-time false constant in debug_disabled.go so every
-// call site is dead-code-eliminated.
+// replaced by a compile-time false constant in local_debug_disabled.go
+// so every call site is dead-code-eliminated.
 const debugEnabled = true
 
 var debugTraceCounter uint64
@@ -90,7 +90,7 @@ func debugMessagesSummary(messages []any, contentMax int) string {
 // methods are nil-safe: a nil *devLog is a no-op, so call sites are
 // unconditional.
 //
-// Production builds get the no-op stub in debug_disabled.go, which the
+// Production builds get the no-op stub in local_debug_disabled.go, which the
 // compiler eliminates entirely, so user content never touches disk in a
 // deployed enclave regardless of the runtime DEBUG flag.
 type devLog struct {

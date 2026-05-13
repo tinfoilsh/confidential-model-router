@@ -30,8 +30,8 @@ func debugMessagesSummary([]any, int) string { return "" }
 // devLog is a no-op stub compiled into production binaries (no
 // toolruntime_debug build tag). Every method is a no-op so call sites
 // compile unconditionally without any #ifdef ceremony. The real
-// implementation lives in debug_enabled.go and is only included in
-// debug builds.
+// implementation lives in local_debug_enabled.go and is only included
+// in debug builds.
 type devLog struct{}
 
 func openDevLog(*http.Request, map[string]any, string, *sessionRegistry, *RouterOptions) *devLog {
