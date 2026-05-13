@@ -69,10 +69,10 @@ Create a temporary config with the models you want to exercise:
 ```bash
 cat > /tmp/model-router-local.yml <<'EOF'
 models:
-  gemma4-31b:
-    repo: tinfoilsh/confidential-gemma4-31b
+  gpt-oss-120b:
+    repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gemma4-31b.inf6.tinfoil.sh
+      - gpt-oss-120b.inf6.tinfoil.sh
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
@@ -253,7 +253,7 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
   -d "$(cat <<EOF
   {
-    "model": "gemma4-31b",
+    "model": "gpt-oss-120b",
     "code_execution_options": {
       "accessToken": "$TOKEN",
       "encryptionKey": "$KEY",
@@ -276,7 +276,7 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
   -d "$(cat <<EOF
   {
-    "model": "gemma4-31b",
+    "model": "gpt-oss-120b",
     "code_execution_options": {
       "accessToken": "$TOKEN",
       "encryptionKey": "$KEY",
@@ -325,7 +325,7 @@ The orchestrator closes containers on shutdown
 
 These combinations were validated locally:
 
-- `gemma4-31b`
+- `gpt-oss-120b`
   - `/v1/chat/completions`
   - non-streaming and streaming
 - `gpt-oss-120b`
