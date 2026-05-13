@@ -735,10 +735,11 @@ func (s *responsesStreamer) openCodeInterpreterCallItem(id, toolName string, arg
 		"type":         "response.output_item.added",
 		"output_index": outputIndex,
 		"item": map[string]any{
-			"id":     id,
-			"type":   "code_interpreter_call",
-			"status": "in_progress",
-			"code":   code,
+			"id":           id,
+			"type":         "code_interpreter_call",
+			"status":       "in_progress",
+			"code":         code,
+			"container_id": tinfoilContainerID,
 		},
 	})
 	return outputIndex

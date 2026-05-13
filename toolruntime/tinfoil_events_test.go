@@ -687,9 +687,12 @@ func TestCodeInterpreterCallEventShape(t *testing.T) {
 	if !strings.Contains(code, "bash") {
 		t.Fatalf("code should contain tool name: %q", code)
 	}
-	results, _ := item["results"].([]map[string]any)
-	if len(results) != 1 || results[0]["text"] != "hi\n" {
-		t.Fatalf("results malformed: %#v", item["results"])
+	outputs, _ := item["outputs"].([]map[string]any)
+	if len(outputs) != 1 || outputs[0]["type"] != "logs" || outputs[0]["logs"] != "hi\n" {
+		t.Fatalf("outputs malformed: %#v", item["outputs"])
+	}
+	if got := item["container_id"]; got != tinfoilContainerID {
+		t.Fatalf("container_id = %v, want %q", got, tinfoilContainerID)
 	}
 	if _, present := item["_tinfoil"]; present {
 		t.Fatalf("successful call must omit _tinfoil sidecar")

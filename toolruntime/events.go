@@ -531,11 +531,10 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 // Code-interpreter-call output items (Responses API)
 // ---------------------------------------------------------------------------
 
-// codeInterpreterCallEvent builds a single code_interpreter_call output
-// item for the non-streaming Responses `output[]` array, analogous to
-// webSearchCallEvent. The item follows OpenAI's code_interpreter_call
-// shape: `code` carries a description of what was executed (tool name +
-// serialized arguments), and `results` carries the text output.
+// codeInterpreterCallEvent builds a code_interpreter_call item for
+// Responses `output[]`. Shape matches OpenAI's ResponseCodeInterpreterToolCall:
+// https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_code_interpreter_tool_call.py
+// Tinfoil only emits the `logs` variant of `outputs` today.
 func codeInterpreterCallEvent(id, status, toolName string, arguments map[string]any, output, errorCode string) map[string]any {
 	code := toolName
 	if len(arguments) > 0 {
@@ -544,17 +543,18 @@ func codeInterpreterCallEvent(id, status, toolName string, arguments map[string]
 		}
 	}
 	item := map[string]any{
-		"type":   "code_interpreter_call",
-		"id":     id,
-		"status": status,
-		"code":   code,
+		"type":         "code_interpreter_call",
+		"id":           id,
+		"status":       status,
+		"code":         code,
+		"container_id": tinfoilContainerID,
 	}
 	if status == "blocked" {
 		item["status"] = "failed"
 	}
 	if output != "" {
-		item["results"] = []map[string]any{
-			{"type": "text", "text": output},
+		item["outputs"] = []map[string]any{
+			{"type": "logs", "logs": output},
 		}
 	}
 	if sidecar := tinfoilSidecar(status, errorCode); sidecar != nil {
@@ -562,6 +562,11 @@ func codeInterpreterCallEvent(id, status, toolName string, arguments map[string]
 	}
 	return item
 }
+
+// tinfoilContainerID is the synthetic placeholder used for the
+// container_id field on every emitted code_interpreter_call item. The
+// spec requires a non-empty string;
+const tinfoilContainerID = "cnt_tinfoil_sandbox"
 
 // buildCodeInterpreterCallOutputItems turns recorded code-execution tool
 // calls into code_interpreter_call output items for the non-streaming
