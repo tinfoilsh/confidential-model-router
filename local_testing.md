@@ -205,23 +205,29 @@ For the matrix layout and result analyzer details, see
 
 ## Code Execution smoke tests
 
-When `code_execution_options` is present, the router validates that all
-three subfields (`accessToken`, `encryptionKey`, `containerAuthToken`)
-are non-empty strings and 400s otherwise.
+Every code-execution call carries three credentials in
+`code_execution_options` (plus the Tinfoil API key on `Authorization`).
 
-The router strips the block from the body and re-injects the values as
-`X-Code-Execution-Access-Token`, `X-Code-Execution-Encryption-Key`,
-and `X-Code-Execution-Container-Auth-Token` headers on the outbound
-MCP hop, so the upstream model enclave never sees the credentials.
+Format constraints, enforced downstream of the router (in confidential-code-execution)
 
-For local probes the orchestrator runs with `-tags dev` (session-auth
-no-op), so only `accessToken` actually matters
+- `accessToken` and `containerAuthToken` must be **64 hex chars**
+  (32 random bytes).
+- `encryptionKey` must be **base64url** (no padding).
 
-Pick a per-session access token and reuse it across calls in the same
-conversation to hit the same container:
+For local probes, `containerAuthToken` and `encryptionKey` can be any
+fixed random values — paste these into your shell once and reuse:
 
 ```bash
-TOKEN=local-test-$(date +%s)
+export CTR_AUTH=48bb95e712bf133be055845c4fc0a9dab692e88a615b70415c85949596a3491d
+export KEY=JMgMq_e9BDVnXvD_ptgUWmJsCHCNRrIjl3M6Wadcgvs
+```
+
+`accessToken` identifies the sandbox container, so generate one fresh
+per test session and **reuse it across every call in that session** to
+land on the same container:
+
+```bash
+export TOKEN=$(openssl rand -hex 32)
 ```
 
 ### Chat Completions
@@ -235,8 +241,8 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
     "model": "gemma4-31b",
     "code_execution_options": {
       "accessToken": "$TOKEN",
-      "encryptionKey": "local-test-key",
-      "containerAuthToken": "local-test-container-auth"
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
     },
     "messages": [
       {"role": "user", "content": "Create a new file called test.txt with hello from tinfoil in it"}
@@ -258,8 +264,8 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
     "model": "gemma4-31b",
     "code_execution_options": {
       "accessToken": "$TOKEN",
-      "encryptionKey": "local-test-key",
-      "containerAuthToken": "local-test-container-auth"
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
     },
     "messages": [
       {"role": "user", "content": "Use cat to read test.txt. What does it say in it?"}
@@ -281,40 +287,14 @@ curl -sS -X POST http://127.0.0.1:8090/v1/responses \
     "model": "gpt-oss-120b",
     "code_execution_options": {
       "accessToken": "$TOKEN",
-      "encryptionKey": "local-test-key",
-      "containerAuthToken": "local-test-container-auth"
+      "encryptionKey": "$KEY",
+      "containerAuthToken": "$CTR_AUTH"
     },
     "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
     "stream": false,
     "temperature": 0,
     "max_output_tokens": 400,
     "tools": [{"type": "code_execution"}]
-  }
-EOF
-)"
-```
-
-### Both tools together
-
-Web search and code execution can be activated in the same request:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -d "$(cat <<EOF
-  {
-    "model": "gpt-oss-120b",
-    "web_search_options": {},
-    "code_execution_options": {
-      "accessToken": "$TOKEN-mixed",
-      "encryptionKey": "local-test-key",
-      "containerAuthToken": "local-test-container-auth"
-    },
-    "messages": [
-      {"role": "user", "content": "Search the web for the current Python version, then use bash to run: python3 --version"}
-    ],
-    "max_tokens": 300
   }
 EOF
 )"
