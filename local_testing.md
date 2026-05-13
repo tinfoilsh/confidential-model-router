@@ -131,6 +131,21 @@ If you want the `toolruntime:<tid> ...` lines in this runbook, build with the
 tag as shown above. Otherwise you will still see `DEBUG=1` router logs but
 none of the per-iteration tool-loop trace.
 
+### Curl Test
+
+Confirm the router is alive!
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TINFOIL_API_KEY" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Say hi in 5 words."}],
+    "max_tokens": 32
+  }'
+```
+
 ---
 
 ## Web Search smoke tests
@@ -145,7 +160,7 @@ curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TINFOIL_API_KEY" \
   -d '{
-    "model": "gemma4-31b",
+    "model": "gpt-oss-120b",
     "web_search_options": {},
     "messages": [
       {
