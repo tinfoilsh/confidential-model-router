@@ -88,6 +88,11 @@ models:
     enclaves:
       - websearch.tinfoil.sh
 
+  code-execution:
+    repo: tinfoilsh/confidential-code-execution
+    enclaves:
+      - code-execution.tinfoil.sh
+
   gemma4-31b:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
