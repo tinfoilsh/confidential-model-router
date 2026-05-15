@@ -23,6 +23,15 @@ type CodeExecutionOptions struct {
 	AccessToken        string
 	EncryptionKey      string
 	ContainerAuthToken string
+	// pointer to distinguish absent from empty
+	Uploads *[]UploadedFile
+}
+
+// code_execution_options.uploads. Handled by code-exec mcp
+type UploadedFile struct {
+	FileAccessToken string
+	Filename        string
+	Sha256          string
 }
 
 // WebSearchOptions wraps the caller's web_search_options block so it
@@ -102,7 +111,44 @@ func parseCodeExecutionOptions(raw any) (*CodeExecutionOptions, error) {
 	if ce.ContainerAuthToken == "" {
 		return nil, fmt.Errorf("code_execution_options.containerAuthToken is required")
 	}
+	if rawUploads, ok := m["uploads"]; ok {
+		uploads, err := parseUploads(rawUploads)
+		if err != nil {
+			return nil, err
+		}
+		ce.Uploads = &uploads
+	}
 	return ce, nil
+}
+
+func parseUploads(raw any) ([]UploadedFile, error) {
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("code_execution_options.uploads must be an array")
+	}
+	out := make([]UploadedFile, len(arr))
+	for i, item := range arr {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("code_execution_options.uploads[%d] must be an object", i)
+		}
+		u := UploadedFile{
+			FileAccessToken: stringField(entry, "fileAccessToken"),
+			Filename:        stringField(entry, "filename"),
+			Sha256:          stringField(entry, "sha256"),
+		}
+		if u.FileAccessToken == "" {
+			return nil, fmt.Errorf("code_execution_options.uploads[%d].fileAccessToken is required", i)
+		}
+		if u.Filename == "" {
+			return nil, fmt.Errorf("code_execution_options.uploads[%d].filename is required", i)
+		}
+		if u.Sha256 == "" {
+			return nil, fmt.Errorf("code_execution_options.uploads[%d].sha256 is required", i)
+		}
+		out[i] = u
+	}
+	return out, nil
 }
 
 func stringField(m map[string]any, key string) string {
@@ -119,12 +165,24 @@ func attachRouterOptionsMeta(registry *sessionRegistry, opts *RouterOptions) {
 		return
 	}
 	if ce := opts.CodeExecution; ce != nil {
+		metaBlock := map[string]any{
+			"accessToken":        ce.AccessToken,
+			"encryptionKey":      ce.EncryptionKey,
+			"containerAuthToken": ce.ContainerAuthToken,
+		}
+		if ce.Uploads != nil {
+			arr := make([]any, len(*ce.Uploads))
+			for i, u := range *ce.Uploads {
+				arr[i] = map[string]any{
+					"fileAccessToken": u.FileAccessToken,
+					"filename":        u.Filename,
+					"sha256":          u.Sha256,
+				}
+			}
+			metaBlock["uploads"] = arr
+		}
 		registry.metaByProfile[toolprofile.CodeExecution.Name] = mcp.Meta{
-			toolprofile.CodeExecutionMetaKey: map[string]any{
-				"accessToken":        ce.AccessToken,
-				"encryptionKey":      ce.EncryptionKey,
-				"containerAuthToken": ce.ContainerAuthToken,
-			},
+			toolprofile.CodeExecutionMetaKey: metaBlock,
 		}
 	}
 }
