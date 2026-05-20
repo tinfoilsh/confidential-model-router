@@ -1,20 +1,105 @@
-name: 'Tinfoil Container Release'
+# Tinfoil Containers release workflow (phase 1 — initiate a release).
+#
+# Trigger this workflow from a branch via "Run workflow" and provide the
+# version. It builds the image, updates tinfoil-config.yml, creates the release
+# tag, and then dispatches phase 2 in `tinfoil-release-publish.yml` against the
+# new tag to attest the image and publish the GitHub release.
+
+name: Tinfoil Release
+
+run-name: Release ${{ inputs.version }}
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. v1.0.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: tinfoil-container-release-${{ inputs.version }}
 
 jobs:
-  measure-image-and-publish:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
+      contents: read    # checkout + check the tag does not exist
+      packages: write   # push the container image
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
-      - uses: tinfoilsh/measure-image-action@9733d724326dd6b476335ec513210861894d4cb2  # v0.8.2
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          config-file: ${{ github.workspace }}/tinfoil-config.yml
+          persist-credentials: false
+
+      - name: Check if version tag already exists
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q .; then
+            echo "::error::Tag $VERSION already exists"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+            type=sha,format=short
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: 0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ inputs.version }}
+
+  prepare-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # update-container-action pushes the release tag
+      pull-requests: write  # required by update-container-action
+      actions: write        # dispatch tinfoil-release-publish.yml on the new tag
+
+    steps:
+      - name: Update tinfoil-config.yml and create the release tag
+        uses: tinfoilsh/update-container-action@5e0a3789316941664cee055706799114e0180565 # v0.6.0
+        with:
+          version: ${{ inputs.version }}
+          source-sha: ${{ github.sha }}
+          update-config: true
+          image-refs: |
+            ghcr.io/${{ github.repository }}@${{ needs.build.outputs.digest }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch the publish workflow on the new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh workflow run tinfoil-release-publish.yml --ref "$VERSION"

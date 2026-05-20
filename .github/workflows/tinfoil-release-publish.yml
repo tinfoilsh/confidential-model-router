@@ -1,0 +1,30 @@
+# Tinfoil Containers release workflow (phase 2 — auto-triggered).
+#
+# DO NOT RUN MANUALLY. This workflow is dispatched automatically by
+# `tinfoil-release.yml` against the newly created release tag.
+
+name: Tinfoil Release - Publish (auto-triggered)
+
+run-name: Publish release ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tinfoil-container-release-${{ github.ref_name }}
+
+jobs:
+  measure-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the GitHub release
+      packages: write       # attach the attestation to the image
+      id-token: write       # keyless attestation signing
+      attestations: write   # publish the attestation
+
+    steps:
+      - name: Measure image, attest, and publish the release
+        uses: tinfoilsh/measure-image-action@e9967c4a2dd60bacc7cce9e4315c5ebcd46118e9 # v0.9.2
+        with:
+          config-file: ${{ github.workspace }}/tinfoil-config.yml
+          github-token: ${{ secrets.GITHUB_TOKEN }}
