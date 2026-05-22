@@ -53,7 +53,6 @@ models:
     enclaves:
       - gpt-oss-120b-0.inf6.tinfoil.sh
       - gpt-oss-120b-1.inf6.tinfoil.sh
-      - gpt-oss-120b-2.inf9.tinfoil.sh
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
