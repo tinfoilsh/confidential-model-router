@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/usage-reporting-go/contract"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // TestCollectorEmitsCustomerRequestAndTokenMeters verifies that a billing
@@ -52,7 +52,7 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 		t.Fatal("timed out waiting for billing event delivery")
 	}
 
-	var batch contract.Batch
+	var batch usagereporting.Batch
 	if err := json.Unmarshal(body, &batch); err != nil {
 		t.Fatalf("decode batch: %v", err)
 	}
@@ -61,11 +61,11 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 	}
 	got := batch.Events[0]
 
-	if got.Operation.Service != contract.ServiceRouter {
-		t.Errorf("service mismatch: got %q want %q", got.Operation.Service, contract.ServiceRouter)
+	if got.Operation.Service != usagereporting.ServiceRouter {
+		t.Errorf("service mismatch: got %q want %q", got.Operation.Service, usagereporting.ServiceRouter)
 	}
-	if got.Operation.Name != contract.OperationRouterModelRequest {
-		t.Errorf("operation mismatch: got %q want %q", got.Operation.Name, contract.OperationRouterModelRequest)
+	if got.Operation.Name != usagereporting.OperationRouterModelRequest {
+		t.Errorf("operation mismatch: got %q want %q", got.Operation.Name, usagereporting.OperationRouterModelRequest)
 	}
 	if got.CustomerRequests != 1 {
 		t.Errorf("customer requests mismatch: got %d want 1", got.CustomerRequests)
@@ -75,11 +75,11 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 	for _, m := range got.Meters {
 		meters[m.Name] = m.Quantity
 	}
-	if meters[contract.MeterInputTokens] != 11 {
-		t.Errorf("input_tokens mismatch: got %d want 11", meters[contract.MeterInputTokens])
+	if meters[usagereporting.MeterInputTokens] != 11 {
+		t.Errorf("input_tokens mismatch: got %d want 11", meters[usagereporting.MeterInputTokens])
 	}
-	if meters[contract.MeterOutputTokens] != 7 {
-		t.Errorf("output_tokens mismatch: got %d want 7", meters[contract.MeterOutputTokens])
+	if meters[usagereporting.MeterOutputTokens] != 7 {
+		t.Errorf("output_tokens mismatch: got %d want 7", meters[usagereporting.MeterOutputTokens])
 	}
 	if _, hasRequestsMeter := meters["requests"]; hasRequestsMeter {
 		t.Errorf("billing event should not emit a requests meter; got %+v", meters)
@@ -125,7 +125,7 @@ func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
 		t.Fatal("timed out waiting for billing event delivery")
 	}
 
-	var batch contract.Batch
+	var batch usagereporting.Batch
 	if err := json.Unmarshal(body, &batch); err != nil {
 		t.Fatalf("decode batch: %v", err)
 	}
@@ -137,10 +137,10 @@ func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
 	for _, m := range batch.Events[0].Meters {
 		meters[m.Name] = m.Quantity
 	}
-	if meters[contract.MeterInputTokens] != 18 {
-		t.Errorf("input_tokens mismatch: got %d want 18", meters[contract.MeterInputTokens])
+	if meters[usagereporting.MeterInputTokens] != 18 {
+		t.Errorf("input_tokens mismatch: got %d want 18", meters[usagereporting.MeterInputTokens])
 	}
-	if meters[contract.MeterOutputTokens] != 0 {
-		t.Errorf("output_tokens mismatch: got %d want 0", meters[contract.MeterOutputTokens])
+	if meters[usagereporting.MeterOutputTokens] != 0 {
+		t.Errorf("output_tokens mismatch: got %d want 0", meters[usagereporting.MeterOutputTokens])
 	}
 }

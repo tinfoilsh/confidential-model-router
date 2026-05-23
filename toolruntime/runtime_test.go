@@ -15,8 +15,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
-	"github.com/tinfoilsh/usage-reporting-go/contract"
-	"github.com/tinfoilsh/usage-reporting-go/usagecontext"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -958,7 +957,7 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 		t.Fatalf("build tool session headers: %v", err)
 	}
 
-	got, ok, err := usagecontext.FromHeaders(headers, secret, now, time.Minute)
+	got, ok, err := usagereporting.FromHeaders(headers, secret, now, time.Minute)
 	if err != nil {
 		t.Fatalf("parse usage context: %v", err)
 	}
@@ -971,10 +970,10 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	if got.ContextID != "req-1" {
 		t.Fatalf("context id mismatch: got %q want req-1", got.ContextID)
 	}
-	if got.ParentService != contract.ServiceRouter {
-		t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, contract.ServiceRouter)
+	if got.ParentService != usagereporting.ServiceRouter {
+		t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, usagereporting.ServiceRouter)
 	}
-	if !usagecontext.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
+	if !usagereporting.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
 		t.Fatalf("api key hash does not match forwarded authorization")
 	}
 	if got.Depth != 1 {
@@ -1001,7 +1000,7 @@ func TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty(t *testing.T) {
 		t.Fatalf("build tool session headers: %v", err)
 	}
 
-	if _, ok, err := usagecontext.FromHeaders(headers, "irrelevant", now, time.Minute); err != nil || ok {
+	if _, ok, err := usagereporting.FromHeaders(headers, "irrelevant", now, time.Minute); err != nil || ok {
 		t.Fatalf("expected no usage context when secret is empty (ok=%v err=%v)", ok, err)
 	}
 }

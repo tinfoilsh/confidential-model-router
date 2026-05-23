@@ -10,8 +10,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 	usageclient "github.com/tinfoilsh/usage-reporting-go/client"
-	"github.com/tinfoilsh/usage-reporting-go/contract"
 )
 
 // Event represents a billing event with token usage
@@ -52,7 +52,7 @@ func maskAPIKey(apiKey string) string {
 func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector {
 	endpoint := ""
 	if controlPlaneURL != "" {
-		endpoint = strings.TrimRight(controlPlaneURL, "/") + contract.IngestionPath
+		endpoint = strings.TrimRight(controlPlaneURL, "/") + usagereporting.IngestionPath
 	}
 
 	c := &Collector{
@@ -85,18 +85,18 @@ func (c *Collector) AddEvent(event Event) {
 			inputTokens = int64(event.TotalTokens)
 		}
 
-		c.reporter.AddEvent(contract.Event{
+		c.reporter.AddEvent(usagereporting.Event{
 			RequestID:  event.RequestID,
 			OccurredAt: event.Timestamp,
 			APIKey:     event.APIKey,
-			Operation: contract.Operation{
-				Service: contract.ServiceRouter,
-				Name:    contract.OperationRouterModelRequest,
+			Operation: usagereporting.Operation{
+				Service: usagereporting.ServiceRouter,
+				Name:    usagereporting.OperationRouterModelRequest,
 			},
 			CustomerRequests: 1,
-			Meters: []contract.Meter{
-				{Name: contract.MeterInputTokens, Quantity: inputTokens},
-				{Name: contract.MeterOutputTokens, Quantity: outputTokens},
+			Meters: []usagereporting.Meter{
+				{Name: usagereporting.MeterInputTokens, Quantity: inputTokens},
+				{Name: usagereporting.MeterOutputTokens, Quantity: outputTokens},
 			},
 			Attributes: map[string]string{
 				"model":     event.Model,
