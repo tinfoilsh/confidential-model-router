@@ -16,22 +16,22 @@ models:
   whisper-large-v3-turbo:
     repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - whisper-large-v3-turbo.realtime.inf9.tinfoil.sh
+      - whisper-large-v3-turbo.realtime.inf10.tinfoil.sh
 
   voxtral-small-24b:
     repo: tinfoilsh/confidential-voxtral-small-24b
     enclaves:
-      - voxtral-small-24b.inf9.tinfoil.sh
+      - voxtral-small-24b.inf10.tinfoil.sh
 
   voxtral-mini-4b-realtime:
     repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - voxtral-mini-4b-realtime.realtime.inf9.tinfoil.sh
+      - voxtral-mini-4b-realtime.realtime.inf10.tinfoil.sh
 
   voxtral-tts:
     repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - voxtral-tts.realtime.inf9.tinfoil.sh
+      - voxtral-tts.realtime.inf10.tinfoil.sh
 
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
@@ -53,6 +53,7 @@ models:
     enclaves:
       - gpt-oss-120b-0.inf6.tinfoil.sh
       - gpt-oss-120b-1.inf6.tinfoil.sh
+      - gpt-oss-120b-1.inf10.tinfoil.sh
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
@@ -65,7 +66,7 @@ models:
   qwen3-tts:
     repo: tinfoilsh/confidential-realtime-models
     enclaves:
-      - qwen3-tts.realtime.inf9.tinfoil.sh
+      - qwen3-tts.realtime.inf10.tinfoil.sh
 
   qwen3-vl-30b:
     repo: tinfoilsh/confidential-qwen3-vl-30b
@@ -96,6 +97,7 @@ models:
     repo: tinfoilsh/confidential-gemma4-31b
     enclaves:
       - gemma4-31b-inf6.tinfoil.containers.tinfoil.dev
+      - gemma4-31b-1.inf10.tinfoil.sh
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
