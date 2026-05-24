@@ -183,6 +183,20 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 // Session setup
 // ---------------------------------------------------------------------------
 
+// newToolSessionRequestID returns the per-session ID used as the outbound
+// X-Tinfoil-Tool-Request-Id header and as the ContextID / RootRequestID
+// inside the signed usage-context.
+//
+// The downstream tool service uses this ID as the per-session billing dedup
+// key, so it MUST be generated server-side. The function deliberately
+// ignores any client-supplied request-id headers on r: honoring a value the
+// caller can choose would let a malicious client collapse many billable
+// tool sessions into one by reusing the same ID across unrelated chat
+// completions within the downstream dedup window.
+func newToolSessionRequestID(_ *http.Request) string {
+	return uuid.NewString()
+}
+
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
@@ -192,10 +206,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 		return nil, err
 	}
 
-	requestID := r.Header.Get("X-Request-Id")
-	if requestID == "" {
-		requestID = uuid.NewString()
-	}
+	requestID := newToolSessionRequestID(r)
 
 	headers, err := toolSessionHeaders(r, requestID, modelName, body, safety, em.UsageContextSecret(), time.Now)
 	if err != nil {
@@ -216,9 +227,13 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 
 // toolSessionHeaders builds the per-request HTTP headers attached to an
 // outbound MCP tool session. When usageContextSecret is set, it also signs a
-// usage-context header carrying BillCustomerRequest=false so the downstream
-// tool service treats the call as part of the router's already-counted
-// customer request and does not double-bill it.
+// usage-context header carrying BillCustomerRequest=true so the downstream
+// tool service bills its own per-session line item alongside the router's
+// token-based chat-completion billing. Double-charging is prevented by the
+// downstream reporter's per-RequestID dedup window: every internal MCP HTTP
+// call within one chat completion shares the same X-Tinfoil-Tool-Request-Id
+// (set by connectToolSession), so multiple model-initiated tool calls inside
+// a single chat completion collapse into a single billable session event.
 func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[string]any, safety safetyOptIns, usageContextSecret string, now func() time.Time) (http.Header, error) {
 	headers := make(http.Header)
 	headers.Set(toolcontext.HeaderRequestID, requestID)
@@ -245,7 +260,7 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 			ParentService:       contract.ServiceRouter,
 			APIKeyHash:          usagecontext.HashAPIKey(apiKey),
 			Depth:               1,
-			BillCustomerRequest: false,
+			BillCustomerRequest: true,
 			IssuedAt:            now().UTC(),
 		}, usageContextSecret); err != nil {
 			return nil, fmt.Errorf("sign tool usage context: %w", err)

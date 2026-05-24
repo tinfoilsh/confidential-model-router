@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
@@ -941,9 +942,11 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 }
 
 // TestToolSessionHeadersSignsUsageContext asserts that outbound MCP tool
-// session headers carry a usage-context signed with BillCustomerRequest=false
-// and ParentService=router, so downstream tool services do not re-bill the
-// customer request the router has already counted.
+// session headers carry a usage-context signed with BillCustomerRequest=true
+// and ParentService=router, so downstream tool services bill their own
+// per-session line item alongside the router's chat-completion billing.
+// Per-RequestID dedup in the downstream reporter prevents double-charging
+// across multiple internal tool calls within one chat completion.
 func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	const secret = "tool-session-secret"
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
@@ -980,8 +983,8 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	if got.Depth != 1 {
 		t.Fatalf("depth mismatch: got %d want 1", got.Depth)
 	}
-	if got.BillCustomerRequest {
-		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=false")
+	if !got.BillCustomerRequest {
+		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=true so downstream services bill their own session line item")
 	}
 }
 
@@ -1003,5 +1006,39 @@ func TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty(t *testing.T) {
 
 	if _, ok, err := usagecontext.FromHeaders(headers, "irrelevant", now, time.Minute); err != nil || ok {
 		t.Fatalf("expected no usage context when secret is empty (ok=%v err=%v)", ok, err)
+	}
+}
+
+// TestNewToolSessionRequestIDIgnoresClientHeaders locks in the contract that
+// the tool-session request ID is generated server-side and does NOT derive
+// from any client-supplied request-id header. Downstream tool services use
+// this ID as their per-session billing dedup key, so honoring a value the
+// caller can choose would let a malicious client collapse many billable
+// sessions into one by reusing the same ID across unrelated chat completions.
+func TestNewToolSessionRequestIDIgnoresClientHeaders(t *testing.T) {
+	const spoofed = "client-controlled-id"
+
+	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("X-Request-Id", spoofed)
+	req.Header.Set("X-Request-ID", spoofed)
+	req.Header.Set("X-Tinfoil-Tool-Request-Id", spoofed)
+
+	got := newToolSessionRequestID(req)
+	if got == spoofed {
+		t.Fatalf("tool-session request id must not derive from client headers, got %q", got)
+	}
+	if got == "" {
+		t.Fatal("tool-session request id must not be empty")
+	}
+	if _, err := uuid.Parse(got); err != nil {
+		t.Fatalf("tool-session request id must be a UUID, got %q: %v", got, err)
+	}
+
+	another := newToolSessionRequestID(req)
+	if got == another {
+		t.Fatal("successive tool-session request ids must be unique")
 	}
 }
