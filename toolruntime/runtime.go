@@ -181,6 +181,20 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 // Session setup
 // ---------------------------------------------------------------------------
 
+// newToolSessionRequestID returns the per-session ID used as the outbound
+// X-Tinfoil-Tool-Request-Id header and as the ContextID / RootRequestID
+// inside the signed usage-context.
+//
+// The downstream tool service uses this ID as the per-session billing dedup
+// key, so it MUST be generated server-side. The function deliberately
+// ignores any client-supplied request-id headers on r: honoring a value the
+// caller can choose would let a malicious client collapse many billable
+// tool sessions into one by reusing the same ID across unrelated chat
+// completions within the downstream dedup window.
+func newToolSessionRequestID(_ *http.Request) string {
+	return uuid.NewString()
+}
+
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
@@ -190,10 +204,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 		return nil, err
 	}
 
-	requestID := r.Header.Get("X-Request-Id")
-	if requestID == "" {
-		requestID = uuid.NewString()
-	}
+	requestID := newToolSessionRequestID(r)
 
 	headers, err := toolSessionHeaders(r, requestID, modelName, body, safety, em.UsageContextSecret(), time.Now)
 	if err != nil {
