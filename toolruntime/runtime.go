@@ -18,8 +18,8 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
-	"github.com/tinfoilsh/usage-reporting-go/contract"
-	"github.com/tinfoilsh/usage-reporting-go/usagecontext"
+
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 // ---------------------------------------------------------------------------
@@ -254,11 +254,11 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 		}
 	}
 	if usageContextSecret != "" {
-		if err := usagecontext.SetHeaders(headers, usagecontext.Context{
+		if err := usagereporting.SetHeaders(headers, usagereporting.Context{
 			ContextID:           requestID,
 			RootRequestID:       requestID,
-			ParentService:       contract.ServiceRouter,
-			APIKeyHash:          usagecontext.HashAPIKey(apiKey),
+			ParentService:       usagereporting.ServiceRouter,
+			APIKeyHash:          usagereporting.HashAPIKey(apiKey),
 			Depth:               1,
 			BillCustomerRequest: true,
 			IssuedAt:            now().UTC(),
