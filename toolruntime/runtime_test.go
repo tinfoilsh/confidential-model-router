@@ -896,9 +896,11 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 }
 
 // TestToolSessionHeadersSignsUsageContext asserts that outbound MCP tool
-// session headers carry a usage-context signed with BillCustomerRequest=false
-// and ParentService=router, so downstream tool services do not re-bill the
-// customer request the router has already counted.
+// session headers carry a usage-context signed with BillCustomerRequest=true
+// and ParentService=router, so downstream tool services bill their own
+// per-session line item alongside the router's chat-completion billing.
+// Per-RequestID dedup in the downstream reporter prevents double-charging
+// across multiple internal tool calls within one chat completion.
 func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	const secret = "tool-session-secret"
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
@@ -935,8 +937,8 @@ func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
 	if got.Depth != 1 {
 		t.Fatalf("depth mismatch: got %d want 1", got.Depth)
 	}
-	if got.BillCustomerRequest {
-		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=false")
+	if !got.BillCustomerRequest {
+		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=true so downstream services bill their own session line item")
 	}
 }
 
