@@ -444,26 +444,29 @@ func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *ups
 
 	usage := usageFromRaw(response.body["usage"])
 	promptTokens := 0
+	cachedPromptTokens := 0
 	completionTokens := 0
 	totalTokens := 0
 	if usage != nil {
 		promptTokens = usage.PromptTokens
+		cachedPromptTokens, _ = usage.CachedPromptTokens()
 		completionTokens = usage.CompletionTokens
 		totalTokens = usage.TotalTokens
 	}
 
 	em.AddBillingEvent(billing.Event{
-		Timestamp:        time.Now(),
-		UserID:           "authenticated_user",
-		APIKey:           apiKey,
-		Model:            modelName,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      totalTokens,
-		RequestID:        responseRequestID(response.header, r.Header),
-		Enclave:          response.header.Get("Tinfoil-Enclave"),
-		RequestPath:      r.URL.Path,
-		Streaming:        streaming,
+		Timestamp:          time.Now(),
+		UserID:             "authenticated_user",
+		APIKey:             apiKey,
+		Model:              modelName,
+		PromptTokens:       promptTokens,
+		CachedPromptTokens: cachedPromptTokens,
+		CompletionTokens:   completionTokens,
+		TotalTokens:        totalTokens,
+		RequestID:          responseRequestID(response.header, r.Header),
+		Enclave:            response.header.Get("Tinfoil-Enclave"),
+		RequestPath:        r.URL.Path,
+		Streaming:          streaming,
 	})
 }
 

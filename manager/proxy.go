@@ -289,18 +289,20 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 					// user's API key and gets billed there directly.
 					emitZeroTokenEvent()
 				} else {
+					cachedPromptTokens, _ := usage.CachedPromptTokens()
 					event := billing.Event{
-						Timestamp:        time.Now(),
-						UserID:           userID,
-						APIKey:           apiKey,
-						Model:            modelName,
-						PromptTokens:     usage.PromptTokens,
-						CompletionTokens: usage.CompletionTokens,
-						TotalTokens:      usage.TotalTokens,
-						RequestID:        requestID,
-						Enclave:          host,
-						RequestPath:      requestPath,
-						Streaming:        streaming,
+						Timestamp:          time.Now(),
+						UserID:             userID,
+						APIKey:             apiKey,
+						Model:              modelName,
+						PromptTokens:       usage.PromptTokens,
+						CachedPromptTokens: cachedPromptTokens,
+						CompletionTokens:   usage.CompletionTokens,
+						TotalTokens:        usage.TotalTokens,
+						RequestID:          requestID,
+						Enclave:            host,
+						RequestPath:        requestPath,
+						Streaming:          streaming,
 					}
 					billingCollector.AddEvent(event)
 				}
