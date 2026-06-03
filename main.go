@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,6 +35,45 @@ var configFile []byte // Initial (attested) config
 
 // Set by build process
 var version = "dev"
+
+// rateLimitIdentity returns the identity used to key rate limiting. For OAuth
+// JWT access tokens it is the token's `sub` claim, so a user's bucket stays
+// stable across the short-lived token's ~15m refreshes (and across multiple
+// tokens minted for the same user); opaque API keys, and anything that is not a
+// well-formed JWT, fall back to the bearer itself.
+//
+// The signature is intentionally NOT verified here. The shim authenticates
+// every inference request and the router is reachable only over the closed
+// shim-net hop, so a token that reaches this point has already been verified
+// upstream; re-verifying would re-introduce the per-request round trip the
+// stateless JWT design exists to avoid.
+func rateLimitIdentity(apiKey string) string {
+	if sub := jwtSubject(apiKey); sub != "" {
+		return sub
+	}
+	return apiKey
+}
+
+// jwtSubject returns the `sub` claim of a compact-JWS access token, or "" if s
+// is not a well-formed three-part JWT or carries no string subject. It inspects
+// the payload only; it does not verify the signature (see rateLimitIdentity).
+func jwtSubject(s string) string {
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.Sub
+}
 
 // getEnvOrDefault returns the environment variable value if set, otherwise returns the default
 func getEnvOrDefault(envKey, defaultVal string) string {
@@ -511,9 +551,12 @@ func main() {
 				// or jumping ahead of other users.
 				delete(body, "priority")
 
+				// Identify the caller for rate limiting (see rateLimitIdentity).
+				rateLimitID := rateLimitIdentity(apiKey)
+
 				// Check rate limiting and inject lower vLLM priority if over budget
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
-					if apiKey != "" && em.RequestTracker().RecordAndCheck(apiKey, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
+					if rateLimitID != "" && em.RequestTracker().RecordAndCheck(rateLimitID, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{
