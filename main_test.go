@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -12,6 +13,38 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
+
+func TestRateLimitIdentity(t *testing.T) {
+	// mkJWT builds a compact-JWS-shaped token (header.payload.sig) with the
+	// given JSON payload; the signature is irrelevant here since rateLimitIdentity
+	// reads the payload without verifying.
+	mkJWT := func(payload string) string {
+		enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+		return enc(`{"alg":"EdDSA","typ":"at+jwt"}`) + "." + enc(payload) + ".sig"
+	}
+	jwtWithSub := mkJWT(`{"sub":"user_42","client_id":"tinfoil-chat"}`)
+	jwtNoSub := mkJWT(`{"client_id":"tinfoil-chat"}`)
+
+	tests := []struct {
+		name   string
+		apiKey string
+		want   string
+	}{
+		{"jwt sub extracted", jwtWithSub, "user_42"},
+		{"jwt without sub falls back to bearer", jwtNoSub, jwtNoSub},
+		{"opaque token key falls back", "tk_abc123", "tk_abc123"},
+		{"chat key falls back", "chat_xyz789", "chat_xyz789"},
+		{"non-jwt dotted string falls back", "a.b.c", "a.b.c"},
+		{"empty stays empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rateLimitIdentity(tt.apiKey); got != tt.want {
+				t.Errorf("rateLimitIdentity(%q) = %q, want %q", tt.apiKey, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestExtractModelFromMultipart(t *testing.T) {
 	tests := []struct {
