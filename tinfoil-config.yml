@@ -1,4 +1,4 @@
-cvm-version: 0.10.2
+cvm-version: 0.10.4
 memory: 16384
 cpus: 8
 
@@ -6,7 +6,7 @@ containers:
   - name: "proxy"
     image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
     restart: always
-    networks: ["egress"]
+    networks: [web]
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
@@ -22,7 +22,7 @@ containers:
       start_period: 5m
 
 networks:
-  egress:
+  web:
     egress: open
 
 shim:
