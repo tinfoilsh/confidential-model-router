@@ -76,7 +76,7 @@ models:
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6-b200
     enclaves:
-      - kimi-k2-6.inf14.tinfoil.sh
+      - kimi-k2-6.inf13.tinfoil.sh
     rate_limit:
       max_requests_per_minute: 4
     overload:
