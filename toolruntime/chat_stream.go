@@ -208,20 +208,25 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		if delta == nil {
 			continue
 		}
-		if content := stringValue(delta["content"]); content != "" {
-			result.content += content
-			s.emitContentDelta(content)
-		}
 		// Reasoning deltas (reasoning_content / reasoning) never carry
 		// citations so they bypass the citation emitter. They must still
 		// flow through to the client as-is so reasoning models keep
 		// driving the live thinking UI when web search is enabled.
+		// Reasoning is emitted before content: at the think-close
+		// boundary upstream parsers emit a single delta carrying both
+		// the final reasoning fragment and the first content tokens,
+		// and splitting it content-first would hand clients the tail of
+		// the reasoning after the answer already started.
 		if r := stringValue(delta["reasoning_content"]); r != "" {
 			result.reasoning += r
 		} else if r := stringValue(delta["reasoning"]); r != "" {
 			result.reasoning += r
 		}
 		s.emitReasoningDelta(delta)
+		if content := stringValue(delta["content"]); content != "" {
+			result.content += content
+			s.emitContentDelta(content)
+		}
 		if rawCalls, ok := delta["tool_calls"].([]any); ok {
 			builder.ingest(rawCalls)
 		}

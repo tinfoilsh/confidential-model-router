@@ -695,6 +695,37 @@ func TestChatStreamerPumpForwardsReasoningDelta(t *testing.T) {
 	}
 }
 
+// TestChatStreamerPumpEmitsReasoningBeforeContentOnCombinedDelta pins the
+// chunk ordering when one upstream delta carries both the final reasoning
+// fragment and the first content tokens (how reasoning parsers emit the
+// think-close boundary). The reasoning chunk must reach the client before
+// the content chunk; the inverted order makes clients render the reasoning
+// tail as a separate phantom thinking block that splits the answer text.
+func TestChatStreamerPumpEmitsReasoningBeforeContentOnCombinedDelta(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning":"thinking about tradeoffs"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning":"offs. ","content":"TCP is"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":" reliable."}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	body := rec.Body.String()
+	reasoningIdx := strings.Index(body, `"reasoning":"offs. "`)
+	contentIdx := strings.Index(body, `"content":"TCP is"`)
+	if reasoningIdx == -1 || contentIdx == -1 {
+		t.Fatalf("expected both reasoning tail and content forwarded, got %s", body)
+	}
+	if reasoningIdx > contentIdx {
+		t.Fatalf("expected reasoning tail before content chunk, got %s", body)
+	}
+}
+
 // chatToolCallTurn builds an SSE chunk sequence for one iteration where
 // the upstream model emits a tool call and finishes with
 // finish_reason:"tool_calls". Used by multi-iteration tests to simulate
