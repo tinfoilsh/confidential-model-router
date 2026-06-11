@@ -361,6 +361,12 @@ func main() {
 			if modelName == "" {
 				modelName = r.URL.Query().Get("model")
 			}
+			if modelName == "" && r.URL.Query().Get("intent") == "transcription" {
+				// OpenAI Realtime transcription clients connect with
+				// ?intent=transcription and select the model in session.update,
+				// which arrives after routing. Default to the realtime STT model.
+				modelName = "voxtral-mini-4b-realtime"
+			}
 			if modelName == "" {
 				jsonError(w, "Missing required parameter: 'model' (use ?model=<name> query parameter for WebSocket requests).", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 				return
