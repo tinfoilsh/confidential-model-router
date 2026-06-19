@@ -40,10 +40,9 @@ type routeContextRequest struct {
 }
 
 type routeContext struct {
-	UserID       string `json:"user_id"`
-	OrgID        string `json:"org_id,omitempty"`
-	PriorityTier string `json:"priority_tier,omitempty"`
-	Priority     *int   `json:"priority,omitempty"`
+	UserID   string `json:"user_id"`
+	OrgID    string `json:"org_id,omitempty"`
+	Priority *int   `json:"priority,omitempty"`
 }
 
 func newRouteContextClient(controlPlaneURL string) *routeContextClient {

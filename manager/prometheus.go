@@ -70,13 +70,13 @@ var (
 		[]string{"model"},
 	)
 
-	// PriorityAssignmentsTotal tracks requests assigned a configured vLLM priority tier
+	// PriorityAssignmentsTotal tracks requests assigned configured vLLM priority
 	PriorityAssignmentsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_priority_assignments_total",
-			Help: "Total number of requests sent with a configured vLLM priority tier",
+			Help: "Total number of requests sent with configured vLLM priority",
 		},
-		[]string{"model", "tier"},
+		[]string{"model"},
 	)
 
 	// RouteContextLookupFailuresTotal tracks failed route-context lookups to the control plane

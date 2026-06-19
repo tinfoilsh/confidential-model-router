@@ -564,14 +564,9 @@ func main() {
 
 				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
 					body["priority"] = *routeCtx.Priority
-					tier := routeCtx.PriorityTier
-					if tier == "" {
-						tier = "configured"
-					}
-					manager.PriorityAssignmentsTotal.WithLabelValues(modelName, tier).Inc()
+					manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
 					log.WithFields(log.Fields{
-						"model":         modelName,
-						"priority_tier": tier,
+						"model": modelName,
 					}).Debug("injecting configured vLLM priority")
 				}
 

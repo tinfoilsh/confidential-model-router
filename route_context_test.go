@@ -30,10 +30,9 @@ func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(routeContext{
-			UserID:       "user_123",
-			OrgID:        "org_123",
-			PriorityTier: "high",
-			Priority:     &priority,
+			UserID:   "user_123",
+			OrgID:    "org_123",
+			Priority: &priority,
 		})
 	}))
 	defer server.Close()
@@ -48,10 +47,10 @@ func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
 		t.Fatal("expected second lookup to succeed from cache")
 	}
 
-	if first.Priority == nil || *first.Priority != priority || first.PriorityTier != "high" {
+	if first.Priority == nil || *first.Priority != priority {
 		t.Fatalf("first context = %#v, want high priority", first)
 	}
-	if second.Priority == nil || *second.Priority != priority || second.PriorityTier != "high" {
+	if second.Priority == nil || *second.Priority != priority {
 		t.Fatalf("second context = %#v, want high priority", second)
 	}
 	if requests != 1 {
