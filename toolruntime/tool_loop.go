@@ -582,6 +582,7 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	a.autoContinueTools = extractAndStripAutoContinueResponsesTools(base["tools"])
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(a.tools))
 	base["input"] = prependResponsesPrompt(a.prompt, base["input"])
+	base["input"] = stripClientSyntheticResponseItems(base["input"])
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
 	return base

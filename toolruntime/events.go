@@ -586,6 +586,37 @@ func buildCodeInterpreterCallOutputItems(records []toolCallRecord) []any {
 	return events
 }
 
+// routerSynthesizedResponseItemTypes are the Responses output-item types the
+// router builds itself rather than receiving from the upstream model. Keep
+// this in sync with the builders above: adding a synthesized type means
+// adding its builder and its entry here, so stripClientSyntheticResponseItems
+// drops the echoed-back variant on the input side too.
+var routerSynthesizedResponseItemTypes = map[string]struct{}{
+	"web_search_call":       {},
+	"code_interpreter_call": {},
+}
+
+// stripClientSyntheticResponseItems drops router-synthesized output items
+// (see routerSynthesizedResponseItemTypes) that clients echo back as input;
+// the upstream model never produced them and rejects them. Input-side
+// counterpart to the output-side builders above.
+func stripClientSyntheticResponseItems(input any) any {
+	items, ok := input.([]any)
+	if !ok {
+		return input
+	}
+	filtered := make([]any, 0, len(items))
+	for _, raw := range items {
+		if item, ok := raw.(map[string]any); ok {
+			if _, drop := routerSynthesizedResponseItemTypes[stringValue(item["type"])]; drop {
+				continue
+			}
+		}
+		filtered = append(filtered, raw)
+	}
+	return filtered
+}
+
 // ---------------------------------------------------------------------------
 // Attach output (non-streaming finalize)
 // ---------------------------------------------------------------------------

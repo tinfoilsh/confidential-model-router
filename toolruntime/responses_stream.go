@@ -915,6 +915,7 @@ func runResponsesStreaming(
 	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
+	base["input"] = stripClientSyntheticResponseItems(base["input"])
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 
