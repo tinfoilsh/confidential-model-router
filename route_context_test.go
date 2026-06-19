@@ -30,8 +30,6 @@ func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(routeContext{
-			UserID:   "user_123",
-			OrgID:    "org_123",
 			Priority: &priority,
 		})
 	}))
