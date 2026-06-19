@@ -588,23 +588,6 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	return base
 }
 
-// stripClientSyntheticResponseItems drops router-synthesized web_search_call
-// items clients echo back as input; the upstream model never produced them.
-func stripClientSyntheticResponseItems(input any) any {
-	items, ok := input.([]any)
-	if !ok {
-		return input
-	}
-	filtered := make([]any, 0, len(items))
-	for _, raw := range items {
-		if item, ok := raw.(map[string]any); ok && stringValue(item["type"]) == "web_search_call" {
-			continue
-		}
-		filtered = append(filtered, raw)
-	}
-	return filtered
-}
-
 func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, []toolCall, bool, any) {
 	routerToolCalls, clientToolCalls := splitToolCalls(a.ownedTools, parseResponsesToolCalls(response.body))
 	autoContinueCalls, externalClientCalls := splitClientToolCalls(a.autoContinueTools, clientToolCalls)
