@@ -582,9 +582,32 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	a.autoContinueTools = extractAndStripAutoContinueResponsesTools(base["tools"])
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(a.tools))
 	base["input"] = prependResponsesPrompt(a.prompt, base["input"])
+	base["input"] = stripClientSyntheticResponseItems(base["input"])
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
 	return base
+}
+
+// stripClientSyntheticResponseItems removes router-synthesized hosted-tool items
+// that clients echo back into `input` on a later turn. Server-side web search
+// runs upstream as router_search/router_fetch function calls; the router
+// synthesizes `web_search_call` output items for the client (see
+// attachResponsesOutput / webSearchCallEvent). The upstream model never produced
+// those items and rejects them as input, so drop them before forwarding. The
+// assistant's answer text and citation annotations remain intact.
+func stripClientSyntheticResponseItems(input any) any {
+	items, ok := input.([]any)
+	if !ok {
+		return input
+	}
+	filtered := make([]any, 0, len(items))
+	for _, raw := range items {
+		if item, ok := raw.(map[string]any); ok && stringValue(item["type"]) == "web_search_call" {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	return filtered
 }
 
 func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, []toolCall, bool, any) {
