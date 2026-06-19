@@ -341,6 +341,8 @@ func main() {
 	defer em.Shutdown()
 	go em.StartWorker()
 
+	routeContextClient := newRouteContextClient(*controlPlaneURL)
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
 		var err error
@@ -560,8 +562,19 @@ func main() {
 				// Identify the caller for rate limiting (see rateLimitIdentity).
 				rateLimitID := rateLimitIdentity(apiKey)
 
-				// Check rate limiting and inject lower vLLM priority if over budget
-				if rlCfg := em.GetRateLimitConfig(rateLimitModel); rlCfg != nil {
+				hasConfiguredPriority := false
+				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
+					body["priority"] = *routeCtx.Priority
+					hasConfiguredPriority = true
+					manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
+					log.WithFields(log.Fields{
+						"model": modelName,
+					}).Debug("injecting configured vLLM priority")
+				}
+
+				// Check rate limiting and inject lower vLLM priority if over budget.
+				// Org-priority callers bypass this soft demotion.
+				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil {
 					if rateLimitID != "" && em.RequestTracker().RecordAndCheck(rateLimitID, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
 						body["priority"] = 1
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()

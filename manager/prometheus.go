@@ -70,6 +70,24 @@ var (
 		[]string{"model"},
 	)
 
+	// PriorityAssignmentsTotal tracks requests assigned configured vLLM priority
+	PriorityAssignmentsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_priority_assignments_total",
+			Help: "Total number of requests sent with configured vLLM priority",
+		},
+		[]string{"model"},
+	)
+
+	// RouteContextLookupFailuresTotal tracks failed route-context lookups to the control plane
+	RouteContextLookupFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_route_context_lookup_failures_total",
+			Help: "Total number of failed route-context lookups to the control plane",
+		},
+		[]string{"model", "reason"},
+	)
+
 	// CircuitBreakerState tracks the current state of each enclave's circuit breaker (0=closed, 1=open, 2=half-open)
 	CircuitBreakerState = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
