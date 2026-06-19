@@ -588,13 +588,8 @@ func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
 	return base
 }
 
-// stripClientSyntheticResponseItems removes router-synthesized hosted-tool items
-// that clients echo back into `input` on a later turn. Server-side web search
-// runs upstream as router_search/router_fetch function calls; the router
-// synthesizes `web_search_call` output items for the client (see
-// attachResponsesOutput / webSearchCallEvent). The upstream model never produced
-// those items and rejects them as input, so drop them before forwarding. The
-// assistant's answer text and citation annotations remain intact.
+// stripClientSyntheticResponseItems drops router-synthesized web_search_call
+// items clients echo back as input; the upstream model never produced them.
 func stripClientSyntheticResponseItems(input any) any {
 	items, ok := input.([]any)
 	if !ok {
