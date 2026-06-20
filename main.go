@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,7 +25,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -258,62 +256,6 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	}
 }
 
-// detectToolProfiles inspects an incoming request and returns the set
-// of built-in tool profiles that should be activated for it. The
-// returned slice is the multi-profile input to toolruntime.Handle:
-// every profile contributes its MCP session and advertised tools to
-// the single tool loop the router runs against the upstream model.
-//
-// Activation signals:
-//   - Chat completions: presence of `code_execution_options` /
-//     `web_search_options` on the body, surfaced as typed flags in
-//     RouterOptions (the fields themselves are already stripped by
-//     ExtractRouterOptions before this function runs).
-//   - /responses: tools[] entries with type "web_search" or
-//     "code_execution".
-//
-// Unknown tool types in /responses' tools[] are ignored so
-// forward-compat requests from newer SDKs do not crash the router.
-func detectToolProfiles(path string, opts *toolruntime.RouterOptions, body map[string]any) []toolprofile.Profile {
-	var profiles []toolprofile.Profile
-
-	if opts.WebSearch != nil {
-		profiles = append(profiles, toolprofile.WebSearch)
-	}
-	if opts.CodeExecution != nil {
-		profiles = append(profiles, toolprofile.CodeExecution)
-	}
-
-	if path == "/v1/responses" {
-		if tools, ok := body["tools"].([]any); ok {
-			seenWebSearch := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
-				return p.Name == toolprofile.WebSearch.Name
-			})
-			seenCodeExecution := slices.ContainsFunc(profiles, func(p toolprofile.Profile) bool {
-				return p.Name == toolprofile.CodeExecution.Name
-			})
-			for _, t := range tools {
-				m, _ := t.(map[string]any)
-				typeVal, _ := m["type"].(string)
-				switch typeVal {
-				case "web_search":
-					if !seenWebSearch {
-						profiles = append(profiles, toolprofile.WebSearch)
-						seenWebSearch = true
-					}
-				case "code_execution":
-					if !seenCodeExecution {
-						profiles = append(profiles, toolprofile.CodeExecution)
-						seenCodeExecution = true
-					}
-				}
-			}
-		}
-	}
-
-	return profiles
-}
-
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -522,7 +464,7 @@ func main() {
 				// against one MCP session per active profile; zero
 				// profiles and no auto-continue tools means no router-owned
 				// work, so the request falls through to the plain proxy path.
-				activeProfiles := detectToolProfiles(r.URL.Path, routerOpts, body)
+				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
