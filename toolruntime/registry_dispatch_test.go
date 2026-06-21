@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -23,7 +21,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 	searchSession := startTestMCPServer(t, "websearch", "search")
 	fakeSession := startTestMCPServer(t, "fake-server", "fake_tool")
 
-	profiles := []toolprofile.Profile{
+	profiles := []Profile{
 		{Name: "web_search", ToolServerModel: "websearch"},
 		{Name: "fake_profile", ToolServerModel: "fake-server"},
 	}
@@ -85,7 +83,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 // annotation counters stay consistent.
 func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 	searchSession := startTestMCPServer(t, "websearch", "search")
-	profiles := []toolprofile.Profile{{Name: "web_search", ToolServerModel: "websearch"}}
+	profiles := []Profile{{Name: "web_search", ToolServerModel: "websearch"}}
 	dial := dialFromMap(map[string]*mcp.ClientSession{"web_search": searchSession})
 
 	registry, err := buildSessionRegistry(context.Background(), profiles, dial)

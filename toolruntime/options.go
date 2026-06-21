@@ -2,10 +2,6 @@ package toolruntime
 
 import (
 	"fmt"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
 // Router-only body fields. Each is an OpenAI-compatible-but-Tinfoil-specific
@@ -159,30 +155,14 @@ func stringField(m map[string]any, key string) string {
 }
 
 // attachRouterOptionsMeta lifts per-request secrets from RouterOptions onto
-// the session registry as mcp.Meta
+// the session registry as mcp.Meta.
 func attachRouterOptionsMeta(registry *sessionRegistry, opts *RouterOptions) {
 	if registry == nil || opts == nil {
 		return
 	}
-	if ce := opts.CodeExecution; ce != nil {
-		metaBlock := map[string]any{
-			"accessToken":        ce.AccessToken,
-			"encryptionKey":      ce.EncryptionKey,
-			"containerAuthToken": ce.ContainerAuthToken,
-		}
-		if ce.Uploads != nil {
-			arr := make([]any, len(*ce.Uploads))
-			for i, u := range *ce.Uploads {
-				arr[i] = map[string]any{
-					"fileAccessToken": u.FileAccessToken,
-					"filename":        u.Filename,
-					"sha256":          u.Sha256,
-				}
-			}
-			metaBlock["uploads"] = arr
-		}
-		registry.metaByProfile[toolprofile.CodeExecution.Name] = mcp.Meta{
-			toolprofile.CodeExecutionMetaKey: metaBlock,
+	for _, d := range profiles {
+		if d.AttachMeta != nil {
+			d.AttachMeta(registry, opts)
 		}
 	}
 }

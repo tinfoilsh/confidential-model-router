@@ -6,27 +6,20 @@ const (
 	routerSearchToolName = "router_search"
 	routerFetchToolName  = "router_fetch"
 
-	mcpSearchToolName = "search"
-	mcpFetchToolName  = "fetch"
-
+	mcpSearchToolName  = "search"
+	mcpFetchToolName   = "fetch"
 	mcpPresentToolName = "present"
-
-	webSearchProfileName     = "web_search"
-	codeExecutionProfileName = "code_execution"
 )
 
 func outwardRouterToolName(profileName, toolName string) string {
-	if profileName != webSearchProfileName {
+	d := descriptorForProfile(profileName)
+	if d == nil || d.Aliases == nil {
 		return toolName
 	}
-	switch toolName {
-	case mcpSearchToolName:
-		return routerSearchToolName
-	case mcpFetchToolName:
-		return routerFetchToolName
-	default:
-		return toolName
+	if outward, ok := d.Aliases[toolName]; ok {
+		return outward
 	}
+	return toolName
 }
 
 func outwardRouterTool(profileName string, tool *mcp.Tool) *mcp.Tool {
@@ -43,14 +36,14 @@ func outwardRouterTool(profileName string, tool *mcp.Tool) *mcp.Tool {
 }
 
 func dispatchRouterToolName(toolName string) string {
-	switch toolName {
-	case routerSearchToolName:
-		return mcpSearchToolName
-	case routerFetchToolName:
-		return mcpFetchToolName
-	default:
-		return toolName
+	for _, d := range profiles {
+		for mcp, outward := range d.Aliases {
+			if outward == toolName {
+				return mcp
+			}
+		}
 	}
+	return toolName
 }
 
 func isRouterSearchToolName(toolName string) bool {

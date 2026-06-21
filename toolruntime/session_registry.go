@@ -5,12 +5,10 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
 // sessionRegistry holds the set of MCP sessions a single request has
-// opened, one per active toolprofile.Profile, and routes each
+// opened, one per active Profile, and routes each
 // router-owned tool call to the session whose server advertised that
 // tool.
 //
@@ -46,7 +44,7 @@ type sessionRegistry struct {
 }
 
 type sessionEntry struct {
-	profile toolprofile.Profile
+	profile Profile
 	session *mcp.ClientSession
 	tools   []*mcp.Tool
 }
@@ -59,8 +57,8 @@ type sessionEntry struct {
 // connectOneToolSession which is the real attested-dial path.
 func buildSessionRegistry(
 	ctx context.Context,
-	profiles []toolprofile.Profile,
-	dial func(context.Context, toolprofile.Profile) (*mcp.ClientSession, error),
+	profiles []Profile,
+	dial func(context.Context, Profile) (*mcp.ClientSession, error),
 ) (*sessionRegistry, error) {
 	r := &sessionRegistry{
 		byTool:         make(map[string]*mcp.ClientSession),

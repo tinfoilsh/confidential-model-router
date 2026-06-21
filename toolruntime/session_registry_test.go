@@ -8,8 +8,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
 // startTestMCPServer spins up an in-memory MCP server that advertises
@@ -55,8 +53,8 @@ func startTestMCPServer(t *testing.T, serverName string, toolNames ...string) *m
 // sessions keyed by profile name. Used by the registry tests so we
 // don't have to stand up HTTP stacks just to exercise the routing
 // table and conflict-detection paths.
-func dialFromMap(sessions map[string]*mcp.ClientSession) func(context.Context, toolprofile.Profile) (*mcp.ClientSession, error) {
-	return func(_ context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
+func dialFromMap(sessions map[string]*mcp.ClientSession) func(context.Context, Profile) (*mcp.ClientSession, error) {
+	return func(_ context.Context, p Profile) (*mcp.ClientSession, error) {
 		s, ok := sessions[p.Name]
 		if !ok {
 			t := "unknown"
@@ -80,7 +78,7 @@ func TestSessionRegistryRoutesTwoProfilesToSeparateSessions(t *testing.T) {
 	searchSession := startTestMCPServer(t, "websearch", "search", "fetch")
 	fakeSession := startTestMCPServer(t, "fake-server", "fake_tool")
 
-	profiles := []toolprofile.Profile{
+	profiles := []Profile{
 		{Name: "web_search", ToolServerModel: "websearch"},
 		{Name: "fake_profile", ToolServerModel: "fake-server"},
 	}
@@ -139,7 +137,7 @@ func TestSessionRegistryFailsLoudOnToolNameConflict(t *testing.T) {
 	firstSession := startTestMCPServer(t, "first", "search")
 	secondSession := startTestMCPServer(t, "second", "search")
 
-	profiles := []toolprofile.Profile{
+	profiles := []Profile{
 		{Name: "primary", ToolServerModel: "first"},
 		{Name: "shadow", ToolServerModel: "second"},
 	}
@@ -168,11 +166,11 @@ func TestSessionRegistryFailsLoudOnToolNameConflict(t *testing.T) {
 func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 	firstSession := startTestMCPServer(t, "first", "search")
 
-	profiles := []toolprofile.Profile{
+	profiles := []Profile{
 		{Name: "primary", ToolServerModel: "first"},
 		{Name: "broken", ToolServerModel: "nowhere"},
 	}
-	dial := func(_ context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
+	dial := func(_ context.Context, p Profile) (*mcp.ClientSession, error) {
 		switch p.Name {
 		case "primary":
 			return firstSession, nil
@@ -204,7 +202,7 @@ func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 // auto-continue-only path: the router may need toolruntime even when no
 // MCP-backed profile is active.
 func TestSessionRegistryEmptyProfilesBuildsEmptyRegistry(t *testing.T) {
-	r, err := buildSessionRegistry(context.Background(), nil, func(context.Context, toolprofile.Profile) (*mcp.ClientSession, error) {
+	r, err := buildSessionRegistry(context.Background(), nil, func(context.Context, Profile) (*mcp.ClientSession, error) {
 		t.Fatal("dial should not be invoked for empty profile list")
 		return nil, nil
 	})
@@ -222,7 +220,7 @@ func TestSessionRegistryEmptyProfilesBuildsEmptyRegistry(t *testing.T) {
 // must not panic or corrupt the entries slice.
 func TestSessionRegistryCloseAllIsIdempotent(t *testing.T) {
 	session := startTestMCPServer(t, "only", "search")
-	profiles := []toolprofile.Profile{{Name: "only", ToolServerModel: "only"}}
+	profiles := []Profile{{Name: "only", ToolServerModel: "only"}}
 	dial := dialFromMap(map[string]*mcp.ClientSession{"only": session})
 
 	r, err := buildSessionRegistry(context.Background(), profiles, dial)
