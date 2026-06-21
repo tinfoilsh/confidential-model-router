@@ -155,8 +155,7 @@ func stringField(m map[string]any, key string) string {
 }
 
 // attachRouterOptionsMeta lifts per-request secrets from RouterOptions onto
-// the session registry as mcp.Meta. Each descriptor's AttachMeta callback
-// handles its own profile; the registry is the single source of truth.
+// the session registry as mcp.Meta.
 func attachRouterOptionsMeta(registry *sessionRegistry, opts *RouterOptions) {
 	if registry == nil || opts == nil {
 		return
