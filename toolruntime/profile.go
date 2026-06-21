@@ -58,19 +58,15 @@ var profiles = []Descriptor{
 	},
 }
 
-// CodeExecutionMetaKey is the params._meta sub-key the code-exec mcp accepts.
 const CodeExecutionMetaKey = "tinfoil_code_exec"
 
-// WebSearch is activated by `web_search_options` on /chat/completions
-// and by a `{"type": "web_search"}` entry in /responses `tools`.
+// `web_search_options` on /chat/completions or `{"type": "web_search"}` entry in /responses `tools`.
 var WebSearch = Profile{
 	Name:            "web_search",
 	ToolServerModel: "websearch",
 }
 
-// CodeExecution is activated by `code_execution_options` on
-// /chat/completions and by a `{"type": "code_execution"}` entry in
-// /responses `tools`.
+// `code_execution_options` on /chat/completions or `{"type": "code_execution"}` entry in /responses `tools`.
 var CodeExecution = Profile{
 	Name:            "code_execution",
 	ToolServerModel: "code-execution",
