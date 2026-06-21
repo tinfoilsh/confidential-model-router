@@ -11,10 +11,7 @@ import (
 
 // Descriptor captures everything the router needs to activate and drive a
 // built-in tool profile: the activation signals, tool-name aliasing,
-// system prompt, and per-request meta attachment. Registering a new
-// profile is one entry in the profiles slice — no scattered switch
-// statements across main.go, router_tool_names.go, prompt.go, and
-// options.go.
+// system prompt, and per-request meta attachment.
 type Descriptor struct {
 	Profile toolprofile.Profile
 
@@ -42,8 +39,6 @@ type Descriptor struct {
 	AttachMeta func(*sessionRegistry, *RouterOptions)
 }
 
-// profiles is the registry of all built-in tool profile descriptors,
-// in activation order. Adding a new profile is one entry here.
 var profiles = []Descriptor{
 	{
 		Profile:           toolprofile.WebSearch,
@@ -64,8 +59,6 @@ var profiles = []Descriptor{
 	},
 }
 
-// descriptorForProfile returns the descriptor for the given profile name,
-// or nil if no descriptor is registered.
 func descriptorForProfile(profileName string) *Descriptor {
 	for i := range profiles {
 		if profiles[i].Profile.Name == profileName {
@@ -76,10 +69,7 @@ func descriptorForProfile(profileName string) *Descriptor {
 }
 
 // DetectProfiles inspects an incoming request and returns the set of
-// built-in tool profiles that should be activated for it. Each
-// descriptor contributes its activation logic; the registry is the
-// single source of truth for what activates a profile, replacing the
-// former switch statement in main.go.
+// built-in tool profiles that should be activated for it.
 func DetectProfiles(path string, opts *RouterOptions, body map[string]any) []toolprofile.Profile {
 	var active []toolprofile.Profile
 	seen := map[string]bool{}
