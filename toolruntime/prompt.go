@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 const (
@@ -64,6 +66,15 @@ func buildRouterPrompt(harmony bool, activeProfiles []string) *mcp.GetPromptResu
 		Description: "Router-injected guidance for active tool profiles.",
 		Messages:    messages,
 	}
+}
+
+// webSearchPrompt builds the system prompt for the web_search profile.
+func webSearchPrompt(harmony bool) string {
+	cite := citations.Instructions
+	if harmony {
+		cite = citations.HarmonyInstructions
+	}
+	return fmt.Sprintf("You may use the %s and %s tools when current web information would improve the answer. Use %s first to discover sources, then %s specific URLs only when you need deeper detail. %s %s %s", routerSearchToolName, routerFetchToolName, routerSearchToolName, routerFetchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 }
 
 func forcedFinalChatRequest(reqBody map[string]any) map[string]any {

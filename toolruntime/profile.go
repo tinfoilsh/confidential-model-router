@@ -1,10 +1,7 @@
 package toolruntime
 
 import (
-	"fmt"
-
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
 // Profile identifies one built-in tool family the router dials as an MCP server.
@@ -116,15 +113,6 @@ func responsesToolTypePresent(body map[string]any, toolType string) bool {
 		}
 	}
 	return false
-}
-
-// webSearchPrompt builds the system prompt for the web_search profile.
-func webSearchPrompt(harmony bool) string {
-	cite := citations.Instructions
-	if harmony {
-		cite = citations.HarmonyInstructions
-	}
-	return fmt.Sprintf("You may use the %s and %s tools when current web information would improve the answer. Use %s first to discover sources, then %s specific URLs only when you need deeper detail. %s %s %s", routerSearchToolName, routerFetchToolName, routerSearchToolName, routerFetchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 }
 
 // attachCodeExecutionMeta lifts code-execution credentials from
