@@ -4,8 +4,6 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
@@ -13,7 +11,7 @@ import (
 // built-in tool profile: the activation signals, tool-name aliasing,
 // system prompt, and per-request meta attachment.
 type Descriptor struct {
-	Profile toolprofile.Profile
+	Profile Profile
 
 	// ResponsesToolType is the /v1/responses tools[] entry type that
 	// activates this profile (e.g. "web_search"). Empty = never
@@ -41,7 +39,7 @@ type Descriptor struct {
 
 var profiles = []Descriptor{
 	{
-		Profile:           toolprofile.WebSearch,
+		Profile:           WebSearch,
 		ResponsesToolType: "web_search",
 		OptionsActive:     func(o *RouterOptions) bool { return o.WebSearch != nil },
 		Aliases: map[string]string{
@@ -51,7 +49,7 @@ var profiles = []Descriptor{
 		Prompt: webSearchPrompt,
 	},
 	{
-		Profile:           toolprofile.CodeExecution,
+		Profile:           CodeExecution,
 		ResponsesToolType: "code_execution",
 		OptionsActive:     func(o *RouterOptions) bool { return o.CodeExecution != nil },
 		Prompt:            func(harmony bool) string { return codeExecutionInstructions },
@@ -70,8 +68,8 @@ func descriptorForProfile(profileName string) *Descriptor {
 
 // DetectProfiles inspects an incoming request and returns the set of
 // built-in tool profiles that should be activated for it.
-func DetectProfiles(path string, opts *RouterOptions, body map[string]any) []toolprofile.Profile {
-	var active []toolprofile.Profile
+func DetectProfiles(path string, opts *RouterOptions, body map[string]any) []Profile {
+	var active []Profile
 	seen := map[string]bool{}
 	for _, d := range profiles {
 		activated := false
@@ -139,7 +137,7 @@ func attachCodeExecutionMeta(registry *sessionRegistry, opts *RouterOptions) {
 		}
 		metaBlock["uploads"] = arr
 	}
-	registry.metaByProfile[toolprofile.CodeExecution.Name] = mcp.Meta{
-		toolprofile.CodeExecutionMetaKey: metaBlock,
+	registry.metaByProfile[CodeExecution.Name] = mcp.Meta{
+		CodeExecutionMetaKey: metaBlock,
 	}
 }

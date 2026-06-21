@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -419,7 +418,7 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 // tools can also enter the tool loop without activating an MCP profile;
 // adding a new profile must come with a new case here.
 func TestDetectToolProfiles(t *testing.T) {
-	profileNames := func(ps []toolprofile.Profile) []string {
+	profileNames := func(ps []toolruntime.Profile) []string {
 		names := make([]string, 0, len(ps))
 		for _, p := range ps {
 			names = append(names, p.Name)

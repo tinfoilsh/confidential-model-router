@@ -17,7 +17,6 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolcontext"
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -118,14 +117,14 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 // routerOpts carries the per-request Tinfoil-specific options
 // extracted from the body at the router edge (see
 // toolcontext.ExtractRouterOptions).
-func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []toolprofile.Profile, body map[string]any, modelName string, routerOpts *RouterOptions) error {
+func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []Profile, body map[string]any, modelName string, routerOpts *RouterOptions) error {
 	ctx := r.Context()
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventFlags := parseTinfoilEventFlags(r.Header)
 	safetyOpts := parseSafetyOptIns(routerOpts, body)
 
-	dial := func(ctx context.Context, p toolprofile.Profile) (*mcp.ClientSession, error) {
+	dial := func(ctx context.Context, p Profile) (*mcp.ClientSession, error) {
 		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, dial)
@@ -200,7 +199,7 @@ func newToolSessionRequestID(_ *http.Request) string {
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile toolprofile.Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
 	if err != nil {
 		return nil, err

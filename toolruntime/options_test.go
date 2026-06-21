@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tinfoilsh/confidential-model-router/toolprofile"
 )
 
 func unmarshal(t *testing.T, raw string) map[string]any {
@@ -259,13 +257,13 @@ func codeExecMeta(t *testing.T, opts *RouterOptions) map[string]any {
 	t.Helper()
 	r := &sessionRegistry{metaByProfile: map[string]mcp.Meta{}}
 	attachRouterOptionsMeta(r, opts)
-	meta := r.metaByProfile[toolprofile.CodeExecution.Name]
+	meta := r.metaByProfile[CodeExecution.Name]
 	if meta == nil {
-		t.Fatalf("expected meta for %q, got nil", toolprofile.CodeExecution.Name)
+		t.Fatalf("expected meta for %q, got nil", CodeExecution.Name)
 	}
-	block, ok := meta[toolprofile.CodeExecutionMetaKey].(map[string]any)
+	block, ok := meta[CodeExecutionMetaKey].(map[string]any)
 	if !ok {
-		t.Fatalf("meta block has wrong type: %T", meta[toolprofile.CodeExecutionMetaKey])
+		t.Fatalf("meta block has wrong type: %T", meta[CodeExecutionMetaKey])
 	}
 	return block
 }
