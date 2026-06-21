@@ -7,9 +7,22 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
+// Profile identifies one built-in tool family and the MCP model name
+// the router dials to service its tool calls. The Name is the stable
+// identifier used in request detectors and logs; ToolServerModel
+// keys into the enclave manager's model table and the
+// LOCAL_MCP_ENDPOINT_<MODEL> debug override.
+type Profile struct {
+	Name            string
+	ToolServerModel string
+}
+
 // Descriptor captures everything the router needs to activate and drive a
 // built-in tool profile: the activation signals, tool-name aliasing,
-// system prompt, and per-request meta attachment.
+// system prompt, and per-request meta attachment. Registering a new
+// profile is one entry in the profiles slice — no scattered switch
+// statements across main.go, router_tool_names.go, prompt.go, and
+// options.go.
 type Descriptor struct {
 	Profile Profile
 
@@ -37,6 +50,8 @@ type Descriptor struct {
 	AttachMeta func(*sessionRegistry, *RouterOptions)
 }
 
+// profiles is the registry of all built-in tool profile descriptors,
+// in activation order. Adding a new profile is one entry here.
 var profiles = []Descriptor{
 	{
 		Profile:           WebSearch,
@@ -55,6 +70,24 @@ var profiles = []Descriptor{
 		Prompt:            func(harmony bool) string { return codeExecutionInstructions },
 		AttachMeta:        attachCodeExecutionMeta,
 	},
+}
+
+// CodeExecutionMetaKey is the params._meta sub-key the code-exec mcp accepts.
+const CodeExecutionMetaKey = "tinfoil_code_exec"
+
+// WebSearch is activated by `web_search_options` on /chat/completions
+// and by a `{"type": "web_search"}` entry in /responses `tools`.
+var WebSearch = Profile{
+	Name:            "web_search",
+	ToolServerModel: "websearch",
+}
+
+// CodeExecution is activated by `code_execution_options` on
+// /chat/completions and by a `{"type": "code_execution"}` entry in
+// /responses `tools`.
+var CodeExecution = Profile{
+	Name:            "code_execution",
+	ToolServerModel: "code-execution",
 }
 
 func descriptorForProfile(profileName string) *Descriptor {
