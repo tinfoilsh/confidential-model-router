@@ -7,14 +7,10 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
 
-// Profile identifies one built-in tool family and the MCP model name
-// the router dials to service its tool calls. The Name is the stable
-// identifier used in request detectors and logs; ToolServerModel
-// keys into the enclave manager's model table and the
-// LOCAL_MCP_ENDPOINT_<MODEL> debug override.
+// Profile identifies one built-in tool family the router dials as an MCP server.
 type Profile struct {
-	Name            string // stable identifier
-	ToolServerModel string //
+	Name            string // stable identifier used in detectors and logs
+	ToolServerModel string // enclave manager model key to dial
 }
 
 // Descriptor captures everything the router needs to activate and drive a
