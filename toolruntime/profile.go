@@ -14,40 +14,30 @@ type Profile struct {
 }
 
 // Descriptor captures everything the router needs to activate and drive a
-// built-in tool profile: the activation signals, tool-name aliasing,
-// system prompt, and per-request meta attachment. Registering a new
-// profile is one entry in the profiles slice — no scattered switch
-// statements across main.go, router_tool_names.go, prompt.go, and
-// options.go.
+// built-in tool profile: activation signals, aliasing, prompt, and per-request meta.
 type Descriptor struct {
 	Profile Profile
 
 	// ResponsesToolType is the /v1/responses tools[] entry type that
-	// activates this profile (e.g. "web_search"). Empty = never
-	// activated via /responses tools[].
+	// activates this profile (e.g. "web_search").
 	ResponsesToolType string
 
 	// OptionsActive reports whether this profile should activate based
-	// on parsed RouterOptions (the chat-completions path). Nil = never
-	// activated via chat options.
+	// on parsed RouterOptions (the chat-completions path).
 	OptionsActive func(*RouterOptions) bool
 
 	// Aliases maps the MCP server's tool name to the outward
 	// (model-facing) name. Entries not in the map keep their name.
-	// Nil = identity (no aliasing).
 	Aliases map[string]string
 
-	// Prompt returns the system prompt text injected when this profile
-	// is active. Nil = no prompt fragment.
+	// System prompt injected when active
 	Prompt func(harmony bool) string
 
-	// AttachMeta lifts per-request options from RouterOptions onto the
-	// session registry as mcp.Meta. Nil = no meta attachment.
+	// Lifts per-request options from RouterOptions onto the session registry as mcp.Meta
 	AttachMeta func(*sessionRegistry, *RouterOptions)
 }
 
-// profiles is the registry of all built-in tool profile descriptors,
-// in activation order. Adding a new profile is one entry here.
+// profiles is the registry of all built-in tool profile descriptors, in activation order.
 var profiles = []Descriptor{
 	{
 		Profile:           WebSearch,
