@@ -83,7 +83,7 @@ func DetectProfiles(path string, opts *RouterOptions, body map[string]any) []Pro
 	seen := map[string]bool{}
 	for _, d := range profiles {
 		activated := false
-		if d.OptionsActive != nil && d.OptionsActive(opts) {
+		if path == "/v1/chat/completions" && d.OptionsActive != nil && d.OptionsActive(opts) {
 			activated = true
 		}
 		if !activated && path == "/v1/responses" && d.ResponsesToolType != "" {
