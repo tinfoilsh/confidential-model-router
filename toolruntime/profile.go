@@ -18,8 +18,11 @@ type Profile struct {
 }
 
 // Descriptor captures everything the router needs to activate and drive a
-// built-in tool profile: activation signals, aliasing, prompt, and per-request meta.
-// Registering a new profile is one entry in the profiles slice.
+// built-in tool profile: the activation signals, tool-name aliasing,
+// system prompt, and per-request meta attachment. Registering a new
+// profile is one entry in the profiles slice — no scattered switch
+// statements across main.go, router_tool_names.go, prompt.go, and
+// options.go.
 type Descriptor struct {
 	Profile Profile
 
