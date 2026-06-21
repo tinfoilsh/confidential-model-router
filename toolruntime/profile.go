@@ -37,7 +37,17 @@ type Descriptor struct {
 	AttachMeta func(*sessionRegistry, *RouterOptions)
 }
 
-// profiles is the registry of all built-in tool profile descriptors, in activation order.
+// All profiles
+var WebSearch = Profile{
+	Name:            "web_search",
+	ToolServerModel: "websearch",
+}
+
+var CodeExecution = Profile{
+	Name:            "code_execution",
+	ToolServerModel: "code-execution",
+}
+
 var profiles = []Descriptor{
 	{
 		Profile:           WebSearch,
@@ -59,18 +69,6 @@ var profiles = []Descriptor{
 }
 
 const CodeExecutionMetaKey = "tinfoil_code_exec"
-
-// `web_search_options` on /chat/completions or `{"type": "web_search"}` entry in /responses `tools`.
-var WebSearch = Profile{
-	Name:            "web_search",
-	ToolServerModel: "websearch",
-}
-
-// `code_execution_options` on /chat/completions or `{"type": "code_execution"}` entry in /responses `tools`.
-var CodeExecution = Profile{
-	Name:            "code_execution",
-	ToolServerModel: "code-execution",
-}
 
 func descriptorForProfile(profileName string) *Descriptor {
 	for i := range profiles {
