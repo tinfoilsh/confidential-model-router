@@ -779,11 +779,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	}
 	totals := s.usageTotals.Usage()
 	if totals != nil {
-		usage = map[string]any{
-			"input_tokens":  totals.PromptTokens,
-			"output_tokens": totals.CompletionTokens,
-			"total_tokens":  totals.TotalTokens,
-		}
+		usage = responsesUsageMap(totals)
 	}
 	// Build the final `output` array. Run it through the citation attachment
 	// on a synthetic body so the final snapshot carries the same normalized
@@ -860,11 +856,7 @@ func (s *responsesStreamer) terminateWithError(r *http.Request, em *manager.Encl
 // most recent single-turn usage block if no totals were recorded.
 func (s *responsesStreamer) totalsBillingUsage() map[string]any {
 	if totals := s.usageTotals.Usage(); totals != nil {
-		return map[string]any{
-			"input_tokens":  totals.PromptTokens,
-			"output_tokens": totals.CompletionTokens,
-			"total_tokens":  totals.TotalTokens,
-		}
+		return responsesUsageMap(totals)
 	}
 	return s.aggregatedUsage
 }

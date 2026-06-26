@@ -42,9 +42,10 @@ func (e *upstreamError) Error() string {
 }
 
 type usageAccumulator struct {
-	promptTokens     int
-	completionTokens int
-	totalTokens      int
+	promptTokens       int
+	cachedPromptTokens int
+	completionTokens   int
+	totalTokens        int
 }
 
 func (a *usageAccumulator) Add(response *upstreamJSONResponse) {
@@ -54,6 +55,9 @@ func (a *usageAccumulator) Add(response *upstreamJSONResponse) {
 	}
 
 	a.promptTokens += usage.PromptTokens
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		a.cachedPromptTokens += cachedPromptTokens
+	}
 	a.completionTokens += usage.CompletionTokens
 	if usage.TotalTokens > 0 {
 		a.totalTokens += usage.TotalTokens
@@ -72,13 +76,19 @@ func (a *usageAccumulator) Usage() *tokencount.Usage {
 		totalTokens = a.promptTokens + a.completionTokens
 	}
 
-	return &tokencount.Usage{
+	usage := &tokencount.Usage{
 		PromptTokens:     a.promptTokens,
 		CompletionTokens: a.completionTokens,
 		TotalTokens:      totalTokens,
 		InputTokens:      a.promptTokens,
 		OutputTokens:     a.completionTokens,
 	}
+	if a.cachedPromptTokens > 0 {
+		details := &tokencount.PromptTokensDetails{CachedTokens: min(a.promptTokens, a.cachedPromptTokens)}
+		usage.PromptTokensDetails = details
+		usage.InputTokensDetails = details
+	}
+	return usage
 }
 
 type headerRoundTripper struct {
@@ -412,6 +422,36 @@ func formatUsageHeader(usage *tokencount.Usage) string {
 	return "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
+}
+
+func chatUsageMap(usage *tokencount.Usage) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	usageMap := map[string]any{
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+	}
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		usageMap["prompt_tokens_details"] = map[string]any{"cached_tokens": cachedPromptTokens}
+	}
+	return usageMap
+}
+
+func responsesUsageMap(usage *tokencount.Usage) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	usageMap := map[string]any{
+		"input_tokens":  usage.PromptTokens,
+		"output_tokens": usage.CompletionTokens,
+		"total_tokens":  usage.TotalTokens,
+	}
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		usageMap["input_tokens_details"] = map[string]any{"cached_tokens": cachedPromptTokens}
+	}
+	return usageMap
 }
 
 func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool) {

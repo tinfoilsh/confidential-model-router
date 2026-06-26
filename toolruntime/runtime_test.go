@@ -212,6 +212,78 @@ func TestResponsesAdapterApplyUsageReplacesResponsesTotals(t *testing.T) {
 	}
 }
 
+func TestUsageAccumulatorPreservesCachedPromptTokens(t *testing.T) {
+	acc := usageAccumulator{}
+	acc.Add(&upstreamJSONResponse{body: map[string]any{
+		"usage": map[string]any{
+			"prompt_tokens":     10,
+			"completion_tokens": 2,
+			"total_tokens":      12,
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens": 6,
+			},
+		},
+	}})
+	acc.Add(&upstreamJSONResponse{body: map[string]any{
+		"usage": map[string]any{
+			"input_tokens":  20,
+			"output_tokens": 3,
+			"total_tokens":  23,
+			"input_tokens_details": map[string]any{
+				"cached_tokens": 14,
+			},
+		},
+	}})
+
+	usage := acc.Usage()
+	if usage == nil {
+		t.Fatal("expected usage")
+	}
+	if usage.PromptTokens != 30 || usage.CompletionTokens != 5 || usage.TotalTokens != 35 {
+		t.Fatalf("unexpected aggregated usage: %#v", usage)
+	}
+	cachedPromptTokens, ok := usage.CachedPromptTokens()
+	if !ok {
+		t.Fatal("expected cached prompt token details")
+	}
+	if cachedPromptTokens != 20 {
+		t.Fatalf("cached prompt tokens = %d, want 20", cachedPromptTokens)
+	}
+}
+
+func TestAdaptersApplyUsagePreserveCachedPromptTokens(t *testing.T) {
+	usage := &tokencount.Usage{
+		PromptTokens:        7,
+		CompletionTokens:    11,
+		TotalTokens:         18,
+		PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 4},
+	}
+
+	chatResponse := &upstreamJSONResponse{body: map[string]any{}, header: make(http.Header)}
+	chatAdapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
+	chatAdapter.applyUsage(chatResponse, usage)
+	chatUsage := usageFromRaw(chatResponse.body["usage"])
+	if chatUsage == nil {
+		t.Fatal("expected chat usage")
+	}
+	cachedPromptTokens, ok := chatUsage.CachedPromptTokens()
+	if !ok || cachedPromptTokens != 4 {
+		t.Fatalf("chat cached prompt tokens = %d, %v; want 4, true", cachedPromptTokens, ok)
+	}
+
+	responsesResponse := &upstreamJSONResponse{body: map[string]any{}, header: make(http.Header)}
+	responsesAdapter := newResponsesLoopAdapter(map[string]any{}, nil, nil, nil, nil)
+	responsesAdapter.applyUsage(responsesResponse, usage)
+	responsesUsage := usageFromRaw(responsesResponse.body["usage"])
+	if responsesUsage == nil {
+		t.Fatal("expected responses usage")
+	}
+	cachedPromptTokens, ok = responsesUsage.CachedPromptTokens()
+	if !ok || cachedPromptTokens != 4 {
+		t.Fatalf("responses cached prompt tokens = %d, %v; want 4, true", cachedPromptTokens, ok)
+	}
+}
+
 func TestChatAdapterFinalizeAggregatesForcedFinalUsage(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{

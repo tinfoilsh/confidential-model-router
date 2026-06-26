@@ -607,11 +607,7 @@ func (s *chatStreamer) finalUsage() map[string]any {
 	if usage == nil {
 		return nil
 	}
-	return map[string]any{
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-	}
+	return chatUsageMap(usage)
 }
 
 // terminateWithError is the single point at which a mid-stream upstream
