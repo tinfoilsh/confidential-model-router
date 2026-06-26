@@ -289,7 +289,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 					// user's API key and gets billed there directly.
 					emitZeroTokenEvent()
 				} else {
-					cachedPromptTokens, _ := usage.CachedPromptTokens()
+					cachedPromptTokens := 0
+					if value, ok := usage.CachedPromptTokens(); ok {
+						cachedPromptTokens = value
+					}
 					event := billing.Event{
 						Timestamp:          time.Now(),
 						UserID:             userID,
