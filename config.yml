@@ -69,11 +69,6 @@ models:
     enclaves:
       - qwen3-tts.realtime.inf10.tinfoil.sh
 
-  qwen3-vl-30b:
-    repo: tinfoilsh/confidential-qwen3-vl-30b
-    enclaves:
-      - qwen3-vl-30b.inf10.tinfoil.sh
-
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6-b200
     enclaves:
