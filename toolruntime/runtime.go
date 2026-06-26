@@ -84,7 +84,7 @@ func (a *usageAccumulator) Usage() *tokencount.Usage {
 		OutputTokens:     a.completionTokens,
 	}
 	if a.cachedPromptTokens > 0 {
-		details := &tokencount.PromptTokensDetails{CachedTokens: min(a.promptTokens, a.cachedPromptTokens)}
+		details := &tokencount.PromptTokensDetails{CachedTokens: a.cachedPromptTokens}
 		usage.PromptTokensDetails = details
 		usage.InputTokensDetails = details
 	}
@@ -425,31 +425,21 @@ func formatUsageHeader(usage *tokencount.Usage) string {
 }
 
 func chatUsageMap(usage *tokencount.Usage) map[string]any {
-	if usage == nil {
-		return nil
-	}
-	usageMap := map[string]any{
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-	}
-	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
-		usageMap["prompt_tokens_details"] = map[string]any{"cached_tokens": cachedPromptTokens}
-	}
-	return usageMap
+	return usageMap(usage, "prompt_tokens", "completion_tokens", "prompt_tokens_details")
 }
 
 func responsesUsageMap(usage *tokencount.Usage) map[string]any {
-	if usage == nil {
-		return nil
-	}
+	return usageMap(usage, "input_tokens", "output_tokens", "input_tokens_details")
+}
+
+func usageMap(usage *tokencount.Usage, inputTokensKey, outputTokensKey, detailsKey string) map[string]any {
 	usageMap := map[string]any{
-		"input_tokens":  usage.PromptTokens,
-		"output_tokens": usage.CompletionTokens,
+		inputTokensKey:  usage.PromptTokens,
+		outputTokensKey: usage.CompletionTokens,
 		"total_tokens":  usage.TotalTokens,
 	}
 	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
-		usageMap["input_tokens_details"] = map[string]any{"cached_tokens": cachedPromptTokens}
+		usageMap[detailsKey] = map[string]any{"cached_tokens": cachedPromptTokens}
 	}
 	return usageMap
 }
