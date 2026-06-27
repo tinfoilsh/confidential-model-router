@@ -130,8 +130,8 @@ func TestCollectorEmitsCachedInputTokensMeterWhenPresent(t *testing.T) {
 	if meters[usagereporting.MeterInputTokens] != 100 {
 		t.Errorf("input_tokens mismatch: got %d want 100", meters[usagereporting.MeterInputTokens])
 	}
-	if meters[meterCachedInputTokens] != 64 {
-		t.Errorf("cached_input_tokens mismatch: got %d want 64", meters[meterCachedInputTokens])
+	if meters[usagereporting.MeterCachedInputTokens] != 64 {
+		t.Errorf("cached_input_tokens mismatch: got %d want 64", meters[usagereporting.MeterCachedInputTokens])
 	}
 	if meters[usagereporting.MeterOutputTokens] != 7 {
 		t.Errorf("output_tokens mismatch: got %d want 7", meters[usagereporting.MeterOutputTokens])
@@ -150,7 +150,7 @@ func TestCollectorOmitsCachedMeterWhenZero(t *testing.T) {
 
 	batch := readBatch()
 	for _, m := range batch.Events[0].Meters {
-		if m.Name == meterCachedInputTokens {
+		if m.Name == usagereporting.MeterCachedInputTokens {
 			t.Fatalf("cached_input_tokens meter should be omitted when zero, got %+v", batch.Events[0].Meters)
 		}
 	}

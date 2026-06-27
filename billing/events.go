@@ -14,8 +14,6 @@ import (
 	usageclient "github.com/tinfoilsh/usage-reporting-go/client"
 )
 
-const meterCachedInputTokens = "cached_input_tokens"
-
 // Event represents a billing event with token usage. CachedPromptTokens is the
 // subset of PromptTokens that the model served from its prompt cache; the
 // uncached portion is derived downstream.
@@ -101,7 +99,7 @@ func (c *Collector) AddEvent(event Event) {
 		}
 		if cachedInputTokens > 0 {
 			meters = append(meters, usagereporting.Meter{
-				Name:     meterCachedInputTokens,
+				Name:     usagereporting.MeterCachedInputTokens,
 				Quantity: cachedInputTokens,
 			})
 		}
