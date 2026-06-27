@@ -42,7 +42,6 @@ models:
     repo: tinfoilsh/confidential-glm5-2
     enclaves:
       - glm-5-2.tinfoil.containers.tinfoil.dev
-      - glm-5-2-1.tinfoil.containers.tinfoil.dev
 
   deepseek-v4-pro:
     repo: tinfoilsh/confidential-deepseek-v4-pro
