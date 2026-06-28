@@ -42,9 +42,10 @@ func (e *upstreamError) Error() string {
 }
 
 type usageAccumulator struct {
-	promptTokens     int
-	completionTokens int
-	totalTokens      int
+	promptTokens       int
+	cachedPromptTokens int
+	completionTokens   int
+	totalTokens        int
 }
 
 func (a *usageAccumulator) Add(response *upstreamJSONResponse) {
@@ -54,6 +55,9 @@ func (a *usageAccumulator) Add(response *upstreamJSONResponse) {
 	}
 
 	a.promptTokens += usage.PromptTokens
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		a.cachedPromptTokens += cachedPromptTokens
+	}
 	a.completionTokens += usage.CompletionTokens
 	if usage.TotalTokens > 0 {
 		a.totalTokens += usage.TotalTokens
@@ -72,13 +76,19 @@ func (a *usageAccumulator) Usage() *tokencount.Usage {
 		totalTokens = a.promptTokens + a.completionTokens
 	}
 
-	return &tokencount.Usage{
+	usage := &tokencount.Usage{
 		PromptTokens:     a.promptTokens,
 		CompletionTokens: a.completionTokens,
 		TotalTokens:      totalTokens,
 		InputTokens:      a.promptTokens,
 		OutputTokens:     a.completionTokens,
 	}
+	if a.cachedPromptTokens > 0 {
+		details := &tokencount.PromptTokensDetails{CachedTokens: a.cachedPromptTokens}
+		usage.PromptTokensDetails = details
+		usage.InputTokensDetails = details
+	}
+	return usage
 }
 
 type headerRoundTripper struct {
@@ -414,6 +424,26 @@ func formatUsageHeader(usage *tokencount.Usage) string {
 		",total=" + strconv.Itoa(usage.TotalTokens)
 }
 
+func chatUsageMap(usage *tokencount.Usage) map[string]any {
+	return usageMap(usage, "prompt_tokens", "completion_tokens", "prompt_tokens_details")
+}
+
+func responsesUsageMap(usage *tokencount.Usage) map[string]any {
+	return usageMap(usage, "input_tokens", "output_tokens", "input_tokens_details")
+}
+
+func usageMap(usage *tokencount.Usage, inputTokensKey, outputTokensKey, detailsKey string) map[string]any {
+	usageMap := map[string]any{
+		inputTokensKey:  usage.PromptTokens,
+		outputTokensKey: usage.CompletionTokens,
+		"total_tokens":  usage.TotalTokens,
+	}
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		usageMap[detailsKey] = map[string]any{"cached_tokens": cachedPromptTokens}
+	}
+	return usageMap
+}
+
 func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool) {
 	if response == nil {
 		return
@@ -444,26 +474,29 @@ func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *ups
 
 	usage := usageFromRaw(response.body["usage"])
 	promptTokens := 0
+	cachedPromptTokens := 0
 	completionTokens := 0
 	totalTokens := 0
 	if usage != nil {
 		promptTokens = usage.PromptTokens
+		cachedPromptTokens, _ = usage.CachedPromptTokens()
 		completionTokens = usage.CompletionTokens
 		totalTokens = usage.TotalTokens
 	}
 
 	em.AddBillingEvent(billing.Event{
-		Timestamp:        time.Now(),
-		UserID:           "authenticated_user",
-		APIKey:           apiKey,
-		Model:            modelName,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      totalTokens,
-		RequestID:        responseRequestID(response.header, r.Header),
-		Enclave:          response.header.Get("Tinfoil-Enclave"),
-		RequestPath:      r.URL.Path,
-		Streaming:        streaming,
+		Timestamp:          time.Now(),
+		UserID:             "authenticated_user",
+		APIKey:             apiKey,
+		Model:              modelName,
+		PromptTokens:       promptTokens,
+		CachedPromptTokens: cachedPromptTokens,
+		CompletionTokens:   completionTokens,
+		TotalTokens:        totalTokens,
+		RequestID:          responseRequestID(response.header, r.Header),
+		Enclave:            response.header.Get("Tinfoil-Enclave"),
+		RequestPath:        r.URL.Path,
+		Streaming:          streaming,
 	})
 }
 

@@ -12,10 +12,9 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
-// TestCollectorEmitsCustomerRequestAndTokenMeters verifies that a billing
-// event flushed through the reporter carries CustomerRequests=1 and exactly
-// the canonical input/output token meters (no requests meter).
-func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
+func setupCollectorTest(t *testing.T) (*Collector, func() usagereporting.Batch) {
+	t.Helper()
+
 	bodies := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf, err := io.ReadAll(r.Body)
@@ -25,10 +24,40 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 		bodies <- buf
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	c := NewCollector(server.URL, "router-test", "test-secret")
-	defer c.Stop()
+	t.Cleanup(c.Stop)
+
+	readBatch := func() usagereporting.Batch {
+		t.Helper()
+		c.reporter.Flush(context.Background())
+
+		var body []byte
+		select {
+		case body = <-bodies:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for billing event delivery")
+		}
+
+		var batch usagereporting.Batch
+		if err := json.Unmarshal(body, &batch); err != nil {
+			t.Fatalf("decode batch: %v", err)
+		}
+		if len(batch.Events) != 1 {
+			t.Fatalf("expected 1 event, got %d", len(batch.Events))
+		}
+		return batch
+	}
+
+	return c, readBatch
+}
+
+// TestCollectorEmitsCustomerRequestAndTokenMeters verifies that a billing
+// event flushed through the reporter carries CustomerRequests=1 and exactly
+// the canonical input/output token meters (no requests meter).
+func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
+	c, readBatch := setupCollectorTest(t)
 
 	c.AddEvent(Event{
 		Timestamp:        time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
@@ -43,22 +72,7 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 		APIKey:           "sk-test-1234567890",
 	})
 
-	c.reporter.Flush(context.Background())
-
-	var body []byte
-	select {
-	case body = <-bodies:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for billing event delivery")
-	}
-
-	var batch usagereporting.Batch
-	if err := json.Unmarshal(body, &batch); err != nil {
-		t.Fatalf("decode batch: %v", err)
-	}
-	if len(batch.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(batch.Events))
-	}
+	batch := readBatch()
 	got := batch.Events[0]
 
 	if got.Operation.Service != usagereporting.ServiceRouter {
@@ -93,20 +107,57 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 	}
 }
 
-func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
-	bodies := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read body: %v", err)
-		}
-		bodies <- buf
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+func TestCollectorEmitsCachedInputTokensMeterWhenPresent(t *testing.T) {
+	c, readBatch := setupCollectorTest(t)
 
-	c := NewCollector(server.URL, "router-test", "test-secret")
-	defer c.Stop()
+	c.AddEvent(Event{
+		Timestamp:          time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
+		Model:              "kimi-k2-6",
+		PromptTokens:       100,
+		CachedPromptTokens: 64,
+		CompletionTokens:   7,
+		TotalTokens:        107,
+		RequestID:          "req-1",
+		APIKey:             "tk_test",
+	})
+
+	batch := readBatch()
+
+	meters := make(map[string]int64)
+	for _, m := range batch.Events[0].Meters {
+		meters[m.Name] = m.Quantity
+	}
+	if meters[usagereporting.MeterInputTokens] != 100 {
+		t.Errorf("input_tokens mismatch: got %d want 100", meters[usagereporting.MeterInputTokens])
+	}
+	if meters[usagereporting.MeterCachedInputTokens] != 64 {
+		t.Errorf("cached_input_tokens mismatch: got %d want 64", meters[usagereporting.MeterCachedInputTokens])
+	}
+	if meters[usagereporting.MeterOutputTokens] != 7 {
+		t.Errorf("output_tokens mismatch: got %d want 7", meters[usagereporting.MeterOutputTokens])
+	}
+}
+
+func TestCollectorOmitsCachedMeterWhenZero(t *testing.T) {
+	c, readBatch := setupCollectorTest(t)
+
+	c.AddEvent(Event{
+		Timestamp:    time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
+		Model:        "gpt-oss-120b",
+		PromptTokens: 100,
+		APIKey:       "tk_test",
+	})
+
+	batch := readBatch()
+	for _, m := range batch.Events[0].Meters {
+		if m.Name == usagereporting.MeterCachedInputTokens {
+			t.Fatalf("cached_input_tokens meter should be omitted when zero, got %+v", batch.Events[0].Meters)
+		}
+	}
+}
+
+func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
+	c, readBatch := setupCollectorTest(t)
 
 	c.AddEvent(Event{
 		Timestamp:   time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
@@ -116,22 +167,7 @@ func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
 		APIKey:      "tk_test",
 	})
 
-	c.reporter.Flush(context.Background())
-
-	var body []byte
-	select {
-	case body = <-bodies:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for billing event delivery")
-	}
-
-	var batch usagereporting.Batch
-	if err := json.Unmarshal(body, &batch); err != nil {
-		t.Fatalf("decode batch: %v", err)
-	}
-	if len(batch.Events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(batch.Events))
-	}
+	batch := readBatch()
 
 	meters := make(map[string]int64)
 	for _, m := range batch.Events[0].Meters {

@@ -14,19 +14,22 @@ import (
 	usageclient "github.com/tinfoilsh/usage-reporting-go/client"
 )
 
-// Event represents a billing event with token usage
+// Event represents a billing event with token usage. CachedPromptTokens is the
+// subset of PromptTokens that the model served from its prompt cache; the
+// uncached portion is derived downstream.
 type Event struct {
-	Timestamp        time.Time `json:"timestamp"`
-	UserID           string    `json:"user_id"`
-	Model            string    `json:"model"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	TotalTokens      int       `json:"total_tokens"`
-	RequestID        string    `json:"request_id"`
-	Enclave          string    `json:"enclave"`
-	RequestPath      string    `json:"request_path"`
-	Streaming        bool      `json:"streaming"`
-	APIKey           string    `json:"api_key"`
+	Timestamp          time.Time `json:"timestamp"`
+	UserID             string    `json:"user_id"`
+	Model              string    `json:"model"`
+	PromptTokens       int       `json:"prompt_tokens"`
+	CachedPromptTokens int       `json:"cached_prompt_tokens"`
+	CompletionTokens   int       `json:"completion_tokens"`
+	TotalTokens        int       `json:"total_tokens"`
+	RequestID          string    `json:"request_id"`
+	Enclave            string    `json:"enclave"`
+	RequestPath        string    `json:"request_path"`
+	Streaming          bool      `json:"streaming"`
+	APIKey             string    `json:"api_key"`
 }
 
 // Collector ships billing events to the control plane via the usage reporter.
@@ -85,6 +88,22 @@ func (c *Collector) AddEvent(event Event) {
 			inputTokens = int64(event.TotalTokens)
 		}
 
+		cachedInputTokens := int64(event.CachedPromptTokens)
+		if cachedInputTokens > inputTokens {
+			cachedInputTokens = inputTokens
+		}
+
+		meters := []usagereporting.Meter{
+			{Name: usagereporting.MeterInputTokens, Quantity: inputTokens},
+			{Name: usagereporting.MeterOutputTokens, Quantity: outputTokens},
+		}
+		if cachedInputTokens > 0 {
+			meters = append(meters, usagereporting.Meter{
+				Name:     usagereporting.MeterCachedInputTokens,
+				Quantity: cachedInputTokens,
+			})
+		}
+
 		c.reporter.AddEvent(usagereporting.Event{
 			RequestID:  event.RequestID,
 			OccurredAt: event.Timestamp,
@@ -94,10 +113,7 @@ func (c *Collector) AddEvent(event Event) {
 				Name:    usagereporting.OperationRouterModelRequest,
 			},
 			CustomerRequests: 1,
-			Meters: []usagereporting.Meter{
-				{Name: usagereporting.MeterInputTokens, Quantity: inputTokens},
-				{Name: usagereporting.MeterOutputTokens, Quantity: outputTokens},
-			},
+			Meters:           meters,
 			Attributes: map[string]string{
 				"model":     event.Model,
 				"route":     event.RequestPath,

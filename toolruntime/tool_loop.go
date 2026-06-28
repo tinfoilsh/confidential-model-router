@@ -347,11 +347,7 @@ func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *toke
 	if response == nil || response.body == nil || usage == nil {
 		return
 	}
-	response.body["usage"] = map[string]any{
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-	}
+	response.body["usage"] = chatUsageMap(usage)
 }
 
 func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, eventFlags tinfoilEventFlags) {
@@ -560,11 +556,7 @@ func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage 
 	if response == nil || response.body == nil || usage == nil {
 		return
 	}
-	response.body["usage"] = map[string]any{
-		"input_tokens":  usage.PromptTokens,
-		"output_tokens": usage.CompletionTokens,
-		"total_tokens":  usage.TotalTokens,
-	}
+	response.body["usage"] = responsesUsageMap(usage)
 }
 
 func (a *responsesLoopAdapter) attachCitations(body map[string]any, state *citations.State, toolCalls *toolCallLog, _ tinfoilEventFlags) {

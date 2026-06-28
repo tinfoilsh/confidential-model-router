@@ -107,6 +107,9 @@ func TestResponsesStreamerFinalizeEmitsCompletedEvent(t *testing.T) {
 			"input_tokens":  float64(7),
 			"output_tokens": float64(11),
 			"total_tokens":  float64(18),
+			"input_tokens_details": map[string]any{
+				"cached_tokens": float64(5),
+			},
 		},
 	}})
 
@@ -118,6 +121,7 @@ func TestResponsesStreamerFinalizeEmitsCompletedEvent(t *testing.T) {
 	body := rec.Body.String()
 	for _, fragment := range []string{
 		"event: response.completed",
+		`"input_tokens_details":{"cached_tokens":5}`,
 		`"status":"completed"`,
 		`"output_tokens":11`,
 	} {

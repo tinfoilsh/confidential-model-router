@@ -253,6 +253,9 @@ func TestChatStreamerFinalizeEmitsFinishAndUsage(t *testing.T) {
 			"prompt_tokens":     float64(4),
 			"completion_tokens": float64(6),
 			"total_tokens":      float64(10),
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens": float64(3),
+			},
 		},
 	}})
 	result := chatIterationResult{
@@ -269,6 +272,7 @@ func TestChatStreamerFinalizeEmitsFinishAndUsage(t *testing.T) {
 	body := rec.Body.String()
 	for _, fragment := range []string{
 		`"finish_reason":"stop"`,
+		`"prompt_tokens_details":{"cached_tokens":3}`,
 		`"usage":{"completion_tokens":6`,
 		"data: [DONE]",
 	} {
