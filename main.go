@@ -272,17 +272,18 @@ var autoModelParamReservedKeys = map[string]bool{
 	"pii_check_options":      true,
 }
 
-// healthyModelResolver resolves an ordered candidate list to a concrete model
-// name. Implemented by *manager.EnclaveManager.
-type healthyModelResolver interface {
-	ResolveHealthyModel(candidates []string) string
+// preferredModelResolver resolves an ordered candidate list to a concrete
+// model name, preferring healthy backends. Implemented by
+// *manager.EnclaveManager.
+type preferredModelResolver interface {
+	ResolvePreferredModel(candidates []string) string
 }
 
 // resolveAutoModel consumes the router-only auto_model_options blob, picks the
 // first candidate whose model currently has a healthy enclave, shallow-merges
 // that candidate's params into body (excluding reserved keys), rewrites
 // body["model"], and strips the blob. It returns the resolved model name.
-func resolveAutoModel(resolver healthyModelResolver, body map[string]any) (string, error) {
+func resolveAutoModel(resolver preferredModelResolver, body map[string]any) (string, error) {
 	raw, ok := body["auto_model_options"].([]any)
 	delete(body, "auto_model_options")
 	if !ok || len(raw) == 0 {
@@ -301,6 +302,9 @@ func resolveAutoModel(resolver healthyModelResolver, body map[string]any) (strin
 			continue
 		}
 		names = append(names, name)
+		if _, seen := paramsByModel[name]; seen {
+			continue
+		}
 		if params, ok := opt["params"].(map[string]any); ok {
 			paramsByModel[name] = params
 		}
@@ -310,7 +314,7 @@ func resolveAutoModel(resolver healthyModelResolver, body map[string]any) (strin
 		return "", fmt.Errorf("Missing auto model choices: 'auto_model_options' has no valid model entries.")
 	}
 
-	resolved := resolver.ResolveHealthyModel(names)
+	resolved := resolver.ResolvePreferredModel(names)
 	if resolved == "" {
 		return "", fmt.Errorf("Missing auto model choices: no valid model could be resolved.")
 	}

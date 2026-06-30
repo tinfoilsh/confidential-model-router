@@ -552,7 +552,7 @@ type fakeResolver struct {
 	healthy map[string]bool
 }
 
-func (f fakeResolver) ResolveHealthyModel(candidates []string) string {
+func (f fakeResolver) ResolvePreferredModel(candidates []string) string {
 	var first string
 	for _, c := range candidates {
 		if c == "" {
@@ -614,6 +614,34 @@ func TestResolveAutoModel(t *testing.T) {
 	// glm-5-2 (skipped) params must not leak into the body.
 	if _, ok := body["chat_template_kwargs"]; ok {
 		t.Fatal("non-selected candidate params leaked into body")
+	}
+}
+
+func TestResolveAutoModel_DuplicateModelKeepsFirstParams(t *testing.T) {
+	resolver := fakeResolver{}
+	body := map[string]any{
+		"model": "auto",
+		"auto_model_options": []any{
+			map[string]any{
+				"model":  "kimi-k2-6",
+				"params": map[string]any{"reasoning_effort": "high"},
+			},
+			map[string]any{
+				"model":  "kimi-k2-6",
+				"params": map[string]any{"reasoning_effort": "low"},
+			},
+		},
+	}
+
+	resolved, err := resolveAutoModel(resolver, body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "kimi-k2-6" {
+		t.Fatalf("resolved = %q, want kimi-k2-6", resolved)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("expected first params (high), got %v", body["reasoning_effort"])
 	}
 }
 

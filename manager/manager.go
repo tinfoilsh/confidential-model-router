@@ -352,7 +352,7 @@ func (m *Model) EnclaveCount() int {
 }
 
 // HasHealthyEnclave reports whether the model has at least one enclave whose
-// circuit breaker is currently closed. Used by ResolveHealthyModel to skip
+// circuit breaker is currently closed. Used by ResolvePreferredModel to skip
 // models whose backends are all tripped (i.e. effectively down).
 func (m *Model) HasHealthyEnclave() bool {
 	m.mu.RLock()
@@ -365,10 +365,11 @@ func (m *Model) HasHealthyEnclave() bool {
 	return false
 }
 
-// ResolveHealthyModel returns the first candidate whose model exists and has a
-// healthy enclave, falling back to the first non-empty candidate when none are
-// healthy (so normal serving surfaces the error), or "" when the list is empty.
-func (em *EnclaveManager) ResolveHealthyModel(candidates []string) string {
+// ResolvePreferredModel returns the first candidate whose model exists and has
+// a healthy enclave. When none are healthy it falls back to the first non-empty
+// candidate (so normal serving surfaces the error), and returns "" when the
+// list is empty. The result is therefore preferred, not guaranteed healthy.
+func (em *EnclaveManager) ResolvePreferredModel(candidates []string) string {
 	var first string
 	for _, name := range candidates {
 		if name == "" {
