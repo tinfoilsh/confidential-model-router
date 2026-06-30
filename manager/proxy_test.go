@@ -82,7 +82,7 @@ func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
 	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
 
 	got := rec.Header().Get(UsageMetricsResponseHeader)
-	want := "prompt=69,completion=20,total=89"
+	want := "prompt=69,completion=20,total=89,model=test-model"
 	if got != want {
 		t.Fatalf("usage header = %q, want %q", got, want)
 	}

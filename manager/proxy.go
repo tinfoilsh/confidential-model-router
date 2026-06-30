@@ -344,7 +344,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage))
+				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage, modelName))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -391,7 +391,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 }
 
 // formatUsage formats token usage for the response header
-func formatUsage(usage *tokencount.Usage) string {
+func formatUsage(usage *tokencount.Usage, model string) string {
 	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
@@ -403,6 +403,10 @@ func formatUsage(usage *tokencount.Usage) string {
 			formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
 				",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
 		}
+	}
+
+	if model != "" {
+		formatted += ",model=" + model
 	}
 
 	return formatted

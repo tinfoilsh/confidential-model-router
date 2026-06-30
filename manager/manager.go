@@ -25,6 +25,7 @@ import (
 
 type Enclave struct {
 	host      string
+	modelName string
 	tlsKeyFP  string
 	hpkeKey   string
 	predicate attestation.PredicateType
@@ -200,6 +201,7 @@ func (em *EnclaveManager) addEnclave(
 	cb := newCircuitBreaker()
 	model.Enclaves[host] = &Enclave{
 		host:      host,
+		modelName: modelName,
 		predicate: verification.Measurement.Type,
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
@@ -366,7 +368,7 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Wrap the ResponseWriter to capture usage and write trailer
-	wrapper := &usageMetricsWriter{ResponseWriter: w}
+	wrapper := &usageMetricsWriter{ResponseWriter: w, model: e.modelName}
 
 	// Store wrapper in request context for ModifyResponse to access
 	ctx := context.WithValue(r.Context(), usageWriterKey{}, wrapper)
