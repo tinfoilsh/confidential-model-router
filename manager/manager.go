@@ -351,6 +351,39 @@ func (m *Model) EnclaveCount() int {
 	return len(m.Enclaves)
 }
 
+// HasHealthyEnclave reports whether the model has at least one enclave whose
+// circuit breaker is currently closed. Used by ResolveHealthyModel to skip
+// models whose backends are all tripped (i.e. effectively down).
+func (m *Model) HasHealthyEnclave() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, enclave := range m.Enclaves {
+		if enclave.cb == nil || enclave.cb.Closed() {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveHealthyModel returns the first candidate whose model exists and has a
+// healthy enclave, falling back to the first non-empty candidate when none are
+// healthy (so normal serving surfaces the error), or "" when the list is empty.
+func (em *EnclaveManager) ResolveHealthyModel(candidates []string) string {
+	var first string
+	for _, name := range candidates {
+		if name == "" {
+			continue
+		}
+		if first == "" {
+			first = name
+		}
+		if model, found := em.GetModel(name); found && model.HasHealthyEnclave() {
+			return name
+		}
+	}
+	return first
+}
+
 func (e *Enclave) isOverloaded() bool {
 	return e != nil && e.metrics != nil && e.metrics.overloaded.Load()
 }
