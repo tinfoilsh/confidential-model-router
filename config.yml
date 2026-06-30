@@ -90,6 +90,7 @@ models:
       - gemma4-31b-1.inf10.tinfoil.sh
       - gemma4-31b-2.inf10.tinfoil.sh
       - gemma4-31b-3.inf10.tinfoil.sh
+      - gemma4-31b-4.inf10.tinfoil.sh
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
