@@ -256,6 +256,79 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	}
 }
 
+// autoModelParamReservedKeys lists body fields that a per-candidate param block
+// must never overwrite when merged, so client-supplied auto params cannot
+// clobber the routing model, conversation, streaming, or tool/option blobs.
+var autoModelParamReservedKeys = map[string]bool{
+	"model":                  true,
+	"messages":               true,
+	"input":                  true,
+	"stream":                 true,
+	"stream_options":         true,
+	"tools":                  true,
+	"tool_choice":            true,
+	"web_search_options":     true,
+	"code_execution_options": true,
+	"pii_check_options":      true,
+}
+
+// preferredModelResolver resolves an ordered candidate list to a concrete
+// model name, preferring healthy backends. Implemented by
+// *manager.EnclaveManager.
+type preferredModelResolver interface {
+	ResolvePreferredModel(candidates []string) string
+}
+
+// resolveAutoModel consumes the router-only auto_model_options blob, picks the
+// first candidate whose model currently has a healthy enclave, shallow-merges
+// that candidate's params into body (excluding reserved keys), rewrites
+// body["model"], and strips the blob. It returns the resolved model name.
+func resolveAutoModel(resolver preferredModelResolver, body map[string]any) (string, error) {
+	raw, ok := body["auto_model_options"].([]any)
+	delete(body, "auto_model_options")
+	if !ok || len(raw) == 0 {
+		return "", fmt.Errorf("Missing auto model choices: 'auto_model_options' is required when model is 'auto'.")
+	}
+
+	names := make([]string, 0, len(raw))
+	paramsByModel := make(map[string]map[string]any, len(raw))
+	for _, entry := range raw {
+		opt, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, ok := opt["model"].(string)
+		if !ok || name == "" {
+			continue
+		}
+		names = append(names, name)
+		if _, seen := paramsByModel[name]; seen {
+			continue
+		}
+		if params, ok := opt["params"].(map[string]any); ok {
+			paramsByModel[name] = params
+		}
+	}
+
+	if len(names) == 0 {
+		return "", fmt.Errorf("Missing auto model choices: 'auto_model_options' has no valid model entries.")
+	}
+
+	resolved := resolver.ResolvePreferredModel(names)
+	if resolved == "" {
+		return "", fmt.Errorf("Missing auto model choices: no valid model could be resolved.")
+	}
+
+	for key, value := range paramsByModel[resolved] {
+		if autoModelParamReservedKeys[key] {
+			continue
+		}
+		body[key] = value
+	}
+	body["model"] = resolved
+	return resolved, nil
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -457,6 +530,20 @@ func main() {
 				if !ok {
 					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
+				}
+
+				// "auto" is a router-side sentinel: the candidate models and
+				// their per-model param blocks travel in the router-only
+				// auto_model_options blob. Resolve it to a concrete, healthy
+				// model and merge that model's params before any downstream
+				// logic (tool detection, rate limiting, serving) runs.
+				if modelName == "auto" {
+					resolved, mergeErr := resolveAutoModel(em, body)
+					if mergeErr != nil {
+						jsonError(w, mergeErr.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+						return
+					}
+					modelName = resolved
 				}
 
 				// Detect which built-in tool profiles this request

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -67,4 +68,89 @@ func TestNextEnclave_EmptyModel(t *testing.T) {
 	if got := m.NextEnclave(nil); got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}
+}
+
+func tripBreaker(e *Enclave) {
+	for i := 0; i < cbFailureThreshold; i++ {
+		e.cb.RecordFailure()
+	}
+}
+
+func TestHasHealthyEnclave(t *testing.T) {
+	healthy := newTestModel("a", "b")
+	if !healthy.HasHealthyEnclave() {
+		t.Fatal("expected healthy model with closed breakers")
+	}
+
+	down := newTestModel("a", "b")
+	tripBreaker(down.Enclaves["a"])
+	tripBreaker(down.Enclaves["b"])
+	if down.HasHealthyEnclave() {
+		t.Fatal("expected unhealthy model with all breakers open")
+	}
+
+	partial := newTestModel("a", "b")
+	tripBreaker(partial.Enclaves["a"])
+	if !partial.HasHealthyEnclave() {
+		t.Fatal("expected healthy model when one breaker is still closed")
+	}
+
+	empty := &Model{Enclaves: map[string]*Enclave{}}
+	if empty.HasHealthyEnclave() {
+		t.Fatal("expected unhealthy model with no enclaves")
+	}
+}
+
+func newTestManager(models map[string]*Model) *EnclaveManager {
+	em := &EnclaveManager{models: &sync.Map{}}
+	for name, m := range models {
+		em.models.Store(name, m)
+	}
+	return em
+}
+
+func TestResolvePreferredModel(t *testing.T) {
+	down := newTestModel("a")
+	tripBreaker(down.Enclaves["a"])
+	em := newTestManager(map[string]*Model{
+		"glm-5-2":         down,
+		"kimi-k2-6":       newTestModel("b"),
+		"deepseek-v4-pro": newTestModel("c"),
+	})
+
+	// First candidate is down -> skip to the next healthy one.
+	if got := em.ResolvePreferredModel([]string{"glm-5-2", "kimi-k2-6", "deepseek-v4-pro"}); got != "kimi-k2-6" {
+		t.Fatalf("expected kimi-k2-6, got %q", got)
+	}
+
+	// First candidate healthy -> use it.
+	if got := em.ResolvePreferredModel([]string{"kimi-k2-6", "deepseek-v4-pro"}); got != "kimi-k2-6" {
+		t.Fatalf("expected kimi-k2-6, got %q", got)
+	}
+
+	// None healthy -> fall back to the first candidate.
+	tripBreaker(em.mustModel(t, "kimi-k2-6").Enclaves["b"])
+	tripBreaker(em.mustModel(t, "deepseek-v4-pro").Enclaves["c"])
+	if got := em.ResolvePreferredModel([]string{"glm-5-2", "kimi-k2-6"}); got != "glm-5-2" {
+		t.Fatalf("expected glm-5-2 fallback, got %q", got)
+	}
+
+	// Unknown model is treated as the first candidate fallback when unhealthy.
+	if got := em.ResolvePreferredModel([]string{"does-not-exist", "kimi-k2-6"}); got != "does-not-exist" {
+		t.Fatalf("expected does-not-exist fallback, got %q", got)
+	}
+
+	// Empty / blank-only lists resolve to "".
+	if got := em.ResolvePreferredModel([]string{"", ""}); got != "" {
+		t.Fatalf("expected empty resolution, got %q", got)
+	}
+}
+
+func (em *EnclaveManager) mustModel(t *testing.T, name string) *Model {
+	t.Helper()
+	m, ok := em.GetModel(name)
+	if !ok {
+		t.Fatalf("model %q not found", name)
+	}
+	return m
 }

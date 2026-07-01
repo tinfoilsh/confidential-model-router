@@ -546,3 +546,112 @@ func TestDetectToolProfiles(t *testing.T) {
 		})
 	}
 }
+
+// fakeResolver picks the first candidate present in healthy, else "".
+type fakeResolver struct {
+	healthy map[string]bool
+}
+
+func (f fakeResolver) ResolvePreferredModel(candidates []string) string {
+	var first string
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if first == "" {
+			first = c
+		}
+		if f.healthy[c] {
+			return c
+		}
+	}
+	return first
+}
+
+func TestResolveAutoModel(t *testing.T) {
+	resolver := fakeResolver{healthy: map[string]bool{"kimi-k2-6": true}}
+
+	body := map[string]any{
+		"model":    "auto",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"stream":   true,
+		"auto_model_options": []any{
+			map[string]any{
+				"model":  "glm-5-2",
+				"params": map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": true}},
+			},
+			map[string]any{
+				"model": "kimi-k2-6",
+				"params": map[string]any{
+					"reasoning_effort": "high",
+					// Reserved keys must never be overwritten by a candidate.
+					"model":    "evil",
+					"messages": "evil",
+				},
+			},
+		},
+	}
+
+	resolved, err := resolveAutoModel(resolver, body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "kimi-k2-6" {
+		t.Fatalf("resolved = %q, want kimi-k2-6", resolved)
+	}
+	if body["model"] != "kimi-k2-6" {
+		t.Fatalf("body[model] = %v, want kimi-k2-6", body["model"])
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("expected merged reasoning_effort=high, got %v", body["reasoning_effort"])
+	}
+	if _, ok := body["auto_model_options"]; ok {
+		t.Fatal("auto_model_options should be stripped from body")
+	}
+	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 1 {
+		t.Fatalf("reserved messages field was clobbered: %v", body["messages"])
+	}
+	// glm-5-2 (skipped) params must not leak into the body.
+	if _, ok := body["chat_template_kwargs"]; ok {
+		t.Fatal("non-selected candidate params leaked into body")
+	}
+}
+
+func TestResolveAutoModel_DuplicateModelKeepsFirstParams(t *testing.T) {
+	resolver := fakeResolver{}
+	body := map[string]any{
+		"model": "auto",
+		"auto_model_options": []any{
+			map[string]any{
+				"model":  "kimi-k2-6",
+				"params": map[string]any{"reasoning_effort": "high"},
+			},
+			map[string]any{
+				"model":  "kimi-k2-6",
+				"params": map[string]any{"reasoning_effort": "low"},
+			},
+		},
+	}
+
+	resolved, err := resolveAutoModel(resolver, body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "kimi-k2-6" {
+		t.Fatalf("resolved = %q, want kimi-k2-6", resolved)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Fatalf("expected first params (high), got %v", body["reasoning_effort"])
+	}
+}
+
+func TestResolveAutoModel_MissingOptions(t *testing.T) {
+	resolver := fakeResolver{}
+	body := map[string]any{"model": "auto"}
+	if _, err := resolveAutoModel(resolver, body); err == nil {
+		t.Fatal("expected error when auto_model_options is missing")
+	}
+	if _, ok := body["auto_model_options"]; ok {
+		t.Fatal("auto_model_options should be stripped even on error")
+	}
+}
