@@ -1,0 +1,162 @@
+{
+  "comment": "Pinned outputs of the domain-tagged, length-prefixed SHA-256 construction (see gen_vectors.py in this directory, an implementation independent of the Go package). Never regenerate this file from the Go code.",
+  "derive": [
+    {
+      "note": "boundary-shift victim: tenant salt of org_12345",
+      "tenant_id": "org_12345",
+      "user_cache_secret": "",
+      "salt": "_1Jm3ACF8algKU89HHA1hZ57regn5axC7TwCDAkVZNY",
+      "mode": "tenant"
+    },
+    {
+      "note": "boundary-shift attacker: user salt of org_1 + 2345",
+      "tenant_id": "org_1",
+      "user_cache_secret": "2345",
+      "salt": "pzER3wZKUaTw_ibSyQ5JOh0XepQ0MbQq0Nnp9Ff9VIo",
+      "mode": "user"
+    },
+    {
+      "note": "tenant salt of the attacker tenant itself",
+      "tenant_id": "org_1",
+      "user_cache_secret": "",
+      "salt": "cNgLgsUfjeeUFrmbOR25ZAkcAJ7zPOxs734daYtHi4k",
+      "mode": "tenant"
+    },
+    {
+      "note": "tenant salt vs user salt, same tenant",
+      "tenant_id": "tenant-a",
+      "user_cache_secret": "",
+      "salt": "xccgUtynHXtqOXLQ4mUt2RC1JmgesvGCGmTcV2v6-7A",
+      "mode": "tenant"
+    },
+    {
+      "note": "user salt subdivides tenant: secret-1",
+      "tenant_id": "tenant-a",
+      "user_cache_secret": "secret-1",
+      "salt": "sX2EgM7N_jfzz0nOEZk-1MDMHsKqz0ieYtvUq2F3kZs",
+      "mode": "user"
+    },
+    {
+      "note": "user salt subdivides tenant: secret-2",
+      "tenant_id": "tenant-a",
+      "user_cache_secret": "secret-2",
+      "salt": "qoZRlUxZ9iRD6_M3t_S01ZPcsdPBbzDPIFJ3amOWgNU",
+      "mode": "user"
+    },
+    {
+      "note": "jwt-sub-shaped tenant id",
+      "tenant_id": "user_2NxTybBAqywNWUxya8FOYlgIRRK",
+      "user_cache_secret": "",
+      "salt": "z8zYjm3wvlY_sp9-S7O8_LJh9qiDviobk1t7hjt2PTU",
+      "mode": "tenant"
+    },
+    {
+      "note": "raw-api-key-shaped tenant id",
+      "tenant_id": "tk_live_9f8e7d6c5b4a3210",
+      "user_cache_secret": "",
+      "salt": "iIsR5KSMRpLDCUlfhrUmLoxbjS-FtRLnihPztDy_ybM",
+      "mode": "tenant"
+    },
+    {
+      "note": "unicode tenant and secret",
+      "tenant_id": "org_\u00fc",
+      "user_cache_secret": "\u79d8\u5bc6",
+      "salt": "852dNab11KRc8efnmMwPOWDDx-XDDZFFj9NelR0SZ3U",
+      "mode": "user"
+    },
+    {
+      "note": "secret containing lp()-shaped bytes",
+      "tenant_id": "tenant-a",
+      "user_cache_secret": "a\u0000\u0000\u0000\u0001b",
+      "salt": "9gpwHkAnnK_cRv-QISFg9pZ0dxrwY0eiCILv1SpryOI",
+      "mode": "user"
+    },
+    {
+      "note": "secret equals another tenant's full id",
+      "tenant_id": "org_1",
+      "user_cache_secret": "org_12345",
+      "salt": "3STBrDOXWkSQ5xxdOm3fuALILZZ0aU6vCfcwS-aPGG0",
+      "mode": "user"
+    },
+    {
+      "note": "smuggled frame: tenant id embeds the lp() encoding of the attacker pair",
+      "tenant_id": "org_1\u0000\u0000\u0000\u00042345",
+      "user_cache_secret": "",
+      "salt": "l9z0cqwFUKC6R_mXksRAwRx3_9A_jBeQFX_B0UaZ6eQ",
+      "mode": "tenant"
+    },
+    {
+      "note": "multi-byte length: 300-byte secret exercises the second length byte",
+      "tenant_id": "tenant-a",
+      "user_cache_secret": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "salt": "Hxi7oZrj2eO4WokluncuHuGGqeR4_Ofy7N8hTRgKLws",
+      "mode": "user"
+    },
+    {
+      "note": "long tenant id",
+      "tenant_id": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+      "user_cache_secret": "",
+      "salt": "TNfrtyYRTfcsMViDAG-UN45iuFl8mnP5xHlAV5QRkmM",
+      "mode": "tenant"
+    }
+  ],
+  "sum": [
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [],
+      "sha256_hex": "4b85083c84e7bec61fa990406d84f0b16be6f5d297d039227c16f68c658888c0"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        ""
+      ],
+      "sha256_hex": "b3daace8c75b2f78fc83697255fb2b6b931651c5469166e9b9f9d2141995de10"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        "a",
+        "bc"
+      ],
+      "sha256_hex": "ba431f8cc015909c6b56dbf8885c359ecdac91219ccc8e17e08cdf92cd52d606"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        "ab",
+        "c"
+      ],
+      "sha256_hex": "e305e275b5a3bbba539f3bf9fb7d87d6715f18b750e8a800806cb096023111d4"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        "abc"
+      ],
+      "sha256_hex": "efbc9715318df293fbc28ca27d122b795cb3552848a2be53c3cc46ad1667f199"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        "abc",
+        ""
+      ],
+      "sha256_hex": "cfe54fa03129a5ee99788168b25ab64bb22a77a89f294423ec40268c03f1cf0e"
+    },
+    {
+      "tag": "tinfoil/test/v1",
+      "fields": [
+        "a\u0000\u0000\u0000\u0001b"
+      ],
+      "sha256_hex": "739ba991b9101ed4e6b891de7ebf2ae375b2138370257d10fb0fd21c8fee1c4f"
+    },
+    {
+      "tag": "tinfoil/cache-salt/v1",
+      "fields": [
+        "org_12345"
+      ],
+      "sha256_hex": "ff5266dc0085f1a960294f3d1c7035859e7bade827e5ac42ed3c020c091564d6"
+    }
+  ]
+}
