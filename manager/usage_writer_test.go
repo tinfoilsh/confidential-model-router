@@ -42,6 +42,7 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 	tests := []struct {
 		name     string
 		usage    *tokencount.Usage
+		model    string
 		expected string
 	}{
 		{
@@ -52,6 +53,28 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 				TotalTokens:      109,
 			},
 			expected: "prompt=67,completion=42,total=109",
+		},
+		{
+			name: "appends model when present",
+			usage: &tokencount.Usage{
+				PromptTokens:     67,
+				CompletionTokens: 42,
+				TotalTokens:      109,
+			},
+			model:    "kimi-k2-6",
+			expected: "prompt=67,completion=42,total=109,model=kimi-k2-6",
+		},
+		{
+			name: "appends model after cached prompt token details",
+			usage: &tokencount.Usage{
+				PromptTokens:             69,
+				CompletionTokens:         20,
+				TotalTokens:              89,
+				PromptTokensDetails:      &tokencount.PromptTokensDetails{CachedTokens: 64},
+				ExposePromptTokenDetails: true,
+			},
+			model:    "kimi-k2-6",
+			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5,model=kimi-k2-6",
 		},
 		{
 			name: "zero values",
@@ -102,7 +125,7 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			wrapper := &usageMetricsWriter{ResponseWriter: rec}
+			wrapper := &usageMetricsWriter{ResponseWriter: rec, model: tt.model}
 
 			if tt.usage != nil {
 				wrapper.SetUsage(tt.usage)
@@ -118,7 +141,7 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 
 func TestUsageMetricsWriter_WriteTrailer(t *testing.T) {
 	rec := httptest.NewRecorder()
-	wrapper := &usageMetricsWriter{ResponseWriter: rec}
+	wrapper := &usageMetricsWriter{ResponseWriter: rec, model: "kimi-k2-6"}
 
 	usage := &tokencount.Usage{
 		PromptTokens:     67,
@@ -132,7 +155,7 @@ func TestUsageMetricsWriter_WriteTrailer(t *testing.T) {
 
 	// Check that the header was set
 	headerValue := rec.Header().Get(UsageMetricsResponseHeader)
-	expected := "prompt=67,completion=42,total=109"
+	expected := "prompt=67,completion=42,total=109,model=kimi-k2-6"
 	if headerValue != expected {
 		t.Errorf("expected header %q, got %q", expected, headerValue)
 	}
