@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/tinfoilsh/confidential-model-router/cachesalt"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -115,6 +116,11 @@ var (
 	// pinning for MCP tool servers during local development. MUST
 	// NOT be enabled in deployed enclaves.
 	debug = flag.Bool("debug", getEnvBool("DEBUG"), "enable debug-only overrides for local development (env: DEBUG)")
+	// cacheSaltEnabled injects a per-principal cache_salt into supported
+	// requests, partitioning the engine's prefix cache between callers.
+	// Off by default for rollout; once enabled, disabling it re-opens
+	// cross-user cache sharing — an emergency lever, not a tuning knob.
+	cacheSaltEnabled = flag.Bool("cache-salt", getEnvBool("CACHE_SALT_ENABLED"), "inject per-principal cache_salt into requests (env: CACHE_SALT_ENABLED)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -504,6 +510,14 @@ func main() {
 				// Identify the caller for rate limiting (see rateLimitIdentity).
 				rateLimitID := rateLimitIdentity(apiKey)
 
+				// Own the cache-salt fields: pop the router-only
+				// user_cache_secret, strip any client-supplied cache_salt,
+				// and (when enabled) inject the derived per-principal salt
+				// on endpoints that support it.
+				if mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled); mode != cachesalt.ModeNone {
+					manager.CacheSaltInjectionsTotal.WithLabelValues(modelName, string(mode)).Inc()
+				}
+
 				hasConfiguredPriority := false
 				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
 					body["priority"] = *routeCtx.Priority
@@ -555,6 +569,19 @@ func main() {
 					}
 					return
 				}
+			}
+		} else if cacheSaltPaths[r.URL.Path] {
+			// Subdomain-routed request on a salt-supporting endpoint. This
+			// path proxies the body verbatim (no parsing above), so apply
+			// cache-salt handling here to keep the strip-and-inject invariant
+			// holding across both routing modes rather than only path routing.
+			mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+			if err != nil {
+				jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				return
+			}
+			if mode != cachesalt.ModeNone {
+				manager.CacheSaltInjectionsTotal.WithLabelValues(modelName, string(mode)).Inc()
 			}
 		}
 

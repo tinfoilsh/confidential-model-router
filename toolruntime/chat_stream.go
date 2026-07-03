@@ -849,6 +849,29 @@ func (b *chatToolCallBuilder) raw() []any {
 // The function assumes isStream(body) is already true. Non-streaming callers
 // continue to go through runChatLoop so existing behavior is preserved for
 // SDKs that do not want SSE back.
+
+// buildChatStreamRequest builds the upstream /v1/chat/completions request for
+// the streaming path, mirroring chatLoopAdapter.buildInitialRequest. It clones
+// body (preserving router-injected fields such as cache_salt), strips
+// router-only fields, forces streaming, and merges tools/prompt. It returns
+// the request body and the auto-continue tool set stripped from it.
+func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
+	reqBody := cloneJSONMap(body)
+	delete(reqBody, "web_search_options")
+	delete(reqBody, "code_execution_options")
+	delete(reqBody, "filters")
+	delete(reqBody, "pii_check_options")
+	delete(reqBody, "prompt_injection_check_options")
+	stripRouterOwnedIncludes(reqBody)
+	reqBody["stream"] = true
+	reqBody["stream_options"] = map[string]any{"include_usage": true}
+	applyParallelToolCallsPolicy(reqBody)
+	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
+	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
+	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
+	return reqBody, autoContinueTools
+}
+
 func runChatStreaming(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -872,19 +895,7 @@ func runChatStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	reqBody := cloneJSONMap(body)
-	delete(reqBody, "web_search_options")
-	delete(reqBody, "code_execution_options")
-	delete(reqBody, "filters")
-	delete(reqBody, "pii_check_options")
-	delete(reqBody, "prompt_injection_check_options")
-	stripRouterOwnedIncludes(reqBody)
-	reqBody["stream"] = true
-	reqBody["stream_options"] = map[string]any{"include_usage": true}
-	applyParallelToolCallsPolicy(reqBody)
-	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
-	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
-	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
+	reqBody, autoContinueTools := buildChatStreamRequest(body, tools, prompt)
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"

@@ -56,10 +56,11 @@ const (
 // is present.
 //
 // tenantID must be a stable identifier for the authenticated caller (e.g.
-// the verified JWT subject). Never pass a client-chosen value — callers
-// could pick their namespace — and never the raw bearer token, which
-// rotates and would cold-start the caller's namespace on every refresh.
-// Isolation is only as strong as the authentication that produced tenantID.
+// the verified JWT subject, or a long-lived opaque API key). Never pass a
+// client-chosen value — callers could pick their namespace — and prefer a
+// stable identifier over a short-lived rotating token, which would
+// cold-start the caller's namespace on every refresh. Isolation is only as
+// strong as the authentication that produced tenantID.
 //
 // If tenantID is empty there is no identity to anchor a salt to: Derive
 // returns ("", ModeNone) and the caller must skip injection. An empty
