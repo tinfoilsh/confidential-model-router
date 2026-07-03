@@ -36,6 +36,12 @@ var cacheSaltPaths = map[string]bool{
 // opaque key) happens here via rateLimitIdentity so the call site cannot
 // wire the wrong value.
 func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cachesalt.Mode, bool) {
+	// A JSON `null` body unmarshals to a nil map (with no error). It carries
+	// no fields to strip and no prompt to cache, and injecting would panic on
+	// the nil map — treat it as passthrough. The engine rejects the null body.
+	if body == nil {
+		return cachesalt.ModeNone, false
+	}
 	_, hadSecret := body["user_cache_secret"]
 	_, hadSalt := body["cache_salt"]
 	secret, _ := body["user_cache_secret"].(string)
