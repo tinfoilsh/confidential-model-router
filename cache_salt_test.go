@@ -261,6 +261,20 @@ func TestSaltProxiedBody(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves int64 precision through the re-marshal", func(t *testing.T) {
+		// 2^53+1 is not representable as float64; default JSON decoding
+		// would silently turn it into ...992.
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"m","seed":9007199254740993}`))
+		if _, err := saltProxiedBody(req, "tenant-a", true); err != nil {
+			t.Fatalf("saltProxiedBody: %v", err)
+		}
+		raw, _ := io.ReadAll(req.Body)
+		if !strings.Contains(string(raw), `"seed":9007199254740993`) {
+			t.Errorf("seed lost precision: %s", raw)
+		}
+	})
+
 	t.Run("forwards a non-JSON body untouched", func(t *testing.T) {
 		const raw = `not json`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))

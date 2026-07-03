@@ -72,8 +72,14 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 		return cachesalt.ModeNone, err
 	}
 
+	// UseNumber keeps numbers as their exact text across the re-marshal;
+	// the default float64 decoding silently corrupts int64-range values
+	// (e.g. seed). dec.More() rejects trailing data, matching
+	// json.Unmarshal's strictness.
+	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+	dec.UseNumber()
 	var body map[string]any
-	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+	if err := dec.Decode(&body); err != nil || dec.More() {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		return cachesalt.ModeNone, nil
 	}
