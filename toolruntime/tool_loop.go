@@ -354,8 +354,16 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 	attachChatOutput(body, state, toolCalls, eventFlags)
 }
 
-func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
-	reqBody := cloneJSONMap(a.body)
+// buildChatUpstreamRequest builds the upstream /v1/chat/completions request
+// body shared by the non-streaming tool loop and the streaming path. It clones
+// body (preserving router-injected fields such as cache_salt), strips
+// router-only fields, applies the parallel-tool-calls policy, merges the
+// tools and prompt, and returns the request plus the auto-continue tool set
+// stripped from it. Callers set the stream flag (and stream_options) for their
+// mode; the shared body is otherwise identical, so keeping it in one place
+// stops the two paths from drifting.
+func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
+	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
@@ -363,11 +371,17 @@ func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
 	delete(reqBody, "pii_check_options")
 	delete(reqBody, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(reqBody)
-	reqBody["stream"] = false
 	applyParallelToolCallsPolicy(reqBody)
-	a.autoContinueTools = extractAndStripAutoContinueChatTools(reqBody["tools"])
-	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(a.tools)...)
-	reqBody["messages"] = prependChatPrompt(a.prompt, reqBody["messages"])
+	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
+	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
+	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
+	return reqBody, autoContinueTools
+}
+
+func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
+	reqBody, autoContinueTools := buildChatUpstreamRequest(a.body, a.tools, a.prompt)
+	reqBody["stream"] = false
+	a.autoContinueTools = autoContinueTools
 
 	if debugEnabled {
 		ownedNames := make([]string, 0, len(a.ownedTools))
