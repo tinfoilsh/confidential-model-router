@@ -47,6 +47,33 @@ func newTestResponsesStreamer(t *testing.T) (*responsesStreamer, *httptest.Respo
 	return streamer, rec
 }
 
+// TestResponsesBuildersOwnStreamMode pins what stays caller-owned now that
+// both responses builders share buildResponsesUpstreamRequest: the stream
+// flag, and the loop's stream_options strip (the field is invalid without
+// streaming). A "simplification" that moves either into the shared helper
+// would change the other path's behavior.
+func TestResponsesBuildersOwnStreamMode(t *testing.T) {
+	body := map[string]any{
+		"model":          "m",
+		"input":          []any{},
+		"stream_options": map[string]any{"include_usage": true},
+	}
+
+	adapter := newResponsesLoopAdapter(body, nil, nil, nil, nil)
+	loopReq := adapter.buildInitialRequest()
+	if loopReq["stream"] != false {
+		t.Errorf("loop stream = %v, want false", loopReq["stream"])
+	}
+	if _, ok := loopReq["stream_options"]; ok {
+		t.Error("loop request kept stream_options, which is invalid without streaming")
+	}
+
+	streamReq, _ := buildResponsesStreamRequest(body, nil, nil)
+	if streamReq["stream"] != true {
+		t.Errorf("stream request stream = %v, want true", streamReq["stream"])
+	}
+}
+
 func TestResponsesStreamerPumpForwardsTextAndCapturesToolCalls(t *testing.T) {
 	streamer, rec := newTestResponsesStreamer(t)
 	frames := []string{

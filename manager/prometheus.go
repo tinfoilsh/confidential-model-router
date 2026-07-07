@@ -79,6 +79,15 @@ var (
 		[]string{"model"},
 	)
 
+	// CacheSaltInjectionsTotal tracks requests injected with a derived cache_salt
+	CacheSaltInjectionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_cache_salt_injections_total",
+			Help: "Total number of requests injected with a derived cache_salt, labeled by derivation mode (tenant or user)",
+		},
+		[]string{"model", "mode"},
+	)
+
 	// RouteContextLookupFailuresTotal tracks failed route-context lookups to the control plane
 	RouteContextLookupFailuresTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

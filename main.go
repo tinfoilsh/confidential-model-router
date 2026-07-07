@@ -115,6 +115,11 @@ var (
 	// pinning for MCP tool servers during local development. MUST
 	// NOT be enabled in deployed enclaves.
 	debug = flag.Bool("debug", getEnvBool("DEBUG"), "enable debug-only overrides for local development (env: DEBUG)")
+	// cacheSaltEnabled injects a per-principal cache_salt into supported
+	// requests, partitioning the engine's prefix cache between callers.
+	// Off by default for rollout; once enabled, disabling it re-opens
+	// cross-user cache sharing — an emergency lever, not a tuning knob.
+	cacheSaltEnabled = flag.Bool("cache-salt", getEnvBool("CACHE_SALT_ENABLED"), "inject per-principal cache_salt into requests (env: CACHE_SALT_ENABLED)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -591,6 +596,13 @@ func main() {
 				// Identify the caller for rate limiting (see rateLimitIdentity).
 				rateLimitID := rateLimitIdentity(apiKey)
 
+				// Own the cache-salt fields: pop the router-only
+				// user_cache_secret, strip any client-supplied cache_salt,
+				// and (when enabled) inject the derived per-principal salt
+				// on endpoints that support it.
+				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
+				recordCacheSaltInjection(modelName, mode)
+
 				hasConfiguredPriority := false
 				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
 					body["priority"] = *routeCtx.Priority
@@ -643,6 +655,30 @@ func main() {
 					return
 				}
 			}
+		} else if cacheSaltPaths[r.URL.Path] {
+			// Subdomain-routed request on a salt-supporting endpoint. This
+			// path proxies the body verbatim (no parsing above), so apply
+			// cache-salt handling here to keep the strip-and-inject invariant
+			// holding across both routing modes rather than only path routing.
+			//
+			// The subdomain names the model before the body is touched, so
+			// reject unknown models up front: the wildcard TLS cert makes
+			// arbitrary subdomains reachable, and 404ing them must not cost
+			// an unbounded body read (it also keeps bogus names out of the
+			// injection metric). This must return, not skip salting — a skip
+			// could race a config refresh that adds the model between here
+			// and the authoritative lookup below, forwarding an unsanitized
+			// body to the engine.
+			if _, found := em.GetModel(modelName); !found {
+				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+				return
+			}
+			mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+			if err != nil {
+				jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				return
+			}
+			recordCacheSaltInjection(modelName, mode)
 		}
 
 		model, found := em.GetModel(modelName)

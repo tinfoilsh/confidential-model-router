@@ -876,6 +876,16 @@ func (s *responsesStreamer) totalsBillingUsage() map[string]any {
 // progress envelopes and a terminal response.output_item.done. No
 // tinfoil-specific channel rides on this route -- the Responses stream
 // is always fully OpenAI-spec-conformant.
+
+// buildResponsesStreamRequest builds the upstream /v1/responses request for
+// the streaming path. It shares its body construction with the non-streaming
+// loop via buildResponsesUpstreamRequest, then forces streaming.
+func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
+	base, autoContinueTools := buildResponsesUpstreamRequest(body, tools, prompt)
+	base["stream"] = true
+	return base, autoContinueTools
+}
+
 func runResponsesStreaming(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -898,16 +908,7 @@ func runResponsesStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	base := cloneJSONMap(body)
-	delete(base, "pii_check_options")
-	delete(base, "prompt_injection_check_options")
-	stripRouterOwnedIncludes(base)
-	base["stream"] = true
-	applyParallelToolCallsPolicy(base)
-	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
-	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
-	base["input"] = prependResponsesPrompt(prompt, base["input"])
-	base["input"] = stripClientSyntheticResponseItems(base["input"])
+	base, autoContinueTools := buildResponsesStreamRequest(body, tools, prompt)
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 
