@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"time"
 
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
@@ -22,8 +21,12 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 		return "", nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
 
+	// No client-level Timeout: it would cover the entire exchange including
+	// reading the streamed response body, hard-killing long-running reasoning
+	// streams mid-flight. Requests are bounded by the caller's context (the
+	// incoming client request), matching the passive behavior of the public
+	// reverse proxy path.
 	client := &http.Client{
-		Timeout: 10 * time.Minute,
 		Transport: &slowHeaderTripper{
 			base: &tinfoilClient.TLSBoundRoundTripper{
 				ExpectedPublicKey: enclave.tlsKeyFP,
@@ -71,7 +74,7 @@ func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Cli
 	// by underscores; see localMCPEndpointEnvVar.
 	if em.debug {
 		if endpoint := os.Getenv(localMCPEndpointEnvVar(modelName)); endpoint != "" {
-			return endpoint, &http.Client{Timeout: 10 * time.Minute}, nil
+			return endpoint, &http.Client{}, nil
 		}
 	}
 
