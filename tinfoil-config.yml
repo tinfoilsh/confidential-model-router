@@ -10,6 +10,7 @@ containers:
     env:
       - DOMAIN
       - REFRESH_INTERVAL: "1m"
+      - CACHE_SALT_ENABLED: "true"
       - USAGE_REPORTER_ID: "model-router"
       - CONTROL_PLANE_URL: "https://api.tinfoil.sh"
     secrets:
