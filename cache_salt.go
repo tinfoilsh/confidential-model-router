@@ -74,12 +74,13 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 
 	// UseNumber keeps numbers as their exact text across the re-marshal;
 	// the default float64 decoding silently corrupts int64-range values
-	// (e.g. seed). dec.More() rejects trailing data, matching
-	// json.Unmarshal's strictness.
+	// (e.g. seed). decodeConsumedAll rejects trailing data, matching
+	// json.Unmarshal's single-document strictness, so a body the engine
+	// would reject is never re-marshaled into one it accepts.
 	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
 	dec.UseNumber()
 	var body map[string]any
-	if err := dec.Decode(&body); err != nil || dec.More() {
+	if err := dec.Decode(&body); err != nil || !decodeConsumedAll(dec) {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		return cachesalt.ModeNone, nil
 	}
@@ -98,4 +99,16 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 	r.ContentLength = int64(len(newBytes))
 	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBytes)))
 	return mode, nil
+}
+
+// decodeConsumedAll reports whether dec has nothing left but trailing
+// whitespace: a follow-up Token read returns io.EOF only at true end of
+// input. dec.More() is not enough here — it exists to iterate elements
+// inside a container and reports "no more elements" at a '}' or ']', so a
+// body like `{...}}` would slip past it and be re-marshaled without its
+// trailing bytes, quietly converting a request the engine rejects into one
+// it accepts.
+func decodeConsumedAll(dec *json.Decoder) bool {
+	_, err := dec.Token()
+	return err == io.EOF
 }

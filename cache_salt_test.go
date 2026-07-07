@@ -290,6 +290,51 @@ func TestSaltProxiedBody(t *testing.T) {
 			t.Errorf("non-JSON body altered: got %q", out)
 		}
 	})
+
+	t.Run("forwards a body with trailing data untouched", func(t *testing.T) {
+		// json.Unmarshal rejects all of these, and so must the engine-bound
+		// rewrite: re-marshaling only the first value would silently convert
+		// a request the engine rejects into one it accepts. The '}'/' ]'
+		// cases are the regression: dec.More() reports "no more elements" at
+		// either byte, so they used to slip past the trailing-data guard.
+		for _, raw := range []string{
+			`{"model":"m","cache_salt":"evil"}}`,
+			`{"model":"m"}]`,
+			`{"model":"m"}} garbage`,
+			`{"model":"m"}{"model":"n"}`,
+			`{"model":"m"} x`,
+		} {
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
+			mode, err := saltProxiedBody(req, "tenant-a", true)
+			if err != nil {
+				t.Fatalf("saltProxiedBody(%q): %v", raw, err)
+			}
+			if mode != cachesalt.ModeNone {
+				t.Errorf("mode = %q for %q, want ModeNone", mode, raw)
+			}
+			out, _ := io.ReadAll(req.Body)
+			if string(out) != raw {
+				t.Errorf("trailing-data body altered: got %q, want %q", out, raw)
+			}
+		}
+	})
+
+	t.Run("trailing whitespace is not trailing data", func(t *testing.T) {
+		// json.Unmarshal accepts trailing whitespace, so the strictness fix
+		// must not regress ordinary clients that end the body with a newline.
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader("{\"model\":\"m\"}\n\t "))
+		mode, err := saltProxiedBody(req, "tenant-a", true)
+		if err != nil {
+			t.Fatalf("saltProxiedBody: %v", err)
+		}
+		if mode != cachesalt.ModeTenant {
+			t.Errorf("mode = %q, want ModeTenant", mode)
+		}
+		if got := decodeBody(t, req); got["cache_salt"] != tenantSalt {
+			t.Errorf("cache_salt = %v, want %q", got["cache_salt"], tenantSalt)
+		}
+	})
 }
 
 // TestCacheSaltMetricSkippedInjection pins that a skipped injection emits no
