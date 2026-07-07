@@ -358,6 +358,28 @@ func TestCacheSaltMetricSkippedInjection(t *testing.T) {
 	}
 }
 
+// TestRecordCacheSaltInjection pins the guard that both routing branches rely
+// on: ModeNone emits no sample (an empty mode label must never exist), any
+// real mode counts one under exactly {model, mode}.
+func TestRecordCacheSaltInjection(t *testing.T) {
+	before := testutil.CollectAndCount(manager.CacheSaltInjectionsTotal)
+
+	recordCacheSaltInjection("record-metric-skip", cachesalt.ModeNone)
+	if after := testutil.CollectAndCount(manager.CacheSaltInjectionsTotal); after != before {
+		t.Errorf("ModeNone minted a series: %d -> %d", before, after)
+	}
+
+	recordCacheSaltInjection("record-metric-count", cachesalt.ModeTenant)
+	recordCacheSaltInjection("record-metric-count", cachesalt.ModeUser)
+	recordCacheSaltInjection("record-metric-count", cachesalt.ModeUser)
+	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "tenant")); got != 1 {
+		t.Errorf(`series {record-metric-count,tenant} = %v, want 1`, got)
+	}
+	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "user")); got != 2 {
+		t.Errorf(`series {record-metric-count,user} = %v, want 2`, got)
+	}
+}
+
 // decodeBody reads the request's current Body (the value saltProxiedBody
 // rewrote it to) and parses it as JSON.
 func decodeBody(t *testing.T, req *http.Request) map[string]any {

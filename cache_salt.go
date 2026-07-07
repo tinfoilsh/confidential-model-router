@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/tinfoilsh/confidential-model-router/cachesalt"
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 // cacheSaltPaths are the endpoints whose engine request schema accepts a
@@ -99,6 +100,18 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 	r.ContentLength = int64(len(newBytes))
 	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBytes)))
 	return mode, nil
+}
+
+// recordCacheSaltInjection counts a performed injection. A skipped one
+// (ModeNone) emits no sample: dashboards distinguish "salting off" from
+// "salting on, mode X" by series existence, so an empty mode label must
+// never appear. Keeping the guard here, next to the code that produces
+// Mode, means no call site can mint one by forgetting it.
+func recordCacheSaltInjection(modelName string, mode cachesalt.Mode) {
+	if mode == cachesalt.ModeNone {
+		return
+	}
+	manager.CacheSaltInjectionsTotal.WithLabelValues(modelName, string(mode)).Inc()
 }
 
 // decodeConsumedAll reports whether dec has nothing left but trailing

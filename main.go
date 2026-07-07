@@ -24,7 +24,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/tinfoilsh/confidential-model-router/cachesalt"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -514,9 +513,8 @@ func main() {
 				// user_cache_secret, strip any client-supplied cache_salt,
 				// and (when enabled) inject the derived per-principal salt
 				// on endpoints that support it.
-				if mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled); mode != cachesalt.ModeNone {
-					manager.CacheSaltInjectionsTotal.WithLabelValues(modelName, string(mode)).Inc()
-				}
+				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
+				recordCacheSaltInjection(modelName, mode)
 
 				hasConfiguredPriority := false
 				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
@@ -593,9 +591,7 @@ func main() {
 				jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 				return
 			}
-			if mode != cachesalt.ModeNone {
-				manager.CacheSaltInjectionsTotal.WithLabelValues(modelName, string(mode)).Inc()
-			}
+			recordCacheSaltInjection(modelName, mode)
 		}
 
 		model, found := em.GetModel(modelName)
