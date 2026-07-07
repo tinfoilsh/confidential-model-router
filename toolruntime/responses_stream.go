@@ -878,21 +878,11 @@ func (s *responsesStreamer) totalsBillingUsage() map[string]any {
 // is always fully OpenAI-spec-conformant.
 
 // buildResponsesStreamRequest builds the upstream /v1/responses request for
-// the streaming path, mirroring responsesLoopAdapter.buildInitialRequest. It
-// clones body (preserving router-injected fields such as cache_salt), strips
-// router-only fields, forces streaming, and merges tools/prompt. It returns
-// the request body and the auto-continue tool set stripped from it.
+// the streaming path. It shares its body construction with the non-streaming
+// loop via buildResponsesUpstreamRequest, then forces streaming.
 func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
-	base := cloneJSONMap(body)
-	delete(base, "pii_check_options")
-	delete(base, "prompt_injection_check_options")
-	stripRouterOwnedIncludes(base)
+	base, autoContinueTools := buildResponsesUpstreamRequest(body, tools, prompt)
 	base["stream"] = true
-	applyParallelToolCallsPolicy(base)
-	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
-	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
-	base["input"] = prependResponsesPrompt(prompt, base["input"])
-	base["input"] = stripClientSyntheticResponseItems(base["input"])
 	return base, autoContinueTools
 }
 
