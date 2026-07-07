@@ -575,6 +575,19 @@ func main() {
 			// path proxies the body verbatim (no parsing above), so apply
 			// cache-salt handling here to keep the strip-and-inject invariant
 			// holding across both routing modes rather than only path routing.
+			//
+			// The subdomain names the model before the body is touched, so
+			// reject unknown models up front: the wildcard TLS cert makes
+			// arbitrary subdomains reachable, and 404ing them must not cost
+			// an unbounded body read (it also keeps bogus names out of the
+			// injection metric). This must return, not skip salting — a skip
+			// could race a config refresh that adds the model between here
+			// and the authoritative lookup below, forwarding an unsanitized
+			// body to the engine.
+			if _, found := em.GetModel(modelName); !found {
+				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+				return
+			}
 			mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 			if err != nil {
 				jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
