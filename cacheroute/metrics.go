@@ -7,7 +7,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/cachesalt"
 	"github.com/tinfoilsh/confidential-model-router/config"
@@ -182,21 +181,13 @@ func SetPoolInfo(model string, hostnames []string) {
 	PoolInfo.WithLabelValues(model, hash).Set(1)
 }
 
-// SetMode publishes the effective mode for a model, logging when it clamps
-// a configured "enforced" down to shadow so config intent and router
-// behavior can't silently diverge.
+// SetMode publishes the effective mode for a model.
 func SetMode(model string, cfg *config.CacheRouteConfig) {
 	raw := ""
 	if cfg != nil {
 		raw = cfg.Mode
 	}
-	mode, clamped := resolveMode(raw)
-	if clamped {
-		log.WithFields(log.Fields{
-			"model": model,
-			"mode":  raw,
-		}).Warn("cache_route mode 'enforced' is not implemented in this build; running shadow")
-	}
+	mode := resolveMode(raw)
 
 	infoMu.Lock()
 	defer infoMu.Unlock()

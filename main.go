@@ -772,10 +772,19 @@ func main() {
 			return
 		}
 
+		// On enforced pools, keyed requests are served in cache-aware
+		// preference order: the key's pick first, then the rest of its
+		// ranking, so an overloaded pick spills to the next-warmest host
+		// via the skip loop below instead of a random sibling.
+		var cacheRouteOrder []string
+		if cacheRouteReq != nil && cacheRouteSettings.Mode == cacheroute.ModeEnforced {
+			cacheRouteOrder = cacheRouteShadow.PreferenceOrder(modelName, cacheRouteReq, model.CacheRoutePool(), cacheRouteSettings)
+		}
+
 		// Try up to N picks (N = number of configured enclaves). Each pick
-		// that turns out overloaded goes into skip, so NextEnclave will prefer
-		// a sibling on the next iteration. Bounded so a single backed-up
-		// enclave doesn't cascade into a 429 when others are healthy.
+		// that turns out overloaded goes into skip, so the next iteration
+		// prefers a sibling. Bounded so a single backed-up enclave doesn't
+		// cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
 			overloaded bool
@@ -784,7 +793,7 @@ func main() {
 			skip       = map[string]bool{}
 		)
 		for range model.EnclaveCount() {
-			enclave = model.NextEnclave(skip)
+			enclave = model.NextEnclavePreferring(cacheRouteOrder, skip)
 			if enclave == nil {
 				break
 			}

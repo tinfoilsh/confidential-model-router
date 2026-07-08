@@ -22,9 +22,9 @@ type RateLimitConfig struct {
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
 // rollout control: "off" (default), "shadow" (compute and meter the would-be
-// routing decision without acting), or "enforced" (act on it; not implemented
-// yet — the router clamps it to shadow). The remaining fields tune the
-// measurement; zero means "use the cacheroute package default".
+// routing decision without acting), or "enforced" (route keyed requests to
+// their cache-aware pick). The remaining fields tune the measurement; zero
+// means "use the cacheroute package default".
 type CacheRouteConfig struct {
 	Mode                   string  `yaml:"mode"`
 	RetentionWindowMinutes int     `yaml:"retention_window_minutes,omitempty"`

@@ -14,12 +14,18 @@ import (
 )
 
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
+	return em.boundHTTPClientPreferring(modelName, nil)
+}
+
+// boundHTTPClientPreferring is boundHTTPClientForModel with a cache-aware
+// host preference (see Model.NextEnclavePreferring).
+func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (string, *http.Client, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return "", nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave := model.NextEnclave(nil)
+	enclave := model.NextEnclavePreferring(order, nil)
 	if enclave == nil {
 		return "", nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
@@ -55,44 +61,56 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 }
 
 // DoModelRequestJSON marshals and dispatches a parsed request body the way
-// DoModelRequest does, and feeds the dispatch to the cache-route shadow. The
-// tool loop calls this for every model iteration — replaying a growing shared
-// prefix, the strongest case for cache-aware routing — so those requests must
-// be measured like plain proxied ones.
+// DoModelRequest does, threading it through cache-aware routing. The tool
+// loop calls this for every model iteration — replaying a growing shared
+// prefix, the strongest case for cache-aware routing — so those requests are
+// measured (and, on enforced pools, pinned) like plain proxied ones: the
+// key is stable across iterations, so the whole loop homes to one replica.
 func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, path string, body map[string]any, headers http.Header) (*http.Response, error) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	host, client, err := em.boundHTTPClientForModel(modelName)
+
+	req, settings, pool, ok := em.cacheRouteRequest(modelName, path, body)
+	var order []string
+	if ok && settings.Mode == cacheroute.ModeEnforced {
+		order = em.cacheRouteShadow.PreferenceOrder(modelName, req, pool, settings)
+	}
+
+	host, client, err := em.boundHTTPClientPreferring(modelName, order)
 	if err != nil {
 		return nil, err
 	}
 	// Observed at dispatch, like the public proxy path, so the picked
 	// replica counts as warm from prefill start.
-	em.observeCacheRoute(modelName, path, body, host)
+	if ok {
+		em.cacheRouteShadow.Observe(modelName, req, pool, host, settings)
+	}
 	return postToEnclave(ctx, client, host, path, bodyBytes, headers)
 }
 
-// observeCacheRoute feeds one internally dispatched request to the
-// cache-route shadow, with the same gating as the public path. Callers only
-// dispatch to cache_salt-capable endpoints, so no endpoint allowlist is
-// re-checked here. Never fails the request.
-func (em *EnclaveManager) observeCacheRoute(modelName, path string, body map[string]any, actualHost string) {
+// cacheRouteRequest classifies one internally dispatched request for the
+// cache-route pipeline, with the same gating as the public path, returning
+// the pool snapshot the decision should be made over. Callers only dispatch
+// to cache_salt-capable endpoints, so no endpoint allowlist is re-checked
+// here. ok is false when the pipeline is off for the model (or the manager
+// has no shadow, as in tests).
+func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[string]any) (*cacheroute.Request, cacheroute.Settings, cacheroute.Pool, bool) {
 	if em.cacheRouteShadow == nil {
-		return
+		return nil, cacheroute.Settings{}, cacheroute.Pool{}, false
 	}
 	model, found := em.GetModel(modelName)
 	if !found {
-		return
+		return nil, cacheroute.Settings{}, cacheroute.Pool{}, false
 	}
 	settings := model.CacheRouteSettings()
 	if settings.Mode == cacheroute.ModeOff {
-		return
+		return nil, cacheroute.Settings{}, cacheroute.Pool{}, false
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
-	em.cacheRouteShadow.Observe(modelName, req, model.CacheRoutePool(), actualHost, settings)
+	return req, settings, model.CacheRoutePool(), true
 }
 
 // postToEnclave builds and sends an attested POST to one enclave host.

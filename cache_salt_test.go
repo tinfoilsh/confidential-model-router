@@ -369,14 +369,18 @@ func TestRecordCacheSaltInjection(t *testing.T) {
 		t.Errorf("ModeNone minted a series: %d -> %d", before, after)
 	}
 
+	// The shared counters carry values across test reruns in one process,
+	// so assert growth, not absolutes.
+	tenantBase := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "tenant"))
+	userBase := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "user"))
 	recordCacheSaltInjection("record-metric-count", cachesalt.ModeTenant)
 	recordCacheSaltInjection("record-metric-count", cachesalt.ModeUser)
 	recordCacheSaltInjection("record-metric-count", cachesalt.ModeUser)
-	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "tenant")); got != 1 {
-		t.Errorf(`series {record-metric-count,tenant} = %v, want 1`, got)
+	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "tenant")) - tenantBase; got != 1 {
+		t.Errorf(`series {record-metric-count,tenant} delta = %v, want 1`, got)
 	}
-	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "user")); got != 2 {
-		t.Errorf(`series {record-metric-count,user} = %v, want 2`, got)
+	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "user")) - userBase; got != 2 {
+		t.Errorf(`series {record-metric-count,user} delta = %v, want 2`, got)
 	}
 }
 

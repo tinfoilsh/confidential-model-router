@@ -187,10 +187,51 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 	if !hostIn(pool.Candidates, actualHost) {
 		return
 	}
+	if cfg.Mode == ModeEnforced {
+		// The landing is the cache-aware pick (modulo overload spill), so
+		// record the real routed distribution and leave the random
+		// comparison quiet.
+		PicksTotal.WithLabelValues(model, actualHost, strconv.Itoa(res.r)).Inc()
+		return
+	}
 	PicksTotal.WithLabelValues(model, res.pick, strconv.Itoa(res.r)).Inc()
 	if res.pick == actualHost {
 		RandomMatchTotal.WithLabelValues(model).Inc()
 	}
+}
+
+// PreferenceOrder returns the cache-aware host order for a keyed request:
+// the least-loaded of the key's top-R replicas first, then the remaining
+// ranking, so an unacceptable pick spills to the next-warmest host. Nil when
+// the request is not keyed or the pool is too small — the caller falls back
+// to random selection. Read-only: rate and warmth accounting happen in
+// Observe at dispatch.
+func (s *Shadow) PreferenceOrder(model string, req *Request, pool Pool, cfg Settings) []string {
+	if req == nil || req.Outcome != OutcomeKeyed || pool.Size < 2 || len(pool.Candidates) == 0 {
+		return nil
+	}
+	ranked := rank(req.Key, pool.Candidates)
+	r := replicationFactor(s.peekRate(model, req.Key), cfg.SplitThresholdRPM, len(ranked))
+	pick := leastLoaded(ranked[:r]).Host
+	order := make([]string, 0, len(ranked))
+	order = append(order, pick)
+	for _, c := range ranked {
+		if c.Host != pick {
+			order = append(order, c.Host)
+		}
+	}
+	return order
+}
+
+// peekRate reads a key's current request rate without recording an arrival.
+func (s *Shadow) peekRate(model string, key Key) float64 {
+	tableKey := model + "\x00" + string(key[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[tableKey]; e != nil {
+		return e.peekRate(s.now())
+	}
+	return 0
 }
 
 // hostIn reports whether host is one of the candidates.
@@ -367,6 +408,21 @@ func (e *entry) bumpRate(now time.Time) float64 {
 	}
 	frac := now.Sub(minute).Seconds() / 60
 	return float64(e.prevCount)*(1-frac) + float64(e.curCount)
+}
+
+// peekRate is bumpRate without the arrival: the sliding-window rate as of
+// now, aging the window forward when the minute has rolled over.
+func (e *entry) peekRate(now time.Time) float64 {
+	minute := now.Truncate(time.Minute)
+	frac := now.Sub(minute).Seconds() / 60
+	switch {
+	case e.windowStart.Equal(minute):
+		return float64(e.prevCount)*(1-frac) + float64(e.curCount)
+	case minute.Sub(e.windowStart) == time.Minute:
+		return float64(e.curCount) * (1 - frac)
+	default:
+		return 0
+	}
 }
 
 // sweeper drains expired entries until Close.

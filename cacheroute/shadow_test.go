@@ -392,6 +392,127 @@ func TestObserveProbeServed(t *testing.T) {
 	}
 }
 
+// TestPreferenceOrder pins the enforcement ordering contract: the pick
+// first, then the rest of the ranking, covering every candidate exactly
+// once; ineligible requests yield nil so callers fall back to random.
+func TestPreferenceOrder(t *testing.T) {
+	s, _, _ := newTestShadow(t)
+	model := "order-" + t.Name()
+	cfg := defaultSettings()
+	req := keyedRequest(t, "o", 1)
+	pool := Pool{Size: 3, Candidates: hosts("enclave-a", "enclave-b", "enclave-c")}
+
+	order := s.PreferenceOrder(model, req, pool, cfg)
+	if len(order) != 3 {
+		t.Fatalf("order = %v, want all 3 candidates", order)
+	}
+	seen := map[string]bool{}
+	for _, h := range order {
+		if seen[h] {
+			t.Fatalf("order = %v, duplicate host", order)
+		}
+		seen[h] = true
+	}
+	for range 5 {
+		again := s.PreferenceOrder(model, req, pool, cfg)
+		for i := range order {
+			if again[i] != order[i] {
+				t.Fatalf("order not deterministic: %v vs %v", again, order)
+			}
+		}
+	}
+
+	// The first element is the ranking's home for a cold key (R = 1): the
+	// same host Observe would report as the would-be pick.
+	s.Observe(model, req, pool, "enclave-a", cfg)
+	pick := "enclave-a"
+	if counterValue(t, RandomMatchTotal, model) == 0 {
+		for _, h := range []string{"enclave-b", "enclave-c"} {
+			if c, err := PicksTotal.GetMetricWithLabelValues(model, h, "1"); err == nil && testutil.ToFloat64(c) > 0 {
+				pick = h
+			}
+		}
+	}
+	if order[0] != pick {
+		t.Fatalf("order[0] = %s, want the pick %s", order[0], pick)
+	}
+
+	if got := s.PreferenceOrder(model, &Request{Outcome: OutcomeNoSalt}, pool, cfg); got != nil {
+		t.Fatalf("non-keyed request must yield nil order, got %v", got)
+	}
+	if got := s.PreferenceOrder(model, req, Pool{Size: 1, Candidates: hosts("only")}, cfg); got != nil {
+		t.Fatalf("single-replica pool must yield nil order, got %v", got)
+	}
+	if got := s.PreferenceOrder(model, nil, pool, cfg); got != nil {
+		t.Fatalf("nil request must yield nil order, got %v", got)
+	}
+}
+
+// TestPreferenceOrderHotKey drives a key past the split threshold and pins
+// that the order starts with the least-loaded of the top-R set.
+func TestPreferenceOrderHotKey(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "order-hot-" + t.Name()
+	cfg := defaultSettings() // threshold 15 rpm
+	req := keyedRequest(t, "oh", 1)
+
+	// Establish a hot rate through observations.
+	for range 40 {
+		clock.advance(time.Second)
+		s.Observe(model, req, pool2(), "enclave-a", cfg)
+	}
+
+	// Find the cold home: order with idle candidates starts there.
+	home := s.PreferenceOrder(model, req, pool2(), cfg)[0]
+	other := "enclave-b"
+	if home == other {
+		other = "enclave-a"
+	}
+
+	// With the home busier than its sibling, R=2 must steer the order to
+	// the least-loaded of the pair.
+	loaded := Pool{Size: 2, Candidates: []Candidate{
+		{Host: home, InFlight: 5},
+		{Host: other, InFlight: 0},
+	}}
+	order := s.PreferenceOrder(model, req, loaded, cfg)
+	if order[0] != other {
+		t.Fatalf("hot key order = %v, want least-loaded %s first", order, other)
+	}
+}
+
+// TestObserveEnforced pins enforcement metric semantics: picks_total records
+// the landing, and the random comparison stays quiet.
+func TestObserveEnforced(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "enforced-" + t.Name()
+	cfg := defaultSettings()
+	cfg.Mode = ModeEnforced
+	req := keyedRequest(t, "e", 1)
+
+	matches := counterDelta(t, RandomMatchTotal, model)
+	landedPicks := counterDelta(t, PicksTotal, model, "enclave-b", "1")
+	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+
+	// Land twice on enclave-b regardless of what the ranking would pick.
+	s.Observe(model, req, pool2(), "enclave-b", cfg)
+	clock.advance(time.Second)
+	s.Observe(model, req, pool2(), "enclave-b", cfg)
+
+	if got := landedPicks(); got != 2 {
+		t.Fatalf("picks for landing = %v, want 2", got)
+	}
+	if got := matches(); got != 0 {
+		t.Fatalf("random match under enforcement = %v, want 0", got)
+	}
+
+	// The second landing on the same host is the enforcement success
+	// signal: repeat_warm, not repeat_cold.
+	if got := warm(); got != 1 {
+		t.Fatalf("repeat_warm = %v, want 1", got)
+	}
+}
+
 // TestTrackedKeysCollector checks the scrape-time gauge: distinct live keys
 // grouped by home enclave and replication factor.
 func TestTrackedKeysCollector(t *testing.T) {
@@ -461,10 +582,9 @@ func TestPoolAndModeInfo(t *testing.T) {
 	if got := gatherLabelValues(t, ModeInfo, model, "mode"); len(got) != 1 || !got["shadow"] {
 		t.Fatalf("mode = %v, want shadow", got)
 	}
-	// The gauge reports the effective mode: enforced clamps to shadow.
 	SetMode(model, &config.CacheRouteConfig{Mode: "enforced"})
-	if got := gatherLabelValues(t, ModeInfo, model, "mode"); len(got) != 1 || !got["shadow"] {
-		t.Fatalf("mode = %v, want shadow (clamped)", got)
+	if got := gatherLabelValues(t, ModeInfo, model, "mode"); len(got) != 1 || !got["enforced"] {
+		t.Fatalf("mode = %v, want enforced", got)
 	}
 
 	DropModel(model)

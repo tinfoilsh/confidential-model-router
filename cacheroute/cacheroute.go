@@ -47,22 +47,21 @@ const (
 	ModeOff Mode = "off"
 	// ModeShadow computes and meters routing decisions without acting.
 	ModeShadow Mode = "shadow"
-	// ModeEnforced acts on routing decisions. Not implemented yet;
-	// resolveMode clamps it to ModeShadow.
+	// ModeEnforced acts on routing decisions: keyed requests are served
+	// by their cache-aware pick instead of a random replica.
 	ModeEnforced Mode = "enforced"
 )
 
-// resolveMode maps a raw config string to the mode this build runs,
-// reporting clamped=true when enforcement was requested but isn't
-// available. Unknown values resolve to off.
-func resolveMode(raw string) (mode Mode, clamped bool) {
+// resolveMode maps a raw config string to a mode. Unknown values resolve to
+// off.
+func resolveMode(raw string) Mode {
 	switch Mode(raw) {
 	case ModeShadow:
-		return ModeShadow, false
+		return ModeShadow
 	case ModeEnforced:
-		return ModeShadow, true
+		return ModeEnforced
 	default:
-		return ModeOff, false
+		return ModeOff
 	}
 }
 
@@ -86,7 +85,7 @@ func SettingsFrom(c *config.CacheRouteConfig) Settings {
 	if c == nil {
 		return s
 	}
-	s.Mode, _ = resolveMode(c.Mode)
+	s.Mode = resolveMode(c.Mode)
 	if c.RetentionWindowMinutes > 0 {
 		s.Retention = time.Duration(c.RetentionWindowMinutes) * time.Minute
 	}

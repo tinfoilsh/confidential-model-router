@@ -313,10 +313,8 @@ func TestSettingsFrom(t *testing.T) {
 		t.Fatalf("explicit config not applied: %+v", s)
 	}
 
-	// Enforcement is not implemented: the config value is accepted but
-	// clamped to shadow.
-	if s := SettingsFrom(&config.CacheRouteConfig{Mode: "enforced"}); s.Mode != ModeShadow {
-		t.Fatalf("enforced must clamp to shadow in this build, got %s", s.Mode)
+	if s := SettingsFrom(&config.CacheRouteConfig{Mode: "enforced"}); s.Mode != ModeEnforced {
+		t.Fatalf("enforced must resolve to enforced, got %s", s.Mode)
 	}
 	if s := SettingsFrom(&config.CacheRouteConfig{Mode: "bogus"}); s.Mode != ModeOff {
 		t.Fatalf("unknown mode must resolve to off, got %s", s.Mode)
