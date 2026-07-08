@@ -49,7 +49,8 @@ func newEnclaveMetrics(host, model string) *enclaveMetrics {
 	}
 }
 
-// setConfig starts or stops polling based on whether overload settings are provided.
+// setConfig starts or stops polling based on whether usable overload
+// thresholds are provided.
 func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -64,7 +65,11 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 	m.cfg = cfg
 	m.cfgMu.Unlock()
 
-	if cfg == nil {
+	// A missing block and a non-positive trip mark both mean "no overload
+	// evaluation". The reset must cover both: leaving a previously tripped
+	// flag in place with evaluation stopped would de-prefer the enclave in
+	// NextEnclave forever.
+	if cfg == nil || cfg.MaxRequestsWaiting <= 0 {
 		m.overloaded.Store(false)
 		m.updateLatest(0, time.Time{})
 		BackendQueueDepth.WithLabelValues(m.model, m.host).Set(0)
@@ -72,18 +77,41 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
-		}).Debug("metrics polling disabled (no overload config)")
+		}).Debug("metrics polling disabled (no overload threshold)")
 		return
+	}
+
+	trip, clear := cfg.Marks()
+	if cfg.ClearRequestsWaiting != 0 && cfg.ClearRequestsWaiting != clear {
+		log.WithFields(log.Fields{
+			"model":                m.model,
+			"enclave":              m.host,
+			"configured_clear":     cfg.ClearRequestsWaiting,
+			"resolved_clear":       clear,
+			"max_requests_waiting": trip,
+		}).Warn("clear_requests_waiting out of range, using default")
+	}
+
+	// The flag may have been computed under the previous marks. If a fresh
+	// sample exists, re-evaluate it against the new marks now — before the
+	// poll goroutine starts, so there is no concurrent writer — rather than
+	// leaving the old decision driving shouldReject until the first scrape
+	// lands (which can take a while if the backend is unreachable). For an
+	// unchanged config the evaluation is a fixed point, so the per-sync
+	// config reinstall does not disturb hysteresis state.
+	if waiting, collected := m.latestSample(); !collected.IsZero() && time.Since(collected) <= sampleStalenessLimit {
+		m.evaluateThresholds(waiting)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.wg.Add(1)
 	log.WithFields(log.Fields{
-		"model":                m.model,
-		"enclave":              m.host,
-		"max_requests_waiting": cfg.MaxRequestsWaiting,
-		"retry_after_minutes":  cfg.RetryAfterMinutes,
+		"model":                  m.model,
+		"enclave":                m.host,
+		"max_requests_waiting":   trip,
+		"clear_requests_waiting": clear,
+		"retry_after_minutes":    cfg.RetryAfterMinutes,
 	}).Info("starting vLLM metrics polling")
 	go m.run(ctx, defaultMetricsPollInterval)
 }
@@ -144,9 +172,8 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 
 	BackendQueueDepth.WithLabelValues(m.model, m.host).Set(waiting)
 
-	now := time.Now()
-	m.updateLatest(waiting, now)
-	m.evaluateThresholds(waiting, now)
+	m.updateLatest(waiting, time.Now())
+	m.evaluateThresholds(waiting)
 }
 
 func (m *enclaveMetrics) shutdown() {
@@ -208,40 +235,66 @@ func (m *enclaveMetrics) latestSample() (float64, time.Time) {
 
 const sampleStalenessLimit = 3 * defaultMetricsPollInterval
 
-func (m *enclaveMetrics) evaluateThresholds(waiting float64, collectedAt time.Time) {
+// evaluateThresholds updates the overload flag from the latest queue depth
+// with hysteresis: trip at the high mark, clear at the lower mark, hold the
+// previous state in between. Without the band, a queue hovering at a single
+// threshold would flap the flag on every poll — and with it the spill and
+// reject decisions that read the flag.
+func (m *enclaveMetrics) evaluateThresholds(waiting float64) {
 	cfg := m.currentConfig()
 	if cfg == nil || cfg.MaxRequestsWaiting <= 0 {
 		return
 	}
 
-	threshold := float64(cfg.MaxRequestsWaiting)
-	if waiting >= threshold {
-		if !m.overloaded.Load() {
-			log.WithFields(log.Fields{
-				"model":                m.model,
-				"enclave":              m.host,
-				"requests_waiting":     waiting,
-				"max_requests_waiting": cfg.MaxRequestsWaiting,
-				"retry_after_minutes":  cfg.RetryAfterMinutes,
-			}).Warn("overload threshold exceeded")
-			OverloadEventsTotal.WithLabelValues(m.model, m.host).Inc()
-		}
-		m.overloaded.Store(true)
+	trip, clear := cfg.Marks()
+	wasOverloaded := m.overloaded.Load()
+	overloaded := wasOverloaded
+	switch {
+	case waiting >= float64(trip):
+		overloaded = true
+	case waiting <= float64(clear):
+		overloaded = false
+	}
+
+	// The two message strings below predate hysteresis and are load-bearing:
+	// external log-based alerts may key on them, so keep them stable and
+	// evolve the structured fields instead.
+	switch {
+	case overloaded && !wasOverloaded:
+		log.WithFields(log.Fields{
+			"model":                  m.model,
+			"enclave":                m.host,
+			"requests_waiting":       waiting,
+			"max_requests_waiting":   trip,
+			"clear_requests_waiting": clear,
+			"retry_after_minutes":    cfg.RetryAfterMinutes,
+		}).Warn("overload threshold exceeded")
+		OverloadEventsTotal.WithLabelValues(m.model, m.host).Inc()
+	case !overloaded && wasOverloaded:
+		log.WithFields(log.Fields{
+			"model":                  m.model,
+			"enclave":                m.host,
+			"requests_waiting":       waiting,
+			"clear_requests_waiting": clear,
+		}).Info("queue depth back below overload threshold")
+		RecoveryEventsTotal.WithLabelValues(m.model, m.host).Inc()
+	}
+
+	m.overloaded.Store(overloaded)
+	if overloaded {
 		BackendOverloaded.WithLabelValues(m.model, m.host).Set(1)
 	} else {
-		if m.overloaded.Load() {
-			log.WithFields(log.Fields{
-				"model":            m.model,
-				"enclave":          m.host,
-				"requests_waiting": waiting,
-			}).Info("queue depth back below overload threshold")
-			RecoveryEventsTotal.WithLabelValues(m.model, m.host).Inc()
-		}
-		m.overloaded.Store(false)
 		BackendOverloaded.WithLabelValues(m.model, m.host).Set(0)
 	}
 }
 
+// shouldReject reports whether new requests to this enclave should be
+// rejected, along with the Retry-After hint and the latest queue depth. It
+// reads the hysteretic overload flag maintained by evaluateThresholds — the
+// same state NextEnclave's preference uses — rather than re-deriving a
+// single-threshold answer, so a tripped backend keeps shedding load until
+// its queue has genuinely drained to the clear mark. A missing or stale
+// sample fails open.
 func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 	cfg := m.currentConfig()
 	if cfg == nil || cfg.MaxRequestsWaiting <= 0 {
@@ -261,7 +314,7 @@ func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 		return false, 0, waiting
 	}
 
-	if waiting < float64(cfg.MaxRequestsWaiting) {
+	if !m.overloaded.Load() {
 		return false, 0, waiting
 	}
 

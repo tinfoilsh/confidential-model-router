@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
 func newTestEnclave(host string) *Enclave {
@@ -67,6 +69,28 @@ func TestNextEnclave_EmptyModel(t *testing.T) {
 	m := &Model{Enclaves: map[string]*Enclave{}}
 	if got := m.NextEnclave(nil); got != nil {
 		t.Fatalf("expected nil, got %v", got)
+	}
+}
+
+func TestOverloadMarks(t *testing.T) {
+	var nilEnclave *Enclave
+	if _, _, ok := nilEnclave.OverloadMarks(); ok {
+		t.Fatal("expected ok=false for nil enclave")
+	}
+
+	e := newTestEnclave("marks-host")
+	if _, _, ok := e.OverloadMarks(); ok {
+		t.Fatal("expected ok=false without overload config")
+	}
+
+	e.metrics = newTestMetrics("marks-host", &config.OverloadConfig{MaxRequestsWaiting: 16, ClearRequestsWaiting: 12})
+	if trip, clear, ok := e.OverloadMarks(); !ok || trip != 16 || clear != 12 {
+		t.Fatalf("OverloadMarks() = (%d, %d, %v), want (16, 12, true)", trip, clear, ok)
+	}
+
+	e.metrics = newTestMetrics("marks-host", &config.OverloadConfig{MaxRequestsWaiting: 0})
+	if _, _, ok := e.OverloadMarks(); ok {
+		t.Fatal("expected ok=false with non-positive trip mark")
 	}
 }
 

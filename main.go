@@ -719,12 +719,20 @@ func main() {
 				secs = 60
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
-			log.WithFields(log.Fields{
+			fields := log.Fields{
 				"model":               modelName,
 				"enclave":             enclave.String(),
 				"requests_waiting":    waiting,
 				"retry_after_seconds": secs,
-			}).Warn("rejecting request due to backend overload")
+			}
+			// With hysteresis, requests_waiting can sit below the trip mark
+			// while the queue drains; log the marks so an in-band reject
+			// doesn't read as a contradiction.
+			if trip, clear, ok := enclave.OverloadMarks(); ok {
+				fields["max_requests_waiting"] = trip
+				fields["clear_requests_waiting"] = clear
+			}
+			log.WithFields(fields).Warn("rejecting request due to backend overload")
 
 			// Record rejection metrics
 			manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
