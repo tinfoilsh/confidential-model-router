@@ -51,3 +51,34 @@ models:
 		t.Fatalf("parsed overload = %+v", overload)
 	}
 }
+
+func TestCacheRouteConfigParsing(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+models:
+  shadowed:
+    repo: org/repo
+    enclaves: [a.example, b.example]
+    cache_route:
+      mode: shadow
+      retention_window_minutes: 5
+      min_prompt_bytes: 2048
+      split_threshold_rpm: 30
+  plain:
+    repo: org/repo
+    enclaves: [c.example]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cr := cfg.Models["shadowed"].CacheRoute
+	if cr == nil {
+		t.Fatal("cache_route block not parsed")
+	}
+	if cr.Mode != "shadow" || cr.RetentionWindowMinutes != 5 || cr.MinPromptBytes != 2048 || cr.SplitThresholdRPM != 30 {
+		t.Fatalf("cache_route = %+v", cr)
+	}
+	if cfg.Models["plain"].CacheRoute != nil {
+		t.Fatal("absent cache_route must stay nil")
+	}
+}

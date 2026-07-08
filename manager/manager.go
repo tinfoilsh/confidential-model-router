@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -19,6 +20,7 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 )
@@ -32,6 +34,12 @@ type Enclave struct {
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
 	cb        *circuitBreaker
+
+	// inflight counts requests currently being proxied through this
+	// enclave. Unlike the polled queue depth (up to ~45s stale), it is
+	// live, which is what least-loaded selection within a hot key's warm
+	// set needs (design doc §5.5).
+	inflight atomic.Int64
 }
 
 type Model struct {
@@ -41,6 +49,7 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
+	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
 	mu            sync.RWMutex
@@ -353,6 +362,44 @@ func (m *Model) EnclaveCount() int {
 	return len(m.Enclaves)
 }
 
+// CacheRoutePool snapshots the model's replica set for the cache-route
+// shadow: the breaker-closed enclaves with their live in-flight counts —
+// the stable HRW membership of the design doc's §5.3, deliberately ignoring
+// the overload flag so a flapping load signal can't re-home keys — falling
+// back to all enclaves when every breaker is open, mirroring NextEnclave's
+// degraded fallback.
+func (m *Model) CacheRoutePool() cacheroute.Pool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pool := cacheroute.Pool{Size: len(m.Enclaves)}
+	for _, enclave := range m.Enclaves {
+		if enclave.cb != nil && !enclave.cb.Closed() {
+			continue
+		}
+		pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
+			Host:     enclave.host,
+			InFlight: int(enclave.inflight.Load()),
+		})
+	}
+	if len(pool.Candidates) == 0 {
+		for _, enclave := range m.Enclaves {
+			pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
+				Host:     enclave.host,
+				InFlight: int(enclave.inflight.Load()),
+			})
+		}
+	}
+	return pool
+}
+
+// CacheRouteSettings returns the model's resolved cache-route settings.
+func (m *Model) CacheRouteSettings() cacheroute.Settings {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cacheroute.SettingsFrom(m.CacheRoute)
+}
+
 // HasHealthyEnclave reports whether the model has at least one enclave whose
 // circuit breaker is currently closed. Used by ResolvePreferredModel to skip
 // models whose backends are all tripped (i.e. effectively down).
@@ -392,6 +439,9 @@ func (e *Enclave) isOverloaded() bool {
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	e.inflight.Add(1)
+	defer e.inflight.Add(-1)
+
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
 	// Check if client requested usage metrics in response header/trailer
@@ -493,8 +543,11 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
+		CacheRoute:        modelConfig.CacheRoute,
 		expectedHosts:     len(modelConfig.Hostnames),
 	})
+	cacheroute.SetMode(modelName, modelConfig.CacheRoute)
+	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }
 
 // updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
@@ -579,6 +632,7 @@ func (em *EnclaveManager) sync() error {
 				}
 				model.Enclaves = make(map[string]*Enclave)
 				model.mu.Unlock()
+				cacheroute.DropModel(modelName)
 				return
 			}
 
@@ -598,9 +652,12 @@ func (em *EnclaveManager) sync() error {
 			model.expectedHosts = len(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
+			model.CacheRoute = configModel.CacheRoute
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}
+			cacheroute.SetMode(modelName, configModel.CacheRoute)
+			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
 
 			// Updating enclaves for each model
 			log.Tracef("updating enclaves for model %s", modelName)

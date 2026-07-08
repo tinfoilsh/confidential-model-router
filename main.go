@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -363,9 +364,22 @@ func main() {
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 
+	// Cache-aware routing shadow (Phase 4): measures what cache-aware
+	// replica selection would do without acting, emitting only aggregate
+	// Prometheus metrics — the enclave has no log sink. Per-model modes
+	// come from config (cache_route.mode).
+	cacheRouteShadow := cacheroute.NewShadow(nil)
+	defer cacheRouteShadow.Close()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
 		var err error
+
+		// Set when the request is eligible for cache-route shadow
+		// observation (path-routed OpenAI-compatible requests on a
+		// salt-supporting endpoint, model pool in shadow mode).
+		var cacheRouteReq *cacheroute.Request
+		var cacheRouteSettings cacheroute.Settings
 
 		// Extract API key early for rate limiting decisions
 		apiKey := ""
@@ -654,6 +668,23 @@ func main() {
 					}
 					return
 				}
+
+				// Cache-route shadow, step 1 of 2: classify the request
+				// and derive its routing key from the parsed body, now
+				// that the body is final (post file-input rewriting, post
+				// salt injection) and the request is known to take the
+				// plain proxy path below — the tool runtime above picks
+				// its own enclaves and joins in Phase 5. Never fails the
+				// request; observation happens after replica selection.
+				if cacheSaltPaths[r.URL.Path] {
+					if m, ok := em.GetModel(modelName); ok {
+						if s := m.CacheRouteSettings(); s.Mode != cacheroute.ModeOff {
+							salt, _ := body["cache_salt"].(string)
+							cacheRouteSettings = s
+							cacheRouteReq = cacheroute.ExtractRequest(body, r.URL.Path, salt, s)
+						}
+					}
+				}
 			}
 		} else if cacheSaltPaths[r.URL.Path] {
 			// Subdomain-routed request on a salt-supporting endpoint. This
@@ -743,6 +774,15 @@ func main() {
 		}
 
 		log.Debugf("%s serving request\n", enclave)
+
+		// Cache-route shadow, step 2 of 2: hand the production pick to
+		// the tracker, which classifies prefix reuse, computes the
+		// would-be cache-aware pick, and increments metrics. Observed at
+		// dispatch so the picked replica counts as warm from prefill
+		// start. Panic-recovered; cannot affect the request.
+		if cacheRouteReq != nil {
+			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
+		}
 
 		enclave.ServeHTTP(w, r)
 	})

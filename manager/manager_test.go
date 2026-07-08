@@ -1,10 +1,14 @@
 package manager
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
@@ -177,4 +181,94 @@ func (em *EnclaveManager) mustModel(t *testing.T, name string) *Model {
 		t.Fatalf("model %q not found", name)
 	}
 	return m
+}
+
+func TestCacheRoutePool(t *testing.T) {
+	m := newTestModel("a", "b", "c")
+	m.Enclaves["b"].inflight.Add(3)
+
+	pool := m.CacheRoutePool()
+	if pool.Size != 3 || len(pool.Candidates) != 3 {
+		t.Fatalf("pool = %+v, want size 3 with 3 candidates", pool)
+	}
+	for _, c := range pool.Candidates {
+		if c.Host == "b" && c.InFlight != 3 {
+			t.Fatalf("candidate b in-flight = %d, want 3", c.InFlight)
+		}
+	}
+
+	// A tripped breaker leaves the stable membership.
+	tripBreaker(m.Enclaves["a"])
+	pool = m.CacheRoutePool()
+	if pool.Size != 3 || len(pool.Candidates) != 2 {
+		t.Fatalf("pool after trip = %+v, want size 3 with 2 candidates", pool)
+	}
+	for _, c := range pool.Candidates {
+		if c.Host == "a" {
+			t.Fatal("breaker-open enclave must not be a candidate")
+		}
+	}
+
+	// All breakers open: degraded fallback to the full pool, mirroring
+	// NextEnclave.
+	tripBreaker(m.Enclaves["b"])
+	tripBreaker(m.Enclaves["c"])
+	if pool = m.CacheRoutePool(); len(pool.Candidates) != 3 {
+		t.Fatalf("all-open pool = %+v, want fallback to all 3", pool)
+	}
+}
+
+func TestCacheRouteSettings(t *testing.T) {
+	m := newTestModel("a", "b")
+	if s := m.CacheRouteSettings(); s.Mode != cacheroute.ModeOff {
+		t.Fatalf("unconfigured mode = %s, want off", s.Mode)
+	}
+
+	m.CacheRoute = &config.CacheRouteConfig{Mode: "shadow", RetentionWindowMinutes: 5}
+	s := m.CacheRouteSettings()
+	if s.Mode != cacheroute.ModeShadow || s.Retention != 5*time.Minute {
+		t.Fatalf("settings = %+v, want shadow with 5m retention", s)
+	}
+}
+
+func TestEnclaveInflightTracking(t *testing.T) {
+	e := newTestEnclave("a")
+	release := make(chan struct{})
+	e.proxy = &httputil.ReverseProxy{
+		Director: func(r *http.Request) {},
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			<-release
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}}, nil
+		}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+		e.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	waitFor(t, func() bool { return e.inflight.Load() == 1 })
+	close(release)
+	<-done
+	if got := e.inflight.Load(); got != 0 {
+		t.Fatalf("in-flight after completion = %d, want 0", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition not reached in time")
 }
