@@ -175,10 +175,32 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 		RepeatIntervalSeconds.WithLabelValues(model).Observe(res.interval.Seconds())
 	}
 	KeyRPM.WithLabelValues(model).Observe(res.rpm)
+
+	// A breaker probe serves from outside the ranked membership (health
+	// beats cache), so the dispatch was not a random draw from the
+	// candidates and the pick-vs-random comparison is meaningless for it.
+	// Reuse and warmth above stay valid — the probe really warms that
+	// replica — but counting these requests in the pick metrics would
+	// deflate the match rate during exactly the degraded windows dashboards
+	// get read. Match rate = random_match / picks stays unbiased, and
+	// keyed − picks measures health-forced dispatch volume.
+	if !hostIn(pool.Candidates, actualHost) {
+		return
+	}
 	PicksTotal.WithLabelValues(model, res.pick, strconv.Itoa(res.r)).Inc()
 	if res.pick == actualHost {
 		RandomMatchTotal.WithLabelValues(model).Inc()
 	}
+}
+
+// hostIn reports whether host is one of the candidates.
+func hostIn(candidates []Candidate, host string) bool {
+	for _, c := range candidates {
+		if c.Host == host {
+			return true
+		}
+	}
+	return false
 }
 
 // keyedResult is what observeKeyed computes under the lock, so the metric

@@ -49,7 +49,9 @@ var (
 	)
 
 	// PicksTotal counts the would-be pick per enclave, with the key's
-	// replication factor at pick time.
+	// replication factor at pick time. Requests served from outside the
+	// ranked membership (breaker probes) are excluded, so this is also the
+	// denominator for the match rate.
 	PicksTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_picks_total",
@@ -59,7 +61,8 @@ var (
 	)
 
 	// RandomMatchTotal counts keyed requests whose would-be pick equals
-	// the actual random pick; expect ≈ 1/pool-size.
+	// the actual random pick; expect RandomMatchTotal/PicksTotal ≈
+	// 1/pool-size.
 	RandomMatchTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_random_match_total",

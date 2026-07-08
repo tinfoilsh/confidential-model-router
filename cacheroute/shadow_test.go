@@ -340,6 +340,58 @@ func TestRandomMatch(t *testing.T) {
 	}
 }
 
+// TestObserveProbeServed pins that a request served from outside the ranked
+// membership (a breaker probe) updates reuse and warmth but is excluded from
+// the pick-vs-random comparison.
+func TestObserveProbeServed(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "probe-served-" + t.Name()
+	cfg := defaultSettings()
+	req := keyedRequest(t, "p", 1)
+
+	keyed := counterDelta(t, RequestsTotal, model, string(OutcomeKeyed))
+	matches := counterDelta(t, RandomMatchTotal, model)
+	picks := func() float64 {
+		total := 0.0
+		for _, host := range []string{"enclave-a", "enclave-b", "probe-c"} {
+			for _, r := range []string{"1", "2"} {
+				if c, err := PicksTotal.GetMetricWithLabelValues(model, host, r); err == nil {
+					total += testutil.ToFloat64(c)
+				}
+			}
+		}
+		return total
+	}
+	picksBase := picks()
+
+	// Served by a probing replica that is not a candidate.
+	s.Observe(model, req, pool2(), "probe-c", cfg)
+	if got := keyed(); got != 1 {
+		t.Fatalf("keyed = %v, want 1", got)
+	}
+	if got := picks() - picksBase; got != 0 {
+		t.Fatalf("picks after probe dispatch = %v, want 0", got)
+	}
+	if got := matches(); got != 0 {
+		t.Fatalf("matches after probe dispatch = %v, want 0", got)
+	}
+
+	// The probe still warmed its replica: a repeat onto it is warm.
+	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+	clock.advance(time.Second)
+	s.Observe(model, req, pool2(), "probe-c", cfg)
+	if got := warm(); got != 1 {
+		t.Fatalf("repeat onto probed replica: warm = %v, want 1", got)
+	}
+
+	// A normally-served request resumes the comparison.
+	clock.advance(time.Second)
+	s.Observe(model, req, pool2(), "enclave-a", cfg)
+	if got := picks() - picksBase; got != 1 {
+		t.Fatalf("picks after normal dispatch = %v, want 1", got)
+	}
+}
+
 // TestTrackedKeysCollector checks the scrape-time gauge: distinct live keys
 // grouped by home enclave and replication factor.
 func TestTrackedKeysCollector(t *testing.T) {
