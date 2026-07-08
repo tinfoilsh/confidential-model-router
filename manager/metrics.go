@@ -92,6 +92,17 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		}).Warn("clear_requests_waiting out of range, using default")
 	}
 
+	// The flag may have been computed under the previous marks. If a fresh
+	// sample exists, re-evaluate it against the new marks now — before the
+	// poll goroutine starts, so there is no concurrent writer — rather than
+	// leaving the old decision driving shouldReject until the first scrape
+	// lands (which can take a while if the backend is unreachable). For an
+	// unchanged config the evaluation is a fixed point, so the per-sync
+	// config reinstall does not disturb hysteresis state.
+	if waiting, collected := m.latestSample(); !collected.IsZero() && time.Since(collected) <= sampleStalenessLimit {
+		m.evaluateThresholds(waiting)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.wg.Add(1)

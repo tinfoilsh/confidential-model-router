@@ -219,6 +219,48 @@ func TestOverloadTransitionLogMessagesStable(t *testing.T) {
 	}
 }
 
+// TestSetConfig_ReevaluatesFlagAgainstNewMarks pins that a threshold change
+// takes effect at setConfig time, not at the next successful scrape: the
+// server 404s every scrape, so only the synchronous re-evaluation inside
+// setConfig can move the flag.
+func TestSetConfig_ReevaluatesFlagAgainstNewMarks(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	m := newEnclaveMetrics(strings.TrimPrefix(ts.URL, "https://"), "test-model")
+	m.client = ts.Client()
+	m.cfgMu.Lock()
+	m.cfg = &config.OverloadConfig{MaxRequestsWaiting: 8}
+	m.cfgMu.Unlock()
+
+	observe(m, 10) // trips under trip=8, and freshens the cached sample
+	if !m.overloaded.Load() {
+		t.Fatal("expected trip under the old thresholds")
+	}
+
+	// Raising the marks must clear the flag immediately (10 <= derived
+	// clear 50), so requests stop being rejected on the old threshold.
+	m.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 100, RetryAfterMinutes: 1})
+	defer m.shutdown()
+	if m.overloaded.Load() {
+		t.Fatal("expected flag cleared against raised thresholds at setConfig time")
+	}
+	if reject, _, _ := m.shouldReject(); reject {
+		t.Fatal("expected allow immediately after the threshold raise")
+	}
+
+	// Lowering the marks below the cached sample must trip immediately.
+	m.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1})
+	if !m.overloaded.Load() {
+		t.Fatal("expected trip against lowered thresholds at setConfig time")
+	}
+	if reject, _, _ := m.shouldReject(); !reject {
+		t.Fatal("expected reject immediately after the threshold cut")
+	}
+}
+
 func TestSetConfig_WarnsOnOutOfRangeClearMark(t *testing.T) {
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "vllm:num_requests_waiting 0.0")
