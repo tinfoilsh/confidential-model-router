@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -363,9 +364,20 @@ func main() {
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 
+	// Measures what cache-aware replica selection would do, without
+	// acting, as aggregate Prometheus metrics. Enabled per model via the
+	// cache_route config block; owned by the manager so the tool loop's
+	// internal dispatches are observed too.
+	cacheRouteShadow := em.CacheRouteShadow()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
 		var err error
+
+		// Set when the request is eligible for cache-route shadow
+		// observation.
+		var cacheRouteReq *cacheroute.Request
+		var cacheRouteSettings cacheroute.Settings
 
 		// Extract API key early for rate limiting decisions
 		apiKey := ""
@@ -654,6 +666,22 @@ func main() {
 					}
 					return
 				}
+
+				// Derive the cache-route shadow key now that the body is
+				// final (post file-input rewriting, post salt injection)
+				// and the request is known to take the plain proxy path —
+				// the tool runtime above observes its own dispatches via
+				// DoModelRequestJSON. Observed after replica selection
+				// below; never fails the request.
+				if cacheSaltPaths[r.URL.Path] {
+					if m, ok := em.GetModel(modelName); ok {
+						if s := m.CacheRouteSettings(); s.Mode != cacheroute.ModeOff {
+							salt, _ := body["cache_salt"].(string)
+							cacheRouteSettings = s
+							cacheRouteReq = cacheroute.ExtractRequest(body, r.URL.Path, salt, s)
+						}
+					}
+				}
 			}
 		} else if cacheSaltPaths[r.URL.Path] {
 			// Subdomain-routed request on a salt-supporting endpoint. This
@@ -743,6 +771,13 @@ func main() {
 		}
 
 		log.Debugf("%s serving request\n", enclave)
+
+		// Hand the production pick to the cache-route shadow. Observed at
+		// dispatch so the picked replica counts as warm from prefill
+		// start; cannot affect the request.
+		if cacheRouteReq != nil {
+			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
+		}
 
 		enclave.ServeHTTP(w, r)
 	})

@@ -79,28 +79,31 @@ func TestEvaluateThresholds_ExplicitClearMark(t *testing.T) {
 }
 
 func TestEvaluateThresholds_TransitionCountersOncePerEpisode(t *testing.T) {
-	// Unique labels so the shared counters are zero-valued for this test.
 	m := newTestMetrics("transition-count-host", &config.OverloadConfig{MaxRequestsWaiting: 16})
+	// The shared counters carry values across test reruns in one process,
+	// so assert growth, not absolutes.
 	trips := OverloadEventsTotal.WithLabelValues("test-model", "transition-count-host")
 	recoveries := RecoveryEventsTotal.WithLabelValues("test-model", "transition-count-host")
+	tripBase := testutil.ToFloat64(trips)
+	recoveryBase := testutil.ToFloat64(recoveries)
 
 	// One episode: trip once, oscillate inside the band, then drain.
 	for _, waiting := range []float64{16, 12, 15, 9, 14, 16, 12} {
 		observe(m, waiting)
 	}
-	if got := testutil.ToFloat64(trips); got != 1 {
+	if got := testutil.ToFloat64(trips) - tripBase; got != 1 {
 		t.Fatalf("trip events during episode = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(recoveries); got != 0 {
+	if got := testutil.ToFloat64(recoveries) - recoveryBase; got != 0 {
 		t.Fatalf("recovery events during episode = %v, want 0", got)
 	}
 
 	observe(m, 8)
 	observe(m, 3)
-	if got := testutil.ToFloat64(recoveries); got != 1 {
+	if got := testutil.ToFloat64(recoveries) - recoveryBase; got != 1 {
 		t.Fatalf("recovery events after drain = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(trips); got != 1 {
+	if got := testutil.ToFloat64(trips) - tripBase; got != 1 {
 		t.Fatalf("trip events after drain = %v, want 1", got)
 	}
 }

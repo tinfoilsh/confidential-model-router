@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -19,6 +20,7 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 )
@@ -32,6 +34,11 @@ type Enclave struct {
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
 	cb        *circuitBreaker
+
+	// inflight counts requests currently proxied through this enclave —
+	// a live load signal, unlike the polled queue depth, which can be up
+	// to ~45s stale.
+	inflight atomic.Int64
 }
 
 type Model struct {
@@ -41,6 +48,7 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
+	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
 	mu            sync.RWMutex
@@ -56,6 +64,7 @@ type EnclaveManager struct {
 	billingCollector     *billing.Collector
 	usageContextSecret   string
 	requestTracker       *ratelimit.RequestTracker
+	cacheRouteShadow     *cacheroute.Shadow
 	refreshInterval      time.Duration
 	stateMu              sync.Mutex
 	errors               []string
@@ -95,6 +104,11 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 // RequestTracker returns the shared request tracker for rate limiting.
 func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
 	return em.requestTracker
+}
+
+// CacheRouteShadow returns the cache-aware routing shadow tracker.
+func (em *EnclaveManager) CacheRouteShadow() *cacheroute.Shadow {
+	return em.cacheRouteShadow
 }
 
 func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
@@ -295,6 +309,9 @@ func (em *EnclaveManager) Shutdown() {
 	if em.billingCollector != nil {
 		em.billingCollector.Stop()
 	}
+	if em.cacheRouteShadow != nil {
+		em.cacheRouteShadow.Close()
+	}
 	em.models.Range(func(_, value any) bool {
 		model := value.(*Model)
 		model.mu.RLock()
@@ -353,6 +370,47 @@ func (m *Model) EnclaveCount() int {
 	return len(m.Enclaves)
 }
 
+// CacheRoutePool snapshots the model's replica set for cache-aware routing:
+// breaker-closed enclaves with live in-flight counts, falling back to all
+// enclaves when every breaker is open (mirroring NextEnclave). The overload
+// flag is deliberately ignored — membership must stay stable so a flapping
+// load signal can't move a key's home.
+func (m *Model) CacheRoutePool() cacheroute.Pool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Size comes from the config, not the live enclave map: during a
+	// release the map is cleared and re-attested one host at a time, and a
+	// multi-replica pool must not reclassify as pool_too_small (skipping
+	// warmth tracking) for that window.
+	pool := cacheroute.Pool{Size: m.expectedHosts}
+	for _, enclave := range m.Enclaves {
+		if enclave.cb != nil && !enclave.cb.Closed() {
+			continue
+		}
+		pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
+			Host:     enclave.host,
+			InFlight: int(enclave.inflight.Load()),
+		})
+	}
+	if len(pool.Candidates) == 0 {
+		for _, enclave := range m.Enclaves {
+			pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
+				Host:     enclave.host,
+				InFlight: int(enclave.inflight.Load()),
+			})
+		}
+	}
+	return pool
+}
+
+// CacheRouteSettings returns the model's resolved cache-route settings.
+func (m *Model) CacheRouteSettings() cacheroute.Settings {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cacheroute.SettingsFrom(m.CacheRoute)
+}
+
 // HasHealthyEnclave reports whether the model has at least one enclave whose
 // circuit breaker is currently closed. Used by ResolvePreferredModel to skip
 // models whose backends are all tripped (i.e. effectively down).
@@ -392,6 +450,9 @@ func (e *Enclave) isOverloaded() bool {
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	e.inflight.Add(1)
+	defer e.inflight.Add(-1)
+
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
 	// Check if client requested usage metrics in response header/trailer
@@ -473,6 +534,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret: usageContextSecret,
 		requestTracker:     ratelimit.NewRequestTracker(),
+		cacheRouteShadow:   cacheroute.NewShadow(nil),
 		refreshInterval:    refreshInterval,
 	}
 
@@ -493,8 +555,11 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
+		CacheRoute:        modelConfig.CacheRoute,
 		expectedHosts:     len(modelConfig.Hostnames),
 	})
+	cacheroute.SetMode(modelName, modelConfig.CacheRoute)
+	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }
 
 // updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
@@ -579,6 +644,7 @@ func (em *EnclaveManager) sync() error {
 				}
 				model.Enclaves = make(map[string]*Enclave)
 				model.mu.Unlock()
+				cacheroute.DropModel(modelName)
 				return
 			}
 
@@ -598,9 +664,12 @@ func (em *EnclaveManager) sync() error {
 			model.expectedHosts = len(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
+			model.CacheRoute = configModel.CacheRoute
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}
+			cacheroute.SetMode(modelName, configModel.CacheRoute)
+			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
 
 			// Updating enclaves for each model
 			log.Tracef("updating enclaves for model %s", modelName)

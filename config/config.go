@@ -20,12 +20,25 @@ type RateLimitConfig struct {
 	MaxRequestsPerMinute int64 `yaml:"max_requests_per_minute"`
 }
 
+// CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
+// rollout control: "off" (default), "shadow" (compute and meter the would-be
+// routing decision without acting), or "enforced" (act on it; not implemented
+// yet — the router clamps it to shadow). The remaining fields tune the
+// measurement; zero means "use the cacheroute package default".
+type CacheRouteConfig struct {
+	Mode                   string  `yaml:"mode"`
+	RetentionWindowMinutes int     `yaml:"retention_window_minutes,omitempty"`
+	MinPromptBytes         int     `yaml:"min_prompt_bytes,omitempty"`
+	SplitThresholdRPM      float64 `yaml:"split_threshold_rpm,omitempty"`
+}
+
 // Model represents the configuration for a single model
 type Model struct {
-	Repo      string           `yaml:"repo"`
-	Hostnames []string         `yaml:"enclaves"`
-	Overload  *OverloadConfig  `yaml:"overload,omitempty"`
-	RateLimit *RateLimitConfig `yaml:"rate_limit,omitempty"`
+	Repo       string            `yaml:"repo"`
+	Hostnames  []string          `yaml:"enclaves"`
+	Overload   *OverloadConfig   `yaml:"overload,omitempty"`
+	RateLimit  *RateLimitConfig  `yaml:"rate_limit,omitempty"`
+	CacheRoute *CacheRouteConfig `yaml:"cache_route,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
