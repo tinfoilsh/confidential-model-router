@@ -91,14 +91,6 @@ models:
       - gemma4-31b-2.inf10.tinfoil.sh
       - gemma4-31b-3.inf10.tinfoil.sh
       - gemma4-31b-4.inf10.tinfoil.sh
-      - gemma4-31b-0.inf8.tinfoil.sh
-      - gemma4-31b-1.inf8.tinfoil.sh
-      - gemma4-31b-2.inf8.tinfoil.sh
-      - gemma4-31b-3.inf8.tinfoil.sh
-      - gemma4-31b-4.inf8.tinfoil.sh
-      - gemma4-31b-5.inf8.tinfoil.sh
-      - gemma4-31b-6.inf8.tinfoil.sh
-      - gemma4-31b-7.inf8.tinfoil.sh
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
