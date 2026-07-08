@@ -126,15 +126,11 @@ func (s *streamBase) openUpstreamSSE(
 	reqBody map[string]any,
 	requestHeaders http.Header,
 ) (io.ReadCloser, error) {
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
 	hdrs := cloneHeaders(requestHeaders)
 	hdrs.Set("Content-Type", "application/json")
 	hdrs.Set("Accept", "text/event-stream")
 
-	resp, err := em.DoModelRequest(ctx, modelName, path, bodyBytes, hdrs)
+	resp, err := em.DoModelRequestJSON(ctx, modelName, path, reqBody, hdrs)
 	if err != nil {
 		return nil, err
 	}

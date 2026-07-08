@@ -4,9 +4,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
@@ -21,7 +25,7 @@ func newTestEnclave(host string) *Enclave {
 }
 
 func newTestModel(hosts ...string) *Model {
-	m := &Model{Enclaves: make(map[string]*Enclave, len(hosts))}
+	m := &Model{Enclaves: make(map[string]*Enclave, len(hosts)), expectedHosts: len(hosts)}
 	for _, h := range hosts {
 		m.Enclaves[h] = newTestEnclave(h)
 	}
@@ -216,6 +220,67 @@ func TestCacheRoutePool(t *testing.T) {
 	if pool = m.CacheRoutePool(); len(pool.Candidates) != 3 {
 		t.Fatalf("all-open pool = %+v, want fallback to all 3", pool)
 	}
+}
+
+// TestCacheRoutePoolSizeIsConfigured pins that Size reflects the config, not
+// the live enclave map: during a release the map is re-attested one host at a
+// time, and a multi-replica pool must stay routable for measurement.
+func TestCacheRoutePoolSizeIsConfigured(t *testing.T) {
+	m := newTestModel("a", "b", "c", "d")
+	delete(m.Enclaves, "b")
+	delete(m.Enclaves, "c")
+	delete(m.Enclaves, "d")
+
+	pool := m.CacheRoutePool()
+	if pool.Size != 4 {
+		t.Fatalf("Size = %d, want configured 4", pool.Size)
+	}
+	if len(pool.Candidates) != 1 {
+		t.Fatalf("candidates = %d, want the 1 live enclave", len(pool.Candidates))
+	}
+}
+
+// TestObserveCacheRoute covers the tool-loop observation gate: a shadow-mode
+// dispatch reaches the shadow's funnel, mode off and a missing shadow are
+// no-ops.
+func TestObserveCacheRoute(t *testing.T) {
+	body := map[string]any{
+		"cache_salt": strings.Repeat("0", 43),
+		"messages": []any{
+			map[string]any{"role": "system", "content": strings.Repeat("s", 5000)},
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	}
+	model := newTestModel("a", "b")
+	model.CacheRoute = &config.CacheRouteConfig{Mode: "shadow"}
+	em := newTestManager(map[string]*Model{"tool-observed": model})
+	em.cacheRouteShadow = cacheroute.NewShadow(prometheus.NewRegistry())
+	defer em.cacheRouteShadow.Close()
+
+	keyed := func() float64 {
+		c, err := cacheroute.RequestsTotal.GetMetricWithLabelValues("tool-observed", string(cacheroute.OutcomeKeyed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return testutil.ToFloat64(c)
+	}
+	base := keyed()
+
+	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
+	if got := keyed() - base; got != 1 {
+		t.Fatalf("keyed delta = %v, want 1", got)
+	}
+
+	// Mode off: no observation.
+	model.CacheRoute = nil
+	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
+	if got := keyed() - base; got != 1 {
+		t.Fatalf("keyed delta after mode off = %v, want 1", got)
+	}
+
+	// No shadow (tests construct managers without one): must not panic.
+	em.cacheRouteShadow = nil
+	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
 }
 
 func TestCacheRouteSettings(t *testing.T) {

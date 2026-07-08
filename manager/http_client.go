@@ -3,11 +3,14 @@ package manager
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
+
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 )
 
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
@@ -36,7 +39,7 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 		},
 	}
 
-	return "https://" + enclave.host, client, nil
+	return enclave.host, client, nil
 }
 
 // DoModelRequest performs an attested POST against the next available enclave
@@ -44,12 +47,57 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	baseURL, client, err := em.boundHTTPClientForModel(modelName)
+	host, client, err := em.boundHTTPClientForModel(modelName)
 	if err != nil {
 		return nil, err
 	}
+	return postToEnclave(ctx, client, host, path, body, headers)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(body))
+// DoModelRequestJSON marshals and dispatches a parsed request body the way
+// DoModelRequest does, and feeds the dispatch to the cache-route shadow. The
+// tool loop calls this for every model iteration — replaying a growing shared
+// prefix, the strongest case for cache-aware routing — so those requests must
+// be measured like plain proxied ones.
+func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, path string, body map[string]any, headers http.Header) (*http.Response, error) {
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	host, client, err := em.boundHTTPClientForModel(modelName)
+	if err != nil {
+		return nil, err
+	}
+	// Observed at dispatch, like the public proxy path, so the picked
+	// replica counts as warm from prefill start.
+	em.observeCacheRoute(modelName, path, body, host)
+	return postToEnclave(ctx, client, host, path, bodyBytes, headers)
+}
+
+// observeCacheRoute feeds one internally dispatched request to the
+// cache-route shadow, with the same gating as the public path. Callers only
+// dispatch to cache_salt-capable endpoints, so no endpoint allowlist is
+// re-checked here. Never fails the request.
+func (em *EnclaveManager) observeCacheRoute(modelName, path string, body map[string]any, actualHost string) {
+	if em.cacheRouteShadow == nil {
+		return
+	}
+	model, found := em.GetModel(modelName)
+	if !found {
+		return
+	}
+	settings := model.CacheRouteSettings()
+	if settings.Mode == cacheroute.ModeOff {
+		return
+	}
+	salt, _ := body["cache_salt"].(string)
+	req := cacheroute.ExtractRequest(body, path, salt, settings)
+	em.cacheRouteShadow.Observe(modelName, req, model.CacheRoutePool(), actualHost, settings)
+}
+
+// postToEnclave builds and sends an attested POST to one enclave host.
+func postToEnclave(ctx context.Context, client *http.Client, host, path string, body []byte, headers http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+host+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +126,11 @@ func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Cli
 		}
 	}
 
-	baseURL, client, err := em.boundHTTPClientForModel(modelName)
+	host, client, err := em.boundHTTPClientForModel(modelName)
 	if err != nil {
 		return "", nil, err
 	}
-	return baseURL + "/mcp", client, nil
+	return "https://" + host + "/mcp", client, nil
 }
 
 // localMCPEndpointEnvVar returns the model-specific debug-bypass env

@@ -64,6 +64,7 @@ type EnclaveManager struct {
 	billingCollector     *billing.Collector
 	usageContextSecret   string
 	requestTracker       *ratelimit.RequestTracker
+	cacheRouteShadow     *cacheroute.Shadow
 	refreshInterval      time.Duration
 	stateMu              sync.Mutex
 	errors               []string
@@ -103,6 +104,11 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 // RequestTracker returns the shared request tracker for rate limiting.
 func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
 	return em.requestTracker
+}
+
+// CacheRouteShadow returns the cache-aware routing shadow tracker.
+func (em *EnclaveManager) CacheRouteShadow() *cacheroute.Shadow {
+	return em.cacheRouteShadow
 }
 
 func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
@@ -303,6 +309,9 @@ func (em *EnclaveManager) Shutdown() {
 	if em.billingCollector != nil {
 		em.billingCollector.Stop()
 	}
+	if em.cacheRouteShadow != nil {
+		em.cacheRouteShadow.Close()
+	}
 	em.models.Range(func(_, value any) bool {
 		model := value.(*Model)
 		model.mu.RLock()
@@ -370,7 +379,11 @@ func (m *Model) CacheRoutePool() cacheroute.Pool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	pool := cacheroute.Pool{Size: len(m.Enclaves)}
+	// Size comes from the config, not the live enclave map: during a
+	// release the map is cleared and re-attested one host at a time, and a
+	// multi-replica pool must not reclassify as pool_too_small (skipping
+	// warmth tracking) for that window.
+	pool := cacheroute.Pool{Size: m.expectedHosts}
 	for _, enclave := range m.Enclaves {
 		if enclave.cb != nil && !enclave.cb.Closed() {
 			continue
@@ -521,6 +534,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret: usageContextSecret,
 		requestTracker:     ratelimit.NewRequestTracker(),
+		cacheRouteShadow:   cacheroute.NewShadow(nil),
 		refreshInterval:    refreshInterval,
 	}
 

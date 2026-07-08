@@ -297,15 +297,10 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry 
 // ---------------------------------------------------------------------------
 
 func postJSON(ctx context.Context, em *manager.EnclaveManager, modelName, path string, body map[string]any, requestHeaders http.Header) (*upstreamJSONResponse, error) {
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
 	reqHeaders := cloneHeaders(requestHeaders)
 	reqHeaders.Set("Content-Type", "application/json")
 
-	resp, err := em.DoModelRequest(ctx, modelName, path, bodyBytes, reqHeaders)
+	resp, err := em.DoModelRequestJSON(ctx, modelName, path, body, reqHeaders)
 	if err != nil {
 		return nil, err
 	}

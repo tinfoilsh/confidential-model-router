@@ -366,9 +366,9 @@ func main() {
 
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
-	// cache_route config block.
-	cacheRouteShadow := cacheroute.NewShadow(nil)
-	defer cacheRouteShadow.Close()
+	// cache_route config block; owned by the manager so the tool loop's
+	// internal dispatches are observed too.
+	cacheRouteShadow := em.CacheRouteShadow()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var modelName string
@@ -670,8 +670,9 @@ func main() {
 				// Derive the cache-route shadow key now that the body is
 				// final (post file-input rewriting, post salt injection)
 				// and the request is known to take the plain proxy path —
-				// the tool runtime above picks its own enclaves. Observed
-				// after replica selection below; never fails the request.
+				// the tool runtime above observes its own dispatches via
+				// DoModelRequestJSON. Observed after replica selection
+				// below; never fails the request.
 				if cacheSaltPaths[r.URL.Path] {
 					if m, ok := em.GetModel(modelName); ok {
 						if s := m.CacheRouteSettings(); s.Mode != cacheroute.ModeOff {
