@@ -34,8 +34,10 @@ type Model struct {
 // is flagged overloaded. ClearRequestsWaiting is the hysteresis clear mark:
 // the flag clears only once the queue drains back down to it, so a backend
 // hovering around the trip mark doesn't flap in and out of overload on every
-// poll. Queue depths are integral, so setting the clear mark to
-// MaxRequestsWaiting-1 disables hysteresis.
+// poll. Zero deliberately means omitted (the default of half the trip mark
+// applies), so the smallest expressible clear mark is 1 — clear once at most
+// one request is waiting. Queue depths are integral, so setting the clear
+// mark to MaxRequestsWaiting-1 disables hysteresis.
 type OverloadConfig struct {
 	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
 	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
@@ -43,9 +45,9 @@ type OverloadConfig struct {
 }
 
 // Marks returns the overload trip and clear thresholds. When
-// ClearRequestsWaiting is unset or out of range (it must sit below the trip
-// mark), the clear mark defaults to half the trip mark. Only meaningful when
-// MaxRequestsWaiting is positive.
+// ClearRequestsWaiting is zero (omitted) or out of range (it must sit below
+// the trip mark), the clear mark defaults to half the trip mark. Only
+// meaningful when MaxRequestsWaiting is positive.
 func (c *OverloadConfig) Marks() (trip, clear int) {
 	trip = c.MaxRequestsWaiting
 	clear = c.ClearRequestsWaiting
