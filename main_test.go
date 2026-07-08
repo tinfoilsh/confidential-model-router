@@ -669,9 +669,9 @@ func TestFilterModelsToServed(t *testing.T) {
 		{"id":"glm-5-2","name":"GLM-5.2","type":"chat"}
 	]}`)
 
-	out, ok := filterModelsToServed(body, served)
-	if !ok {
-		t.Fatal("expected ok=true for a well-formed payload")
+	out, err := filterModelsToServed(body, served)
+	if err != nil {
+		t.Fatalf("unexpected error for a well-formed payload: %v", err)
 	}
 
 	var parsed struct {
@@ -702,7 +702,7 @@ func TestFilterModelsToServed(t *testing.T) {
 }
 
 func TestFilterModelsToServedRejectsMalformed(t *testing.T) {
-	if _, ok := filterModelsToServed([]byte(`{bad json`), map[string]*manager.Model{}); ok {
-		t.Error("expected ok=false for malformed payload so caller passes it through")
+	if _, err := filterModelsToServed([]byte(`{bad json`), map[string]*manager.Model{}); err == nil {
+		t.Error("expected an error for a malformed payload so the caller can surface it")
 	}
 }

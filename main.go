@@ -152,15 +152,15 @@ func sendJSON(w http.ResponseWriter, data any) {
 
 // filterModelsToServed narrows an OpenAI-compatible /v1/models payload to the
 // models this router actually serves, so the list reflects local availability
-// rather than the control plane's full catalog. Returns false if the payload
-// can't be parsed, signalling the caller to pass it through unchanged.
-func filterModelsToServed(body []byte, served map[string]*manager.Model) ([]byte, bool) {
+// rather than the control plane's full catalog. Returns an error if the payload
+// can't be parsed, so the caller can surface the upstream problem.
+func filterModelsToServed(body []byte, served map[string]*manager.Model) ([]byte, error) {
 	var payload struct {
 		Object string           `json:"object"`
 		Data   []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, false
+		return nil, fmt.Errorf("parsing models list: %w", err)
 	}
 
 	kept := make([]map[string]any, 0, len(payload.Data))
@@ -181,9 +181,9 @@ func filterModelsToServed(body []byte, served map[string]*manager.Model) ([]byte
 		"data":   kept,
 	})
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("encoding models list: %w", err)
 	}
-	return out, true
+	return out, nil
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {
@@ -519,18 +519,24 @@ func main() {
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				// Narrow the control plane's full catalog to the models this
-				// router actually serves. On any parse failure, pass the
-				// upstream response through untouched.
-				if resp.StatusCode == http.StatusOK {
-					if filtered, ok := filterModelsToServed(body, em.Models()); ok {
-						w.WriteHeader(http.StatusOK)
-						w.Write(filtered)
-						return
-					}
+				// Forward upstream errors as-is; only a 200 is a models list
+				// we should rewrite.
+				if resp.StatusCode != http.StatusOK {
+					w.WriteHeader(resp.StatusCode)
+					w.Write(body)
+					return
 				}
-				w.WriteHeader(resp.StatusCode)
-				w.Write(body)
+				// A 200 we can't parse means the control plane returned
+				// something unexpected — surface it rather than forwarding a
+				// body we couldn't filter.
+				filtered, err := filterModelsToServed(body, em.Models())
+				if err != nil {
+					log.Errorf("filtering /v1/models response: %v", err)
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				w.Write(filtered)
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
