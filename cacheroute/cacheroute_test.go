@@ -75,7 +75,7 @@ func withCacheKey(body map[string]any, key string) map[string]any {
 	return out
 }
 
-// TestExtractRequestKeyComponents verifies each §5.1 key input moves the key
+// TestExtractRequestKeyComponents verifies that each key input moves the key
 // and that non-prompt fields do not.
 func TestExtractRequestKeyComponents(t *testing.T) {
 	base := extract(t, bigChatBody(), "/v1/chat/completions", testSalt).Key
@@ -288,7 +288,8 @@ func TestSettingsFrom(t *testing.T) {
 		t.Fatalf("explicit config not applied: %+v", s)
 	}
 
-	// Phase 4 clamps enforced to shadow: the build measures, it does not act.
+	// Enforcement is not implemented: the config value is accepted but
+	// clamped to shadow.
 	if s := SettingsFrom(&config.CacheRouteConfig{Mode: "enforced"}); s.Mode != ModeShadow {
 		t.Fatalf("enforced must clamp to shadow in this build, got %s", s.Mode)
 	}

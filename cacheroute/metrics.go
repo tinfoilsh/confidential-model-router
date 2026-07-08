@@ -13,17 +13,12 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
-// The Phase 4 metric contract (implementation plan, Phase 4). Names are
-// phase-neutral — the same pipeline keeps emitting them when Phase 5 flips to
-// acting, so the flip is verified on the same Grafana panels. Every label is
-// a closed enum; per-key values must never appear as labels (a key-derived
-// label would be a stable pseudonymous user identifier and unbounded
-// cardinality). Per-enclave counters are the same exposure class as the
-// existing router_proxy_success_total{model, enclave}.
+// Every label below is a closed enum. A routing key, or anything derived
+// from one, must never appear as a label value: it would be unbounded
+// cardinality and a stable pseudonymous user identifier.
 var (
-	// RequestsTotal is the eligibility funnel — the denominator for every
-	// other panel, and (via outcome="error") proof the shadow path never
-	// fails a request.
+	// RequestsTotal is the eligibility funnel. outcome="error" counts
+	// recovered panics and must stay ≈ 0.
 	RequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_requests_total",
@@ -32,11 +27,9 @@ var (
 		[]string{"model", "outcome"},
 	)
 
-	// ReuseTotal classifies each keyed request against where the actual
-	// pick landed: first_seen, repeat_warm (the pick was already warm for
-	// this key), repeat_cold (the key was warm somewhere else — the prize
-	// shadow mode exists to size; under enforcement it collapsing toward
-	// zero is the success signal).
+	// ReuseTotal classifies keyed requests against where the actual pick
+	// landed. repeat_cold = the prefix was warm on a replica the pick
+	// missed, i.e. the reuse cache-aware routing would have captured.
 	ReuseTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_reuse_total",
@@ -45,8 +38,8 @@ var (
 		[]string{"model", "outcome"},
 	)
 
-	// ReusePromptBytesTotal is ReuseTotal weighted by prompt bytes, the
-	// prefill-cost proxy: read the prize byte-weighted first.
+	// ReusePromptBytesTotal weights ReuseTotal by prompt bytes, since
+	// prefill cost scales with prompt size.
 	ReusePromptBytesTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_reuse_prompt_bytes_total",
@@ -55,9 +48,8 @@ var (
 		[]string{"model", "outcome"},
 	)
 
-	// PicksTotal is the would-be pick per keyed request with the key's
-	// replication factor at pick time. Balance across enclaves answers
-	// exit question 2; the r split answers question 3.
+	// PicksTotal counts the would-be pick per enclave, with the key's
+	// replication factor at pick time.
 	PicksTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_picks_total",
@@ -66,10 +58,8 @@ var (
 		[]string{"model", "enclave", "r"},
 	)
 
-	// RandomMatchTotal counts keyed requests where the would-be pick
-	// equals the production random pick: ≈ 1/N is the pipeline sanity
-	// check, and 1 − match rate sizes how much traffic moves at the
-	// Phase 5 flip. Goes quiet under enforcement.
+	// RandomMatchTotal counts keyed requests whose would-be pick equals
+	// the actual random pick; expect ≈ 1/pool-size.
 	RandomMatchTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_random_match_total",
@@ -78,10 +68,8 @@ var (
 		[]string{"model"},
 	)
 
-	// RepeatIntervalSeconds validates W against real re-arrival spacing.
-	// Buckets must straddle every candidate W (1 s – 30 min); the shadow
-	// table retains keys past W so mass beyond the window is visible
-	// rather than truncated at it.
+	// RepeatIntervalSeconds measures time between sightings of a key.
+	// Buckets straddle every plausible retention window.
 	RepeatIntervalSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_cache_route_repeat_interval_seconds",
@@ -91,9 +79,8 @@ var (
 		[]string{"model"},
 	)
 
-	// KeyRPM places the hot-key split threshold before anything acts.
-	// Buckets must straddle the candidate threshold (1 – 300 rpm;
-	// OpenAI's figure is ~15).
+	// KeyRPM is the per-key request rate observed at request time.
+	// Buckets straddle every plausible split threshold.
 	KeyRPM = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_cache_route_key_rpm",
@@ -103,9 +90,9 @@ var (
 		[]string{"model"},
 	)
 
-	// KeyEvictionsTotal separates normal turnover (ttl) from classification
-	// bias (capacity): a table at capacity misclassifies genuine repeats
-	// as first-seen and understates the prize, so capacity must sit ≈ 0.
+	// KeyEvictionsTotal separates normal turnover (ttl) from table
+	// pressure (capacity). Capacity evictions make genuine repeats look
+	// first-seen and bias reuse counts low — keep ≈ 0 by sizing the table.
 	KeyEvictionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_key_evictions_total",
@@ -114,9 +101,8 @@ var (
 		[]string{"model", "reason"},
 	)
 
-	// ComputeSeconds is the full shadow-path cost per request (extraction
-	// + observation) — the "shadow is free" proof, needed because there is
-	// no profiler in the enclave either. p99 must stay well under 1 ms.
+	// ComputeSeconds is the shadow path's per-request cost; p99 should
+	// stay well under 1ms.
 	ComputeSeconds = promauto.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "router_cache_route_compute_seconds",
@@ -125,11 +111,9 @@ var (
 		},
 	)
 
-	// PoolInfo pins each model's configured replica-set view. Equal
-	// pool_hash across router instances ⇒ identical HRW views, and with
-	// keyless derivation (§6) identical views ⇒ identical homes by
-	// construction — the continuous replacement for a cross-router
-	// spot-check.
+	// PoolInfo pins each model's configured replica-set view. Router
+	// instances that disagree on pool_hash compute different HRW rankings
+	// for the same key.
 	PoolInfo = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "router_cache_route_pool_info",
@@ -138,9 +122,8 @@ var (
 		[]string{"model", "pool_hash"},
 	)
 
-	// ModeInfo exposes the per-pool rollout state (off, shadow, enforced)
-	// so dashboards read the phase from data, not deploy folklore. It
-	// reports the effective mode this build runs, after any clamping.
+	// ModeInfo reports the effective cache-route mode per model, after any
+	// clamping.
 	ModeInfo = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "router_cache_route_mode",
@@ -149,11 +132,8 @@ var (
 		[]string{"model", "mode"},
 	)
 
-	// trackedKeysDesc describes the router_cache_route_tracked_keys gauge,
-	// emitted by Shadow's Collect: live shadow-table keys by current HRW
-	// home and replication factor — the distinct-key view for exit
-	// questions 2 and 3. It is a custom collector because the values are
-	// walked from the table at scrape time.
+	// trackedKeysDesc describes the gauge Shadow.Collect emits at scrape
+	// time: live table keys by HRW home and replication factor.
 	trackedKeysDesc = prometheus.NewDesc(
 		"router_cache_route_tracked_keys",
 		"Live shadow-table routing keys by HRW home enclave and current replication factor",
@@ -162,13 +142,12 @@ var (
 	)
 )
 
-// poolInfoDomainTag namespaces the pool_hash derivation. Same constraint as
-// every other tag: fixed constant, no tag a prefix of another.
+// poolInfoDomainTag namespaces the pool_hash derivation; no tag in the
+// router may be a prefix of another.
 const poolInfoDomainTag = "tinfoil/route-pool/v1"
 
-// infoMu guards lastPoolHash and lastMode, which remember each model's
-// current info-label values so a change replaces the old series instead of
-// leaving a stale one alongside it.
+// infoMu guards the last-published info labels so a change replaces the old
+// series instead of leaving a stale one beside it.
 var (
 	infoMu       sync.Mutex
 	lastPoolHash = map[string]string{}
@@ -176,8 +155,7 @@ var (
 )
 
 // SetPoolInfo publishes the pool_info series for a model from its configured
-// enclave hostnames (order-insensitive), replacing any previous series. Empty
-// hostnames delete the series — the model has no pool to agree on.
+// enclave hostnames (order-insensitive). Empty hostnames delete the series.
 func SetPoolInfo(model string, hostnames []string) {
 	sorted := make([]string, len(hostnames))
 	copy(sorted, hostnames)
@@ -201,10 +179,9 @@ func SetPoolInfo(model string, hostnames []string) {
 	PoolInfo.WithLabelValues(model, hash).Set(1)
 }
 
-// SetMode publishes the mode series for a model from its raw config block,
-// replacing any previous series. It logs when it clamps a configured
-// "enforced" down to shadow (this build measures only; Phase 5 acts), so the
-// config's intent and the router's behavior can't silently diverge.
+// SetMode publishes the effective mode for a model, logging when it clamps
+// a configured "enforced" down to shadow so config intent and router
+// behavior can't silently diverge.
 func SetMode(model string, cfg *config.CacheRouteConfig) {
 	raw := ""
 	if cfg != nil {

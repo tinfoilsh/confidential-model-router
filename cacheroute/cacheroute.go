@@ -1,20 +1,12 @@
-// Package cacheroute implements cache-aware replica routing (design doc §5)
-// in shadow mode: it derives a routing key from the parsed request body,
-// ranks a model's replicas with rendezvous hashing, and measures — via
-// aggregate Prometheus metrics only — what cache-aware routing would have
-// done and whether it would have helped. It never influences which replica
-// serves a request.
+// Package cacheroute implements cache-aware replica routing in shadow mode:
+// it derives a routing key from the parsed request body, ranks a model's
+// replicas with rendezvous hashing, and measures what cache-aware routing
+// would have done — without influencing which replica serves a request.
 //
-// The router runs inside an enclave with no log sink, so /metrics is the only
-// telemetry channel out. All per-key state (the shadow table in shadow.go)
-// stays in process memory; nothing exported can be tied to a single request,
-// key, or user. Metric labels are closed enum sets — a routing key or any
-// value derived from one must never appear as a label.
-//
-// Like cachesalt, key derivation is a pure function of the request and pinned
-// by tests: changing the domain tag, framing, field order, or the window
-// flattening re-homes every key (a fleet-wide cache cold-start once routing
-// acts on keys), so treat the construction as frozen.
+// The router's only telemetry channel is Prometheus, so everything the
+// shadow learns is exported as aggregate metrics over closed label sets.
+// Per-key state stays in process memory; a routing key, or anything derived
+// from one, must never appear in a label or log line.
 package cacheroute
 
 import (
@@ -26,50 +18,43 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
-// KeyDomainTag namespaces routing-key derivation. Like cachesalt's tags it is
-// hashed unframed, so it must be a fixed constant and no tag anywhere in the
-// router may be a prefix of another.
+// KeyDomainTag namespaces routing-key derivation. Tags are hashed unframed,
+// so no tag in the router may be a prefix of another.
 const KeyDomainTag = "tinfoil/route-key/v1"
 
-// prefixWindowCap bounds the bytes of prompt prefix that feed the routing
-// key: ~1KB ≈ 256 tokens, mirroring OpenAI's prefix-hash window (§5.1). The
-// cap is a routing-hint tradeoff, not a correctness bound — cache_salt and
-// the engine's byte-exact prefix cache remain the security and correctness
-// boundaries.
+// prefixWindowCap bounds how much prompt prefix feeds the routing key
+// (~256 tokens). A routing hint only: the engine's byte-exact prefix cache
+// remains the correctness boundary.
 const prefixWindowCap = 1024
 
-// Defaults for the per-model Settings knobs (design doc §5.2, §5.4, and the
-// implementation plan's Phase 4).
 const (
-	// DefaultRetention is W, the assumed KV-retention window: a replica
-	// that served a key within W is assumed still warm for it.
+	// DefaultRetention is the assumed KV-retention window: a replica that
+	// served a key within it is assumed still warm for that key.
 	DefaultRetention = 10 * time.Minute
-	// DefaultMinPromptBytes is the eligibility floor: prompts below it
-	// aren't worth pinning (§5.2; ~1,000 tokens, OpenAI's cache floor).
+	// DefaultMinPromptBytes is the eligibility floor: shorter prompts
+	// aren't worth pinning to a replica.
 	DefaultMinPromptBytes = 4096
 	// DefaultSplitThresholdRPM is the per-key request rate that adds one
-	// replica to a key's warm set (§5.4; OpenAI's figure is ~15 rpm).
+	// replica to a hot key's warm set (OpenAI splits at ~15 rpm).
 	DefaultSplitThresholdRPM = 15
 )
 
-// Mode is the per-model rollout state of cache-aware routing.
+// Mode is a model's cache-route rollout state.
 type Mode string
 
 const (
-	// ModeOff disables the shadow pipeline entirely.
+	// ModeOff disables the pipeline entirely.
 	ModeOff Mode = "off"
 	// ModeShadow computes and meters routing decisions without acting.
 	ModeShadow Mode = "shadow"
-	// ModeEnforced acts on routing decisions. Not implemented until
-	// Phase 5: resolveMode clamps it to ModeShadow so an early config
-	// flip cannot silently claim behavior the build doesn't have.
+	// ModeEnforced acts on routing decisions. Not implemented yet;
+	// resolveMode clamps it to ModeShadow.
 	ModeEnforced Mode = "enforced"
 )
 
-// resolveMode maps a raw config mode string to the mode this build actually
-// runs. It reports clamped=true when the config asked for enforcement, which
-// this Phase 4 build downgrades to shadow; the mode metric must report the
-// effective mode so dashboards never lie. Unknown values resolve to off.
+// resolveMode maps a raw config string to the mode this build runs,
+// reporting clamped=true when enforcement was requested but isn't
+// available. Unknown values resolve to off.
 func resolveMode(raw string) (mode Mode, clamped bool) {
 	switch Mode(raw) {
 	case ModeShadow:
@@ -81,16 +66,16 @@ func resolveMode(raw string) (mode Mode, clamped bool) {
 	}
 }
 
-// Settings are the resolved per-model cache-route knobs.
+// Settings are a model's resolved cache-route knobs.
 type Settings struct {
 	Mode              Mode
-	Retention         time.Duration // W: how long a replica is assumed warm for a key
+	Retention         time.Duration // how long a replica stays warm for a key
 	MinPromptBytes    int           // eligibility floor on whole-prompt bytes
 	SplitThresholdRPM float64       // per-key rpm per replica of warm set
 }
 
-// SettingsFrom resolves a config block (nil means unconfigured) to concrete
-// settings, applying package defaults for zero fields.
+// SettingsFrom resolves a config block (nil means unconfigured), applying
+// defaults for zero fields.
 func SettingsFrom(c *config.CacheRouteConfig) Settings {
 	s := Settings{
 		Mode:              ModeOff,
@@ -114,63 +99,53 @@ func SettingsFrom(c *config.CacheRouteConfig) Settings {
 	return s
 }
 
-// Outcome is the eligibility-funnel classification of a request, used as the
-// outcome label of router_cache_route_requests_total. Values form a closed
-// set; dashboards depend on them.
+// Outcome classifies a request for the eligibility funnel
+// (router_cache_route_requests_total). Closed set; dashboards depend on it.
 type Outcome string
 
 const (
-	// OutcomeKeyed means a routing key was derived and the full shadow
-	// pipeline ran.
+	// OutcomeKeyed: a routing key was derived and the full pipeline ran.
 	OutcomeKeyed Outcome = "keyed"
-	// OutcomeNoSalt means the request carries no injected cache_salt. The
-	// salt is a routing-key component (§5.1) and the rollout invariant is
-	// no salt ⇒ no cache-aware routing.
+	// OutcomeNoSalt: no injected cache_salt, which is a routing-key
+	// component — no salt means no cache-aware routing.
 	OutcomeNoSalt Outcome = "no_salt"
-	// OutcomeNoPrefix means no prompt fields could be extracted, so there
-	// is nothing to key on.
+	// OutcomeNoPrefix: no prompt fields to key on.
 	OutcomeNoPrefix Outcome = "no_prefix"
-	// OutcomeBelowFloor means the prompt is under the eligibility floor
-	// and carries no prompt_cache_key (§5.2: short prompts aren't worth
-	// pinning).
+	// OutcomeBelowFloor: prompt under the floor with no prompt_cache_key.
 	OutcomeBelowFloor Outcome = "below_floor"
-	// OutcomePoolTooSmall means the model has fewer than two configured
-	// replicas, so routing can't move anything.
+	// OutcomePoolTooSmall: fewer than two configured replicas.
 	OutcomePoolTooSmall Outcome = "pool_too_small"
-	// OutcomeError means the shadow path panicked and was recovered. Must
-	// stay ≈ 0; it exists to prove shadow never fails a request.
+	// OutcomeError: the shadow path panicked and was recovered. Must stay
+	// ≈ 0.
 	OutcomeError Outcome = "error"
 )
 
-// Key is a derived routing key: a domain-tagged SHA-256 over the cache salt,
-// client prompt_cache_key, and prompt prefix window. Internal to the router,
-// never sent downstream, never logged, never a metric label.
+// Key is a derived routing key. Internal to the router: never sent
+// downstream, logged, or used as a metric label.
 type Key [32]byte
 
 // Request is the shadow pipeline's view of one request, produced by
-// ExtractRequest at body-parse time and consumed by Shadow.Observe after the
-// production selector has picked a replica.
+// ExtractRequest at body-parse time and consumed by Shadow.Observe after
+// replica selection.
 type Request struct {
-	// Outcome is the funnel classification. Key is only meaningful when
-	// Outcome == OutcomeKeyed.
+	// Outcome is the funnel classification; Key is meaningful only when
+	// Outcome is OutcomeKeyed.
 	Outcome Outcome
 	Key     Key
-	// PromptBytes approximates the whole-prompt size (tools + all message
-	// contents), the prefill-cost weight for the byte-weighted reuse
-	// metrics and the eligibility floor input.
+	// PromptBytes approximates whole-prompt size (tools + all message
+	// contents): the eligibility-floor input and the weight for the
+	// byte-weighted reuse metrics.
 	PromptBytes int
 
-	elapsed time.Duration // extraction cost, folded into compute_seconds by Observe
+	elapsed time.Duration // extraction cost, folded into ComputeSeconds
 }
 
-// ExtractRequest classifies a parsed OpenAI-compatible request body and, when
-// eligible, derives its routing key. salt is the encoded cache_salt string
-// the router injected ("" when none). It never fails: any panic is recovered
-// into OutcomeError, and malformed shapes simply classify as ineligible.
-//
-// Call it only on endpoints that support cache_salt and only after the body
-// is final (post file-input rewriting, post salt injection), so the window is
-// built from what the engine will actually see.
+// ExtractRequest classifies a parsed OpenAI-compatible body and, when
+// eligible, derives its routing key. salt is the cache_salt string the
+// router injected ("" when none). It never fails: panics are recovered into
+// OutcomeError and malformed shapes classify as ineligible. Call it after
+// the body is final (post file-input rewriting, post salt injection) so the
+// window reflects what the engine will see.
 func ExtractRequest(body map[string]any, path, salt string, s Settings) (req *Request) {
 	start := time.Now()
 	req = &Request{Outcome: OutcomeError}
@@ -191,8 +166,8 @@ func ExtractRequest(body map[string]any, path, salt string, s Settings) (req *Re
 	case tools == nil && system == nil && user == nil && promptCacheKey == "":
 		req.Outcome = OutcomeNoPrefix
 	case req.PromptBytes < s.MinPromptBytes && promptCacheKey == "":
-		// A request carrying prompt_cache_key is always eligible: an
-		// explicit client grouping is honored as stated (§5.2).
+		// An explicit prompt_cache_key makes a request eligible
+		// regardless of size.
 		req.Outcome = OutcomeBelowFloor
 	default:
 		req.Outcome = OutcomeKeyed
@@ -201,17 +176,14 @@ func ExtractRequest(body map[string]any, path, salt string, s Settings) (req *Re
 	return req
 }
 
-// deriveKey computes the routing key (§5.1):
+// deriveKey computes
 //
-//	routing_key = hash(cache_salt ‖ prompt_cache_key ‖ prefix_window)
-//	prefix_window = lp(tools) ‖ lp(system) ‖ lp(first user message), 1KB cap
+//	Sum(tag, salt, prompt_cache_key, tools, system, first user message)
 //
-// using cachesalt.Sum's domain-tagged, length-prefixed framing (§6), with the
-// three window fields passed as separate lp()-framed fields and the cap
-// applied across their total. The salt input is the encoded 43-char salt
-// string the router injects, exactly as the design doc pins it. Missing
-// fields contribute lp("") via their nil flattening, keeping the encoding
-// deterministic.
+// with the three prompt fields flattened and capped to prefixWindowCap
+// across their total. Sum length-prefixes every field, so boundaries can't
+// shift. The construction is pinned by test vectors: changing any detail
+// re-homes every key, a fleet-wide cache cold-start once routing acts.
 func deriveKey(salt, promptCacheKey string, tools, system, user any) Key {
 	budget := prefixWindowCap
 	toolsB := flattenValue(tools, budget)
@@ -222,19 +194,16 @@ func deriveKey(salt, promptCacheKey string, tools, system, user any) Key {
 	return Key(cachesalt.Sum(KeyDomainTag, salt, promptCacheKey, string(toolsB), string(systemB), string(userB)))
 }
 
-// promptFields pulls the three prefix-window fields out of the parsed body in
+// promptFields pulls the routing-relevant fields out of the parsed body in
 // prompt-render order (tools → system → first user message), per endpoint
-// shape. These are the extracted fields that become the engine's cached
-// prefix — never raw body bytes, whose leading content is sampling params and
-// marshaler field order (§5.1's mis-keying argument). A missing field is nil.
+// shape. Keying on parsed fields rather than raw body bytes keeps volatile
+// non-prompt content (sampling params, marshaler field order) out of the
+// key. A missing field is nil.
 func promptFields(body map[string]any, path string) (tools, system, user any) {
 	tools = body["tools"]
 
 	switch path {
 	case "/v1/responses":
-		// The Responses API carries the system prompt in `instructions`
-		// and the conversation in `input` (a string, or a list of
-		// role-tagged items).
 		system = body["instructions"]
 		switch input := body["input"].(type) {
 		case string:
@@ -246,8 +215,7 @@ func promptFields(body map[string]any, path string) (tools, system, user any) {
 		user = body["prompt"]
 	default: // /v1/chat/completions and anything chat-shaped
 		if messages, ok := body["messages"].([]any); ok {
-			// OpenAI-compatible clients use either role for the
-			// system prompt; take whichever appears first.
+			// Clients use either role for the system prompt.
 			system = firstMessageContent(messages, "system", "developer")
 			user = firstMessageContent(messages, "user")
 		}
@@ -273,11 +241,9 @@ func firstMessageContent(messages []any, roles ...string) any {
 	return nil
 }
 
-// promptLen approximates §5.2's prompt_len — the total byte length of tools
-// plus all message contents (the parsed fields, not the raw body) — by
-// summing the string content reachable from those fields. It is the
-// eligibility-floor input and the prefill-cost weight; a size proxy, not an
-// exact token count.
+// promptLen approximates whole-prompt size — tools plus all message
+// contents — by summing reachable string bytes. A size proxy for the floor
+// threshold, not a token count.
 func promptLen(body map[string]any, path string, tools any) int {
 	n := valueLen(tools)
 	switch path {
@@ -292,9 +258,8 @@ func promptLen(body map[string]any, path string, tools any) int {
 	return n
 }
 
-// messageContentLen sums valueLen over the content field of each message in
-// a messages/input list. Non-list shapes (e.g. a string input) are measured
-// directly.
+// messageContentLen sums valueLen over each message's content field;
+// non-list shapes are measured directly.
 func messageContentLen(v any) int {
 	list, ok := v.([]any)
 	if !ok {
@@ -309,10 +274,8 @@ func messageContentLen(v any) int {
 	return n
 }
 
-// valueLen is the length counterpart of flattenValue: the total bytes its
-// string leaves would contribute, computed without building anything. Only
-// string lengths count — structure, numbers, and bools are size noise for a
-// floor threshold.
+// valueLen sums the string bytes reachable from v without building
+// anything.
 func valueLen(v any) int {
 	switch x := v.(type) {
 	case string:
@@ -335,17 +298,10 @@ func valueLen(v any) int {
 }
 
 // flattenValue renders a parsed JSON value into deterministic bytes for the
-// prefix window, spending at most budget bytes. It exists instead of
-// json.Marshal for one reason: boundedness. A multimodal first user message
-// can carry megabytes of inline image data, and marshaling it whole to keep
-// ≤1KB would put an unbounded allocation on every request the shadow
-// observes. Traversal stops the moment the budget is spent.
-//
-// Determinism is what the routing key needs (every router must derive the
-// same bytes from the same parsed value), and three choices provide it: map
-// keys are visited in sorted order, every field is lp()-framed so boundaries
-// can't shift (§6), and scalars render via strconv. The encoding is pinned by
-// test vectors; changing it re-homes every key.
+// prefix window, spending at most budget. It replaces json.Marshal for one
+// reason: boundedness — a multimodal message can carry megabytes of inline
+// image data, and the walk must stop at the budget rather than marshal the
+// whole value first.
 func flattenValue(v any, budget int) []byte {
 	if budget <= 0 {
 		return nil
@@ -355,20 +311,18 @@ func flattenValue(v any, budget int) []byte {
 	return buf
 }
 
-// appendFlattened appends v's flattening to buf, never growing it past
-// budget. Strings are lp-framed; containers frame each element (and each
-// sorted map key) so distinct structures can't collide. The final append may
-// overshoot mid-token; the tail is truncated to the budget, which is safe
-// because a truncated window is still deterministic — both routers truncate
-// identically.
+// appendFlattened appends v's flattening to buf, never growing past budget.
+// Determinism is load-bearing: map keys visit in sorted order, every
+// element is length-prefixed so boundaries can't shift, and scalars render
+// via strconv. Truncating mid-token at the budget is fine — every router
+// truncates identically.
 func appendFlattened(buf []byte, v any, budget int) []byte {
 	if len(buf) >= budget {
 		return buf[:budget]
 	}
 	switch x := v.(type) {
 	case nil:
-		// Contributes nothing: a missing field is lp("") at the Sum
-		// layer.
+		// A missing field contributes nothing.
 	case string:
 		buf = appendFramed(buf, x)
 	case bool:
@@ -391,8 +345,8 @@ func appendFlattened(buf []byte, v any, budget int) []byte {
 			buf = appendFlattened(buf, x[k], budget)
 		}
 	default:
-		// json.Number and exotic shapes: render via their string form
-		// when available; otherwise contribute nothing.
+		// json.Number renders via String(); anything else contributes
+		// nothing.
 		if s, ok := v.(interface{ String() string }); ok {
 			buf = appendFramed(buf, s.String())
 		}
@@ -410,7 +364,7 @@ func appendFramed(buf []byte, s string) []byte {
 	return append(buf, s...)
 }
 
-// sortedKeys returns m's keys in sorted order for deterministic traversal.
+// sortedKeys returns m's keys sorted, for deterministic traversal.
 func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

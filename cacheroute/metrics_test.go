@@ -7,10 +7,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// TestMetricContract pins the Phase 4 metric contract: every metric name and
-// label set the implementation plan documents (and Grafana panels are built
-// on) must appear in the exposition exactly as specified. A rename or label
-// change here is a dashboard-breaking change and must be deliberate.
+// TestMetricContract pins the metric surface Grafana panels are built on:
+// every name and label set must appear in the exposition exactly as listed.
+// A rename or label change here breaks dashboards and must be deliberate.
 func TestMetricContract(t *testing.T) {
 	s, clock, reg := newTestShadow(t)
 	model := "contract-" + t.Name()

@@ -9,52 +9,40 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// DefaultMaxKeys bounds the shadow table. At a few hundred bytes per entry
-// this costs tens of MB. Size it so capacity evictions stay ≈ 0 — a table at
-// capacity misclassifies genuine repeats as first-seen and understates the
-// prize (watch router_cache_route_key_evictions_total{reason="capacity"}).
+// DefaultMaxKeys bounds the shadow table (a few hundred bytes per entry).
+// Size it so capacity evictions stay ≈ 0; see KeyEvictionsTotal.
 const DefaultMaxKeys = 100_000
 
-// retentionFactor extends entry lifetime past the classification window W.
-// Classification only trusts warmth within W, but the repeat-interval
-// histogram exists to validate W against real re-arrival spacing — which
-// requires seeing re-arrivals *beyond* W. Expiring entries exactly at W would
-// truncate the histogram at the window boundary and make the measurement an
-// artifact of itself.
+// retentionFactor keeps entries alive past the classification window so
+// RepeatIntervalSeconds can see re-arrivals beyond it. Expiring at exactly
+// the window would truncate the histogram at the very boundary the data is
+// meant to tune.
 const retentionFactor = 4
 
-// sweepInterval is how often the background sweeper drains expired entries.
-// Expiry is also enforced at touch time (stale warmth classifies as
-// first-seen), so the sweeper is purely a memory bound, not a correctness
-// one.
-const sweepInterval = 30 * time.Second
-
-// sweepChunk caps evictions per lock acquisition so a large expired backlog
-// (e.g. after an idle night) can't stall the request path behind one long
-// sweep.
-const sweepChunk = 1024
-
-// Reuse classifications, the outcome label values of ReuseTotal and
-// ReusePromptBytesTotal. Closed set; dashboards depend on them.
+// sweepInterval and sweepChunk bound the background eviction of expired
+// entries. Stale warmth is also handled at touch time, so sweeping is a
+// memory bound, not a correctness one.
 const (
-	// ReuseFirstSeen: the key is not in the table, or nothing is warm for
-	// it anymore.
+	sweepInterval = 30 * time.Second
+	sweepChunk    = 1024
+)
+
+// Reuse classifications for ReuseTotal and ReusePromptBytesTotal.
+const (
+	// ReuseFirstSeen: key not in the table, or nothing warm for it
+	// anymore.
 	ReuseFirstSeen = "first_seen"
-	// ReuseRepeatWarm: the actual pick was already warm for this key —
-	// random routing got the hit anyway.
+	// ReuseRepeatWarm: the actual pick was already warm for this key.
 	ReuseRepeatWarm = "repeat_warm"
-	// ReuseRepeatCold: the key is warm somewhere, but not where the pick
-	// landed. This is the prize shadow mode exists to size.
+	// ReuseRepeatCold: the key was warm somewhere other than the pick —
+	// the reuse cache-aware routing would have captured.
 	ReuseRepeatCold = "repeat_cold"
 )
 
-// Shadow is the cache-aware routing shadow tracker: one bounded, evicting
-// table keyed by routing key that answers, at request time, "have we seen
-// this key recently, and where did it land?" — the join a per-request
-// decision log would have enabled offline, done in-enclave because metrics
-// are the only telemetry channel out. Nothing in it is exported except the
-// aggregates in metrics.go and the tracked-keys gauge it emits as a
-// prometheus.Collector.
+// Shadow measures what cache-aware routing would do without acting: a
+// bounded, evicting table keyed by routing key records where each key's
+// requests actually landed, and Observe turns that into the aggregate
+// metrics in metrics.go. Per-key state never leaves this process.
 type Shadow struct {
 	mu      sync.Mutex
 	entries map[string]*entry // table key: model \x00 routing key
@@ -65,27 +53,23 @@ type Shadow struct {
 	done chan struct{}
 }
 
-// entry is the per-key shadow state. It never leaves the enclave.
+// entry is the per-key state.
 type entry struct {
 	model    string
 	lastSeen time.Time
 	expiry   time.Time
 
-	// warm records, per replica hostname, when this key last landed there
-	// — under random routing, "where this prefix is warm". Entries older
-	// than W are pruned on touch, so the map stays bounded by the pool
-	// size plus briefly-stale hosts.
+	// warm maps replica hostname → when this key last landed there.
+	// Entries older than the retention window are pruned on touch.
 	warm map[string]time.Time
 
-	// Sliding-window request rate (two fixed one-minute buckets,
-	// interpolated), modeled on ratelimit.RequestTracker.
+	// Two-bucket sliding-window request rate.
 	windowStart time.Time
 	prevCount   int
 	curCount    int
 
-	// home and r are the key's HRW rank-0 replica and replication factor
-	// as of the last observation, aggregated at scrape time into the
-	// tracked-keys gauge.
+	// Last observed HRW home and replication factor, aggregated into the
+	// tracked-keys gauge at scrape time.
 	home string
 	r    int
 
@@ -106,8 +90,8 @@ func WithMaxKeys(n int) Option {
 }
 
 // NewShadow creates a shadow tracker, registers its tracked-keys gauge with
-// reg (nil means the default registerer), and starts the background sweeper.
-// Callers own its lifetime: Close stops the sweeper.
+// reg (nil means the default registerer), and starts the background
+// sweeper. Close stops the sweeper.
 func NewShadow(reg prometheus.Registerer, opts ...Option) *Shadow {
 	s := &Shadow{
 		entries: make(map[string]*entry),
@@ -133,11 +117,9 @@ func (s *Shadow) Close() {
 }
 
 // Observe runs the shadow pipeline for one request after the production
-// selector has made its (still random) pick. It classifies the request
-// against the table, computes the would-be cache-aware pick, updates the
-// table, and increments metrics. It must never affect the request: any panic
-// is recovered into the error outcome, and its full cost is metered into
-// ComputeSeconds.
+// selector has picked a replica: classify the request against the table,
+// compute the would-be pick, update state, increment metrics. It must never
+// affect the request — panics are recovered into OutcomeError.
 func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost string, cfg Settings) {
 	start := time.Now()
 	defer func() {
@@ -160,9 +142,8 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 		return
 	}
 	if len(pool.Candidates) == 0 {
-		// Can't happen while the pool snapshot falls back to all
-		// replicas, but a ranking over nothing must not panic into the
-		// error counter for a shape difference.
+		// Unreachable while the pool snapshot falls back to all
+		// replicas, but never rank over nothing.
 		RequestsTotal.WithLabelValues(model, string(OutcomePoolTooSmall)).Inc()
 		return
 	}
@@ -182,25 +163,24 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 	}
 }
 
-// keyedResult carries everything observeKeyed computes under the lock so the
-// metric increments can happen outside it.
+// keyedResult is what observeKeyed computes under the lock, so the metric
+// increments can happen outside it.
 type keyedResult struct {
-	reuse    string        // ReuseTotal outcome label
-	repeat   bool          // whether the key was in the table (interval is meaningful)
-	interval time.Duration // time since the key was last seen
-	rpm      float64       // sliding-window request rate, including this request
-	pick     string        // would-be pick: least-loaded of the top-R ranking
-	r        int           // replication factor at pick time
+	reuse    string
+	repeat   bool // the key was already in the table
+	interval time.Duration
+	rpm      float64
+	pick     string // least-loaded of the top-R ranking
+	r        int
 }
 
-// observeKeyed does the table touch, classification, ranking, and state
-// update for one keyed request under a single lock acquisition.
+// observeKeyed does the table touch, classification, and ranking for one
+// keyed request under a single lock acquisition.
 func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, actualHost string, cfg Settings) keyedResult {
 	now := s.now()
-	// The table key is model-scoped: the routing key itself contains no
-	// model (§5.1), so the same salted prompt sent to two models derives
-	// the same key — but warm hostnames are per-model replicas, and
-	// cross-model hits must not pollute each other's classification.
+	// Scope the table key by model: the routing key contains no model id,
+	// so the same salted prompt sent to two models collides — but warmth
+	// is per-model replicas.
 	tableKey := model + "\x00" + string(key[:])
 
 	s.mu.Lock()
@@ -216,8 +196,6 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 		res.interval = now.Sub(e.lastSeen)
 		s.lru.MoveToFront(e.elem)
 
-		// Prune warmth beyond the classification window; what's left is
-		// where the engine plausibly still holds this prefix.
 		for host, seen := range e.warm {
 			if now.Sub(seen) > cfg.Retention {
 				delete(e.warm, host)
@@ -225,8 +203,7 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 		}
 		switch {
 		case len(e.warm) == 0:
-			// The key is back, but nothing is warm anymore —
-			// equivalent to a first sighting for cache purposes.
+			// Everything went stale: cache-wise a first sighting.
 			res.reuse = ReuseFirstSeen
 		case !e.warm[actualHost].IsZero():
 			res.reuse = ReuseRepeatWarm
@@ -249,8 +226,8 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	return res
 }
 
-// insertLocked adds a fresh entry, evicting the least-recently-used one when
-// the table is full. Must be called with s.mu held.
+// insertLocked adds a fresh entry, evicting the least-recently-used one at
+// capacity. Caller holds s.mu.
 func (s *Shadow) insertLocked(model, tableKey string, now time.Time) *entry {
 	if len(s.entries) >= s.maxKeys {
 		if back := s.lru.Back(); back != nil {
@@ -269,11 +246,9 @@ func (s *Shadow) insertLocked(model, tableKey string, now time.Time) *entry {
 	return e
 }
 
-// bumpRate records one request in the entry's rate window and returns the
-// sliding-window rate in requests/minute, including this request. Two fixed
-// one-minute buckets are interpolated by position within the current minute —
-// cheap, and smooth enough that the key_rpm histogram and R don't sawtooth at
-// minute boundaries.
+// bumpRate records one request and returns the sliding-window rate in
+// requests/minute: two fixed one-minute buckets, interpolated by position
+// within the current minute so the rate doesn't sawtooth at boundaries.
 func (e *entry) bumpRate(now time.Time) float64 {
 	minute := now.Truncate(time.Minute)
 	switch {
@@ -292,10 +267,7 @@ func (e *entry) bumpRate(now time.Time) float64 {
 	return float64(e.prevCount)*(1-frac) + float64(e.curCount)
 }
 
-// sweeper periodically drops expired entries from the cold end of the LRU.
-// Because a touch moves an entry to the front and pushes its expiry forward,
-// LRU order is expiry order, so sweeping pops from the back until it meets a
-// live entry — O(expired), not O(table).
+// sweeper drains expired entries until Close.
 func (s *Shadow) sweeper() {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
@@ -309,7 +281,10 @@ func (s *Shadow) sweeper() {
 	}
 }
 
-// sweep evicts expired entries in bounded chunks per lock acquisition.
+// sweep evicts expired entries from the cold end of the LRU in bounded
+// chunks per lock acquisition. Touches move entries to the front and push
+// expiry forward, so LRU order is expiry order and the scan is O(expired),
+// not O(table).
 func (s *Shadow) sweep() {
 	for {
 		evicted := 0
@@ -342,9 +317,9 @@ func (s *Shadow) Describe(ch chan<- *prometheus.Desc) {
 	ch <- trackedKeysDesc
 }
 
-// Collect implements prometheus.Collector: it walks the table and emits the
-// tracked-keys gauge — live keys by model, current HRW home, and current
-// replication factor. Only counts leave the lock; keys never do.
+// Collect implements prometheus.Collector: it aggregates live keys by
+// (model, home, replication factor). Only counts leave the lock; keys never
+// do.
 func (s *Shadow) Collect(ch chan<- prometheus.Metric) {
 	type group struct{ model, home, r string }
 	counts := make(map[group]int)

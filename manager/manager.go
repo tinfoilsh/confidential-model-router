@@ -35,10 +35,9 @@ type Enclave struct {
 	metrics   *enclaveMetrics
 	cb        *circuitBreaker
 
-	// inflight counts requests currently being proxied through this
-	// enclave. Unlike the polled queue depth (up to ~45s stale), it is
-	// live, which is what least-loaded selection within a hot key's warm
-	// set needs (design doc §5.5).
+	// inflight counts requests currently proxied through this enclave —
+	// a live load signal, unlike the polled queue depth, which can be up
+	// to ~45s stale.
 	inflight atomic.Int64
 }
 
@@ -362,12 +361,11 @@ func (m *Model) EnclaveCount() int {
 	return len(m.Enclaves)
 }
 
-// CacheRoutePool snapshots the model's replica set for the cache-route
-// shadow: the breaker-closed enclaves with their live in-flight counts —
-// the stable HRW membership of the design doc's §5.3, deliberately ignoring
-// the overload flag so a flapping load signal can't re-home keys — falling
-// back to all enclaves when every breaker is open, mirroring NextEnclave's
-// degraded fallback.
+// CacheRoutePool snapshots the model's replica set for cache-aware routing:
+// breaker-closed enclaves with live in-flight counts, falling back to all
+// enclaves when every breaker is open (mirroring NextEnclave). The overload
+// flag is deliberately ignored — membership must stay stable so a flapping
+// load signal can't move a key's home.
 func (m *Model) CacheRoutePool() cacheroute.Pool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
