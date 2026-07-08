@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -653,5 +654,55 @@ func TestResolveAutoModel_MissingOptions(t *testing.T) {
 	}
 	if _, ok := body["auto_model_options"]; ok {
 		t.Fatal("auto_model_options should be stripped even on error")
+	}
+}
+
+func TestFilterModelsToServed(t *testing.T) {
+	served := map[string]*manager.Model{
+		"kimi-k2-6": {},
+		"glm-5-2":   {},
+	}
+
+	body := []byte(`{"object":"list","data":[
+		{"id":"kimi-k2-6","name":"Kimi K2.6","type":"chat"},
+		{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro","type":"chat"},
+		{"id":"glm-5-2","name":"GLM-5.2","type":"chat"}
+	]}`)
+
+	out, ok := filterModelsToServed(body, served)
+	if !ok {
+		t.Fatal("expected ok=true for a well-formed payload")
+	}
+
+	var parsed struct {
+		Object string           `json:"object"`
+		Data   []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	if parsed.Object != "list" {
+		t.Errorf("object = %q, want %q", parsed.Object, "list")
+	}
+
+	gotIDs := make(map[string]map[string]any)
+	for _, m := range parsed.Data {
+		gotIDs[m["id"].(string)] = m
+	}
+	if len(gotIDs) != 2 {
+		t.Fatalf("kept %d models, want 2: %v", len(gotIDs), gotIDs)
+	}
+	if _, ok := gotIDs["deepseek-v4-pro"]; ok {
+		t.Error("deepseek-v4-pro is not served but was kept")
+	}
+	// Passthrough fields (name) must survive filtering.
+	if kimi := gotIDs["kimi-k2-6"]; kimi == nil || kimi["name"] != "Kimi K2.6" {
+		t.Errorf("kimi-k2-6 name not preserved: %v", kimi)
+	}
+}
+
+func TestFilterModelsToServedRejectsMalformed(t *testing.T) {
+	if _, ok := filterModelsToServed([]byte(`{bad json`), map[string]*manager.Model{}); ok {
+		t.Error("expected ok=false for malformed payload so caller passes it through")
 	}
 }

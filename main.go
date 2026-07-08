@@ -150,6 +150,42 @@ func sendJSON(w http.ResponseWriter, data any) {
 	}
 }
 
+// filterModelsToServed narrows an OpenAI-compatible /v1/models payload to the
+// models this router actually serves, so the list reflects local availability
+// rather than the control plane's full catalog. Returns false if the payload
+// can't be parsed, signalling the caller to pass it through unchanged.
+func filterModelsToServed(body []byte, served map[string]*manager.Model) ([]byte, bool) {
+	var payload struct {
+		Object string           `json:"object"`
+		Data   []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+
+	kept := make([]map[string]any, 0, len(payload.Data))
+	for _, entry := range payload.Data {
+		if id, ok := entry["id"].(string); ok {
+			if _, served := served[id]; served {
+				kept = append(kept, entry)
+			}
+		}
+	}
+
+	object := payload.Object
+	if object == "" {
+		object = "list"
+	}
+	out, err := json.Marshal(map[string]any{
+		"object": object,
+		"data":   kept,
+	})
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
 func isWebSocketUpgrade(r *http.Request) bool {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return false
@@ -477,9 +513,24 @@ func main() {
 					return
 				}
 				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
+				// Narrow the control plane's full catalog to the models this
+				// router actually serves. On any parse failure, pass the
+				// upstream response through untouched.
+				if resp.StatusCode == http.StatusOK {
+					if filtered, ok := filterModelsToServed(body, em.Models()); ok {
+						w.WriteHeader(http.StatusOK)
+						w.Write(filtered)
+						return
+					}
+				}
 				w.WriteHeader(resp.StatusCode)
-				io.Copy(w, resp.Body)
+				w.Write(body)
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
