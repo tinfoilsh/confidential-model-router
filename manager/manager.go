@@ -676,3 +676,17 @@ func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {
 	}
 	return e.metrics.shouldReject()
 }
+
+// OverloadMarks returns the resolved overload trip and clear marks for this
+// enclave, or ok=false when no usable overload thresholds are configured.
+func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
+	if e == nil || e.metrics == nil {
+		return 0, 0, false
+	}
+	cfg := e.metrics.currentConfig()
+	if cfg == nil || cfg.MaxRequestsWaiting <= 0 {
+		return 0, 0, false
+	}
+	trip, clear = cfg.Marks()
+	return trip, clear, true
+}

@@ -29,9 +29,30 @@ type Model struct {
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
+//
+// MaxRequestsWaiting is the trip mark: a backend whose queue depth reaches it
+// is flagged overloaded. ClearRequestsWaiting is the hysteresis clear mark:
+// the flag clears only once the queue drains back down to it, so a backend
+// hovering around the trip mark doesn't flap in and out of overload on every
+// poll. Queue depths are integral, so setting the clear mark to
+// MaxRequestsWaiting-1 disables hysteresis.
 type OverloadConfig struct {
-	MaxRequestsWaiting int `yaml:"max_requests_waiting"`
-	RetryAfterMinutes  int `yaml:"retry_after_minutes"`
+	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
+	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
+	RetryAfterMinutes    int `yaml:"retry_after_minutes"`
+}
+
+// Marks returns the overload trip and clear thresholds. When
+// ClearRequestsWaiting is unset or out of range (it must sit below the trip
+// mark), the clear mark defaults to half the trip mark. Only meaningful when
+// MaxRequestsWaiting is positive.
+func (c *OverloadConfig) Marks() (trip, clear int) {
+	trip = c.MaxRequestsWaiting
+	clear = c.ClearRequestsWaiting
+	if clear <= 0 || clear >= trip {
+		clear = trip / 2
+	}
+	return trip, clear
 }
 
 // Config represents the configuration structure matching config.yml
