@@ -44,6 +44,8 @@ models:
       - glm-5-2-inf7.tinfoil.containers.tinfoil.dev
       - glm-5-2-inf11.tinfoil.containers.tinfoil.dev
       - glm-5-2-inf12.tinfoil.containers.tinfoil.dev
+    cache_route:
+      mode: shadow
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
@@ -53,6 +55,8 @@ models:
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
+    cache_route:
+      mode: shadow
 
   gpt-oss-safeguard-120b:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
@@ -98,3 +102,5 @@ models:
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
+    cache_route:
+      mode: shadow
