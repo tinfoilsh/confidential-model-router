@@ -46,11 +46,27 @@ const (
 type Shadow struct {
 	mu      sync.Mutex
 	entries map[string]*entry // table key: model \x00 routing key
-	lru     *list.List        // front = most recently touched; values are table keys
+	// One LRU list per retention duration; expiry is lastSeen plus a fixed
+	// multiple of retention, so WITHIN a list LRU order is expiry order and
+	// the sweeper can pop expired entries from the back. A single global
+	// list would not have that property across models with different
+	// retention windows, stranding expired entries behind an unexpired
+	// long-retention one.
+	lists map[time.Duration]*list.List
+	// Live tracked-keys aggregate by (model, home, r), maintained on every
+	// insert/touch/evict so Collect never has to walk the table under the
+	// request path's mutex.
+	counts  map[group]int
 	maxKeys int
 
 	now  func() time.Time
 	done chan struct{}
+}
+
+// group identifies one tracked-keys gauge series.
+type group struct {
+	model, home string
+	r           int
 }
 
 // entry is the per-key state.
@@ -68,12 +84,13 @@ type entry struct {
 	prevCount   int
 	curCount    int
 
-	// Last observed HRW home and replication factor, aggregated into the
-	// tracked-keys gauge at scrape time.
+	// Last observed HRW home and replication factor, mirrored into
+	// Shadow.counts.
 	home string
 	r    int
 
-	elem *list.Element
+	retention time.Duration // which of Shadow.lists holds elem
+	elem      *list.Element
 }
 
 // Option configures a Shadow.
@@ -95,7 +112,8 @@ func WithMaxKeys(n int) Option {
 func NewShadow(reg prometheus.Registerer, opts ...Option) *Shadow {
 	s := &Shadow{
 		entries: make(map[string]*entry),
-		lru:     list.New(),
+		lists:   make(map[time.Duration]*list.List),
+		counts:  make(map[group]int),
 		maxKeys: DefaultMaxKeys,
 		now:     time.Now,
 		done:    make(chan struct{}),
@@ -189,12 +207,12 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	var res keyedResult
 	e, ok := s.entries[tableKey]
 	if !ok {
-		e = s.insertLocked(model, tableKey, now)
+		e = s.insertLocked(model, tableKey, cfg.Retention)
 		res.reuse = ReuseFirstSeen
 	} else {
 		res.repeat = true
 		res.interval = now.Sub(e.lastSeen)
-		s.lru.MoveToFront(e.elem)
+		s.touchLocked(e, cfg.Retention)
 
 		for host, seen := range e.warm {
 			if now.Sub(seen) > cfg.Retention {
@@ -220,30 +238,92 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	ranked := rank(key, candidates)
 	res.r = replicationFactor(res.rpm, cfg.SplitThresholdRPM, len(ranked))
 	res.pick = leastLoaded(ranked[:res.r]).Host
+	s.shiftCountLocked(model, e.home, e.r, ranked[0].Host, res.r)
 	e.home = ranked[0].Host
 	e.r = res.r
 
 	return res
 }
 
-// insertLocked adds a fresh entry, evicting the least-recently-used one at
-// capacity. Caller holds s.mu.
-func (s *Shadow) insertLocked(model, tableKey string, now time.Time) *entry {
+// shiftCountLocked moves an entry between tracked-keys groups. An empty
+// oldHome means the entry is new; an empty newHome means it is leaving.
+// Caller holds s.mu.
+func (s *Shadow) shiftCountLocked(model, oldHome string, oldR int, newHome string, newR int) {
+	if oldHome == newHome && oldR == newR {
+		return
+	}
+	if oldHome != "" {
+		g := group{model, oldHome, oldR}
+		if s.counts[g]--; s.counts[g] <= 0 {
+			delete(s.counts, g)
+		}
+	}
+	if newHome != "" {
+		s.counts[group{model, newHome, newR}]++
+	}
+}
+
+// listFor returns the LRU list for a retention duration, creating it on
+// first use. Caller holds s.mu.
+func (s *Shadow) listFor(retention time.Duration) *list.List {
+	l := s.lists[retention]
+	if l == nil {
+		l = list.New()
+		s.lists[retention] = l
+	}
+	return l
+}
+
+// touchLocked moves an entry to the front of its retention list, migrating
+// it when the model's configured retention changed. Caller holds s.mu.
+func (s *Shadow) touchLocked(e *entry, retention time.Duration) {
+	if e.retention == retention {
+		s.lists[e.retention].MoveToFront(e.elem)
+		return
+	}
+	tableKey := e.elem.Value
+	s.lists[e.retention].Remove(e.elem)
+	e.retention = retention
+	e.elem = s.listFor(retention).PushFront(tableKey)
+}
+
+// insertLocked adds a fresh entry, evicting the least-recently-touched one
+// across all retention lists at capacity. Caller holds s.mu.
+func (s *Shadow) insertLocked(model, tableKey string, retention time.Duration) *entry {
 	if len(s.entries) >= s.maxKeys {
-		if back := s.lru.Back(); back != nil {
-			evictKey := back.Value.(string)
-			KeyEvictionsTotal.WithLabelValues(s.entries[evictKey].model, "capacity").Inc()
-			delete(s.entries, evictKey)
-			s.lru.Remove(back)
+		var oldest *list.Element
+		var oldestSeen time.Time
+		for _, l := range s.lists {
+			back := l.Back()
+			if back == nil {
+				continue
+			}
+			if seen := s.entries[back.Value.(string)].lastSeen; oldest == nil || seen.Before(oldestSeen) {
+				oldest, oldestSeen = back, seen
+			}
+		}
+		if oldest != nil {
+			s.evictLocked(oldest, "capacity")
 		}
 	}
 	e := &entry{
-		model: model,
-		warm:  make(map[string]time.Time, 4),
+		model:     model,
+		warm:      make(map[string]time.Time, 4),
+		retention: retention,
 	}
-	e.elem = s.lru.PushFront(tableKey)
+	e.elem = s.listFor(retention).PushFront(tableKey)
 	s.entries[tableKey] = e
 	return e
+}
+
+// evictLocked removes an entry given its list element. Caller holds s.mu.
+func (s *Shadow) evictLocked(elem *list.Element, reason string) {
+	tableKey := elem.Value.(string)
+	e := s.entries[tableKey]
+	KeyEvictionsTotal.WithLabelValues(e.model, reason).Inc()
+	s.shiftCountLocked(e.model, e.home, e.r, "", 0)
+	delete(s.entries, tableKey)
+	s.lists[e.retention].Remove(elem)
 }
 
 // bumpRate records one request and returns the sliding-window rate in
@@ -281,29 +361,30 @@ func (s *Shadow) sweeper() {
 	}
 }
 
-// sweep evicts expired entries from the cold end of the LRU in bounded
-// chunks per lock acquisition. Touches move entries to the front and push
-// expiry forward, so LRU order is expiry order and the scan is O(expired),
-// not O(table).
+// sweep evicts expired entries from the cold end of each retention list in
+// bounded chunks per lock acquisition. Within a list, touches move entries
+// to the front and push expiry forward by the same fixed multiple, so LRU
+// order is expiry order and the scan is O(expired), not O(table).
 func (s *Shadow) sweep() {
 	for {
 		evicted := 0
 		s.mu.Lock()
 		now := s.now()
-		for evicted < sweepChunk {
-			back := s.lru.Back()
-			if back == nil {
-				break
+		for retention, l := range s.lists {
+			for evicted < sweepChunk {
+				back := l.Back()
+				if back == nil {
+					break
+				}
+				if s.entries[back.Value.(string)].expiry.After(now) {
+					break
+				}
+				s.evictLocked(back, "ttl")
+				evicted++
 			}
-			tableKey := back.Value.(string)
-			e := s.entries[tableKey]
-			if e.expiry.After(now) {
-				break
+			if l.Len() == 0 {
+				delete(s.lists, retention)
 			}
-			KeyEvictionsTotal.WithLabelValues(e.model, "ttl").Inc()
-			delete(s.entries, tableKey)
-			s.lru.Remove(back)
-			evicted++
 		}
 		s.mu.Unlock()
 		if evicted < sweepChunk {
@@ -317,20 +398,23 @@ func (s *Shadow) Describe(ch chan<- *prometheus.Desc) {
 	ch <- trackedKeysDesc
 }
 
-// Collect implements prometheus.Collector: it aggregates live keys by
-// (model, home, replication factor). Only counts leave the lock; keys never
-// do.
+// Collect implements prometheus.Collector: it snapshots the incrementally
+// maintained per-(model, home, r) counts — O(series), never a table walk, so
+// a scrape cannot stall the request path behind the shared mutex. Only
+// counts leave the lock; keys never do.
 func (s *Shadow) Collect(ch chan<- prometheus.Metric) {
-	type group struct{ model, home, r string }
-	counts := make(map[group]int)
-
+	type sample struct {
+		g group
+		n int
+	}
 	s.mu.Lock()
-	for _, e := range s.entries {
-		counts[group{e.model, e.home, strconv.Itoa(e.r)}]++
+	samples := make([]sample, 0, len(s.counts))
+	for g, n := range s.counts {
+		samples = append(samples, sample{g, n})
 	}
 	s.mu.Unlock()
 
-	for g, n := range counts {
-		ch <- prometheus.MustNewConstMetric(trackedKeysDesc, prometheus.GaugeValue, float64(n), g.model, g.home, g.r)
+	for _, sm := range samples {
+		ch <- prometheus.MustNewConstMetric(trackedKeysDesc, prometheus.GaugeValue, float64(sm.n), sm.g.model, sm.g.home, strconv.Itoa(sm.g.r))
 	}
 }

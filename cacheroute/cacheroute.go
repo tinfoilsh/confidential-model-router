@@ -314,21 +314,20 @@ func flattenValue(v any, budget int) []byte {
 // appendFlattened appends v's flattening to buf, never growing past budget.
 // Determinism is load-bearing: map keys visit in sorted order, every
 // element is length-prefixed so boundaries can't shift, and scalars render
-// via strconv. Truncating mid-token at the budget is fine — every router
-// truncates identically.
+// via strconv.
 func appendFlattened(buf []byte, v any, budget int) []byte {
 	if len(buf) >= budget {
-		return buf[:budget]
+		return buf
 	}
 	switch x := v.(type) {
 	case nil:
 		// A missing field contributes nothing.
 	case string:
-		buf = appendFramed(buf, x)
+		buf = appendFramed(buf, x, budget)
 	case bool:
-		buf = appendFramed(buf, strconv.FormatBool(x))
+		buf = appendFramed(buf, strconv.FormatBool(x), budget)
 	case float64:
-		buf = appendFramed(buf, strconv.FormatFloat(x, 'g', -1, 64))
+		buf = appendFramed(buf, strconv.FormatFloat(x, 'g', -1, 64), budget)
 	case []any:
 		for _, e := range x {
 			if len(buf) >= budget {
@@ -341,24 +340,33 @@ func appendFlattened(buf []byte, v any, budget int) []byte {
 			if len(buf) >= budget {
 				break
 			}
-			buf = appendFramed(buf, k)
+			buf = appendFramed(buf, k, budget)
 			buf = appendFlattened(buf, x[k], budget)
 		}
 	default:
 		// json.Number renders via String(); anything else contributes
 		// nothing.
 		if s, ok := v.(interface{ String() string }); ok {
-			buf = appendFramed(buf, s.String())
+			buf = appendFramed(buf, s.String(), budget)
 		}
-	}
-	if len(buf) > budget {
-		buf = buf[:budget]
 	}
 	return buf
 }
 
-// appendFramed appends lp(s) = uint32_be(len(s)) ‖ s.
-func appendFramed(buf []byte, s string) []byte {
+// appendFramed appends lp(s) = uint32_be(len(s)) ‖ s, truncating s so the
+// frame fits the budget. Truncating BEFORE framing is load-bearing twice:
+// the header encodes the window-visible length, so bytes beyond the window
+// can never influence the key (a growing prompt with a stable prefix must
+// keep its key), and a multi-megabyte leaf costs at most the window, never a
+// full copy.
+func appendFramed(buf []byte, s string, budget int) []byte {
+	room := budget - len(buf) - 4
+	if room <= 0 {
+		return buf
+	}
+	if len(s) > room {
+		s = s[:room]
+	}
 	n := uint32(len(s))
 	buf = append(buf, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	return append(buf, s...)

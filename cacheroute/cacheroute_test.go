@@ -184,6 +184,31 @@ func TestExtractRequestWindowCap(t *testing.T) {
 	if c == d {
 		t.Error("divergence inside the window must change the key")
 	}
+
+	// Total field length beyond the window must not move the key either: a
+	// growing prompt with a stable prefix keeps its key.
+	g := extract(t, chatBody("sys", prefix), "/v1/chat/completions", testSalt).Key
+	h := extract(t, chatBody("sys", prefix+strings.Repeat("q", 1000)), "/v1/chat/completions", testSalt).Key
+	if g != h {
+		t.Error("field length beyond the window must not change the key")
+	}
+	i := extract(t, map[string]any{"prompt": prefix}, "/v1/completions", testSalt).Key
+	j := extract(t, map[string]any{"prompt": prefix + strings.Repeat("q", 1000)}, "/v1/completions", testSalt).Key
+	if i != j {
+		t.Error("growing completions prompt with a stable prefix must keep its key")
+	}
+}
+
+// TestFlattenLeafBounded pins the flattener's cost bound: a multi-megabyte
+// leaf must cost at most the window, never a full copy.
+func TestFlattenLeafBounded(t *testing.T) {
+	out := flattenValue(strings.Repeat("x", 8<<20), prefixWindowCap)
+	if len(out) > prefixWindowCap {
+		t.Fatalf("flattened %d bytes, cap %d", len(out), prefixWindowCap)
+	}
+	if cap(out) > 4*prefixWindowCap {
+		t.Fatalf("flatten buffer capacity %d betrays a full-leaf copy", cap(out))
+	}
 }
 
 // TestExtractRequestMultimodalBounded exercises structured (multimodal)
