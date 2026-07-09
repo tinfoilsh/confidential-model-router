@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,5 +81,41 @@ func TestPostToEnclaveInflight(t *testing.T) {
 	}
 	if got := e2.inflight.Load(); got != 0 {
 		t.Fatalf("in-flight after error = %d, want 0", got)
+	}
+}
+
+type strictCloser struct {
+	closes int
+}
+
+func (c *strictCloser) Read(p []byte) (int, error) { return 0, nil }
+func (c *strictCloser) Close() error {
+	c.closes++
+	if c.closes > 1 {
+		return fmt.Errorf("closed %d times", c.closes)
+	}
+	return nil
+}
+
+// TestInflightBodyCloseIdempotent pins that the wrapper owns the body's
+// lifecycle: exactly one underlying close, exactly one gauge decrement, and
+// nil on every later call.
+func TestInflightBodyCloseIdempotent(t *testing.T) {
+	e := &Enclave{}
+	e.inflight.Add(1)
+	rc := &strictCloser{}
+	b := &inflightBody{ReadCloser: rc, enclave: e}
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("first close = %v, want nil", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("second close = %v, want nil", err)
+	}
+	if rc.closes != 1 {
+		t.Fatalf("underlying closes = %d, want 1", rc.closes)
+	}
+	if got := e.inflight.Load(); got != 0 {
+		t.Fatalf("in-flight = %d, want 0", got)
 	}
 }

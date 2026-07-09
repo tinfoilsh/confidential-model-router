@@ -163,10 +163,14 @@ type inflightBody struct {
 	closed  atomic.Bool
 }
 
+// Close is idempotent, like net/http's own response bodies: the first call
+// decrements the gauge and closes the underlying body, later calls do
+// nothing and return nil.
 func (b *inflightBody) Close() error {
-	if b.closed.CompareAndSwap(false, true) {
-		b.enclave.inflight.Add(-1)
+	if !b.closed.CompareAndSwap(false, true) {
+		return nil
 	}
+	b.enclave.inflight.Add(-1)
 	return b.ReadCloser.Close()
 }
 
