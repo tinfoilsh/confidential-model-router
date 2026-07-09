@@ -39,10 +39,11 @@ const (
 	ReuseRepeatCold = "repeat_cold"
 )
 
-// Shadow measures what cache-aware routing would do without acting: a
-// bounded, evicting table keyed by routing key records where each key's
-// requests actually landed, and Observe turns that into the aggregate
-// metrics in metrics.go. Per-key state never leaves this process.
+// Shadow is the cache-aware routing engine: a bounded, evicting table keyed
+// by routing key records where each key's requests actually landed. On
+// shadow pools Observe only measures; on enforced pools Decide drives
+// replica selection and ObserveLanding records it. Per-key state never
+// leaves this process.
 type Shadow struct {
 	mu      sync.Mutex
 	entries map[string]*entry // table key: model \x00 routing key
@@ -134,21 +135,87 @@ func (s *Shadow) Close() {
 	close(s.done)
 }
 
+// Decision is one keyed request's routing decision, made before dispatch by
+// Decide and consumed by ObserveLanding once the landing is known — one
+// ranking and one pool snapshot per request, so the recorded replication
+// factor is the one that actually shaped routing.
+type Decision struct {
+	// Order is the host preference: the pick (least-loaded of the key's
+	// top-R replicas) first, then the rest of the ranking, so an
+	// unacceptable pick spills to the next-warmest host.
+	Order []string
+
+	pool    Pool
+	home    string
+	r       int
+	elapsed time.Duration
+}
+
+// Decide computes the routing decision for a keyed request on an enforced
+// pool. Nil when the request is not keyed or the pool is too small — the
+// caller falls back to random selection — and on a recovered panic, so a
+// derivation bug degrades to random routing instead of failing the request.
+// Read-only: rate and warmth accounting happen at landing time.
+func (s *Shadow) Decide(model string, req *Request, pool Pool, cfg Settings) (d *Decision) {
+	start := time.Now()
+	defer func() {
+		if r := recover(); r != nil {
+			RequestsTotal.WithLabelValues(model, string(OutcomeError)).Inc()
+			d = nil
+		}
+	}()
+
+	if req == nil || req.Outcome != OutcomeKeyed || pool.Size < 2 || len(pool.Candidates) == 0 {
+		return nil
+	}
+	ranked := rank(req.Key, pool.Candidates)
+	r := replicationFactor(s.peekRate(model, req.Key), cfg.SplitThresholdRPM, len(ranked))
+	pick := leastLoaded(ranked[:r]).Host
+	order := make([]string, 0, len(ranked))
+	order = append(order, pick)
+	for _, c := range ranked {
+		if c.Host != pick {
+			order = append(order, c.Host)
+		}
+	}
+	return &Decision{
+		Order:   order,
+		pool:    pool,
+		home:    ranked[0].Host,
+		r:       r,
+		elapsed: time.Since(start),
+	}
+}
+
 // Observe runs the shadow pipeline for one request after the production
 // selector has picked a replica: classify the request against the table,
 // compute the would-be pick, update state, increment metrics. It must never
 // affect the request — panics are recovered into OutcomeError.
 func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost string, cfg Settings) {
+	s.observe(model, req, pool, actualHost, nil, cfg)
+}
+
+// ObserveLanding records the landing of a dispatch routed by d, reusing the
+// decision's pool snapshot and ranking so the metrics describe the decision
+// that was actually made.
+func (s *Shadow) ObserveLanding(model string, req *Request, d *Decision, actualHost string, cfg Settings) {
+	s.observe(model, req, d.pool, actualHost, d, cfg)
+}
+
+func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost string, d *Decision, cfg Settings) {
 	start := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			RequestsTotal.WithLabelValues(model, string(OutcomeError)).Inc()
 		}
-		var extraction time.Duration
+		var elapsed time.Duration
 		if req != nil {
-			extraction = req.elapsed
+			elapsed = req.elapsed
 		}
-		ComputeSeconds.Observe((extraction + time.Since(start)).Seconds())
+		if d != nil {
+			elapsed += d.elapsed
+		}
+		ComputeSeconds.Observe((elapsed + time.Since(start)).Seconds())
 	}()
 
 	if req.Outcome != OutcomeKeyed {
@@ -166,7 +233,7 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 		return
 	}
 
-	res := s.observeKeyed(model, req.Key, pool.Candidates, actualHost, cfg)
+	res := s.observeKeyed(model, req.Key, pool.Candidates, actualHost, d, cfg)
 
 	RequestsTotal.WithLabelValues(model, string(OutcomeKeyed)).Inc()
 	ReuseTotal.WithLabelValues(model, res.reuse).Inc()
@@ -187,10 +254,11 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 	if !hostIn(pool.Candidates, actualHost) {
 		return
 	}
-	if cfg.Mode == ModeEnforced {
+	if d != nil || cfg.Mode == ModeEnforced {
 		// The landing is the cache-aware pick (modulo overload spill), so
-		// record the real routed distribution and leave the random
-		// comparison quiet.
+		// record the real routed distribution — labeled with the
+		// replication factor that shaped the routing when a decision is
+		// available — and leave the random comparison quiet.
 		PicksTotal.WithLabelValues(model, actualHost, strconv.Itoa(res.r)).Inc()
 		return
 	}
@@ -198,29 +266,6 @@ func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost strin
 	if res.pick == actualHost {
 		RandomMatchTotal.WithLabelValues(model).Inc()
 	}
-}
-
-// PreferenceOrder returns the cache-aware host order for a keyed request:
-// the least-loaded of the key's top-R replicas first, then the remaining
-// ranking, so an unacceptable pick spills to the next-warmest host. Nil when
-// the request is not keyed or the pool is too small — the caller falls back
-// to random selection. Read-only: rate and warmth accounting happen in
-// Observe at dispatch.
-func (s *Shadow) PreferenceOrder(model string, req *Request, pool Pool, cfg Settings) []string {
-	if req == nil || req.Outcome != OutcomeKeyed || pool.Size < 2 || len(pool.Candidates) == 0 {
-		return nil
-	}
-	ranked := rank(req.Key, pool.Candidates)
-	r := replicationFactor(s.peekRate(model, req.Key), cfg.SplitThresholdRPM, len(ranked))
-	pick := leastLoaded(ranked[:r]).Host
-	order := make([]string, 0, len(ranked))
-	order = append(order, pick)
-	for _, c := range ranked {
-		if c.Host != pick {
-			order = append(order, c.Host)
-		}
-	}
-	return order
 }
 
 // peekRate reads a key's current request rate without recording an arrival.
@@ -251,13 +296,15 @@ type keyedResult struct {
 	repeat   bool // the key was already in the table
 	interval time.Duration
 	rpm      float64
-	pick     string // least-loaded of the top-R ranking
+	pick     string // least-loaded of the top-R ranking; unset when a Decision was supplied
 	r        int
 }
 
 // observeKeyed does the table touch, classification, and ranking for one
-// keyed request under a single lock acquisition.
-func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, actualHost string, cfg Settings) keyedResult {
+// keyed request under a single lock acquisition. When d is non-nil the
+// dispatch was routed by that decision, so its home and replication factor
+// are recorded instead of re-deriving them.
+func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, actualHost string, d *Decision, cfg Settings) keyedResult {
 	now := s.now()
 	// Scope the table key by model: the routing key contains no model id,
 	// so the same salted prompt sent to two models collides — but warmth
@@ -298,12 +345,17 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	e.lastSeen = now
 	e.expiry = now.Add(retentionFactor * cfg.Retention)
 
-	ranked := rank(key, candidates)
-	res.r = replicationFactor(res.rpm, cfg.SplitThresholdRPM, len(ranked))
-	res.pick = leastLoaded(ranked[:res.r]).Host
-	s.shiftCountLocked(model, e.home, e.r, ranked[0].Host, res.r)
-	e.home = ranked[0].Host
-	e.r = res.r
+	home := ""
+	if d != nil {
+		home, res.r = d.home, d.r
+	} else {
+		ranked := rank(key, candidates)
+		res.r = replicationFactor(res.rpm, cfg.SplitThresholdRPM, len(ranked))
+		res.pick = leastLoaded(ranked[:res.r]).Host
+		home = ranked[0].Host
+	}
+	s.shiftCountLocked(model, e.home, e.r, home, res.r)
+	e.home, e.r = home, res.r
 
 	return res
 }

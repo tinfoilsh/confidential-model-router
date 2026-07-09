@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/cachesalt"
 	"github.com/tinfoilsh/confidential-model-router/config"
@@ -154,6 +155,7 @@ var (
 	infoMu       sync.Mutex
 	lastPoolHash = map[string]string{}
 	lastMode     = map[string]Mode{}
+	lastRawMode  = map[string]string{}
 )
 
 // SetPoolInfo publishes the pool_info series for a model from its configured
@@ -181,7 +183,10 @@ func SetPoolInfo(model string, hostnames []string) {
 	PoolInfo.WithLabelValues(model, hash).Set(1)
 }
 
-// SetMode publishes the effective mode for a model.
+// SetMode publishes the effective mode for a model, logging when a
+// configured value is unrecognized: mode is a live traffic lever, and a
+// typo silently resolving to off would otherwise leave only the gauge as
+// evidence.
 func SetMode(model string, cfg *config.CacheRouteConfig) {
 	raw := ""
 	if cfg != nil {
@@ -190,6 +195,13 @@ func SetMode(model string, cfg *config.CacheRouteConfig) {
 	mode := resolveMode(raw)
 
 	infoMu.Lock()
+	if raw != "" && raw != string(ModeOff) && mode == ModeOff && lastRawMode[model] != raw {
+		log.WithFields(log.Fields{
+			"model": model,
+			"mode":  raw,
+		}).Error("unrecognized cache_route mode; treating as off")
+	}
+	lastRawMode[model] = raw
 	defer infoMu.Unlock()
 	if prev, ok := lastMode[model]; ok && prev != mode {
 		ModeInfo.DeleteLabelValues(model, string(prev))
@@ -210,4 +222,5 @@ func DropModel(model string) {
 		ModeInfo.DeleteLabelValues(model, string(prev))
 		delete(lastMode, model)
 	}
+	delete(lastRawMode, model)
 }

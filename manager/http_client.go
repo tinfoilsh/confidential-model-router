@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sync/atomic"
 
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 
@@ -14,20 +16,25 @@ import (
 )
 
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	return em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	return enclave.host, client, nil
 }
 
-// boundHTTPClientPreferring is boundHTTPClientForModel with a cache-aware
-// host preference (see Model.NextEnclavePreferring).
-func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (string, *http.Client, error) {
+// boundHTTPClientPreferring picks the serving enclave for an internal
+// dispatch — honoring a cache-aware host preference with overload spill (see
+// Model.SelectForDispatch) — and builds its attested client.
+func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (*Enclave, *http.Client, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
-		return "", nil, fmt.Errorf("model %s not found", modelName)
+		return nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave := model.NextEnclavePreferring(order, nil)
+	enclave := model.SelectForDispatch(order)
 	if enclave == nil {
-		return "", nil, fmt.Errorf("model %s has no available enclave", modelName)
+		return nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
 
 	// No client-level Timeout: it would cover the entire exchange including
@@ -45,7 +52,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 		},
 	}
 
-	return enclave.host, client, nil
+	return enclave, client, nil
 }
 
 // DoModelRequest performs an attested POST against the next available enclave
@@ -53,19 +60,20 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	host, client, err := em.boundHTTPClientForModel(modelName)
+	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
 	if err != nil {
 		return nil, err
 	}
-	return postToEnclave(ctx, client, host, path, body, headers)
+	return postToEnclave(ctx, client, enclave, path, body, headers)
 }
 
 // DoModelRequestJSON marshals and dispatches a parsed request body the way
 // DoModelRequest does, threading it through cache-aware routing. The tool
 // loop calls this for every model iteration — replaying a growing shared
 // prefix, the strongest case for cache-aware routing — so those requests are
-// measured (and, on enforced pools, pinned) like plain proxied ones: the
-// key is stable across iterations, so the whole loop homes to one replica.
+// measured (and, on enforced pools, pinned) like plain proxied ones. The key
+// stays stable across iterations while the request shape does (the forced
+// final turn drops tool definitions and re-keys; see toolruntime).
 func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, path string, body map[string]any, headers http.Header) (*http.Response, error) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -73,21 +81,27 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 	}
 
 	req, settings, pool, ok := em.cacheRouteRequest(modelName, path, body)
-	var order []string
+	var decision *cacheroute.Decision
 	if ok && settings.Mode == cacheroute.ModeEnforced {
-		order = em.cacheRouteShadow.PreferenceOrder(modelName, req, pool, settings)
+		decision = em.cacheRouteShadow.Decide(modelName, req, pool, settings)
+	}
+	var order []string
+	if decision != nil {
+		order = decision.Order
 	}
 
-	host, client, err := em.boundHTTPClientPreferring(modelName, order)
+	enclave, client, err := em.boundHTTPClientPreferring(modelName, order)
 	if err != nil {
 		return nil, err
 	}
 	// Observed at dispatch, like the public proxy path, so the picked
 	// replica counts as warm from prefill start.
-	if ok {
-		em.cacheRouteShadow.Observe(modelName, req, pool, host, settings)
+	if decision != nil {
+		em.cacheRouteShadow.ObserveLanding(modelName, req, decision, enclave.host, settings)
+	} else if ok {
+		em.cacheRouteShadow.Observe(modelName, req, pool, enclave.host, settings)
 	}
-	return postToEnclave(ctx, client, host, path, bodyBytes, headers)
+	return postToEnclave(ctx, client, enclave, path, bodyBytes, headers)
 }
 
 // cacheRouteRequest classifies one internally dispatched request for the
@@ -113,9 +127,12 @@ func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[str
 	return req, settings, model.CacheRoutePool(), true
 }
 
-// postToEnclave builds and sends an attested POST to one enclave host.
-func postToEnclave(ctx context.Context, client *http.Client, host, path string, body []byte, headers http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+host+path, bytes.NewReader(body))
+// postToEnclave builds and sends an attested POST to one enclave, counting
+// it in the enclave's in-flight gauge for the lifetime of the response body
+// so internal dispatches are visible to least-loaded selection like proxied
+// requests are.
+func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +144,30 @@ func postToEnclave(ctx context.Context, client *http.Client, host, path string, 
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-	return client.Do(req)
+	enclave.inflight.Add(1)
+	resp, err := client.Do(req)
+	if err != nil {
+		enclave.inflight.Add(-1)
+		return nil, err
+	}
+	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
+	return resp, nil
+}
+
+// inflightBody decrements the enclave's in-flight gauge when the response
+// body is closed — client.Do returns at response headers, so for streaming
+// responses the request is still in flight until the consumer finishes.
+type inflightBody struct {
+	io.ReadCloser
+	enclave *Enclave
+	closed  atomic.Bool
+}
+
+func (b *inflightBody) Close() error {
+	if b.closed.CompareAndSwap(false, true) {
+		b.enclave.inflight.Add(-1)
+	}
+	return b.ReadCloser.Close()
 }
 
 func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {

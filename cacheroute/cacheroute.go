@@ -1,10 +1,11 @@
-// Package cacheroute implements cache-aware replica routing in shadow mode:
-// it derives a routing key from the parsed request body, ranks a model's
-// replicas with rendezvous hashing, and measures what cache-aware routing
-// would have done — without influencing which replica serves a request.
+// Package cacheroute implements cache-aware replica routing: it derives a
+// routing key from the parsed request body, ranks a model's replicas with
+// rendezvous hashing, and — per pool — either only measures what routing
+// would have done (shadow) or drives replica selection (enforced, via
+// Shadow.Decide feeding the manager's selectors).
 //
 // The router's only telemetry channel is Prometheus, so everything the
-// shadow learns is exported as aggregate metrics over closed label sets.
+// pipeline learns is exported as aggregate metrics over closed label sets.
 // Per-key state stays in process memory; a routing key, or anything derived
 // from one, must never appear in a label or log line.
 package cacheroute

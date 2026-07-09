@@ -775,10 +775,17 @@ func main() {
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its
 		// ranking, so an overloaded pick spills to the next-warmest host
-		// via the skip loop below instead of a random sibling.
+		// via the skip loop below instead of a random sibling. The
+		// decision carries its pool snapshot and replication factor to
+		// the landing observation, so the metrics describe the decision
+		// that actually routed the request.
+		var cacheRouteDecision *cacheroute.Decision
 		var cacheRouteOrder []string
 		if cacheRouteReq != nil && cacheRouteSettings.Mode == cacheroute.ModeEnforced {
-			cacheRouteOrder = cacheRouteShadow.PreferenceOrder(modelName, cacheRouteReq, model.CacheRoutePool(), cacheRouteSettings)
+			cacheRouteDecision = cacheRouteShadow.Decide(modelName, cacheRouteReq, model.CacheRoutePool(), cacheRouteSettings)
+			if cacheRouteDecision != nil {
+				cacheRouteOrder = cacheRouteDecision.Order
+			}
 		}
 
 		// Try up to N picks (N = number of configured enclaves). Each pick
@@ -838,10 +845,12 @@ func main() {
 
 		log.Debugf("%s serving request\n", enclave)
 
-		// Hand the production pick to the cache-route shadow. Observed at
+		// Hand the landing to the cache-route pipeline. Observed at
 		// dispatch so the picked replica counts as warm from prefill
 		// start; cannot affect the request.
-		if cacheRouteReq != nil {
+		if cacheRouteDecision != nil {
+			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
+		} else if cacheRouteReq != nil {
 			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
 		}
 

@@ -392,65 +392,58 @@ func TestObserveProbeServed(t *testing.T) {
 	}
 }
 
-// TestPreferenceOrder pins the enforcement ordering contract: the pick
-// first, then the rest of the ranking, covering every candidate exactly
-// once; ineligible requests yield nil so callers fall back to random.
-func TestPreferenceOrder(t *testing.T) {
+// TestDecide pins the enforcement ordering contract: the pick first, then
+// the rest of the ranking, covering every candidate exactly once;
+// ineligible requests yield nil so callers fall back to random.
+func TestDecide(t *testing.T) {
 	s, _, _ := newTestShadow(t)
 	model := "order-" + t.Name()
 	cfg := defaultSettings()
 	req := keyedRequest(t, "o", 1)
 	pool := Pool{Size: 3, Candidates: hosts("enclave-a", "enclave-b", "enclave-c")}
 
-	order := s.PreferenceOrder(model, req, pool, cfg)
-	if len(order) != 3 {
-		t.Fatalf("order = %v, want all 3 candidates", order)
+	d := s.Decide(model, req, pool, cfg)
+	if d == nil || len(d.Order) != 3 {
+		t.Fatalf("decision = %+v, want an order over all 3 candidates", d)
 	}
 	seen := map[string]bool{}
-	for _, h := range order {
+	for _, h := range d.Order {
 		if seen[h] {
-			t.Fatalf("order = %v, duplicate host", order)
+			t.Fatalf("order = %v, duplicate host", d.Order)
 		}
 		seen[h] = true
 	}
 	for range 5 {
-		again := s.PreferenceOrder(model, req, pool, cfg)
-		for i := range order {
-			if again[i] != order[i] {
-				t.Fatalf("order not deterministic: %v vs %v", again, order)
+		again := s.Decide(model, req, pool, cfg)
+		for i := range d.Order {
+			if again.Order[i] != d.Order[i] {
+				t.Fatalf("order not deterministic: %v vs %v", again.Order, d.Order)
 			}
 		}
 	}
 
-	// The first element is the ranking's home for a cold key (R = 1): the
-	// same host Observe would report as the would-be pick.
-	s.Observe(model, req, pool, "enclave-a", cfg)
-	pick := "enclave-a"
-	if counterValue(t, RandomMatchTotal, model) == 0 {
-		for _, h := range []string{"enclave-b", "enclave-c"} {
-			if c, err := PicksTotal.GetMetricWithLabelValues(model, h, "1"); err == nil && testutil.ToFloat64(c) > 0 {
-				pick = h
-			}
-		}
+	// For a cold key R=1, so the pick is the ranking's head.
+	if want := rankedHosts(req.Key, pool.Candidates)[0]; d.Order[0] != want {
+		t.Fatalf("order[0] = %s, want ranking head %s", d.Order[0], want)
 	}
-	if order[0] != pick {
-		t.Fatalf("order[0] = %s, want the pick %s", order[0], pick)
+	if d.home != d.Order[0] || d.r != 1 {
+		t.Fatalf("decision home/r = %s/%d, want %s/1", d.home, d.r, d.Order[0])
 	}
 
-	if got := s.PreferenceOrder(model, &Request{Outcome: OutcomeNoSalt}, pool, cfg); got != nil {
-		t.Fatalf("non-keyed request must yield nil order, got %v", got)
+	if got := s.Decide(model, &Request{Outcome: OutcomeNoSalt}, pool, cfg); got != nil {
+		t.Fatalf("non-keyed request must yield nil decision, got %+v", got)
 	}
-	if got := s.PreferenceOrder(model, req, Pool{Size: 1, Candidates: hosts("only")}, cfg); got != nil {
-		t.Fatalf("single-replica pool must yield nil order, got %v", got)
+	if got := s.Decide(model, req, Pool{Size: 1, Candidates: hosts("only")}, cfg); got != nil {
+		t.Fatalf("single-replica pool must yield nil decision, got %+v", got)
 	}
-	if got := s.PreferenceOrder(model, nil, pool, cfg); got != nil {
-		t.Fatalf("nil request must yield nil order, got %v", got)
+	if got := s.Decide(model, nil, pool, cfg); got != nil {
+		t.Fatalf("nil request must yield nil decision, got %+v", got)
 	}
 }
 
-// TestPreferenceOrderHotKey drives a key past the split threshold and pins
-// that the order starts with the least-loaded of the top-R set.
-func TestPreferenceOrderHotKey(t *testing.T) {
+// TestDecideHotKey drives a key past the split threshold and pins that the
+// order starts with the least-loaded of the top-R set.
+func TestDecideHotKey(t *testing.T) {
 	s, clock, _ := newTestShadow(t)
 	model := "order-hot-" + t.Name()
 	cfg := defaultSettings() // threshold 15 rpm
@@ -463,7 +456,7 @@ func TestPreferenceOrderHotKey(t *testing.T) {
 	}
 
 	// Find the cold home: order with idle candidates starts there.
-	home := s.PreferenceOrder(model, req, pool2(), cfg)[0]
+	home := s.Decide(model, req, pool2(), cfg).Order[0]
 	other := "enclave-b"
 	if home == other {
 		other = "enclave-a"
@@ -475,9 +468,74 @@ func TestPreferenceOrderHotKey(t *testing.T) {
 		{Host: home, InFlight: 5},
 		{Host: other, InFlight: 0},
 	}}
-	order := s.PreferenceOrder(model, req, loaded, cfg)
-	if order[0] != other {
-		t.Fatalf("hot key order = %v, want least-loaded %s first", order, other)
+	d := s.Decide(model, req, loaded, cfg)
+	if d.Order[0] != other {
+		t.Fatalf("hot key order = %v, want least-loaded %s first", d.Order, other)
+	}
+	if d.r != 2 {
+		t.Fatalf("hot key r = %d, want 2", d.r)
+	}
+}
+
+// TestObserveLanding pins the decision-threading contract: picks_total is
+// labeled with the landing and the replication factor that shaped routing,
+// the random comparison stays quiet, and the same-host repeat is warm.
+func TestObserveLanding(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "landing-" + t.Name()
+	cfg := defaultSettings()
+	cfg.Mode = ModeEnforced
+	req := keyedRequest(t, "l", 1)
+
+	matches := counterDelta(t, RandomMatchTotal, model)
+	landedPicks := counterDelta(t, PicksTotal, model, "enclave-b", "1")
+	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+
+	d := s.Decide(model, req, pool2(), cfg)
+	s.ObserveLanding(model, req, d, "enclave-b", cfg)
+	clock.advance(time.Second)
+	d = s.Decide(model, req, pool2(), cfg)
+	s.ObserveLanding(model, req, d, "enclave-b", cfg)
+
+	if got := landedPicks(); got != 2 {
+		t.Fatalf("picks for landing = %v, want 2", got)
+	}
+	if got := matches(); got != 0 {
+		t.Fatalf("random match under enforcement = %v, want 0", got)
+	}
+	if got := warm(); got != 1 {
+		t.Fatalf("repeat_warm = %v, want 1", got)
+	}
+}
+
+// TestObserveLandingUsesDecisionR pins that picks_total is labeled with the
+// replication factor that routed the request, not one recomputed after the
+// arrival bumps the rate: near the split threshold the two differ.
+func TestObserveLandingUsesDecisionR(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "decision-r-" + t.Name()
+	cfg := defaultSettings()
+	cfg.Mode = ModeEnforced
+	cfg.SplitThresholdRPM = 3
+	req := keyedRequest(t, "dr", 1)
+
+	// Three arrivals in one minute, then step into the next minute: the
+	// pre-arrival rate reads just under the threshold (r=1) while the
+	// post-arrival rate crosses it (r=2).
+	for range 3 {
+		clock.advance(time.Second)
+		s.Observe(model, req, pool2(), "enclave-a", cfg)
+	}
+	clock.advance(time.Minute)
+
+	r1Picks := counterDelta(t, PicksTotal, model, "enclave-a", "1")
+	d := s.Decide(model, req, pool2(), cfg)
+	if d.r != 1 {
+		t.Fatalf("decision r = %d, want 1 (pre-arrival rate under threshold)", d.r)
+	}
+	s.ObserveLanding(model, req, d, "enclave-a", cfg)
+	if got := r1Picks(); got != 1 {
+		t.Fatalf("picks labeled with routed r=1: %v, want 1 (post-arrival recompute would label r=2)", got)
 	}
 }
 
