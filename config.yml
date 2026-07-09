@@ -45,7 +45,7 @@ models:
       - glm-5-2-inf11.tinfoil.containers.tinfoil.dev
       - glm-5-2-inf12.tinfoil.containers.tinfoil.dev
     cache_route:
-      mode: shadow
+      mode: enforced
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
