@@ -422,3 +422,80 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not reached in time")
 }
+
+// makeOverloaded flags an enclave overloaded with a fresh queue sample so
+// ShouldReject fires deterministically.
+func makeOverloaded(e *Enclave) {
+	e.metrics.cfgMu.Lock()
+	e.metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+	e.metrics.cfgMu.Unlock()
+	e.metrics.updateLatest(5, time.Now())
+	e.metrics.overloaded.Store(true)
+}
+
+// TestSelectForDispatchAllOverloadedReturnsWarmest pins the exhaustion
+// fallback: when every candidate is overloaded, the dispatch serves through
+// overload at the order head (the key's warmest replica), not at whatever
+// host the spill loop examined last.
+func TestSelectForDispatchAllOverloadedReturnsWarmest(t *testing.T) {
+	m := newTestModel("a", "b", "c")
+	for _, h := range []string{"a", "b", "c"} {
+		makeOverloaded(m.Enclaves[h])
+	}
+	for range 20 {
+		if got := m.SelectForDispatch([]string{"b", "c", "a"}); got == nil || got.host != "b" {
+			t.Fatalf("all-overloaded pick = %v, want warmest b", got)
+		}
+	}
+}
+
+// TestSelectForDispatchNeverPicksDeadHost pins that a breaker-open host is
+// unreachable while any closed candidate exists, even with every closed
+// candidate overloaded — busy-but-alive always beats dead.
+func TestSelectForDispatchNeverPicksDeadHost(t *testing.T) {
+	m := newTestModel("a", "b", "c")
+	makeOverloaded(m.Enclaves["a"])
+	makeOverloaded(m.Enclaves["b"])
+	tripBreaker(m.Enclaves["c"])
+	m.Enclaves["c"].cb.lastFailureNano.Store(time.Now().UnixNano()) // not probe-due
+
+	for range 200 {
+		got := m.SelectForDispatch([]string{"a", "b"})
+		if got == nil || got.host == "c" {
+			t.Fatalf("pick = %v, must never be dead host c", got)
+		}
+		if got.host != "a" {
+			t.Fatalf("pick = %v, want warmest overloaded a", got)
+		}
+	}
+}
+
+// TestSelectForDispatchDoesNotClaimProbes pins that internal dispatches
+// leave recovery probes alone: they never record breaker outcomes, so a
+// probe claimed here would strand the breaker in half-open until restart.
+func TestSelectForDispatchDoesNotClaimProbes(t *testing.T) {
+	m := newTestModel("a", "b")
+	tripBreaker(m.Enclaves["b"])
+	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
+
+	if got := m.SelectForDispatch([]string{"a"}); got == nil || got.host != "a" {
+		t.Fatalf("pick = %v, want a (probe must not be claimed)", got)
+	}
+	if st := m.Enclaves["b"].cb.State(); st != cbOpen {
+		t.Fatalf("breaker state = %v, want still open (probe claim belongs to the public path)", st)
+	}
+}
+
+// TestShouldRejectNonClosedBreaker pins that overload rejection only applies
+// to healthy replicas: a probe or last-resort pick must dispatch.
+func TestShouldRejectNonClosedBreaker(t *testing.T) {
+	e := newTestEnclave("reject-open-host")
+	makeOverloaded(e)
+	if reject, _, _ := e.ShouldReject(); !reject {
+		t.Fatal("closed + overloaded must reject")
+	}
+	tripBreaker(e)
+	if reject, _, _ := e.ShouldReject(); reject {
+		t.Fatal("non-closed breaker must not be overload-rejected")
+	}
+}
