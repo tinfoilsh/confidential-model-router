@@ -52,6 +52,7 @@ models:
     enclaves:
       - gpt-oss-120b-0.inf6.tinfoil.sh
       - gpt-oss-120b-1.inf10.tinfoil.sh
+      - gpt-oss-120b-2.inf14.tinfoil.sh
     overload:
       max_requests_waiting: 8
       retry_after_minutes: 1
@@ -91,8 +92,10 @@ models:
       - gemma4-31b-2.inf10.tinfoil.sh
       - gemma4-31b-3.inf10.tinfoil.sh
       - gemma4-31b-4.inf10.tinfoil.sh
+      - gemma4-31b-0.inf14.tinfoil.sh
+      - gemma4-31b-1.inf14.tinfoil.sh
     overload:
-      max_requests_waiting: 16
+      max_requests_waiting: 32
       retry_after_minutes: 1
     cache_route:
       mode: shadow
