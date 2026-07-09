@@ -820,11 +820,26 @@ func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig) {
 	e.metrics.setConfig(cfg)
 }
 
+// shutdown stops the enclave's background polling and drops its per-enclave
+// gauge series. Gauges assert current state, so a series left behind for a
+// removed host keeps reporting stale queue depth, overload, and breaker
+// state until process restart — overcounting any pool-size query after a
+// resize. Counters stay: their history remains truthful and rate() of a
+// flat counter is zero. The breaker is retired first so callbacks from
+// requests still draining cannot republish the deleted gauge.
 func (e *Enclave) shutdown() {
-	if e == nil || e.metrics == nil {
+	if e == nil {
 		return
 	}
-	e.metrics.shutdown()
+	if e.metrics != nil {
+		e.metrics.shutdown()
+	}
+	if e.cb != nil {
+		e.cb.Retire()
+	}
+	BackendQueueDepth.DeleteLabelValues(e.modelName, e.host)
+	BackendOverloaded.DeleteLabelValues(e.modelName, e.host)
+	CircuitBreakerState.DeleteLabelValues(e.modelName, e.host)
 }
 
 func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {

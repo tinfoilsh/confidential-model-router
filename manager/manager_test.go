@@ -423,6 +423,117 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not reached in time")
 }
 
+// TestShutdownDropsEnclaveGaugeSeries pins that removing an enclave removes
+// its gauge series: a stale gauge for a departed host keeps asserting queue
+// depth, overload, and breaker state until process restart, overcounting
+// pool-size queries after a resize.
+func TestShutdownDropsEnclaveGaugeSeries(t *testing.T) {
+	e := newTestEnclave("gauge-drop-host")
+	e.modelName = "gauge-drop-model"
+	BackendQueueDepth.WithLabelValues(e.modelName, e.host).Set(3)
+	BackendOverloaded.WithLabelValues(e.modelName, e.host).Set(1)
+	CircuitBreakerState.WithLabelValues(e.modelName, e.host).Set(0)
+
+	e.shutdown()
+
+	// DeleteLabelValues reports false when the series is already gone.
+	if BackendQueueDepth.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("queue depth series survived shutdown")
+	}
+	if BackendOverloaded.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("overloaded series survived shutdown")
+	}
+	if CircuitBreakerState.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("breaker state series survived shutdown")
+	}
+	if !e.cb.Retired() {
+		t.Fatal("breaker not retired by shutdown")
+	}
+}
+
+// TestRetiredBreakerDoesNotRepublish pins the draining-request edge: a proxy
+// callback that completes after the enclave was removed must not resurrect
+// the deleted breaker gauge series.
+func TestRetiredBreakerDoesNotRepublish(t *testing.T) {
+	const model, host = "gauge-retire-model", "gauge-retire-host"
+	cb := newCircuitBreaker()
+
+	publishBreakerState(model, host, cb)
+	if !CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("live breaker must publish its gauge")
+	}
+
+	cb.Retire()
+	publishBreakerState(model, host, cb)
+	if CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("retired breaker republished the deleted gauge series")
+	}
+}
+
+// TestShutdownSerializesWithBreakerPublication forces the TOCTOU ordering
+// where a draining callback passes the retired check before shutdown starts.
+// Shutdown must wait for that publication and delete its series afterward.
+func TestShutdownSerializesWithBreakerPublication(t *testing.T) {
+	const model, host = "gauge-race-model", "gauge-race-host"
+	e := newTestEnclave(host)
+	e.modelName = model
+
+	publishEntered := make(chan struct{})
+	allowPublish := make(chan struct{})
+	publishDone := make(chan struct{})
+	await := func(name string, done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	defer func() {
+		select {
+		case <-allowPublish:
+		default:
+			close(allowPublish)
+		}
+	}()
+
+	go func() {
+		defer close(publishDone)
+		e.cb.publishIfActive(func(state cbState) {
+			close(publishEntered)
+			<-allowPublish
+			CircuitBreakerState.WithLabelValues(model, host).Set(float64(state))
+		})
+	}()
+	await("publication to enter", publishEntered)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		e.shutdown()
+	}()
+
+	// Retire marks the breaker before waiting on its write barrier. A failed
+	// TryRLock proves shutdown is queued behind the in-flight publication.
+	waitFor(t, func() bool {
+		if !e.cb.Retired() {
+			return false
+		}
+		if e.cb.publishMu.TryRLock() {
+			e.cb.publishMu.RUnlock()
+			return false
+		}
+		return true
+	})
+
+	close(allowPublish)
+	await("publication to finish", publishDone)
+	await("shutdown to finish", shutdownDone)
+	if CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("breaker publication survived shutdown")
+	}
+}
+
 // makeOverloaded flags an enclave overloaded with a fresh queue sample so
 // ShouldReject fires deterministically.
 func makeOverloaded(e *Enclave) {

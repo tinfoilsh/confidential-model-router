@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -26,6 +27,8 @@ type circuitBreaker struct {
 	state               atomic.Int32
 	consecutiveFailures atomic.Int64
 	lastFailureNano     atomic.Int64
+	retired             atomic.Bool
+	publishMu           sync.RWMutex
 }
 
 func newCircuitBreaker() *circuitBreaker {
@@ -87,4 +90,29 @@ func (cb *circuitBreaker) State() cbState {
 // ConsecutiveFailures returns the current consecutive failure count.
 func (cb *circuitBreaker) ConsecutiveFailures() int64 {
 	return cb.consecutiveFailures.Load()
+}
+
+// Retire marks the breaker's enclave as removed from the pool and waits for
+// any state publication that already observed it as active to finish. Once
+// this returns, shutdown can delete the gauge without a draining request
+// recreating it afterward.
+func (cb *circuitBreaker) Retire() {
+	cb.retired.Store(true)
+	cb.publishMu.Lock()
+	cb.publishMu.Unlock()
+}
+
+// Retired reports whether the enclave was removed from the pool.
+func (cb *circuitBreaker) Retired() bool { return cb.retired.Load() }
+
+// publishIfActive serializes a state publication with retirement. Holding the
+// read lock through publish prevents Retire from returning between the retired
+// check and the publication itself. publish must not call Retire.
+func (cb *circuitBreaker) publishIfActive(publish func(cbState)) {
+	cb.publishMu.RLock()
+	defer cb.publishMu.RUnlock()
+	if cb.Retired() {
+		return
+	}
+	publish(cb.State())
 }
