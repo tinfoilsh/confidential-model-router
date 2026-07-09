@@ -422,3 +422,50 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not reached in time")
 }
+
+// TestShutdownDropsEnclaveGaugeSeries pins that removing an enclave removes
+// its gauge series: a stale gauge for a departed host keeps asserting queue
+// depth, overload, and breaker state until process restart, overcounting
+// pool-size queries after a resize.
+func TestShutdownDropsEnclaveGaugeSeries(t *testing.T) {
+	e := newTestEnclave("gauge-drop-host")
+	e.modelName = "gauge-drop-model"
+	BackendQueueDepth.WithLabelValues(e.modelName, e.host).Set(3)
+	BackendOverloaded.WithLabelValues(e.modelName, e.host).Set(1)
+	CircuitBreakerState.WithLabelValues(e.modelName, e.host).Set(0)
+
+	e.shutdown()
+
+	// DeleteLabelValues reports false when the series is already gone.
+	if BackendQueueDepth.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("queue depth series survived shutdown")
+	}
+	if BackendOverloaded.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("overloaded series survived shutdown")
+	}
+	if CircuitBreakerState.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("breaker state series survived shutdown")
+	}
+	if !e.cb.Retired() {
+		t.Fatal("breaker not retired by shutdown")
+	}
+}
+
+// TestRetiredBreakerDoesNotRepublish pins the draining-request edge: a proxy
+// callback that completes after the enclave was removed must not resurrect
+// the deleted breaker gauge series.
+func TestRetiredBreakerDoesNotRepublish(t *testing.T) {
+	const model, host = "gauge-retire-model", "gauge-retire-host"
+	cb := newCircuitBreaker()
+
+	publishBreakerState(model, host, cb)
+	if !CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("live breaker must publish its gauge")
+	}
+
+	cb.Retire()
+	publishBreakerState(model, host, cb)
+	if CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("retired breaker republished the deleted gauge series")
+	}
+}

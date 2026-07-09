@@ -134,6 +134,16 @@ func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
+// publishBreakerState republishes the breaker gauge after a request
+// outcome — unless the enclave was retired: its series was deleted at
+// shutdown and a draining request must not resurrect it.
+func publishBreakerState(modelName, host string, cb *circuitBreaker) {
+	if cb.Retired() {
+		return
+	}
+	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+}
+
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		// Client cancellations aren't backend faults — track in a dedicated
@@ -144,12 +154,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		}
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
-		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+		publishBreakerState(modelName, host, cb)
 	}
 	recordSuccess := func() {
 		cb.RecordSuccess()
 		ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
-		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+		publishBreakerState(modelName, host, cb)
 	}
 
 	transport := &slowHeaderTripper{

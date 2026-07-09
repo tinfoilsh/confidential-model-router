@@ -26,6 +26,7 @@ type circuitBreaker struct {
 	state               atomic.Int32
 	consecutiveFailures atomic.Int64
 	lastFailureNano     atomic.Int64
+	retired             atomic.Bool
 }
 
 func newCircuitBreaker() *circuitBreaker {
@@ -88,3 +89,11 @@ func (cb *circuitBreaker) State() cbState {
 func (cb *circuitBreaker) ConsecutiveFailures() int64 {
 	return cb.consecutiveFailures.Load()
 }
+
+// Retire marks the breaker's enclave as removed from the pool, so callbacks
+// from requests still draining after removal stop republishing the state
+// gauge that shutdown deleted.
+func (cb *circuitBreaker) Retire() { cb.retired.Store(true) }
+
+// Retired reports whether the enclave was removed from the pool.
+func (cb *circuitBreaker) Retired() bool { return cb.retired.Load() }
