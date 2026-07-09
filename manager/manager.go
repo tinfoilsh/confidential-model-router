@@ -328,6 +328,14 @@ func (em *EnclaveManager) Shutdown() {
 // open breaker is past its cooldown, it sends a probe to that enclave. Falls
 // back to any closed enclave, then any enclave (degraded > unavailable).
 func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
+	return m.nextEnclave(skip, true)
+}
+
+// nextEnclave is NextEnclave with probe claiming optional: internal
+// dispatches never record breaker outcomes, so a probe they claim is a
+// probe that strands the breaker in half-open — only the public proxy
+// path, which records outcomes, may claim one.
+func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -336,7 +344,7 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 	for _, enclave := range m.Enclaves {
 		all = append(all, enclave)
 		if enclave.cb != nil && !enclave.cb.Closed() {
-			if enclave.cb.NeedProbe() {
+			if claimProbes && enclave.cb.NeedProbe() {
 				return enclave
 			}
 			continue
@@ -370,17 +378,25 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 // retry loop, SelectForDispatch for internal dispatches), so a flapping
 // load signal can never move a key's home.
 func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) *Enclave {
+	return m.nextEnclavePreferring(order, skip, true)
+}
+
+func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool) *Enclave {
 	if len(order) == 0 {
-		return m.NextEnclave(skip)
+		return m.nextEnclave(skip, claimProbes)
 	}
 
-	m.mu.RLock()
-	for _, enclave := range m.Enclaves {
-		if enclave.cb != nil && !enclave.cb.Closed() && enclave.cb.NeedProbe() {
-			m.mu.RUnlock()
-			return enclave
+	if claimProbes {
+		m.mu.RLock()
+		for _, enclave := range m.Enclaves {
+			if enclave.cb != nil && !enclave.cb.Closed() && enclave.cb.NeedProbe() {
+				m.mu.RUnlock()
+				return enclave
+			}
 		}
+		m.mu.RUnlock()
 	}
+	m.mu.RLock()
 	for _, host := range order {
 		enclave := m.Enclaves[host]
 		if enclave == nil || skip[host] {
@@ -393,27 +409,42 @@ func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) *Enc
 		return enclave
 	}
 	m.mu.RUnlock()
-	return m.NextEnclave(skip)
+	return m.nextEnclave(skip, claimProbes)
 }
 
 // SelectForDispatch picks the serving enclave for an internal dispatch (the
 // tool loop), honoring the cache-aware order with the same overload spill as
 // the public retry loop: an overloaded pick is skipped and selection moves
-// to the next-warmest host. When every candidate is overloaded it returns
-// the last pick anyway — internal dispatches have no 429 path, matching the
-// old NextEnclave behavior of serving through overload.
+// to the next-warmest host. Internal dispatches have no 429 path, so when
+// every live candidate is overloaded it serves through overload at the
+// warmest one — never at a breaker-open host, which is reachable only when
+// no closed replica exists at all. It also never claims recovery probes:
+// internal dispatches don't record breaker outcomes, so a probe claimed
+// here would strand the breaker in half-open.
 func (m *Model) SelectForDispatch(order []string) *Enclave {
 	skip := map[string]bool{}
+	var firstOverloaded *Enclave
 	var enclave *Enclave
 	for range m.EnclaveCount() {
-		enclave = m.NextEnclavePreferring(order, skip)
+		enclave = m.nextEnclavePreferring(order, skip, false)
 		if enclave == nil {
-			return nil
+			break
+		}
+		if enclave.cb != nil && !enclave.cb.Closed() {
+			// Selection is down to non-closed last resorts: every
+			// remaining closed candidate is overloaded or none exist.
+			break
 		}
 		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
 			return enclave
 		}
+		if firstOverloaded == nil {
+			firstOverloaded = enclave
+		}
 		skip[enclave.String()] = true
+	}
+	if firstOverloaded != nil {
+		return firstOverloaded
 	}
 	return enclave
 }
@@ -813,6 +844,13 @@ func (e *Enclave) shutdown() {
 
 func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {
 	if e == nil || e.metrics == nil {
+		return false, 0, 0
+	}
+	// A pick whose breaker isn't closed is a recovery probe or a last
+	// resort — rejecting it for overload defeats its purpose (and swallows
+	// the probe: claimed but never dispatched, the breaker would strand in
+	// half-open). Its queue metrics are suspect while the host fails, too.
+	if e.cb != nil && !e.cb.Closed() {
 		return false, 0, 0
 	}
 	return e.metrics.shouldReject()
