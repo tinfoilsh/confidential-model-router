@@ -60,7 +60,7 @@ models:
       max_requests_waiting: 8
       retry_after_minutes: 1
     cache_route:
-      mode: shadow
+      mode: enforced
 
   gpt-oss-safeguard-120b:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
