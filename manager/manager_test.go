@@ -240,10 +240,10 @@ func TestCacheRoutePoolSizeIsConfigured(t *testing.T) {
 	}
 }
 
-// TestObserveCacheRoute covers the tool-loop observation gate: a shadow-mode
-// dispatch reaches the shadow's funnel, mode off and a missing shadow are
-// no-ops.
-func TestObserveCacheRoute(t *testing.T) {
+// TestCacheRouteRequest covers the tool-loop gate: a shadow-mode dispatch
+// classifies and reaches the shadow's funnel via Observe, mode off and a
+// missing shadow gate out.
+func TestCacheRouteRequest(t *testing.T) {
 	body := map[string]any{
 		"cache_salt": strings.Repeat("0", 43),
 		"messages": []any{
@@ -266,21 +266,106 @@ func TestObserveCacheRoute(t *testing.T) {
 	}
 	base := keyed()
 
-	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
+	req, settings, pool, ok := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body)
+	if !ok || req == nil || pool.Size != 2 {
+		t.Fatalf("gate = (%v, %+v, %+v), want open with 2-replica pool", ok, req, pool)
+	}
+	em.cacheRouteShadow.Observe("tool-observed", req, pool, "a", settings)
 	if got := keyed() - base; got != 1 {
 		t.Fatalf("keyed delta = %v, want 1", got)
 	}
 
-	// Mode off: no observation.
+	// Mode off gates out.
 	model.CacheRoute = nil
-	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
-	if got := keyed() - base; got != 1 {
-		t.Fatalf("keyed delta after mode off = %v, want 1", got)
+	if _, _, _, stillOK := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body); stillOK {
+		t.Fatal("mode off must gate out")
 	}
 
-	// No shadow (tests construct managers without one): must not panic.
+	// No shadow (tests construct managers without one) gates out.
 	em.cacheRouteShadow = nil
-	em.observeCacheRoute("tool-observed", "/v1/chat/completions", body, "a")
+	if _, _, _, stillOK := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body); stillOK {
+		t.Fatal("missing shadow must gate out")
+	}
+}
+
+// TestNextEnclavePreferring pins enforcement selection: order is honored
+// among breaker-closed replicas, skip and open breakers spill down the
+// order, a due probe wins over the order, and exhaustion falls back to
+// random selection.
+func TestNextEnclavePreferring(t *testing.T) {
+	m := newTestModel("a", "b", "c")
+	order := []string{"b", "c", "a"}
+
+	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
+		t.Fatalf("pick = %v, want order head b", got)
+	}
+	if got := m.NextEnclavePreferring(order, map[string]bool{"b": true}); got == nil || got.host != "c" {
+		t.Fatalf("pick with b skipped = %v, want c", got)
+	}
+
+	// An overloaded order host is still returned: the overload flag must
+	// never move a key's home — stepping aside is the caller's per-request
+	// job (skip / SelectForDispatch), not the selector's.
+	m.Enclaves["b"].metrics.overloaded.Store(true)
+	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
+		t.Fatalf("pick with b overloaded = %v, want b (no overload veto)", got)
+	}
+	m.Enclaves["b"].metrics.overloaded.Store(false)
+
+	tripBreaker(m.Enclaves["b"])
+	// Keep the trip fresh so a stalled test runner cannot cross the probe
+	// cooldown and turn the open breaker into a served probe mid-test.
+	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().UnixNano())
+	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "c" {
+		t.Fatalf("pick with b open = %v, want c", got)
+	}
+
+	// Order exhausted: fall back to random among the acceptable rest.
+	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().UnixNano())
+	if got := m.NextEnclavePreferring([]string{"b"}, nil); got == nil || got.host == "b" {
+		t.Fatalf("exhausted order = %v, want random fallback avoiding b", got)
+	}
+
+	// A due probe beats the cache preference.
+	probe := m.Enclaves["b"]
+	probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	if got := m.NextEnclavePreferring([]string{"a", "c"}, nil); got == nil || got.host != "b" {
+		t.Fatalf("pick with due probe = %v, want probe b", got)
+	}
+
+	// Empty order behaves like NextEnclave.
+	if got := m.NextEnclavePreferring(nil, map[string]bool{"a": true, "b": true}); got == nil || got.host != "c" {
+		t.Fatalf("nil order = %v, want c", got)
+	}
+}
+
+// TestSelectForDispatch pins the internal-dispatch overload spill: an
+// overloaded order head is skipped for the next-warmest host, and when every
+// candidate is overloaded the dispatch still gets an enclave (internal
+// callers have no 429 path).
+func TestSelectForDispatch(t *testing.T) {
+	m := newTestModel("a", "b", "c")
+	order := []string{"b", "c", "a"}
+
+	if got := m.SelectForDispatch(order); got == nil || got.host != "b" {
+		t.Fatalf("pick = %v, want order head b", got)
+	}
+
+	m.Enclaves["b"].metrics.overloaded.Store(true)
+	m.Enclaves["b"].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+	m.Enclaves["b"].metrics.updateLatest(5, time.Now())
+	if got := m.SelectForDispatch(order); got == nil || got.host != "c" {
+		t.Fatalf("pick with b overloaded = %v, want spill to c", got)
+	}
+
+	for _, h := range []string{"a", "c"} {
+		m.Enclaves[h].metrics.overloaded.Store(true)
+		m.Enclaves[h].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+		m.Enclaves[h].metrics.updateLatest(5, time.Now())
+	}
+	if got := m.SelectForDispatch(order); got == nil {
+		t.Fatal("all-overloaded dispatch must still return an enclave")
+	}
 }
 
 func TestCacheRouteSettings(t *testing.T) {

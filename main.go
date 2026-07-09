@@ -772,10 +772,26 @@ func main() {
 			return
 		}
 
+		// On enforced pools, keyed requests are served in cache-aware
+		// preference order: the key's pick first, then the rest of its
+		// ranking, so an overloaded pick spills to the next-warmest host
+		// via the skip loop below instead of a random sibling. The
+		// decision carries its pool snapshot and replication factor to
+		// the landing observation, so the metrics describe the decision
+		// that actually routed the request.
+		var cacheRouteDecision *cacheroute.Decision
+		var cacheRouteOrder []string
+		if cacheRouteReq != nil && cacheRouteSettings.Mode == cacheroute.ModeEnforced {
+			cacheRouteDecision = cacheRouteShadow.Decide(modelName, cacheRouteReq, model.CacheRoutePool(), cacheRouteSettings)
+			if cacheRouteDecision != nil {
+				cacheRouteOrder = cacheRouteDecision.Order
+			}
+		}
+
 		// Try up to N picks (N = number of configured enclaves). Each pick
-		// that turns out overloaded goes into skip, so NextEnclave will prefer
-		// a sibling on the next iteration. Bounded so a single backed-up
-		// enclave doesn't cascade into a 429 when others are healthy.
+		// that turns out overloaded goes into skip, so the next iteration
+		// prefers a sibling. Bounded so a single backed-up enclave doesn't
+		// cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
 			overloaded bool
@@ -784,7 +800,7 @@ func main() {
 			skip       = map[string]bool{}
 		)
 		for range model.EnclaveCount() {
-			enclave = model.NextEnclave(skip)
+			enclave = model.NextEnclavePreferring(cacheRouteOrder, skip)
 			if enclave == nil {
 				break
 			}
@@ -829,10 +845,12 @@ func main() {
 
 		log.Debugf("%s serving request\n", enclave)
 
-		// Hand the production pick to the cache-route shadow. Observed at
+		// Hand the landing to the cache-route pipeline. Observed at
 		// dispatch so the picked replica counts as warm from prefill
 		// start; cannot affect the request.
-		if cacheRouteReq != nil {
+		if cacheRouteDecision != nil {
+			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
+		} else if cacheRouteReq != nil {
 			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
 		}
 

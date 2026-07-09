@@ -155,6 +155,7 @@ var (
 	infoMu       sync.Mutex
 	lastPoolHash = map[string]string{}
 	lastMode     = map[string]Mode{}
+	lastRawMode  = map[string]string{}
 )
 
 // SetPoolInfo publishes the pool_info series for a model from its configured
@@ -182,23 +183,25 @@ func SetPoolInfo(model string, hostnames []string) {
 	PoolInfo.WithLabelValues(model, hash).Set(1)
 }
 
-// SetMode publishes the effective mode for a model, logging when it clamps
-// a configured "enforced" down to shadow so config intent and router
-// behavior can't silently diverge.
+// SetMode publishes the effective mode for a model, logging when a
+// configured value is unrecognized: mode is a live traffic lever, and a
+// typo silently resolving to off would otherwise leave only the gauge as
+// evidence.
 func SetMode(model string, cfg *config.CacheRouteConfig) {
 	raw := ""
 	if cfg != nil {
 		raw = cfg.Mode
 	}
-	mode, clamped := resolveMode(raw)
-	if clamped {
+	mode := resolveMode(raw)
+
+	infoMu.Lock()
+	if raw != "" && raw != string(ModeOff) && mode == ModeOff && lastRawMode[model] != raw {
 		log.WithFields(log.Fields{
 			"model": model,
 			"mode":  raw,
-		}).Warn("cache_route mode 'enforced' is not implemented in this build; running shadow")
+		}).Error("unrecognized cache_route mode; treating as off")
 	}
-
-	infoMu.Lock()
+	lastRawMode[model] = raw
 	defer infoMu.Unlock()
 	if prev, ok := lastMode[model]; ok && prev != mode {
 		ModeInfo.DeleteLabelValues(model, string(prev))
@@ -219,4 +222,5 @@ func DropModel(model string) {
 		ModeInfo.DeleteLabelValues(model, string(prev))
 		delete(lastMode, model)
 	}
+	delete(lastRawMode, model)
 }

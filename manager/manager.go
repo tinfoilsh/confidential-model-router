@@ -361,6 +361,63 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 	return nil
 }
 
+// NextEnclavePreferring picks like NextEnclave, but serves the first
+// acceptable host from order — the cache-aware preference, best first —
+// before falling back to random selection. Health still beats cache: a due
+// probe wins, and order hosts are honored only while their breakers are
+// closed. The overload flag deliberately does not veto an order host; every
+// caller must step aside per request via ShouldReject and skip (main.go's
+// retry loop, SelectForDispatch for internal dispatches), so a flapping
+// load signal can never move a key's home.
+func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) *Enclave {
+	if len(order) == 0 {
+		return m.NextEnclave(skip)
+	}
+
+	m.mu.RLock()
+	for _, enclave := range m.Enclaves {
+		if enclave.cb != nil && !enclave.cb.Closed() && enclave.cb.NeedProbe() {
+			m.mu.RUnlock()
+			return enclave
+		}
+	}
+	for _, host := range order {
+		enclave := m.Enclaves[host]
+		if enclave == nil || skip[host] {
+			continue
+		}
+		if enclave.cb != nil && !enclave.cb.Closed() {
+			continue
+		}
+		m.mu.RUnlock()
+		return enclave
+	}
+	m.mu.RUnlock()
+	return m.NextEnclave(skip)
+}
+
+// SelectForDispatch picks the serving enclave for an internal dispatch (the
+// tool loop), honoring the cache-aware order with the same overload spill as
+// the public retry loop: an overloaded pick is skipped and selection moves
+// to the next-warmest host. When every candidate is overloaded it returns
+// the last pick anyway — internal dispatches have no 429 path, matching the
+// old NextEnclave behavior of serving through overload.
+func (m *Model) SelectForDispatch(order []string) *Enclave {
+	skip := map[string]bool{}
+	var enclave *Enclave
+	for range m.EnclaveCount() {
+		enclave = m.NextEnclavePreferring(order, skip)
+		if enclave == nil {
+			return nil
+		}
+		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
+			return enclave
+		}
+		skip[enclave.String()] = true
+	}
+	return enclave
+}
+
 // EnclaveCount returns the number of configured enclaves under the model lock.
 // Callers that need to bound a retry loop on enclave cardinality should use
 // this rather than reading len(m.Enclaves) directly.
