@@ -469,3 +469,67 @@ func TestRetiredBreakerDoesNotRepublish(t *testing.T) {
 		t.Fatal("retired breaker republished the deleted gauge series")
 	}
 }
+
+// TestShutdownSerializesWithBreakerPublication forces the TOCTOU ordering
+// where a draining callback passes the retired check before shutdown starts.
+// Shutdown must wait for that publication and delete its series afterward.
+func TestShutdownSerializesWithBreakerPublication(t *testing.T) {
+	const model, host = "gauge-race-model", "gauge-race-host"
+	e := newTestEnclave(host)
+	e.modelName = model
+
+	publishEntered := make(chan struct{})
+	allowPublish := make(chan struct{})
+	publishDone := make(chan struct{})
+	await := func(name string, done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	defer func() {
+		select {
+		case <-allowPublish:
+		default:
+			close(allowPublish)
+		}
+	}()
+
+	go func() {
+		defer close(publishDone)
+		e.cb.publishIfActive(func(state cbState) {
+			close(publishEntered)
+			<-allowPublish
+			CircuitBreakerState.WithLabelValues(model, host).Set(float64(state))
+		})
+	}()
+	await("publication to enter", publishEntered)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		e.shutdown()
+	}()
+
+	// Retire marks the breaker before waiting on its write barrier. A failed
+	// TryRLock proves shutdown is queued behind the in-flight publication.
+	waitFor(t, func() bool {
+		if !e.cb.Retired() {
+			return false
+		}
+		if e.cb.publishMu.TryRLock() {
+			e.cb.publishMu.RUnlock()
+			return false
+		}
+		return true
+	})
+
+	close(allowPublish)
+	await("publication to finish", publishDone)
+	await("shutdown to finish", shutdownDone)
+	if CircuitBreakerState.DeleteLabelValues(model, host) {
+		t.Fatal("breaker publication survived shutdown")
+	}
+}

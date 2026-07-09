@@ -138,10 +138,9 @@ func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // outcome — unless the enclave was retired: its series was deleted at
 // shutdown and a draining request must not resurrect it.
 func publishBreakerState(modelName, host string, cb *circuitBreaker) {
-	if cb.Retired() {
-		return
-	}
-	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+	cb.publishIfActive(func(state cbState) {
+		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(state))
+	})
 }
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
