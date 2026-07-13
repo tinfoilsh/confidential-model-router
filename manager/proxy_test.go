@@ -239,6 +239,30 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 	}
 }
 
+// TestProxyOversizedBodyIsClientError pins that a MaxBytesReader trip
+// during the outbound copy answers 413 and records no backend failure, so
+// cheap oversized uploads cannot open a healthy enclave's breaker.
+func TestProxyOversizedBodyIsClientError(t *testing.T) {
+	cb := newCircuitBreaker()
+	collector := billing.NewCollector("", "", "")
+	t.Cleanup(collector.Stop)
+	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, cb)
+
+	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
+	rec := httptest.NewRecorder()
+	proxy.ErrorHandler(rec, req, &http.MaxBytesError{Limit: 1})
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+	if got := cb.ConsecutiveFailures(); got != 0 {
+		t.Fatalf("breaker failures = %d, want 0 (client fault)", got)
+	}
+	if cb.State() != cbClosed {
+		t.Fatalf("breaker state = %d, want closed", cb.State())
+	}
+}
+
 func TestCircuitBreaker_SuccessResetsFailureCount(t *testing.T) {
 	cb := newCircuitBreaker()
 	cb.RecordFailure()

@@ -101,7 +101,7 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if r.ContentLength > maxRequestBodySize {
-		jsonError(w, "Request body is too large.", manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
@@ -111,7 +111,7 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 func writeRequestBodyError(w http.ResponseWriter, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		jsonError(w, "Request body is too large.", manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return
 	}
 	jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)

@@ -94,6 +94,7 @@ const (
 	ErrMsgServerError   = "The server had an error while processing your request."
 	ErrMsgOverloaded    = "The engine is currently overloaded, please try again later."
 	ErrMsgModelNotFound = "The model does not exist."
+	ErrMsgBodyTooLarge  = "Request body is too large."
 )
 
 // billingCloser wraps a response body and emits a zero-token billing event
@@ -194,6 +195,31 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// A body-limit trip during the outbound copy (chunked uploads pass
+		// the router's Content-Length pre-check) is a client fault: answer
+		// 413 and leave the breaker alone, or cheap oversized uploads could
+		// take a healthy backend out of rotation. Like a cancellation, a
+		// tripped recovery probe must still return the breaker to open.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			log.WithFields(log.Fields{
+				"model":   modelName,
+				"enclave": host,
+			}).Warn("request body exceeded limit while proxying")
+			if cb.AbortProbe() {
+				publishBreakerState(modelName, host, cb)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"message": ErrMsgBodyTooLarge,
+					"type":    ErrTypeInvalidRequest,
+				},
+			})
+			return
+		}
+
 		reason := classifyProxyError(err)
 		log.WithFields(log.Fields{
 			"model":   modelName,
