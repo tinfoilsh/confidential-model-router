@@ -82,6 +82,16 @@ func (cb *circuitBreaker) NeedProbe() bool {
 	return cb.casState(cbOpen, cbHalfOpen)
 }
 
+// AbortProbe returns a claimed recovery probe to the open state without
+// counting a client cancellation as a backend failure.
+func (cb *circuitBreaker) AbortProbe() bool {
+	if !cb.casState(cbHalfOpen, cbOpen) {
+		return false
+	}
+	cb.lastFailureNano.Store(time.Now().UnixNano())
+	return true
+}
+
 // State returns the current state for observability.
 func (cb *circuitBreaker) State() cbState {
 	return cb.loadState()

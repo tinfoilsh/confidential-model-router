@@ -94,14 +94,18 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 	if err != nil {
 		return nil, err
 	}
-	// Observed at dispatch, like the public proxy path, so the picked
-	// replica counts as warm from prefill start.
-	if decision != nil {
-		em.cacheRouteShadow.ObserveLanding(modelName, req, decision, enclave.host, settings)
-	} else if ok {
-		em.cacheRouteShadow.Observe(modelName, req, pool, enclave.host, settings)
+	resp, err := postToEnclave(ctx, client, enclave, path, bodyBytes, headers)
+	if err != nil {
+		return nil, err
 	}
-	return postToEnclave(ctx, client, enclave, path, bodyBytes, headers)
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		if decision != nil {
+			em.cacheRouteShadow.ObserveLanding(modelName, req, decision, enclave.host, settings)
+		} else if ok {
+			em.cacheRouteShadow.Observe(modelName, req, pool, enclave.host, settings)
+		}
+	}
+	return resp, nil
 }
 
 // cacheRouteRequest classifies one internally dispatched request for the
@@ -148,7 +152,34 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	resp, err := client.Do(req)
 	if err != nil {
 		enclave.inflight.Add(-1)
+		reason := classifyProxyError(err)
+		if reason == "canceled" {
+			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
+			if enclave.cb != nil && enclave.cb.AbortProbe() {
+				publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
+			}
+		} else {
+			ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, reason).Inc()
+			if enclave.cb != nil {
+				enclave.cb.RecordFailure()
+				publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
+			}
+		}
 		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, httpFailureReason(resp.StatusCode)).Inc()
+		if enclave.cb != nil {
+			enclave.cb.RecordFailure()
+		}
+	} else {
+		ProxySuccessTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
+		if enclave.cb != nil {
+			enclave.cb.RecordSuccess()
+		}
+	}
+	if enclave.cb != nil {
+		publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
 	}
 	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
 	return resp, nil

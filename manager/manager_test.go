@@ -581,19 +581,18 @@ func TestSelectForDispatchNeverPicksDeadHost(t *testing.T) {
 	}
 }
 
-// TestSelectForDispatchDoesNotClaimProbes pins that internal dispatches
-// leave recovery probes alone: they never record breaker outcomes, so a
-// probe claimed here would strand the breaker in half-open until restart.
-func TestSelectForDispatchDoesNotClaimProbes(t *testing.T) {
+// TestSelectForDispatchClaimsProbes pins that internal dispatches participate
+// in breaker recovery now that their outcomes are recorded.
+func TestSelectForDispatchClaimsProbes(t *testing.T) {
 	m := newTestModel("a", "b")
 	tripBreaker(m.Enclaves["b"])
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
 
-	if got := m.SelectForDispatch([]string{"a"}); got == nil || got.host != "a" {
-		t.Fatalf("pick = %v, want a (probe must not be claimed)", got)
+	if got := m.SelectForDispatch([]string{"a"}); got == nil || got.host != "b" {
+		t.Fatalf("pick = %v, want due probe b", got)
 	}
-	if st := m.Enclaves["b"].cb.State(); st != cbOpen {
-		t.Fatalf("breaker state = %v, want still open (probe claim belongs to the public path)", st)
+	if st := m.Enclaves["b"].cb.State(); st != cbHalfOpen {
+		t.Fatalf("breaker state = %v, want half-open after probe claim", st)
 	}
 }
 

@@ -49,7 +49,11 @@ func TestPostToEnclaveInflight(t *testing.T) {
 	// waits on it, or a failed assertion deadlocks the test binary.
 	t.Cleanup(ts.Close)
 	t.Cleanup(releaseFn)
-	e := &Enclave{host: strings.TrimPrefix(ts.URL, "https://")}
+	e := &Enclave{
+		host:      strings.TrimPrefix(ts.URL, "https://"),
+		modelName: "test-model",
+		cb:        newCircuitBreaker(),
+	}
 
 	resp, err := postToEnclave(context.Background(), ts.Client(), e, "/v1/chat/completions", []byte("{}"), nil)
 	if err != nil {
@@ -57,6 +61,9 @@ func TestPostToEnclaveInflight(t *testing.T) {
 	}
 	if got := e.inflight.Load(); got != 1 {
 		t.Fatalf("in-flight after headers = %d, want 1 (body still open)", got)
+	}
+	if got := e.cb.ConsecutiveFailures(); got != 0 {
+		t.Fatalf("breaker failures after success = %d, want 0", got)
 	}
 	releaseFn()
 	if err := resp.Body.Close(); err != nil {
@@ -75,12 +82,42 @@ func TestPostToEnclaveInflight(t *testing.T) {
 	ts2 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	client := ts2.Client()
 	ts2.Close()
-	e2 := &Enclave{host: strings.TrimPrefix(ts2.URL, "https://")}
+	e2 := &Enclave{
+		host:      strings.TrimPrefix(ts2.URL, "https://"),
+		modelName: "test-model",
+		cb:        newCircuitBreaker(),
+	}
 	if _, err := postToEnclave(context.Background(), client, e2, "/x", nil, nil); err == nil {
 		t.Fatal("expected transport error against closed server")
 	}
 	if got := e2.inflight.Load(); got != 0 {
 		t.Fatalf("in-flight after error = %d, want 0", got)
+	}
+	if got := e2.cb.ConsecutiveFailures(); got != 1 {
+		t.Fatalf("breaker failures after transport error = %d, want 1", got)
+	}
+}
+
+func TestPostToEnclaveCancellationReleasesRecoveryProbe(t *testing.T) {
+	cb := newCircuitBreaker()
+	cb.consecutiveFailures.Store(cbFailureThreshold)
+	cb.storeState(cbHalfOpen)
+	e := &Enclave{
+		host:      "example.invalid",
+		modelName: "test-model",
+		cb:        cb,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil); err == nil {
+		t.Fatal("expected canceled request to fail")
+	}
+	if got := cb.State(); got != cbOpen {
+		t.Fatalf("breaker state = %d, want open", got)
+	}
+	if got := cb.ConsecutiveFailures(); got != cbFailureThreshold {
+		t.Fatalf("breaker failures = %d, want %d", got, cbFailureThreshold)
 	}
 }
 

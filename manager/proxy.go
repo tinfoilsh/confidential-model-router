@@ -146,9 +146,13 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		// Client cancellations aren't backend faults — track in a dedicated
-		// counter, don't trip the breaker.
+		// counter, don't trip the breaker. A cancelled recovery probe must
+		// still return the breaker to open, or it strands half-open forever.
 		if reason == "canceled" {
 			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
+			if cb.AbortProbe() {
+				publishBreakerState(modelName, host, cb)
+			}
 			return
 		}
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()

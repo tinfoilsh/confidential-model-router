@@ -185,6 +185,60 @@ func TestCircuitBreaker_HalfOpenToOpenOnFailure(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_AbortProbeReturnsToOpen(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	if !cb.NeedProbe() {
+		t.Fatal("expected probe after cooldown")
+	}
+	failures := cb.ConsecutiveFailures()
+
+	if !cb.AbortProbe() {
+		t.Fatal("expected claimed probe to abort")
+	}
+	if cb.State() != cbOpen {
+		t.Fatalf("expected open after abort, got %d", cb.State())
+	}
+	if cb.ConsecutiveFailures() != failures {
+		t.Fatalf("abort changed failure count: got %d, want %d", cb.ConsecutiveFailures(), failures)
+	}
+	if cb.NeedProbe() {
+		t.Fatal("should restart cooldown after abort")
+	}
+}
+
+// TestProxyCancellationReleasesRecoveryProbe pins that a client
+// cancellation on the public proxy path returns a claimed recovery probe
+// to open instead of stranding the breaker half-open forever.
+func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
+	cb := newCircuitBreaker()
+	for i := 0; i < cbFailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	if !cb.NeedProbe() {
+		t.Fatal("expected probe claim after cooldown")
+	}
+
+	collector := billing.NewCollector("", "", "")
+	t.Cleanup(collector.Stop)
+	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	proxy.ErrorHandler(rec, req, context.Canceled)
+
+	if cb.State() != cbOpen {
+		t.Fatalf("breaker state = %d, want open after cancelled probe", cb.State())
+	}
+	if cb.NeedProbe() {
+		t.Fatal("cooldown must restart after a cancelled probe")
+	}
+}
+
 func TestCircuitBreaker_SuccessResetsFailureCount(t *testing.T) {
 	cb := newCircuitBreaker()
 	cb.RecordFailure()

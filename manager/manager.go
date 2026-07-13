@@ -331,10 +331,7 @@ func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
 	return m.nextEnclave(skip, true)
 }
 
-// nextEnclave is NextEnclave with probe claiming optional: internal
-// dispatches never record breaker outcomes, so a probe they claim is a
-// probe that strands the breaker in half-open — only the public proxy
-// path, which records outcomes, may claim one.
+// nextEnclave is NextEnclave with probe claiming optional.
 func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -418,15 +415,14 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 // to the next-warmest host. Internal dispatches have no 429 path, so when
 // every live candidate is overloaded it serves through overload at the
 // warmest one — never at a breaker-open host, which is reachable only when
-// no closed replica exists at all. It also never claims recovery probes:
-// internal dispatches don't record breaker outcomes, so a probe claimed
-// here would strand the breaker in half-open.
+// no closed replica exists at all. Internal dispatches record their outcomes,
+// so they may also claim a due recovery probe.
 func (m *Model) SelectForDispatch(order []string) *Enclave {
 	skip := map[string]bool{}
 	var firstOverloaded *Enclave
 	var enclave *Enclave
 	for range m.EnclaveCount() {
-		enclave = m.nextEnclavePreferring(order, skip, false)
+		enclave = m.nextEnclavePreferring(order, skip, true)
 		if enclave == nil {
 			break
 		}
