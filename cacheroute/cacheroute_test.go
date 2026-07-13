@@ -280,20 +280,84 @@ func TestDeriveKeyPinned(t *testing.T) {
 	}
 
 	// Hand-framed reference: string contents flatten to lp(content); the
-	// window fields are Sum'd as separate lp() fields after salt and
-	// prompt_cache_key, under the routing-key domain tag.
+	// window fields are Sum'd as separate lp() fields after the routing
+	// secret (empty here: none installed), salt, and prompt_cache_key,
+	// under the routing-key domain tag.
 	lp := func(s string) string {
 		n := len(s)
 		return string([]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}) + s
 	}
-	want := Key(cachesalt.Sum(KeyDomainTag, testSalt, "group-1", "", lp("sys prompt"), lp("user prompt")))
+	want := Key(cachesalt.Sum(KeyDomainTag, "", testSalt, "group-1", "", lp("sys prompt"), lp("user prompt")))
 	if got.Key != want {
 		t.Fatalf("key = %x, want hand-framed %x", got.Key, want)
 	}
 
-	const golden = "fac9e3d0f3dda00695b7ecab7dd7dc7a4d569d49cc5145b71bfcc1eae53978e4"
+	const golden = "f3f6287264aaf4d7fe1a8ded41fdf7e78b7ebac31ebe0e15fc029599ccd6b4e4"
 	if h := hex.EncodeToString(got.Key[:]); h != golden {
 		t.Fatalf("key = %s, want golden %s (changing the construction re-homes every key)", h, golden)
+	}
+}
+
+// TestDeriveKeyPinnedSecret pins the construction with a routing secret
+// installed the same two ways: hand-framed reference and a golden from an
+// independent implementation. Distinct secrets must derive distinct keys.
+func TestDeriveKeyPinnedSecret(t *testing.T) {
+	const secret = "test-routing-secret-0123456789abcdef"
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": "sys prompt"},
+			map[string]any{"role": "user", "content": "user prompt"},
+		},
+		"prompt_cache_key": "group-1",
+	}
+	settings := Settings{Mode: ModeShadow, MinPromptBytes: 1, Retention: DefaultRetention, SplitThresholdRPM: DefaultSplitThresholdRPM, Secret: secret}
+	got := ExtractRequest(body, "/v1/chat/completions", testSalt, settings)
+	if got.Outcome != OutcomeKeyed {
+		t.Fatalf("outcome = %s, want keyed", got.Outcome)
+	}
+
+	lp := func(s string) string {
+		n := len(s)
+		return string([]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}) + s
+	}
+	want := Key(cachesalt.Sum(KeyDomainTag, secret, testSalt, "group-1", "", lp("sys prompt"), lp("user prompt")))
+	if got.Key != want {
+		t.Fatalf("key = %x, want hand-framed %x", got.Key, want)
+	}
+
+	// Golden from an independent implementation (Python hashlib):
+	// Sum(tag, secret, salt, "group-1", "", lp("sys prompt"),
+	// lp("user prompt")).
+	const golden = "6e6be0988ec76eb2e5d4c4b23ae0a4cecadcf4fbd27911570e164b894b6bf0a3"
+	if h := hex.EncodeToString(got.Key[:]); h != golden {
+		t.Fatalf("key = %s, want golden %s (changing the construction re-homes every key)", h, golden)
+	}
+
+	other := settings
+	other.Secret = "other-routing-secret-0123456789abcdef"
+	if r := ExtractRequest(body, "/v1/chat/completions", testSalt, other); r.Key == got.Key {
+		t.Fatal("different secrets must derive different keys")
+	}
+}
+
+// TestSettingsFromSecret verifies SettingsFrom resolves the installed
+// process-wide secret for configured and unconfigured models alike, and
+// that clearing it restores unkeyed derivation.
+func TestSettingsFromSecret(t *testing.T) {
+	const secret = "test-routing-secret-0123456789abcdef"
+	SetSecret(secret)
+	t.Cleanup(func() { SetSecret("") })
+
+	if s := SettingsFrom(nil); s.Secret != secret {
+		t.Fatalf("nil config must resolve the secret, got %q", s.Secret)
+	}
+	if s := SettingsFrom(&config.CacheRouteConfig{Mode: "enforced"}); s.Secret != secret {
+		t.Fatalf("configured model must resolve the secret, got %q", s.Secret)
+	}
+
+	SetSecret("")
+	if s := SettingsFrom(nil); s.Secret != "" {
+		t.Fatalf("cleared secret must resolve empty, got %q", s.Secret)
 	}
 }
 

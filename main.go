@@ -121,6 +121,13 @@ var (
 	// Off by default for rollout; once enabled, disabling it re-opens
 	// cross-user cache sharing — an emergency lever, not a tuning knob.
 	cacheSaltEnabled = flag.Bool("cache-salt", getEnvBool("CACHE_SALT_ENABLED"), "inject per-principal cache_salt into requests (env: CACHE_SALT_ENABLED)")
+	// cacheRouteSecret keys cache-route routing keys so key→replica
+	// placement isn't computable offline by callers. Must be identical
+	// across all router replicas; changing it re-homes every key. The env
+	// var is resolved after parse, not as the flag default: defaults are
+	// printed verbatim by -h and any flag-parse error, and the secret must
+	// never reach a log.
+	cacheRouteSecret = flag.String("cache-route-secret", "", "secret mixed into cache-route routing keys, must match across router replicas (env: CACHE_ROUTE_SECRET)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -385,6 +392,22 @@ func main() {
 	}
 	if *usageContextSecret == "" {
 		log.Fatal("USAGE_CONTEXT_SECRET is required")
+	}
+
+	// A routing-secret skew between replicas silently re-homes keys on only
+	// the skewed instance, so tolerate the classic source — a trailing
+	// newline from secret tooling — but refuse a value that is set yet
+	// unusable: booting unkeyed on a garbage secret would be that same
+	// silent skew.
+	if secret := *cacheRouteSecret; secret != "" || os.Getenv("CACHE_ROUTE_SECRET") != "" {
+		if secret == "" {
+			secret = os.Getenv("CACHE_ROUTE_SECRET")
+		}
+		secret = strings.TrimSpace(secret)
+		if len(secret) < 32 {
+			log.Fatal("CACHE_ROUTE_SECRET must be at least 32 bytes (e.g. openssl rand -base64 32)")
+		}
+		cacheroute.SetSecret(secret)
 	}
 
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval)

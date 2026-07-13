@@ -16,6 +16,7 @@ containers:
     secrets:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
+      - CACHE_ROUTE_SECRET
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s
