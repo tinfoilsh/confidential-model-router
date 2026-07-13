@@ -250,8 +250,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		apiKey := ""
 		if authHeader != "" {
 			// Extract API key from "Bearer <api_key>" format
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+			if apiKey = BearerToken(authHeader); apiKey != "" {
 				// For user ID, we can use a placeholder or the API key itself
 				userID = "authenticated_user"
 			}

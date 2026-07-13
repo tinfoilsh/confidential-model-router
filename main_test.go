@@ -47,25 +47,6 @@ func TestRateLimitIdentity(t *testing.T) {
 	}
 }
 
-func TestBearerTokenMatchesShimParsing(t *testing.T) {
-	tests := []struct {
-		header string
-		want   string
-	}{
-		{"Bearer tk_test", "tk_test"},
-		{"bearer tk_test", "tk_test"},
-		{"BEARER   tk_test  ", "tk_test"},
-		{"Token tk_test", ""},
-		{"Bearer", ""},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		if got := bearerToken(tt.header); got != tt.want {
-			t.Errorf("bearerToken(%q) = %q, want %q", tt.header, got, tt.want)
-		}
-	}
-}
-
 func TestLimitRequestBodyRejectsKnownOversize(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
 	req.ContentLength = maxRequestBodySize + 1

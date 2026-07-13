@@ -258,9 +258,7 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 	apiKey := ""
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
-		if strings.HasPrefix(auth, "Bearer ") {
-			apiKey = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		}
+		apiKey = manager.BearerToken(auth)
 	}
 	if usageContextSecret != "" {
 		if err := usagereporting.SetHeaders(headers, usagereporting.Context{
@@ -457,12 +455,7 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return
-	}
-
-	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+	apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 	if apiKey == "" {
 		return
 	}

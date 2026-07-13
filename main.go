@@ -37,14 +37,6 @@ var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
 
-func bearerToken(header string) string {
-	const scheme = "bearer "
-	if len(header) < len(scheme) || !strings.EqualFold(header[:len(scheme)], scheme) {
-		return ""
-	}
-	return strings.TrimSpace(header[len(scheme):])
-}
-
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
 // stable across the short-lived token's ~15m refreshes (and across multiple
@@ -463,7 +455,7 @@ func main() {
 		var cacheRouteSettings cacheroute.Settings
 
 		// Extract API key early for rate limiting decisions
-		apiKey := bearerToken(r.Header.Get("Authorization"))
+		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
 			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
