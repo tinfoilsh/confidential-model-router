@@ -13,6 +13,7 @@ package cacheroute
 import (
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/cachesalt"
@@ -22,6 +23,26 @@ import (
 // KeyDomainTag namespaces routing-key derivation. Tags are hashed unframed,
 // so no tag in the router may be a prefix of another.
 const KeyDomainTag = "tinfoil/route-key/v1"
+
+// keySecret is the process-wide routing secret (see SetSecret), stored
+// atomically so startup wiring can't race request handling.
+var keySecret atomic.Value // string
+
+// SetSecret installs the process-wide secret mixed into routing keys.
+// Every other derivation input is known to the caller who sent the request;
+// the secret is what keeps key→replica placement from being computable
+// offline. It must be identical across all router replicas — instances
+// that disagree silently derive different keys for the same request — and
+// changing it re-homes every key.
+func SetSecret(secret string) {
+	keySecret.Store(secret)
+}
+
+// currentSecret returns the installed routing secret, "" when none.
+func currentSecret() string {
+	s, _ := keySecret.Load().(string)
+	return s
+}
 
 // prefixWindowCap bounds how much prompt prefix feeds the routing key
 // (~256 tokens). A routing hint only: the engine's byte-exact prefix cache
@@ -72,6 +93,7 @@ type Settings struct {
 	Retention         time.Duration // how long a replica stays warm for a key
 	MinPromptBytes    int           // eligibility floor on whole-prompt bytes
 	SplitThresholdRPM float64       // per-key rpm per replica of warm set
+	Secret            string        // routing secret from SetSecret; "" when none installed
 }
 
 // SettingsFrom resolves a config block (nil means unconfigured), applying
@@ -82,6 +104,7 @@ func SettingsFrom(c *config.CacheRouteConfig) Settings {
 		Retention:         DefaultRetention,
 		MinPromptBytes:    DefaultMinPromptBytes,
 		SplitThresholdRPM: DefaultSplitThresholdRPM,
+		Secret:            currentSecret(),
 	}
 	if c == nil {
 		return s
@@ -171,27 +194,28 @@ func ExtractRequest(body map[string]any, path, salt string, s Settings) (req *Re
 		req.Outcome = OutcomeBelowFloor
 	default:
 		req.Outcome = OutcomeKeyed
-		req.Key = deriveKey(salt, promptCacheKey, tools, system, user)
+		req.Key = deriveKey(s.Secret, salt, promptCacheKey, tools, system, user)
 	}
 	return req
 }
 
 // deriveKey computes
 //
-//	Sum(tag, salt, prompt_cache_key, tools, system, first user message)
+//	Sum(tag, secret, salt, prompt_cache_key, tools, system, first user message)
 //
 // with the three prompt fields flattened and capped to prefixWindowCap
 // across their total. Sum length-prefixes every field, so boundaries can't
-// shift. The construction is pinned by test vectors: changing any detail
-// re-homes every key, a fleet-wide cache cold-start once routing acts.
-func deriveKey(salt, promptCacheKey string, tools, system, user any) Key {
+// shift; an uninstalled secret contributes lp(""). The construction is
+// pinned by test vectors: changing any detail re-homes every key, a
+// fleet-wide cache cold-start once routing acts.
+func deriveKey(secret, salt, promptCacheKey string, tools, system, user any) Key {
 	budget := prefixWindowCap
 	toolsB := flattenValue(tools, budget)
 	budget -= len(toolsB)
 	systemB := flattenValue(system, budget)
 	budget -= len(systemB)
 	userB := flattenValue(user, budget)
-	return Key(cachesalt.Sum(KeyDomainTag, salt, promptCacheKey, string(toolsB), string(systemB), string(userB)))
+	return Key(cachesalt.Sum(KeyDomainTag, secret, salt, promptCacheKey, string(toolsB), string(systemB), string(userB)))
 }
 
 // promptFields pulls the routing-relevant fields out of the parsed body in
