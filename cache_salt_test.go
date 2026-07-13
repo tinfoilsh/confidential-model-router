@@ -14,11 +14,12 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-// jwtWithSubject builds an unsigned compact JWT carrying the given subject,
-// matching what jwtSubject parses (payload only, signature ignored).
+// jwtWithSubject builds an unsigned at+jwt-shaped token carrying the given
+// subject, matching the token type the outer shim verifies.
 func jwtWithSubject(sub string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"at+jwt"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `"}`))
-	return "hdr." + payload + ".sig"
+	return header + "." + payload + ".sig"
 }
 
 func TestApplyCacheSaltStripsFieldsUnconditionally(t *testing.T) {
@@ -194,6 +195,18 @@ func TestApplyCacheSaltOpaqueKeyIdentity(t *testing.T) {
 	}
 }
 
+func TestApplyCacheSaltJWTShapedOpaqueKeyUsesRawIdentity(t *testing.T) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"api-key"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"attacker-chosen"}`))
+	key := header + "." + payload + ".opaque"
+	want, _ := cachesalt.Derive(key, "")
+	body := map[string]any{"model": "m"}
+	applyCacheSalt(body, "/v1/chat/completions", key, true)
+	if got, _ := body["cache_salt"].(string); got != want {
+		t.Errorf("cache_salt = %q, want raw opaque-key identity %q", got, want)
+	}
+}
+
 // TestSaltProxiedBody covers the subdomain routing path, where the body is
 // otherwise forwarded verbatim.
 func TestSaltProxiedBody(t *testing.T) {
@@ -275,23 +288,15 @@ func TestSaltProxiedBody(t *testing.T) {
 		}
 	})
 
-	t.Run("forwards a non-JSON body untouched", func(t *testing.T) {
+	t.Run("rejects a non-JSON body", func(t *testing.T) {
 		const raw = `not json`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-		mode, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		if mode != cachesalt.ModeNone {
-			t.Errorf("mode = %q, want ModeNone", mode)
-		}
-		out, _ := io.ReadAll(req.Body)
-		if string(out) != raw {
-			t.Errorf("non-JSON body altered: got %q", out)
+		if _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
+			t.Fatal("expected malformed subdomain body to be rejected")
 		}
 	})
 
-	t.Run("forwards a body with trailing data untouched", func(t *testing.T) {
+	t.Run("rejects a body with trailing data", func(t *testing.T) {
 		// json.Unmarshal rejects all of these, and so must the engine-bound
 		// rewrite: re-marshaling only the first value would silently convert
 		// a request the engine rejects into one it accepts. The '}'/' ]'
@@ -305,16 +310,8 @@ func TestSaltProxiedBody(t *testing.T) {
 			`{"model":"m"} x`,
 		} {
 			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-			mode, err := saltProxiedBody(req, "tenant-a", true)
-			if err != nil {
-				t.Fatalf("saltProxiedBody(%q): %v", raw, err)
-			}
-			if mode != cachesalt.ModeNone {
-				t.Errorf("mode = %q for %q, want ModeNone", mode, raw)
-			}
-			out, _ := io.ReadAll(req.Body)
-			if string(out) != raw {
-				t.Errorf("trailing-data body altered: got %q, want %q", out, raw)
+			if _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
+				t.Errorf("expected trailing-data body %q to be rejected", raw)
 			}
 		}
 	})

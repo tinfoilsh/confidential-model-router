@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,8 +65,8 @@ func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cac
 // saltProxiedBody applies cache-salt handling to a request that the router
 // otherwise forwards verbatim (the subdomain routing path, which never
 // parses the body). It rewrites r.Body in place and returns the derivation
-// mode. Only JSON-object bodies are touched; a non-JSON body is forwarded
-// byte-for-byte, and a body that needs no change is not re-marshaled.
+// mode. The body must be one JSON object so router-owned cache fields can
+// never bypass stripping on a malformed request.
 func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mode, error) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
@@ -81,9 +82,11 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
 	dec.UseNumber()
 	var body map[string]any
-	if err := dec.Decode(&body); err != nil || !decodeConsumedAll(dec) {
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		return cachesalt.ModeNone, nil
+	if err := dec.Decode(&body); err != nil || !decodeConsumedAll(dec) || body == nil {
+		if err != nil {
+			return cachesalt.ModeNone, err
+		}
+		return cachesalt.ModeNone, errors.New("request body must be one JSON object")
 	}
 
 	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
