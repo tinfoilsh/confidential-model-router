@@ -85,11 +85,16 @@ func (cb *circuitBreaker) NeedProbe() bool {
 // AbortProbe returns a claimed recovery probe to the open state without
 // counting a client cancellation as a backend failure.
 func (cb *circuitBreaker) AbortProbe() bool {
-	if !cb.casState(cbHalfOpen, cbOpen) {
+	if cb.loadState() != cbHalfOpen {
 		return false
 	}
+	// Restart the cooldown before exposing the open state: a NeedProbe
+	// caller that observes cbOpen with the stale pre-probe timestamp would
+	// claim a fresh probe with no cooldown at all. A spurious store when
+	// the CAS below loses is harmless — the concurrent transition owns the
+	// timestamp from then on.
 	cb.lastFailureNano.Store(time.Now().UnixNano())
-	return true
+	return cb.casState(cbHalfOpen, cbOpen)
 }
 
 // State returns the current state for observability.
