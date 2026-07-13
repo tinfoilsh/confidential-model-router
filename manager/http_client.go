@@ -15,8 +15,12 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 )
 
+// boundHTTPClientForModel picks a host for a caller-driven session (the MCP
+// tool transport). Those connections never reach postToEnclave, so no
+// breaker outcome is ever recorded for them: claiming a recovery probe here
+// would strand the breaker half-open until restart.
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	enclave, client, _, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, _, err := em.boundHTTPClientPreferring(modelName, nil, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -26,14 +30,15 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
 // Model.SelectForDispatch) — and builds its attested client. A non-nil
-// ProbeClaim must travel with the dispatched request (see ProbeClaim).
-func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (*Enclave, *http.Client, *ProbeClaim, error) {
+// ProbeClaim must travel with the dispatched request (see ProbeClaim);
+// claimProbes must be false for callers that record no breaker outcomes.
+func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string, claimProbes bool) (*Enclave, *http.Client, *ProbeClaim, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave, claim := model.SelectForDispatch(order)
+	enclave, claim := model.selectForDispatch(order, claimProbes)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
@@ -61,7 +66,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +96,7 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 		order = decision.Order
 	}
 
-	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, order)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, order, true)
 	if err != nil {
 		return nil, err
 	}

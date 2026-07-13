@@ -604,6 +604,26 @@ func TestSelectForDispatchClaimsProbes(t *testing.T) {
 	}
 }
 
+// TestSelectForDispatchWithoutClaimingLeavesProbes pins the selection used
+// by callers that record no breaker outcomes (MCP sessions, file
+// conversion): a due probe must be left for a path that can resolve it.
+func TestSelectForDispatchWithoutClaimingLeavesProbes(t *testing.T) {
+	m := newTestModel("a", "b")
+	tripBreaker(m.Enclaves["b"])
+	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
+
+	got, claim := m.selectForDispatch([]string{"a"}, false)
+	if got == nil || got.host != "a" {
+		t.Fatalf("pick = %v, want a", got)
+	}
+	if claim != nil {
+		t.Fatal("non-claiming selection must not return a probe claim")
+	}
+	if st := m.Enclaves["b"].cb.State(); st != cbOpen {
+		t.Fatalf("breaker state = %v, want still open (probe left unclaimed)", st)
+	}
+}
+
 // TestShouldRejectNonClosedBreaker pins that overload rejection only applies
 // to healthy replicas: a probe or last-resort pick must dispatch.
 func TestShouldRejectNonClosedBreaker(t *testing.T) {
