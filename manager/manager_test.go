@@ -37,7 +37,7 @@ func TestNextEnclave_PrefersNonOverloaded(t *testing.T) {
 	m.Enclaves["a"].metrics.overloaded.Store(true)
 
 	for i := 0; i < 50; i++ {
-		if got := m.NextEnclave(nil); got == nil || got.host != "b" {
+		if got, _ := m.NextEnclave(nil); got == nil || got.host != "b" {
 			t.Fatalf("expected b, got %v", got)
 		}
 	}
@@ -45,7 +45,7 @@ func TestNextEnclave_PrefersNonOverloaded(t *testing.T) {
 
 func TestNextEnclave_SkipExcludesFromPreferred(t *testing.T) {
 	m := newTestModel("a", "b", "c")
-	got := m.NextEnclave(map[string]bool{"a": true, "b": true})
+	got, _ := m.NextEnclave(map[string]bool{"a": true, "b": true})
 	if got == nil || got.host != "c" {
 		t.Fatalf("expected c, got %v", got)
 	}
@@ -55,7 +55,7 @@ func TestNextEnclave_AllOverloadedFallsBack(t *testing.T) {
 	m := newTestModel("a", "b")
 	m.Enclaves["a"].metrics.overloaded.Store(true)
 	m.Enclaves["b"].metrics.overloaded.Store(true)
-	if got := m.NextEnclave(nil); got == nil {
+	if got, _ := m.NextEnclave(nil); got == nil {
 		t.Fatal("expected fallback pick, got nil")
 	}
 }
@@ -68,14 +68,18 @@ func TestNextEnclave_ProbeOverridesSkip(t *testing.T) {
 	}
 	probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 
-	if got := m.NextEnclave(map[string]bool{"probe": true}); got == nil || got.host != "probe" {
+	got, claim := m.NextEnclave(map[string]bool{"probe": true})
+	if got == nil || got.host != "probe" {
 		t.Fatalf("expected probe, got %v", got)
+	}
+	if claim == nil {
+		t.Fatal("probe pick must carry its claim")
 	}
 }
 
 func TestNextEnclave_EmptyModel(t *testing.T) {
 	m := &Model{Enclaves: map[string]*Enclave{}}
-	if got := m.NextEnclave(nil); got != nil {
+	if got, _ := m.NextEnclave(nil); got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }
@@ -296,10 +300,10 @@ func TestNextEnclavePreferring(t *testing.T) {
 	m := newTestModel("a", "b", "c")
 	order := []string{"b", "c", "a"}
 
-	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
+	if got, _ := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want order head b", got)
 	}
-	if got := m.NextEnclavePreferring(order, map[string]bool{"b": true}); got == nil || got.host != "c" {
+	if got, _ := m.NextEnclavePreferring(order, map[string]bool{"b": true}); got == nil || got.host != "c" {
 		t.Fatalf("pick with b skipped = %v, want c", got)
 	}
 
@@ -307,7 +311,7 @@ func TestNextEnclavePreferring(t *testing.T) {
 	// never move a key's home — stepping aside is the caller's per-request
 	// job (skip / SelectForDispatch), not the selector's.
 	m.Enclaves["b"].metrics.overloaded.Store(true)
-	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
+	if got, _ := m.NextEnclavePreferring(order, nil); got == nil || got.host != "b" {
 		t.Fatalf("pick with b overloaded = %v, want b (no overload veto)", got)
 	}
 	m.Enclaves["b"].metrics.overloaded.Store(false)
@@ -316,25 +320,25 @@ func TestNextEnclavePreferring(t *testing.T) {
 	// Keep the trip fresh so a stalled test runner cannot cross the probe
 	// cooldown and turn the open breaker into a served probe mid-test.
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().UnixNano())
-	if got := m.NextEnclavePreferring(order, nil); got == nil || got.host != "c" {
+	if got, _ := m.NextEnclavePreferring(order, nil); got == nil || got.host != "c" {
 		t.Fatalf("pick with b open = %v, want c", got)
 	}
 
 	// Order exhausted: fall back to random among the acceptable rest.
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().UnixNano())
-	if got := m.NextEnclavePreferring([]string{"b"}, nil); got == nil || got.host == "b" {
+	if got, _ := m.NextEnclavePreferring([]string{"b"}, nil); got == nil || got.host == "b" {
 		t.Fatalf("exhausted order = %v, want random fallback avoiding b", got)
 	}
 
 	// A due probe beats the cache preference.
 	probe := m.Enclaves["b"]
 	probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	if got := m.NextEnclavePreferring([]string{"a", "c"}, nil); got == nil || got.host != "b" {
-		t.Fatalf("pick with due probe = %v, want probe b", got)
+	if got, claim := m.NextEnclavePreferring([]string{"a", "c"}, nil); got == nil || got.host != "b" || claim == nil {
+		t.Fatalf("pick with due probe = %v (claim %v), want claimed probe b", got, claim)
 	}
 
 	// Empty order behaves like NextEnclave.
-	if got := m.NextEnclavePreferring(nil, map[string]bool{"a": true, "b": true}); got == nil || got.host != "c" {
+	if got, _ := m.NextEnclavePreferring(nil, map[string]bool{"a": true, "b": true}); got == nil || got.host != "c" {
 		t.Fatalf("nil order = %v, want c", got)
 	}
 }
@@ -347,14 +351,14 @@ func TestSelectForDispatch(t *testing.T) {
 	m := newTestModel("a", "b", "c")
 	order := []string{"b", "c", "a"}
 
-	if got := m.SelectForDispatch(order); got == nil || got.host != "b" {
+	if got, _ := m.SelectForDispatch(order); got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want order head b", got)
 	}
 
 	m.Enclaves["b"].metrics.overloaded.Store(true)
 	m.Enclaves["b"].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
 	m.Enclaves["b"].metrics.updateLatest(5, time.Now())
-	if got := m.SelectForDispatch(order); got == nil || got.host != "c" {
+	if got, _ := m.SelectForDispatch(order); got == nil || got.host != "c" {
 		t.Fatalf("pick with b overloaded = %v, want spill to c", got)
 	}
 
@@ -363,7 +367,7 @@ func TestSelectForDispatch(t *testing.T) {
 		m.Enclaves[h].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
 		m.Enclaves[h].metrics.updateLatest(5, time.Now())
 	}
-	if got := m.SelectForDispatch(order); got == nil {
+	if got, _ := m.SelectForDispatch(order); got == nil {
 		t.Fatal("all-overloaded dispatch must still return an enclave")
 	}
 }
@@ -554,7 +558,7 @@ func TestSelectForDispatchAllOverloadedReturnsWarmest(t *testing.T) {
 		makeOverloaded(m.Enclaves[h])
 	}
 	for range 20 {
-		if got := m.SelectForDispatch([]string{"b", "c", "a"}); got == nil || got.host != "b" {
+		if got, _ := m.SelectForDispatch([]string{"b", "c", "a"}); got == nil || got.host != "b" {
 			t.Fatalf("all-overloaded pick = %v, want warmest b", got)
 		}
 	}
@@ -571,7 +575,7 @@ func TestSelectForDispatchNeverPicksDeadHost(t *testing.T) {
 	m.Enclaves["c"].cb.lastFailureNano.Store(time.Now().UnixNano()) // not probe-due
 
 	for range 200 {
-		got := m.SelectForDispatch([]string{"a", "b"})
+		got, _ := m.SelectForDispatch([]string{"a", "b"})
 		if got == nil || got.host == "c" {
 			t.Fatalf("pick = %v, must never be dead host c", got)
 		}
@@ -588,8 +592,12 @@ func TestSelectForDispatchClaimsProbes(t *testing.T) {
 	tripBreaker(m.Enclaves["b"])
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
 
-	if got := m.SelectForDispatch([]string{"a"}); got == nil || got.host != "b" {
+	got, claim := m.SelectForDispatch([]string{"a"})
+	if got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want due probe b", got)
+	}
+	if claim == nil {
+		t.Fatal("probe pick must carry its claim")
 	}
 	if st := m.Enclaves["b"].cb.State(); st != cbHalfOpen {
 		t.Fatalf("breaker state = %v, want half-open after probe claim", st)

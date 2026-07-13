@@ -146,16 +146,6 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
-		// Client cancellations aren't backend faults — track in a dedicated
-		// counter, don't trip the breaker. A cancelled recovery probe must
-		// still return the breaker to open, or it strands half-open forever.
-		if reason == "canceled" {
-			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
-			if cb.AbortProbe() {
-				publishBreakerState(modelName, host, cb)
-			}
-			return
-		}
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
 		publishBreakerState(modelName, host, cb)
@@ -206,9 +196,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"model":   modelName,
 				"enclave": host,
 			}).Warn("request body exceeded limit while proxying")
-			if cb.AbortProbe() {
-				publishBreakerState(modelName, host, cb)
-			}
+			ProbeClaimFromContext(r.Context()).Abort()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			json.NewEncoder(w).Encode(map[string]any{
@@ -227,7 +215,16 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			"reason":  reason,
 			"error":   err.Error(),
 		}).Error("proxy error")
-		recordFailure(reason)
+		// Client cancellations aren't backend faults — track in a dedicated
+		// counter, don't trip the breaker. A cancelled recovery probe must
+		// still return the breaker to open, or it strands half-open forever;
+		// only the request that owns the claim may release it.
+		if reason == "canceled" {
+			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
+			ProbeClaimFromContext(r.Context()).Abort()
+		} else {
+			recordFailure(reason)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{

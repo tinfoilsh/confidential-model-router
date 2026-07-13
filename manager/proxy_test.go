@@ -134,25 +134,25 @@ func TestCircuitBreaker_SuccessResetsClosed(t *testing.T) {
 	}
 }
 
-func TestCircuitBreaker_NeedProbeAfterCooldown(t *testing.T) {
+func TestCircuitBreaker_ClaimProbeAfterCooldown(t *testing.T) {
 	cb := newCircuitBreaker()
 	for i := 0; i < cbFailureThreshold; i++ {
 		cb.RecordFailure()
 	}
-	if cb.NeedProbe() {
+	if _, ok := cb.ClaimProbe(); ok {
 		t.Fatal("should not probe before cooldown")
 	}
 	// Simulate cooldown by backdating lastFailureNano
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 
-	if !cb.NeedProbe() {
+	if _, ok := cb.ClaimProbe(); !ok {
 		t.Fatal("expected probe after cooldown")
 	}
 	if cb.State() != cbHalfOpen {
 		t.Fatalf("expected half-open, got %d", cb.State())
 	}
 	// Second call should return false (only one probe allowed)
-	if cb.NeedProbe() {
+	if _, ok := cb.ClaimProbe(); ok {
 		t.Fatal("expected no second probe while half-open")
 	}
 }
@@ -163,7 +163,7 @@ func TestCircuitBreaker_HalfOpenToClosedOnSuccess(t *testing.T) {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	cb.NeedProbe() // transition to half-open
+	cb.ClaimProbe() // transition to half-open
 
 	cb.RecordSuccess()
 	if cb.State() != cbClosed {
@@ -177,7 +177,7 @@ func TestCircuitBreaker_HalfOpenToOpenOnFailure(t *testing.T) {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	cb.NeedProbe() // transition to half-open
+	cb.ClaimProbe() // transition to half-open
 
 	cb.RecordFailure()
 	if cb.State() != cbOpen {
@@ -191,12 +191,16 @@ func TestCircuitBreaker_AbortProbeReturnsToOpen(t *testing.T) {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	if !cb.NeedProbe() {
+	token, ok := cb.ClaimProbe()
+	if !ok {
 		t.Fatal("expected probe after cooldown")
 	}
 	failures := cb.ConsecutiveFailures()
 
-	if !cb.AbortProbe() {
+	if cb.AbortProbe(token - 1) {
+		t.Fatal("a stale token must not abort the current probe")
+	}
+	if !cb.AbortProbe(token) {
 		t.Fatal("expected claimed probe to abort")
 	}
 	if cb.State() != cbOpen {
@@ -205,36 +209,50 @@ func TestCircuitBreaker_AbortProbeReturnsToOpen(t *testing.T) {
 	if cb.ConsecutiveFailures() != failures {
 		t.Fatalf("abort changed failure count: got %d, want %d", cb.ConsecutiveFailures(), failures)
 	}
-	if cb.NeedProbe() {
+	if _, ok := cb.ClaimProbe(); ok {
 		t.Fatal("should restart cooldown after abort")
 	}
 }
 
 // TestProxyCancellationReleasesRecoveryProbe pins that a client
 // cancellation on the public proxy path returns a claimed recovery probe
-// to open instead of stranding the breaker half-open forever.
+// to open instead of stranding the breaker half-open forever — but only
+// when the cancelled request owns the claim.
 func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 	cb := newCircuitBreaker()
 	for i := 0; i < cbFailureThreshold; i++ {
 		cb.RecordFailure()
 	}
 	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
-	if !cb.NeedProbe() {
+	token, ok := cb.ClaimProbe()
+	if !ok {
 		t.Fatal("expected probe claim after cooldown")
 	}
+	claim := &ProbeClaim{cb: cb, token: token, modelName: "probe-model", host: "probe-host.test"}
 
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb)
 
+	// A cancelled request that does not own the claim must leave the
+	// in-flight probe alone.
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	rec := httptest.NewRecorder()
+	proxy.ErrorHandler(rec, req, context.Canceled)
+	if cb.State() != cbHalfOpen {
+		t.Fatalf("breaker state = %d, want half-open (probe not owned by canceller)", cb.State())
+	}
+
+	// The owning request's cancellation releases it.
+	req = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req = req.WithContext(WithProbeClaim(req.Context(), claim))
+	rec = httptest.NewRecorder()
 	proxy.ErrorHandler(rec, req, context.Canceled)
 
 	if cb.State() != cbOpen {
 		t.Fatalf("breaker state = %d, want open after cancelled probe", cb.State())
 	}
-	if cb.NeedProbe() {
+	if _, ok := cb.ClaimProbe(); ok {
 		t.Fatal("cooldown must restart after a cancelled probe")
 	}
 }

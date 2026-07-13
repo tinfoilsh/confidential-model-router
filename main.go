@@ -848,13 +848,14 @@ func main() {
 		// cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
+			probeClaim *manager.ProbeClaim
 			overloaded bool
 			retryAfter time.Duration
 			waiting    float64
 			skip       = map[string]bool{}
 		)
 		for range model.EnclaveCount() {
-			enclave = model.NextEnclavePreferring(cacheRouteOrder, skip)
+			enclave, probeClaim = model.NextEnclavePreferring(cacheRouteOrder, skip)
 			if enclave == nil {
 				break
 			}
@@ -906,6 +907,13 @@ func main() {
 			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
 		} else if cacheRouteReq != nil {
 			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
+		}
+
+		// A claimed recovery probe travels with its request, so the
+		// enclave's outcome handlers can tell an owner's cancellation
+		// (which must release the claim) from an unrelated one.
+		if probeClaim != nil {
+			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
 
 		enclave.ServeHTTP(w, r)

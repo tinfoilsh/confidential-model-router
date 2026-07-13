@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,8 +28,12 @@ type circuitBreaker struct {
 	state               atomic.Int32
 	consecutiveFailures atomic.Int64
 	lastFailureNano     atomic.Int64
-	retired             atomic.Bool
-	publishMu           sync.RWMutex
+	// probeGen counts probe claims; an AbortProbe caller must present the
+	// token of the current claim, so a stale holder cannot release a probe
+	// it no longer owns.
+	probeGen  atomic.Uint64
+	retired   atomic.Bool
+	publishMu sync.RWMutex
 }
 
 func newCircuitBreaker() *circuitBreaker {
@@ -68,33 +73,78 @@ func (cb *circuitBreaker) Closed() bool {
 	return cb.loadState() == cbClosed
 }
 
-// NeedProbe attempts to transition an open circuit breaker to half-open after
-// the cooldown has elapsed. Returns true if this caller won the CAS and should
-// send exactly one probe request to this enclave.
-func (cb *circuitBreaker) NeedProbe() bool {
+// ClaimProbe attempts to transition an open circuit breaker to half-open
+// after the cooldown has elapsed. When this caller wins the CAS it returns
+// (token, true): exactly one probe request must be dispatched for the claim,
+// resolving it via RecordSuccess or RecordFailure — or AbortProbe with the
+// token if the probe is cancelled before the backend answers.
+func (cb *circuitBreaker) ClaimProbe() (uint64, bool) {
 	if cb.loadState() != cbOpen {
-		return false
+		return 0, false
 	}
 	last := time.Unix(0, cb.lastFailureNano.Load())
 	if time.Since(last) < cbCooldown {
-		return false
+		return 0, false
 	}
-	return cb.casState(cbOpen, cbHalfOpen)
+	if !cb.casState(cbOpen, cbHalfOpen) {
+		return 0, false
+	}
+	return cb.probeGen.Add(1), true
 }
 
-// AbortProbe returns a claimed recovery probe to the open state without
-// counting a client cancellation as a backend failure.
-func (cb *circuitBreaker) AbortProbe() bool {
-	if cb.loadState() != cbHalfOpen {
+// AbortProbe returns the claimed recovery probe identified by token to the
+// open state without counting a client cancellation as a backend failure.
+// A token from a superseded claim is refused, so an unrelated in-flight
+// request's cancellation can never release a probe it does not own.
+func (cb *circuitBreaker) AbortProbe(token uint64) bool {
+	if cb.probeGen.Load() != token || cb.loadState() != cbHalfOpen {
 		return false
 	}
-	// Restart the cooldown before exposing the open state: a NeedProbe
+	// Restart the cooldown before exposing the open state: a ClaimProbe
 	// caller that observes cbOpen with the stale pre-probe timestamp would
 	// claim a fresh probe with no cooldown at all. A spurious store when
 	// the CAS below loses is harmless — the concurrent transition owns the
 	// timestamp from then on.
 	cb.lastFailureNano.Store(time.Now().UnixNano())
 	return cb.casState(cbHalfOpen, cbOpen)
+}
+
+// ProbeClaim ties a claimed recovery probe to the one request dispatched
+// for it. The request's terminal outcome resolves the breaker; a client
+// cancellation calls Abort instead, and only the claim holder may do so.
+type ProbeClaim struct {
+	cb        *circuitBreaker
+	token     uint64
+	modelName string
+	host      string
+}
+
+// Abort returns the claimed probe to the open state and restarts its
+// cooldown. Safe to call on a nil claim; reports whether the abort happened.
+func (pc *ProbeClaim) Abort() bool {
+	if pc == nil || !pc.cb.AbortProbe(pc.token) {
+		return false
+	}
+	publishBreakerState(pc.modelName, pc.host, pc.cb)
+	return true
+}
+
+// probeClaimContextKey carries the public proxy path's probe claim in the
+// request context, so the per-enclave error handler can tell whether a
+// cancelled request owns the in-flight probe.
+type probeClaimContextKey struct{}
+
+// WithProbeClaim attaches a probe claim to the request context of the one
+// request dispatched for it.
+func WithProbeClaim(ctx context.Context, claim *ProbeClaim) context.Context {
+	return context.WithValue(ctx, probeClaimContextKey{}, claim)
+}
+
+// ProbeClaimFromContext returns the request's probe claim, or nil when the
+// request does not own one.
+func ProbeClaimFromContext(ctx context.Context) *ProbeClaim {
+	claim, _ := ctx.Value(probeClaimContextKey{}).(*ProbeClaim)
+	return claim
 }
 
 // State returns the current state for observability.

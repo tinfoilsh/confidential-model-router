@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestLocalMCPEndpointEnvVar pins the exact shape of the debug-bypass
@@ -55,7 +56,7 @@ func TestPostToEnclaveInflight(t *testing.T) {
 		cb:        newCircuitBreaker(),
 	}
 
-	resp, err := postToEnclave(context.Background(), ts.Client(), e, "/v1/chat/completions", []byte("{}"), nil)
+	resp, err := postToEnclave(context.Background(), ts.Client(), e, "/v1/chat/completions", []byte("{}"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestPostToEnclaveInflight(t *testing.T) {
 		modelName: "test-model",
 		cb:        newCircuitBreaker(),
 	}
-	if _, err := postToEnclave(context.Background(), client, e2, "/x", nil, nil); err == nil {
+	if _, err := postToEnclave(context.Background(), client, e2, "/x", nil, nil, nil); err == nil {
 		t.Fatal("expected transport error against closed server")
 	}
 	if got := e2.inflight.Load(); got != 0 {
@@ -101,16 +102,21 @@ func TestPostToEnclaveInflight(t *testing.T) {
 func TestPostToEnclaveCancellationReleasesRecoveryProbe(t *testing.T) {
 	cb := newCircuitBreaker()
 	cb.consecutiveFailures.Store(cbFailureThreshold)
-	cb.storeState(cbHalfOpen)
+	cb.storeState(cbOpen)
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 	e := &Enclave{
 		host:      "example.invalid",
 		modelName: "test-model",
 		cb:        cb,
 	}
+	claim := e.claimProbe()
+	if claim == nil {
+		t.Fatal("expected probe claim after cooldown")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil); err == nil {
+	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil, claim); err == nil {
 		t.Fatal("expected canceled request to fail")
 	}
 	if got := cb.State(); got != cbOpen {
@@ -118,6 +124,32 @@ func TestPostToEnclaveCancellationReleasesRecoveryProbe(t *testing.T) {
 	}
 	if got := cb.ConsecutiveFailures(); got != cbFailureThreshold {
 		t.Fatalf("breaker failures = %d, want %d", got, cbFailureThreshold)
+	}
+}
+
+// TestPostToEnclaveNonOwnerCancellationKeepsProbe pins that a cancelled
+// dispatch without the claim cannot release someone else's in-flight probe.
+func TestPostToEnclaveNonOwnerCancellationKeepsProbe(t *testing.T) {
+	cb := newCircuitBreaker()
+	cb.consecutiveFailures.Store(cbFailureThreshold)
+	cb.storeState(cbOpen)
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	e := &Enclave{
+		host:      "example.invalid",
+		modelName: "test-model",
+		cb:        cb,
+	}
+	if e.claimProbe() == nil {
+		t.Fatal("expected probe claim after cooldown")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil, nil); err == nil {
+		t.Fatal("expected canceled request to fail")
+	}
+	if got := cb.State(); got != cbHalfOpen {
+		t.Fatalf("breaker state = %d, want half-open (probe still owned)", got)
 	}
 }
 

@@ -116,7 +116,7 @@ func (em *EnclaveManager) ConvertFile(
 		}
 	}
 
-	enclave := model.NextEnclave(nil)
+	enclave, _ := model.NextEnclave(nil)
 	if enclave == nil {
 		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,

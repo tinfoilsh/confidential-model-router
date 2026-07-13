@@ -16,7 +16,7 @@ import (
 )
 
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, _, err := em.boundHTTPClientPreferring(modelName, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -25,16 +25,17 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
-// Model.SelectForDispatch) — and builds its attested client.
-func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (*Enclave, *http.Client, error) {
+// Model.SelectForDispatch) — and builds its attested client. A non-nil
+// ProbeClaim must travel with the dispatched request (see ProbeClaim).
+func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (*Enclave, *http.Client, *ProbeClaim, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
-		return nil, nil, fmt.Errorf("model %s not found", modelName)
+		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave := model.SelectForDispatch(order)
+	enclave, claim := model.SelectForDispatch(order)
 	if enclave == nil {
-		return nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
+		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
 
 	// No client-level Timeout: it would cover the entire exchange including
@@ -52,7 +53,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 		},
 	}
 
-	return enclave, client, nil
+	return enclave, client, claim, nil
 }
 
 // DoModelRequest performs an attested POST against the next available enclave
@@ -60,11 +61,11 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, nil)
 	if err != nil {
 		return nil, err
 	}
-	return postToEnclave(ctx, client, enclave, path, body, headers)
+	return postToEnclave(ctx, client, enclave, path, body, headers, claim)
 }
 
 // DoModelRequestJSON marshals and dispatches a parsed request body the way
@@ -90,11 +91,11 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 		order = decision.Order
 	}
 
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, order)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, order)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := postToEnclave(ctx, client, enclave, path, bodyBytes, headers)
+	resp, err := postToEnclave(ctx, client, enclave, path, bodyBytes, headers, claim)
 	if err != nil {
 		return nil, err
 	}
@@ -135,9 +136,12 @@ func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[str
 // it in the enclave's in-flight gauge for the lifetime of the response body
 // so internal dispatches are visible to least-loaded selection like proxied
 // requests are.
-func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header) (*http.Response, error) {
+func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header, claim *ProbeClaim) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
+		// The claim resolves through the request's outcome; a request that
+		// was never built must release it or the breaker strands half-open.
+		claim.Abort()
 		return nil, err
 	}
 	for key, values := range headers {
@@ -155,9 +159,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		reason := classifyProxyError(err)
 		if reason == "canceled" {
 			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
-			if enclave.cb != nil && enclave.cb.AbortProbe() {
-				publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
-			}
+			claim.Abort()
 		} else {
 			ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, reason).Inc()
 			if enclave.cb != nil {
