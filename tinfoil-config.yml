@@ -17,6 +17,7 @@ containers:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
       - CACHE_ROUTE_SECRET
+      - METRICS_API_KEY
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
       interval: 30s
@@ -30,3 +31,13 @@ networks:
 shim:
   upstream-port: 8089
   tls-wildcard: true
+  paths:
+    - /
+    - /health
+    - /.well-known/tinfoil-proxy
+    - /.well-known/prometheus-targets
+    - /metrics
+    - /v1/*
+  authenticated: true
+  authenticated-endpoints:
+    - /metrics
