@@ -15,8 +15,12 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 )
 
+// boundHTTPClientForModel picks a host for a caller-driven session (the MCP
+// tool transport). Those connections never reach postToEnclave, so no
+// breaker outcome is ever recorded for them: claiming a recovery probe here
+// would strand the breaker half-open until restart.
 func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, _, err := em.boundHTTPClientPreferring(modelName, nil, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -25,16 +29,18 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
-// Model.SelectForDispatch) — and builds its attested client.
-func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string) (*Enclave, *http.Client, error) {
+// Model.SelectForDispatch) — and builds its attested client. A non-nil
+// ProbeClaim must travel with the dispatched request (see ProbeClaim);
+// claimProbes must be false for callers that record no breaker outcomes.
+func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string, claimProbes bool) (*Enclave, *http.Client, *ProbeClaim, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
-		return nil, nil, fmt.Errorf("model %s not found", modelName)
+		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave := model.SelectForDispatch(order)
+	enclave, claim := model.selectForDispatch(order, claimProbes)
 	if enclave == nil {
-		return nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
+		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
 
 	// No client-level Timeout: it would cover the entire exchange including
@@ -52,7 +58,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 		},
 	}
 
-	return enclave, client, nil
+	return enclave, client, claim, nil
 }
 
 // DoModelRequest performs an attested POST against the next available enclave
@@ -60,11 +66,11 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, nil)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, nil, true)
 	if err != nil {
 		return nil, err
 	}
-	return postToEnclave(ctx, client, enclave, path, body, headers)
+	return postToEnclave(ctx, client, enclave, path, body, headers, claim)
 }
 
 // DoModelRequestJSON marshals and dispatches a parsed request body the way
@@ -90,18 +96,22 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 		order = decision.Order
 	}
 
-	enclave, client, err := em.boundHTTPClientPreferring(modelName, order)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, order, true)
 	if err != nil {
 		return nil, err
 	}
-	// Observed at dispatch, like the public proxy path, so the picked
-	// replica counts as warm from prefill start.
-	if decision != nil {
-		em.cacheRouteShadow.ObserveLanding(modelName, req, decision, enclave.host, settings)
-	} else if ok {
-		em.cacheRouteShadow.Observe(modelName, req, pool, enclave.host, settings)
+	resp, err := postToEnclave(ctx, client, enclave, path, bodyBytes, headers, claim)
+	if err != nil {
+		return nil, err
 	}
-	return postToEnclave(ctx, client, enclave, path, bodyBytes, headers)
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		if decision != nil {
+			em.cacheRouteShadow.ObserveLanding(modelName, req, decision, enclave.host, settings)
+		} else if ok {
+			em.cacheRouteShadow.Observe(modelName, req, pool, enclave.host, settings)
+		}
+	}
+	return resp, nil
 }
 
 // cacheRouteRequest classifies one internally dispatched request for the
@@ -131,9 +141,12 @@ func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[str
 // it in the enclave's in-flight gauge for the lifetime of the response body
 // so internal dispatches are visible to least-loaded selection like proxied
 // requests are.
-func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header) (*http.Response, error) {
+func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header, claim *ProbeClaim) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
+		// The claim resolves through the request's outcome; a request that
+		// was never built must release it or the breaker strands half-open.
+		claim.Abort()
 		return nil, err
 	}
 	for key, values := range headers {
@@ -148,7 +161,32 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	resp, err := client.Do(req)
 	if err != nil {
 		enclave.inflight.Add(-1)
+		reason := classifyProxyError(err)
+		if reason == "canceled" {
+			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
+			claim.Abort()
+		} else {
+			ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, reason).Inc()
+			if enclave.cb != nil {
+				enclave.cb.RecordFailure()
+				publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
+			}
+		}
 		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, httpFailureReason(resp.StatusCode)).Inc()
+		if enclave.cb != nil {
+			enclave.cb.RecordFailure()
+		}
+	} else {
+		ProxySuccessTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
+		if enclave.cb != nil {
+			enclave.cb.RecordSuccess()
+		}
+	}
+	if enclave.cb != nil {
+		publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
 	}
 	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
 	return resp, nil

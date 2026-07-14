@@ -323,19 +323,31 @@ func (em *EnclaveManager) Shutdown() {
 	})
 }
 
+// claimProbe attempts to claim the enclave's due recovery probe, returning
+// the claim the dispatched request must carry, or nil when no probe is due.
+func (e *Enclave) claimProbe() *ProbeClaim {
+	if e.cb == nil {
+		return nil
+	}
+	token, ok := e.cb.ClaimProbe()
+	if !ok {
+		return nil
+	}
+	return &ProbeClaim{cb: e.cb, token: token, modelName: e.modelName, host: e.host}
+}
+
 // NextEnclave picks a uniformly random enclave with a closed circuit breaker,
 // preferring those that are not currently overloaded and not in skip. If an
 // open breaker is past its cooldown, it sends a probe to that enclave. Falls
 // back to any closed enclave, then any enclave (degraded > unavailable).
-func (m *Model) NextEnclave(skip map[string]bool) *Enclave {
+// A non-nil ProbeClaim means the pick is a claimed recovery probe: the
+// request dispatched to it must carry the claim (see ProbeClaim).
+func (m *Model) NextEnclave(skip map[string]bool) (*Enclave, *ProbeClaim) {
 	return m.nextEnclave(skip, true)
 }
 
-// nextEnclave is NextEnclave with probe claiming optional: internal
-// dispatches never record breaker outcomes, so a probe they claim is a
-// probe that strands the breaker in half-open — only the public proxy
-// path, which records outcomes, may claim one.
-func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
+// nextEnclave is NextEnclave with probe claiming optional.
+func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) (*Enclave, *ProbeClaim) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -344,8 +356,10 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
 	for _, enclave := range m.Enclaves {
 		all = append(all, enclave)
 		if enclave.cb != nil && !enclave.cb.Closed() {
-			if claimProbes && enclave.cb.NeedProbe() {
-				return enclave
+			if claimProbes {
+				if claim := enclave.claimProbe(); claim != nil {
+					return enclave, claim
+				}
 			}
 			continue
 		}
@@ -360,13 +374,13 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
 
 	switch {
 	case len(preferred) > 0:
-		return preferred[rand.IntN(len(preferred))]
+		return preferred[rand.IntN(len(preferred))], nil
 	case len(closed) > 0:
-		return closed[rand.IntN(len(closed))]
+		return closed[rand.IntN(len(closed))], nil
 	case len(all) > 0:
-		return all[rand.IntN(len(all))]
+		return all[rand.IntN(len(all))], nil
 	}
-	return nil
+	return nil, nil
 }
 
 // NextEnclavePreferring picks like NextEnclave, but serves the first
@@ -377,11 +391,11 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) *Enclave {
 // caller must step aside per request via ShouldReject and skip (main.go's
 // retry loop, SelectForDispatch for internal dispatches), so a flapping
 // load signal can never move a key's home.
-func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) *Enclave {
+func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) (*Enclave, *ProbeClaim) {
 	return m.nextEnclavePreferring(order, skip, true)
 }
 
-func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool) *Enclave {
+func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool) (*Enclave, *ProbeClaim) {
 	if len(order) == 0 {
 		return m.nextEnclave(skip, claimProbes)
 	}
@@ -389,9 +403,11 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 	if claimProbes {
 		m.mu.RLock()
 		for _, enclave := range m.Enclaves {
-			if enclave.cb != nil && !enclave.cb.Closed() && enclave.cb.NeedProbe() {
-				m.mu.RUnlock()
-				return enclave
+			if enclave.cb != nil && !enclave.cb.Closed() {
+				if claim := enclave.claimProbe(); claim != nil {
+					m.mu.RUnlock()
+					return enclave, claim
+				}
 			}
 		}
 		m.mu.RUnlock()
@@ -406,7 +422,7 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 			continue
 		}
 		m.mu.RUnlock()
-		return enclave
+		return enclave, nil
 	}
 	m.mu.RUnlock()
 	return m.nextEnclave(skip, claimProbes)
@@ -418,17 +434,29 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 // to the next-warmest host. Internal dispatches have no 429 path, so when
 // every live candidate is overloaded it serves through overload at the
 // warmest one — never at a breaker-open host, which is reachable only when
-// no closed replica exists at all. It also never claims recovery probes:
-// internal dispatches don't record breaker outcomes, so a probe claimed
-// here would strand the breaker in half-open.
-func (m *Model) SelectForDispatch(order []string) *Enclave {
+// no closed replica exists at all. Internal dispatches record their outcomes,
+// so they may also claim a due recovery probe.
+func (m *Model) SelectForDispatch(order []string) (*Enclave, *ProbeClaim) {
+	return m.selectForDispatch(order, true)
+}
+
+// selectForDispatch is SelectForDispatch with probe claiming optional, for
+// callers that hand the connection to a transport that records no breaker
+// outcomes (a claimed probe there would strand the breaker half-open).
+func (m *Model) selectForDispatch(order []string, claimProbes bool) (*Enclave, *ProbeClaim) {
 	skip := map[string]bool{}
 	var firstOverloaded *Enclave
 	var enclave *Enclave
 	for range m.EnclaveCount() {
-		enclave = m.nextEnclavePreferring(order, skip, false)
+		var claim *ProbeClaim
+		enclave, claim = m.nextEnclavePreferring(order, skip, claimProbes)
 		if enclave == nil {
 			break
+		}
+		// A claimed probe must be dispatched: preferring an overloaded
+		// pick over it would leave the claim unresolved.
+		if claim != nil {
+			return enclave, claim
 		}
 		if enclave.cb != nil && !enclave.cb.Closed() {
 			// Selection is down to non-closed last resorts: every
@@ -436,7 +464,7 @@ func (m *Model) SelectForDispatch(order []string) *Enclave {
 			break
 		}
 		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
-			return enclave
+			return enclave, nil
 		}
 		if firstOverloaded == nil {
 			firstOverloaded = enclave
@@ -444,9 +472,9 @@ func (m *Model) SelectForDispatch(order []string) *Enclave {
 		skip[enclave.String()] = true
 	}
 	if firstOverloaded != nil {
-		return firstOverloaded
+		return firstOverloaded, nil
 	}
-	return enclave
+	return enclave, nil
 }
 
 // EnclaveCount returns the number of configured enclaves under the model lock.

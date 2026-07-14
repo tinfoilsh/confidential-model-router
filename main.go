@@ -35,6 +35,8 @@ var configFile []byte // Initial (attested) config
 // Set by build process
 var version = "dev"
 
+const maxRequestBodySize int64 = 64 * 1024 * 1024
+
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
 // stable across the short-lived token's ~15m refreshes (and across multiple
@@ -53,12 +55,24 @@ func rateLimitIdentity(apiKey string) string {
 	return apiKey
 }
 
-// jwtSubject returns the `sub` claim of a compact-JWS access token, or "" if s
-// is not a well-formed three-part JWT or carries no string subject. It inspects
-// the payload only; it does not verify the signature (see rateLimitIdentity).
+// jwtSubject returns the `sub` claim of an explicitly typed compact-JWS access
+// token, or "" if s is not an at+jwt token or carries no string subject. It
+// inspects the payload only; the outer shim verifies the same token type before
+// the request can reach this handler (see rateLimitIdentity).
 func jwtSubject(s string) string {
 	parts := strings.Split(s, ".")
-	if len(parts) != 3 {
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	header, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return ""
+	}
+	var metadata struct {
+		Type string `json:"typ"`
+	}
+	if json.Unmarshal(header, &metadata) != nil ||
+		strings.TrimPrefix(strings.ToLower(metadata.Type), "application/") != "at+jwt" {
 		return ""
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -72,6 +86,27 @@ func jwtSubject(s string) string {
 		return ""
 	}
 	return claims.Sub
+}
+
+func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	if r.ContentLength > maxRequestBodySize {
+		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+	return true
+}
+
+func writeRequestBodyError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		return
+	}
+	jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 }
 
 // getEnvOrDefault returns the environment variable value if set, otherwise returns the default
@@ -441,6 +476,10 @@ func main() {
 	cacheRouteShadow := em.CacheRouteShadow()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !limitRequestBody(w, r) {
+			return
+		}
+
 		var modelName string
 		var err error
 
@@ -450,10 +489,7 @@ func main() {
 		var cacheRouteSettings cacheroute.Settings
 
 		// Extract API key early for rate limiting decisions
-		apiKey := ""
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			apiKey = strings.TrimPrefix(auth, "Bearer ")
-		}
+		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
 			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
@@ -577,7 +613,7 @@ func main() {
 				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 				if err != nil {
-					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeRequestBodyError(w, err)
 					return
 				}
 				r.Body.Close()
@@ -596,6 +632,11 @@ func main() {
 				var bodyBytes []byte
 				modelName, bodyBytes, err = extractModelFromMultipart(r)
 				if err != nil {
+					var tooLarge *http.MaxBytesError
+					if errors.As(err, &tooLarge) {
+						writeRequestBodyError(w, err)
+						return
+					}
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
@@ -610,7 +651,7 @@ func main() {
 				bodyBytes, err := io.ReadAll(r.Body)
 
 				if err != nil {
-					jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeRequestBodyError(w, err)
 					return
 				}
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
@@ -794,7 +835,12 @@ func main() {
 			}
 			mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 			if err != nil {
-				jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					writeRequestBodyError(w, err)
+					return
+				}
+				jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 				return
 			}
 			recordCacheSaltInjection(modelName, mode)
@@ -828,14 +874,23 @@ func main() {
 		// cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
+			probeClaim *manager.ProbeClaim
 			overloaded bool
 			retryAfter time.Duration
 			waiting    float64
 			skip       = map[string]bool{}
 		)
 		for range model.EnclaveCount() {
-			enclave = model.NextEnclavePreferring(cacheRouteOrder, skip)
+			enclave, probeClaim = model.NextEnclavePreferring(cacheRouteOrder, skip)
 			if enclave == nil {
+				break
+			}
+			// A claimed probe must be dispatched: skipping its pick as
+			// overloaded would leave the claim unresolved and strand the
+			// breaker half-open (see Model.selectForDispatch). Overload
+			// spill applies to plain picks only.
+			if probeClaim != nil {
+				overloaded = false
 				break
 			}
 			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
@@ -886,6 +941,13 @@ func main() {
 			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
 		} else if cacheRouteReq != nil {
 			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
+		}
+
+		// A claimed recovery probe travels with its request, so the
+		// enclave's outcome handlers can tell an owner's cancellation
+		// (which must release the claim) from an unrelated one.
+		if probeClaim != nil {
+			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
 
 		enclave.ServeHTTP(w, r)

@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -43,6 +44,26 @@ func TestRateLimitIdentity(t *testing.T) {
 				t.Errorf("rateLimitIdentity(%q) = %q, want %q", tt.apiKey, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLimitRequestBodyRejectsKnownOversize(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	req.ContentLength = maxRequestBodySize + 1
+	rec := httptest.NewRecorder()
+	if limitRequestBody(rec, req) {
+		t.Fatal("oversized request was accepted")
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestWriteRequestBodyErrorClassifiesChunkedOversize(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeRequestBodyError(rec, &http.MaxBytesError{Limit: maxRequestBodySize})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
 }
 

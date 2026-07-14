@@ -94,6 +94,7 @@ const (
 	ErrMsgServerError   = "The server had an error while processing your request."
 	ErrMsgOverloaded    = "The engine is currently overloaded, please try again later."
 	ErrMsgModelNotFound = "The model does not exist."
+	ErrMsgBodyTooLarge  = "Request body is too large."
 )
 
 // billingCloser wraps a response body and emits a zero-token billing event
@@ -145,12 +146,6 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
-		// Client cancellations aren't backend faults — track in a dedicated
-		// counter, don't trip the breaker.
-		if reason == "canceled" {
-			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
-			return
-		}
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
 		publishBreakerState(modelName, host, cb)
@@ -190,6 +185,29 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// A body-limit trip during the outbound copy (chunked uploads pass
+		// the router's Content-Length pre-check) is a client fault: answer
+		// 413 and leave the breaker alone, or cheap oversized uploads could
+		// take a healthy backend out of rotation. Like a cancellation, a
+		// tripped recovery probe must still return the breaker to open.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			log.WithFields(log.Fields{
+				"model":   modelName,
+				"enclave": host,
+			}).Warn("request body exceeded limit while proxying")
+			ProbeClaimFromContext(r.Context()).Abort()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"message": ErrMsgBodyTooLarge,
+					"type":    ErrTypeInvalidRequest,
+				},
+			})
+			return
+		}
+
 		reason := classifyProxyError(err)
 		log.WithFields(log.Fields{
 			"model":   modelName,
@@ -197,7 +215,16 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			"reason":  reason,
 			"error":   err.Error(),
 		}).Error("proxy error")
-		recordFailure(reason)
+		// Client cancellations aren't backend faults — track in a dedicated
+		// counter, don't trip the breaker. A cancelled recovery probe must
+		// still return the breaker to open, or it strands half-open forever;
+		// only the request that owns the claim may release it.
+		if reason == "canceled" {
+			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
+			ProbeClaimFromContext(r.Context()).Abort()
+		} else {
+			recordFailure(reason)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -223,8 +250,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		apiKey := ""
 		if authHeader != "" {
 			// Extract API key from "Bearer <api_key>" format
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+			if apiKey = BearerToken(authHeader); apiKey != "" {
 				// For user ID, we can use a placeholder or the API key itself
 				userID = "authenticated_user"
 			}
