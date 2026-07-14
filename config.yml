@@ -99,4 +99,4 @@ models:
       max_requests_waiting: 32
       retry_after_minutes: 1
     cache_route:
-      mode: enforced
+      mode: shadow
