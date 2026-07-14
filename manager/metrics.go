@@ -19,6 +19,16 @@ import (
 
 const defaultMetricsPollInterval = 15 * time.Second
 
+// pollAPIKey, when set, is sent as a bearer token on backend /metrics
+// scrapes (enclaves require an admin key). Stored atomically so startup
+// wiring can't race a running poller.
+var pollAPIKey atomic.Value // string
+
+// SetMetricsPollAPIKey installs the credential for backend /metrics polls.
+func SetMetricsPollAPIKey(key string) {
+	pollAPIKey.Store(key)
+}
+
 // enclaveMetrics polls backend metrics and logs queue depth for observability.
 type enclaveMetrics struct {
 	host  string
@@ -143,6 +153,9 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 			"enclave": m.host,
 		}).Debugf("metrics request creation failed: %v", err)
 		return
+	}
+	if key, _ := pollAPIKey.Load().(string); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 
 	resp, err := m.client.Do(req)

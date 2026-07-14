@@ -128,6 +128,10 @@ var (
 	// printed verbatim by -h and any flag-parse error, and the secret must
 	// never reach a log.
 	cacheRouteSecret = flag.String("cache-route-secret", "", "secret mixed into cache-route routing keys, must match across router replicas (env: CACHE_ROUTE_SECRET)")
+	// metricsAPIKey authenticates the overload poller's enclave /metrics
+	// scrapes. Env resolved after parse, like cache-route-secret, so the
+	// secret never reaches flag output.
+	metricsAPIKey = flag.String("metrics-api-key", "", "admin API key sent as a bearer token when polling enclave /metrics (env: METRICS_API_KEY)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -408,6 +412,13 @@ func main() {
 			log.Fatal("CACHE_ROUTE_SECRET must be at least 32 bytes (e.g. openssl rand -hex 32)")
 		}
 		cacheroute.SetSecret(secret)
+	}
+
+	if key := *metricsAPIKey; key != "" || os.Getenv("METRICS_API_KEY") != "" {
+		if key == "" {
+			key = os.Getenv("METRICS_API_KEY")
+		}
+		manager.SetMetricsPollAPIKey(strings.TrimSpace(key))
 	}
 
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
