@@ -851,6 +851,14 @@ func main() {
 			if enclave == nil {
 				break
 			}
+			// A claimed probe must be dispatched: skipping its pick as
+			// overloaded would leave the claim unresolved and strand the
+			// breaker half-open (see Model.selectForDispatch). Overload
+			// spill applies to plain picks only.
+			if probeClaim != nil {
+				overloaded = false
+				break
+			}
 			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
 				break
 			}
