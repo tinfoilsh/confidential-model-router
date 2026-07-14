@@ -405,7 +405,7 @@ func main() {
 		}
 		secret = strings.TrimSpace(secret)
 		if len(secret) < 32 {
-			log.Fatal("CACHE_ROUTE_SECRET must be at least 32 bytes (e.g. openssl rand -base64 32)")
+			log.Fatal("CACHE_ROUTE_SECRET must be at least 32 bytes (e.g. openssl rand -hex 32)")
 		}
 		cacheroute.SetSecret(secret)
 	}
