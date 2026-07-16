@@ -49,6 +49,7 @@ models:
       retry_after_minutes: 1
     cache_route:
       mode: enforced
+      split_threshold_rpm: 5
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
