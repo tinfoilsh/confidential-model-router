@@ -45,10 +45,11 @@ models:
       - glm-5-2-inf11.tinfoil.containers.tinfoil.dev
       - glm-5-2-inf12.tinfoil.containers.tinfoil.dev
     overload:
-      max_requests_waiting: 16
+      max_requests_waiting: 8
       retry_after_minutes: 1
     cache_route:
       mode: enforced
+      split_threshold_rpm: 5
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
