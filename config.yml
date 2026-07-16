@@ -1,6 +1,5 @@
 # Trust anchor only (model -> repo pinning, requires a router release).
-# Live config (replicas, rate limits, ...) is served by the control plane:
-# edit it in the backoffice under Router Config.
+# Live config with domain and settings is set in the tinfoil backend.
 
 routers:
   inference.tinfoil.sh:
