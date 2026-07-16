@@ -79,6 +79,15 @@ var (
 		[]string{"model"},
 	)
 
+	// PriorityOverloadAdmitsTotal tracks configured-priority requests admitted while all backends reported overload
+	PriorityOverloadAdmitsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_priority_overload_admits_total",
+			Help: "Total number of configured-priority requests admitted despite backend overload",
+		},
+		[]string{"model"},
+	)
+
 	// CacheSaltInjectionsTotal tracks requests injected with a derived cache_salt
 	CacheSaltInjectionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
