@@ -13,6 +13,7 @@ containers:
       - CACHE_SALT_ENABLED: "true"
       - USAGE_REPORTER_ID: "model-router"
       - CONTROL_PLANE_URL: "https://api.tinfoil.sh"
+      - UPDATE_CONFIG_URL: "https://api.tinfoil.sh/api/shim/router-config"
     secrets:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
