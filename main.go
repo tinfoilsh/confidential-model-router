@@ -488,6 +488,10 @@ func main() {
 		var cacheRouteReq *cacheroute.Request
 		var cacheRouteSettings cacheroute.Settings
 
+		// Set when the control plane configured a vLLM priority for this
+		// caller; such callers are exempt from overload shedding.
+		hasConfiguredPriority := false
+
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
@@ -747,7 +751,6 @@ func main() {
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
 
-				hasConfiguredPriority := false
 				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
 					body["priority"] = *routeCtx.Priority
 					hasConfiguredPriority = true
@@ -880,23 +883,35 @@ func main() {
 			waiting    float64
 			skip       = map[string]bool{}
 		)
-		for range model.EnclaveCount() {
-			enclave, probeClaim = model.NextEnclavePreferring(cacheRouteOrder, skip)
-			if enclave == nil {
-				break
+		if hasConfiguredPriority {
+			// Configured-priority callers have no 429 path: like internal
+			// dispatches they serve through overload at the warmest host,
+			// where their injected priority jumps the backend queue.
+			enclave, probeClaim = model.SelectForDispatch(cacheRouteOrder)
+			if enclave != nil && probeClaim == nil {
+				if ov, _, _ := enclave.ShouldReject(); ov {
+					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
+				}
 			}
-			// A claimed probe must be dispatched: skipping its pick as
-			// overloaded would leave the claim unresolved and strand the
-			// breaker half-open (see Model.selectForDispatch). Overload
-			// spill applies to plain picks only.
-			if probeClaim != nil {
-				overloaded = false
-				break
+		} else {
+			for range model.EnclaveCount() {
+				enclave, probeClaim = model.NextEnclavePreferring(cacheRouteOrder, skip)
+				if enclave == nil {
+					break
+				}
+				// A claimed probe must be dispatched: skipping its pick as
+				// overloaded would leave the claim unresolved and strand the
+				// breaker half-open (see Model.selectForDispatch). Overload
+				// spill applies to plain picks only.
+				if probeClaim != nil {
+					overloaded = false
+					break
+				}
+				if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
+					break
+				}
+				skip[enclave.String()] = true
 			}
-			if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
-				break
-			}
-			skip[enclave.String()] = true
 		}
 		if enclave == nil {
 			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
