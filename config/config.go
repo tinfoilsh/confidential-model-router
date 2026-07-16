@@ -16,7 +16,10 @@ import (
 // RateLimitConfig describes optional per-API-key request rate limits for a
 // model. Requests over the soft per-minute budget are sent to vLLM with a
 // lower scheduling priority; requests over the hard budget are rejected with
-// HTTP 429. Either budget may be configured independently; zero disables it.
+// HTTP 429. Zero disables a budget. The hard check runs first, so when both
+// are set the hard budget must sit above the soft one — a hard budget at or
+// below the soft budget rejects requests before they can be demoted, turning
+// the soft tier off entirely.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
