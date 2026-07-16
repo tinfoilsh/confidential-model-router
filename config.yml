@@ -43,6 +43,7 @@ models:
     enclaves:
       - glm-5-2-inf7.tinfoil.containers.tinfoil.dev
       - glm-5-2-inf11.tinfoil.containers.tinfoil.dev
+      - glm-5-2-inf12.tinfoil.containers.tinfoil.dev
     overload:
       max_requests_waiting: 16
       retry_after_minutes: 1
