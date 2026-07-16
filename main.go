@@ -764,10 +764,11 @@ func main() {
 				// budget, inject lower vLLM priority over the soft budget.
 				// Org-priority callers bypass both.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
-					count := em.RequestTracker().Record(rateLimitID, rateLimitModel)
+					count, resetIn := em.RequestTracker().Record(rateLimitID, rateLimitModel)
 					if hard := rlCfg.HardMaxRequestsPerMinute; hard > 0 && count >= hard {
-						// The budget refills at the next fixed-window minute boundary.
-						secs := 60 - time.Now().Second()
+						// Round up: rounding down would point the client back
+						// inside the window it was just rejected in.
+						secs := int((resetIn + time.Second - 1) / time.Second)
 						w.Header().Set("Retry-After", strconv.Itoa(secs))
 						manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{

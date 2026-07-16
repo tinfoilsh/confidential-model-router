@@ -47,11 +47,12 @@ func bucketKey(apiKey, model string) string {
 }
 
 // Record atomically increments the request count for the API key and model
-// and returns the count in the current one-minute window. An empty API key
-// is not tracked and always returns 0.
-func (t *RequestTracker) Record(apiKey, model string) int64 {
+// and returns the count in the current one-minute window along with the time
+// remaining until the window resets. An empty API key is not tracked and
+// returns 0, 0.
+func (t *RequestTracker) Record(apiKey, model string) (int64, time.Duration) {
 	if apiKey == "" {
-		return 0
+		return 0, 0
 	}
 
 	now := t.nowFunc()
@@ -83,7 +84,7 @@ func (t *RequestTracker) Record(apiKey, model string) int64 {
 		t.lastCleanup = now
 	}
 
-	return b.count
+	return b.count, b.windowStart.Add(time.Minute).Sub(now)
 }
 
 // cleanup removes entries whose windows are more than 2 minutes old.
