@@ -760,10 +760,25 @@ func main() {
 					}).Debug("injecting configured vLLM priority")
 				}
 
-				// Check rate limiting and inject lower vLLM priority if over budget.
-				// Org-priority callers bypass this soft demotion.
-				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil {
-					if rateLimitID != "" && em.RequestTracker().RecordAndCheck(rateLimitID, rateLimitModel, rlCfg.MaxRequestsPerMinute) {
+				// Check per-key rate limits: reject with 429 over the hard
+				// budget, inject lower vLLM priority over the soft budget.
+				// Org-priority callers bypass both.
+				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
+					count, resetIn := em.RequestTracker().Record(rateLimitID, rateLimitModel)
+					if hard := rlCfg.HardMaxRequestsPerMinute; hard > 0 && count >= hard {
+						// Round up: rounding down would point the client back
+						// inside the window it was just rejected in.
+						secs := int((resetIn + time.Second - 1) / time.Second)
+						w.Header().Set("Retry-After", strconv.Itoa(secs))
+						manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						log.WithFields(log.Fields{
+							"model":               rateLimitModel,
+							"retry_after_seconds": secs,
+						}).Warn("rejecting request over hard per-key rate limit")
+						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+						return
+					}
+					if soft := rlCfg.MaxRequestsPerMinute; soft > 0 && count >= soft {
 						body["priority"] = 1
 						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
 						log.WithFields(log.Fields{

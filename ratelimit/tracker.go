@@ -46,12 +46,14 @@ func bucketKey(apiKey, model string) string {
 	return apiKey + "\x00" + model
 }
 
-// RecordAndCheck atomically increments the request count and returns true
-// if the API key has exceeded the limit for the given model in the current
-// one-minute window.
-func (t *RequestTracker) RecordAndCheck(apiKey, model string, limit int64) bool {
+// Record atomically increments the request count for the API key and model
+// and returns the count in the current one-minute window along with the time
+// remaining until the window resets, always in (0, time.Minute]: a request
+// landing exactly on a minute boundary starts the next window. An empty API
+// key is not tracked and returns 0, 0.
+func (t *RequestTracker) Record(apiKey, model string) (int64, time.Duration) {
 	if apiKey == "" {
-		return false
+		return 0, 0
 	}
 
 	now := t.nowFunc()
@@ -83,10 +85,7 @@ func (t *RequestTracker) RecordAndCheck(apiKey, model string, limit int64) bool 
 		t.lastCleanup = now
 	}
 
-	if limit <= 0 {
-		return false
-	}
-	return b.count >= limit
+	return b.count, b.windowStart.Add(time.Minute).Sub(now)
 }
 
 // cleanup removes entries whose windows are more than 2 minutes old.
