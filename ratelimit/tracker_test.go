@@ -6,25 +6,13 @@ import (
 	"time"
 )
 
-func TestRecordAndCheck(t *testing.T) {
+func TestRecordCounts(t *testing.T) {
 	tracker := NewRequestTracker()
 
-	// First two requests under limit of 3
-	if tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should not be rate limited at 1/3")
-	}
-	if tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should not be rate limited at 2/3")
-	}
-
-	// Third request hits limit
-	if !tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should be rate limited at 3/3")
-	}
-
-	// Over limit
-	if !tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should be rate limited at 4/3")
+	for i := int64(1); i <= 4; i++ {
+		if got := tracker.Record("key1", "model1"); got != i {
+			t.Fatalf("expected count %d, got %d", i, got)
+		}
 	}
 }
 
@@ -32,22 +20,17 @@ func TestDifferentKeysAreIndependent(t *testing.T) {
 	tracker := NewRequestTracker()
 
 	for i := 0; i < 5; i++ {
-		tracker.RecordAndCheck("key1", "model1", 100)
+		tracker.Record("key1", "model1")
 	}
-	tracker.RecordAndCheck("key2", "model1", 100)
-	tracker.RecordAndCheck("key1", "model2", 100)
 
-	// key1/model1 has 5 requests
-	if !tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("key1/model1 should be rate limited")
+	if got := tracker.Record("key1", "model1"); got != 6 {
+		t.Fatalf("key1/model1 expected count 6, got %d", got)
 	}
-	// key2/model1 has 1 request
-	if tracker.RecordAndCheck("key2", "model1", 3) {
-		t.Fatal("key2/model1 should not be rate limited")
+	if got := tracker.Record("key2", "model1"); got != 1 {
+		t.Fatalf("key2/model1 expected count 1, got %d", got)
 	}
-	// key1/model2 has 1 request
-	if tracker.RecordAndCheck("key1", "model2", 3) {
-		t.Fatal("key1/model2 should not be rate limited")
+	if got := tracker.Record("key1", "model2"); got != 1 {
+		t.Fatalf("key1/model2 expected count 1, got %d", got)
 	}
 }
 
@@ -56,38 +39,24 @@ func TestWindowReset(t *testing.T) {
 	tracker := NewRequestTracker(WithNowFunc(func() time.Time { return now }))
 
 	for i := 0; i < 5; i++ {
-		tracker.RecordAndCheck("key1", "model1", 100)
+		tracker.Record("key1", "model1")
 	}
-	if !tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should be rate limited in current window")
+	if got := tracker.Record("key1", "model1"); got != 6 {
+		t.Fatalf("expected count 6 in current window, got %d", got)
 	}
 
 	// Advance to next minute
 	now = time.Date(2025, 1, 1, 10, 31, 0, 0, time.UTC)
-	if tracker.RecordAndCheck("key1", "model1", 3) {
-		t.Fatal("should not be rate limited after window reset")
+	if got := tracker.Record("key1", "model1"); got != 1 {
+		t.Fatalf("expected count 1 after window reset, got %d", got)
 	}
 }
 
 func TestEmptyAPIKeyIgnored(t *testing.T) {
 	tracker := NewRequestTracker()
 
-	if tracker.RecordAndCheck("", "model1", 1) {
-		t.Fatal("empty API key should never be rate limited")
-	}
-}
-
-func TestZeroLimitNeverRateLimits(t *testing.T) {
-	tracker := NewRequestTracker()
-	for i := 0; i < 100; i++ {
-		tracker.RecordAndCheck("key1", "model1", 100)
-	}
-
-	if tracker.RecordAndCheck("key1", "model1", 0) {
-		t.Fatal("zero limit should never rate limit")
-	}
-	if tracker.RecordAndCheck("key1", "model1", -1) {
-		t.Fatal("negative limit should never rate limit")
+	if got := tracker.Record("", "model1"); got != 0 {
+		t.Fatalf("empty API key should not be tracked, got count %d", got)
 	}
 }
 
@@ -95,11 +64,11 @@ func TestCleanup(t *testing.T) {
 	now := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
 	tracker := NewRequestTracker(WithNowFunc(func() time.Time { return now }))
 
-	tracker.RecordAndCheck("key1", "model1", 100)
+	tracker.Record("key1", "model1")
 
-	// Advance 3 minutes and trigger cleanup via RecordAndCheck
+	// Advance 3 minutes and trigger cleanup via Record
 	now = time.Date(2025, 1, 1, 10, 3, 1, 0, time.UTC)
-	tracker.RecordAndCheck("key2", "model1", 100) // triggers cleanup
+	tracker.Record("key2", "model1") // triggers cleanup
 
 	tracker.mu.Lock()
 	_, exists := tracker.buckets[bucketKey("key1", "model1")]
@@ -117,8 +86,12 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tracker.RecordAndCheck("key1", "model1", 100)
+			tracker.Record("key1", "model1")
 		}()
 	}
 	wg.Wait()
+
+	if got := tracker.Record("key1", "model1"); got != 101 {
+		t.Fatalf("expected count 101 after concurrent records, got %d", got)
+	}
 }

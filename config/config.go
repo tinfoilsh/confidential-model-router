@@ -13,11 +13,13 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key request rate limits for a model.
-// When configured, requests from API keys that exceed the per-minute budget
-// are sent to vLLM with a lower scheduling priority.
+// RateLimitConfig describes optional per-API-key request rate limits for a
+// model. Requests over the soft per-minute budget are sent to vLLM with a
+// lower scheduling priority; requests over the hard budget are rejected with
+// HTTP 429. Either budget may be configured independently; zero disables it.
 type RateLimitConfig struct {
-	MaxRequestsPerMinute int64 `yaml:"max_requests_per_minute"`
+	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
+	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
 }
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the

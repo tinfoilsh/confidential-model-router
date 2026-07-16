@@ -70,6 +70,15 @@ var (
 		[]string{"model"},
 	)
 
+	// RateLimitRejectionsTotal tracks requests rejected due to hard per-key rate limits
+	RateLimitRejectionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_rejections_total",
+			Help: "Total number of requests rejected with 429 due to hard per-key rate limits",
+		},
+		[]string{"model"},
+	)
+
 	// PriorityAssignmentsTotal tracks requests assigned configured vLLM priority
 	PriorityAssignmentsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
