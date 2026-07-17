@@ -210,7 +210,7 @@ func newToolSessionRequestID(_ *http.Request) string {
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
 func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
-	endpoint, httpClient, err := em.MCPServerEndpoint(profile.ToolServerModel)
+	endpoint, httpClient, err := em.MCPServerEndpoint(ctx, profile.ToolServerModel)
 	if err != nil {
 		return nil, err
 	}

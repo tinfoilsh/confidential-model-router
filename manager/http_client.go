@@ -19,8 +19,8 @@ import (
 // tool transport). Those connections never reach postToEnclave, so no
 // breaker outcome is ever recorded for them: claiming a recovery probe here
 // would strand the breaker half-open until restart.
-func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	enclave, client, _, err := em.boundHTTPClientPreferring(modelName, nil, false)
+func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName string) (string, *http.Client, error) {
+	enclave, client, _, err := em.boundHTTPClientPreferring(ctx, modelName, nil, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -29,16 +29,19 @@ func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *ht
 
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
-// Model.SelectForDispatch) — and builds its attested client. A non-nil
-// ProbeClaim must travel with the dispatched request (see ProbeClaim);
-// claimProbes must be false for callers that record no breaker outcomes.
-func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []string, claimProbes bool) (*Enclave, *http.Client, *ProbeClaim, error) {
+// Model.SelectForDispatch) — and builds its attested client. Reservation
+// pools apply via the caller org in ctx (see WithCallerOrg); no org means
+// the shared pool. A non-nil ProbeClaim must travel with the dispatched
+// request (see ProbeClaim); claimProbes must be false for callers that
+// record no breaker outcomes.
+func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelName string, order []string, claimProbes bool) (*Enclave, *http.Client, *ProbeClaim, error) {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	enclave, claim := model.selectForDispatch(order, claimProbes)
+	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
+	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
@@ -66,7 +69,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(modelName string, order []st
 // billing/usage hooks) so that internal callers can be responsible for their
 // own billing accounting without needing a trust-the-caller HTTP header.
 func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, nil, true)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(ctx, modelName, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +89,7 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 		return nil, err
 	}
 
-	req, settings, pool, ok := em.cacheRouteRequest(modelName, path, body)
+	req, settings, pool, ok := em.cacheRouteRequest(ctx, modelName, path, body)
 	var decision *cacheroute.Decision
 	if ok && settings.Mode == cacheroute.ModeEnforced {
 		decision = em.cacheRouteShadow.Decide(modelName, req, pool, settings)
@@ -96,7 +99,7 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 		order = decision.Order
 	}
 
-	enclave, client, claim, err := em.boundHTTPClientPreferring(modelName, order, true)
+	enclave, client, claim, err := em.boundHTTPClientPreferring(ctx, modelName, order, true)
 	if err != nil {
 		return nil, err
 	}
@@ -116,11 +119,12 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 
 // cacheRouteRequest classifies one internally dispatched request for the
 // cache-route pipeline, with the same gating as the public path, returning
-// the pool snapshot the decision should be made over. Callers only dispatch
-// to cache_salt-capable endpoints, so no endpoint allowlist is re-checked
+// the pool snapshot the decision should be made over — scoped to the
+// caller's primary reservation pool. Callers only dispatch to
+// cache_salt-capable endpoints, so no endpoint allowlist is re-checked
 // here. ok is false when the pipeline is off for the model (or the manager
 // has no shadow, as in tests).
-func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[string]any) (*cacheroute.Request, cacheroute.Settings, cacheroute.Pool, bool) {
+func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path string, body map[string]any) (*cacheroute.Request, cacheroute.Settings, cacheroute.Pool, bool) {
 	if em.cacheRouteShadow == nil {
 		return nil, cacheroute.Settings{}, cacheroute.Pool{}, false
 	}
@@ -134,7 +138,8 @@ func (em *EnclaveManager) cacheRouteRequest(modelName, path string, body map[str
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
-	return req, settings, model.CacheRoutePool(), true
+	primary, _ := model.ReservationPools(CallerOrgFromContext(ctx))
+	return req, settings, model.CacheRoutePoolIn(primary), true
 }
 
 // postToEnclave builds and sends an attested POST to one enclave, counting
@@ -212,7 +217,10 @@ func (b *inflightBody) Close() error {
 	return b.ReadCloser.Close()
 }
 
-func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {
+// MCPServerEndpoint resolves the attested MCP endpoint for a tool-server
+// model. Reservation pools apply via the caller org in ctx (see
+// WithCallerOrg), so a reserved caller's tool sessions use its pool.
+func (em *EnclaveManager) MCPServerEndpoint(ctx context.Context, modelName string) (string, *http.Client, error) {
 	// LOCAL_MCP_ENDPOINT_<MODEL_NAME> bypasses attested TLS pinning
 	// and connects to an arbitrary URL (typically http://127.0.0.1).
 	// Honored only when --debug / DEBUG is explicitly enabled so a
@@ -226,7 +234,7 @@ func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Cli
 		}
 	}
 
-	host, client, err := em.boundHTTPClientForModel(modelName)
+	host, client, err := em.boundHTTPClientForModel(ctx, modelName)
 	if err != nil {
 		return "", nil, err
 	}

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -270,7 +271,7 @@ func TestCacheRouteRequest(t *testing.T) {
 	}
 	base := keyed()
 
-	req, settings, pool, ok := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body)
+	req, settings, pool, ok := em.cacheRouteRequest(context.Background(), "tool-observed", "/v1/chat/completions", body)
 	if !ok || req == nil || pool.Size != 2 {
 		t.Fatalf("gate = (%v, %+v, %+v), want open with 2-replica pool", ok, req, pool)
 	}
@@ -281,13 +282,13 @@ func TestCacheRouteRequest(t *testing.T) {
 
 	// Mode off gates out.
 	model.CacheRoute = nil
-	if _, _, _, stillOK := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body); stillOK {
+	if _, _, _, stillOK := em.cacheRouteRequest(context.Background(), "tool-observed", "/v1/chat/completions", body); stillOK {
 		t.Fatal("mode off must gate out")
 	}
 
 	// No shadow (tests construct managers without one) gates out.
 	em.cacheRouteShadow = nil
-	if _, _, _, stillOK := em.cacheRouteRequest("tool-observed", "/v1/chat/completions", body); stillOK {
+	if _, _, _, stillOK := em.cacheRouteRequest(context.Background(), "tool-observed", "/v1/chat/completions", body); stillOK {
 		t.Fatal("missing shadow must gate out")
 	}
 }
@@ -612,7 +613,7 @@ func TestSelectForDispatchWithoutClaimingLeavesProbes(t *testing.T) {
 	tripBreaker(m.Enclaves["b"])
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
 
-	got, claim := m.selectForDispatch([]string{"a"}, false)
+	got, claim := m.selectForDispatch([]string{"a"}, false, nil)
 	if got == nil || got.host != "a" {
 		t.Fatalf("pick = %v, want a", got)
 	}

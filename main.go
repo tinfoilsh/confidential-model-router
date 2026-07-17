@@ -496,6 +496,11 @@ func main() {
 		// the TTFT / inter-token SLA observation at dispatch.
 		isStreaming := false
 
+		// The caller's org from route-context; only consulted for models
+		// with enclave reservations.
+		callerOrgID := ""
+		callerOrgResolved := false
+
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
@@ -712,6 +717,27 @@ func main() {
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
+				// Strip any user-supplied priority to prevent circumventing rate limits
+				// or jumping ahead of other users.
+				delete(body, "priority")
+
+				// Resolved before any internal dispatch (file conversion,
+				// tool loop) so they all select from the caller's
+				// reservation pools.
+				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
+					callerOrgID = routeCtx.OrgID
+					callerOrgResolved = true
+					r = r.WithContext(manager.WithCallerOrg(r.Context(), routeCtx.OrgID))
+					if routeCtx.Priority != nil {
+						body["priority"] = *routeCtx.Priority
+						hasConfiguredPriority = true
+						manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
+						log.WithFields(log.Fields{
+							"model": modelName,
+						}).Debug("injecting configured vLLM priority")
+					}
+				}
+
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
 					case "/v1/responses":
@@ -741,10 +767,6 @@ func main() {
 					}
 				}
 
-				// Strip any user-supplied priority to prevent circumventing rate limits
-				// or jumping ahead of other users.
-				delete(body, "priority")
-
 				// Identify the caller for rate limiting (see rateLimitIdentity).
 				rateLimitID := rateLimitIdentity(apiKey)
 
@@ -754,15 +776,6 @@ func main() {
 				// on endpoints that support it.
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
-
-				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok && routeCtx.Priority != nil {
-					body["priority"] = *routeCtx.Priority
-					hasConfiguredPriority = true
-					manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
-					log.WithFields(log.Fields{
-						"model": modelName,
-					}).Debug("injecting configured vLLM priority")
-				}
 
 				// Check per-key rate limits: reject with 429 over the hard
 				// budget, inject lower vLLM priority over the soft budget.
@@ -875,67 +888,77 @@ func main() {
 			return
 		}
 
+		// Resolve the caller's reservation pools. Only reserved models pay
+		// for org resolution; a failed lookup fails closed to shared.
+		var poolPrimary, poolSpill map[string]bool
+		if model.HasReservations() {
+			if !callerOrgResolved {
+				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
+					callerOrgID = routeCtx.OrgID
+					callerOrgResolved = true
+				}
+			}
+			poolPrimary, poolSpill = model.ReservationPools(callerOrgID)
+		}
+
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its
 		// ranking, so an overloaded pick spills to the next-warmest host
 		// via the skip loop below instead of a random sibling. The
 		// decision carries its pool snapshot and replication factor to
 		// the landing observation, so the metrics describe the decision
-		// that actually routed the request.
+		// that actually routed the request. The pool is scoped to the
+		// caller's primary reservation pool.
 		var cacheRouteDecision *cacheroute.Decision
 		var cacheRouteOrder []string
 		if cacheRouteReq != nil && cacheRouteSettings.Mode == cacheroute.ModeEnforced {
-			cacheRouteDecision = cacheRouteShadow.Decide(modelName, cacheRouteReq, model.CacheRoutePool(), cacheRouteSettings)
+			cacheRouteDecision = cacheRouteShadow.Decide(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), cacheRouteSettings)
 			if cacheRouteDecision != nil {
 				cacheRouteOrder = cacheRouteDecision.Order
 			}
 		}
 
-		// Try up to N picks (N = number of configured enclaves). Each pick
-		// that turns out overloaded goes into skip, so the next iteration
-		// prefers a sibling. Bounded so a single backed-up enclave doesn't
-		// cascade into a 429 when others are healthy.
 		var (
 			enclave    *manager.Enclave
 			probeClaim *manager.ProbeClaim
 			overloaded bool
 			retryAfter time.Duration
 			waiting    float64
-			skip       = map[string]bool{}
 		)
 		if hasConfiguredPriority {
 			// Configured-priority callers have no 429 path: like internal
 			// dispatches they serve through overload at the warmest host,
 			// where their injected priority jumps the backend queue.
-			enclave, probeClaim = model.SelectForDispatch(cacheRouteOrder)
+			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill)
 			if enclave != nil && probeClaim == nil {
 				if ov, _, _ := enclave.ShouldReject(); ov {
 					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
 				}
 			}
 		} else {
-			for range model.EnclaveCount() {
-				enclave, probeClaim = model.NextEnclavePreferring(cacheRouteOrder, skip)
-				if enclave == nil {
-					break
-				}
-				// A claimed probe must be dispatched: skipping its pick as
-				// overloaded would leave the claim unresolved and strand the
-				// breaker half-open (see Model.selectForDispatch). Overload
-				// spill applies to plain picks only.
-				if probeClaim != nil {
-					overloaded = false
-					break
-				}
-				if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
-					break
-				}
-				skip[enclave.String()] = true
-			}
+			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
 		if enclave == nil {
 			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
 			return
+		}
+
+		// Meter landing pools on reserved models; poolSpill is only
+		// non-nil for reserved callers.
+		if poolPrimary != nil && !overloaded {
+			pool := "shared"
+			if poolSpill != nil {
+				if poolPrimary[enclave.String()] {
+					pool = "reserved"
+				} else {
+					pool = "spilled"
+					log.WithFields(log.Fields{
+						"model":   modelName,
+						"enclave": enclave.String(),
+					}).Debug("reserved pool exhausted; spilling to shared pool")
+				}
+			}
+			manager.ReservedPoolServesTotal.WithLabelValues(modelName, pool).Inc()
 		}
 
 		if overloaded {
@@ -975,7 +998,7 @@ func main() {
 		if cacheRouteDecision != nil {
 			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
 		} else if cacheRouteReq != nil {
-			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePool(), enclave.String(), cacheRouteSettings)
+			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), enclave.String(), cacheRouteSettings)
 		}
 
 		// A claimed recovery probe travels with its request, so the
