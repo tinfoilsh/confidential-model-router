@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -9,6 +10,19 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
+
+// sinkResponseWriter accepts any write sequence. httptest.ResponseRecorder
+// can't be used for 1xx tests: it latches the informational code as the
+// final status and then rejects the body, which a real server would accept.
+type sinkResponseWriter struct{ header http.Header }
+
+func newSinkResponseWriter() *sinkResponseWriter {
+	return &sinkResponseWriter{header: make(http.Header)}
+}
+
+func (s *sinkResponseWriter) Header() http.Header         { return s.header }
+func (s *sinkResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (s *sinkResponseWriter) WriteHeader(int)             {}
 
 func histogramState(t *testing.T, o prometheus.Observer) (count uint64, sum float64) {
 	t.Helper()
@@ -73,6 +87,44 @@ func TestLatencyWriterSkipsErrorResponses(t *testing.T) {
 
 	if count, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "none")); count != 0 {
 		t.Fatalf("error response must not observe TTFT, got count=%d", count)
+	}
+}
+
+func TestLatencyWriterInformationalThenError(t *testing.T) {
+	const model = "latency-test-1xx-error"
+	lw := &latencyWriter{
+		ResponseWriter: newSinkResponseWriter(),
+		model:          model,
+		class:          "none",
+		start:          time.Now(),
+	}
+
+	lw.WriteHeader(100)
+	lw.WriteHeader(502)
+	if _, err := lw.Write([]byte(`{"error":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "none")); count != 0 {
+		t.Fatalf("error response behind a 1xx must not observe TTFT, got count=%d", count)
+	}
+}
+
+func TestLatencyWriterInformationalThenSuccess(t *testing.T) {
+	const model = "latency-test-1xx-ok"
+	lw := &latencyWriter{
+		ResponseWriter: newSinkResponseWriter(),
+		model:          model,
+		class:          "none",
+		start:          time.Now(),
+	}
+
+	lw.WriteHeader(100)
+	lw.WriteHeader(200)
+	if _, err := lw.Write([]byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "none")); count != 1 {
+		t.Fatalf("success behind a 1xx must observe TTFT, got count=%d", count)
 	}
 }
 

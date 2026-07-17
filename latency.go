@@ -56,7 +56,9 @@ func (lw *latencyWriter) now() time.Time {
 }
 
 func (lw *latencyWriter) WriteHeader(code int) {
-	if lw.status == 0 {
+	// 1xx headers are interim (the proxy forwards them ahead of the real
+	// status), so keep updating until the first non-informational code.
+	if lw.status < 200 {
 		lw.status = code
 	}
 	lw.ResponseWriter.WriteHeader(code)
