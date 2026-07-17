@@ -17,7 +17,11 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
-const defaultMetricsPollInterval = 15 * time.Second
+// vLLM updates its queue-depth gauge every engine step (tens of ms), so a
+// 1s poll reads fresh data each time. A scrape that outlives the interval
+// blocks the loop and the ticker coalesces missed ticks, so a slow backend
+// is polled at scrape-duration cadence rather than piling up requests.
+const defaultMetricsPollInterval = time.Second
 
 // pollAPIKey, when set, is sent as a bearer token on backend /metrics
 // scrapes (enclaves require an admin key). Stored atomically so startup
@@ -246,7 +250,13 @@ func (m *enclaveMetrics) latestSample() (float64, time.Time) {
 	return m.latestWaiting, m.latestCollected
 }
 
-const sampleStalenessLimit = 3 * defaultMetricsPollInterval
+// sampleStalenessLimit bounds how long the overload flag keeps driving
+// shouldReject without a fresh sample. It is a fixed window rather than a
+// multiple of the poll interval: at a 1s cadence, deriving it from the
+// interval would fail open after a single slow scrape (the scrape client
+// timeout alone is 5s). 15s means roughly three consecutive timed-out
+// scrapes must elapse before the safety net is dropped.
+const sampleStalenessLimit = 15 * time.Second
 
 // evaluateThresholds updates the overload flag from the latest queue depth
 // with hysteresis: trip at the high mark, clear at the lower mark, hold the
