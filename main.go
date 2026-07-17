@@ -492,6 +492,10 @@ func main() {
 		// caller; such callers are exempt from overload shedding.
 		hasConfiguredPriority := false
 
+		// Set when the parsed body requests a streaming response; gates
+		// the TTFT / inter-token SLA observation at dispatch.
+		isStreaming := false
+
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
@@ -789,6 +793,7 @@ func main() {
 
 				// If streaming request, ensure upstream usage is available for billing.
 				if stream, ok := body["stream"].(bool); ok && stream {
+					isStreaming = true
 					ensureStreamingUsageOptions(body, r.Header)
 					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
 						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
@@ -980,7 +985,11 @@ func main() {
 			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
 
-		enclave.ServeHTTP(w, r)
+		rw := http.ResponseWriter(w)
+		if isStreaming && latencyMetricPaths[r.URL.Path] {
+			rw = newLatencyWriter(w, modelName, priorityClass(hasConfiguredPriority))
+		}
+		enclave.ServeHTTP(rw, r)
 	})
 
 	// Setup graceful shutdown

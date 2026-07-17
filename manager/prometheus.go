@@ -25,6 +25,28 @@ var (
 		[]string{"model"},
 	)
 
+	// TTFTSeconds tracks time to first response body byte for streaming
+	// requests, split by caller priority class for SLA tracking
+	TTFTSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_ttft_seconds",
+			Help:    "Time to first response body byte for streaming requests",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 30, 60},
+		},
+		[]string{"model", "priority"},
+	)
+
+	// InterTokenSeconds tracks gaps between streamed response chunks,
+	// split by caller priority class for SLA tracking
+	InterTokenSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_inter_token_seconds",
+			Help:    "Gap between streamed response body chunks",
+			Buckets: []float64{0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1},
+		},
+		[]string{"model", "priority"},
+	)
+
 	// BackendQueueDepth tracks the current queue depth at each backend enclave
 	BackendQueueDepth = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
