@@ -19,8 +19,8 @@ import (
 // tool transport). Those connections never reach postToEnclave, so no
 // breaker outcome is ever recorded for them: claiming a recovery probe here
 // would strand the breaker half-open until restart.
-func (em *EnclaveManager) boundHTTPClientForModel(modelName string) (string, *http.Client, error) {
-	enclave, client, _, err := em.boundHTTPClientPreferring(context.Background(), modelName, nil, false)
+func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName string) (string, *http.Client, error) {
+	enclave, client, _, err := em.boundHTTPClientPreferring(ctx, modelName, nil, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -217,7 +217,10 @@ func (b *inflightBody) Close() error {
 	return b.ReadCloser.Close()
 }
 
-func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Client, error) {
+// MCPServerEndpoint resolves the attested MCP endpoint for a tool-server
+// model. Reservation pools apply via the caller org in ctx (see
+// WithCallerOrg), so a reserved caller's tool sessions use its pool.
+func (em *EnclaveManager) MCPServerEndpoint(ctx context.Context, modelName string) (string, *http.Client, error) {
 	// LOCAL_MCP_ENDPOINT_<MODEL_NAME> bypasses attested TLS pinning
 	// and connects to an arbitrary URL (typically http://127.0.0.1).
 	// Honored only when --debug / DEBUG is explicitly enabled so a
@@ -231,7 +234,7 @@ func (em *EnclaveManager) MCPServerEndpoint(modelName string) (string, *http.Cli
 		}
 	}
 
-	host, client, err := em.boundHTTPClientForModel(modelName)
+	host, client, err := em.boundHTTPClientForModel(ctx, modelName)
 	if err != nil {
 		return "", nil, err
 	}

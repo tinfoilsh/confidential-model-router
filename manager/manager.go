@@ -64,11 +64,18 @@ type Model struct {
 	mu sync.RWMutex
 }
 
-// applyReservations rebuilds the derived reservation lookup sets. The caller
-// must hold m.mu or have exclusive access (addModel, before publish).
+// applyReservations rebuilds the derived reservation lookup sets. Reserved
+// hosts not present in the configured hostnames are dropped with a warning:
+// counting them would silently shrink an org's effective pool (or leave it
+// empty, routing all its traffic to spill). The caller must hold m.mu or
+// have exclusive access (addModel, before publish).
 func (m *Model) applyReservations(reservations []config.ReservationConfig, hostnames []string) {
 	m.Reservations = reservations
 
+	known := make(map[string]bool, len(hostnames))
+	for _, host := range hostnames {
+		known[host] = true
+	}
 	byOrg := make(map[string]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
 	for _, res := range reservations {
@@ -85,8 +92,15 @@ func (m *Model) applyReservations(reservations []config.ReservationConfig, hostn
 				byOrg[orgID] = set
 			}
 			for _, host := range res.Enclaves {
+				if !known[host] {
+					log.Warnf("reservation for org %s references unknown enclave %s, ignoring", orgID, host)
+					continue
+				}
 				set[host] = true
 				reserved[host] = true
+			}
+			if len(set) == 0 {
+				delete(byOrg, orgID)
 			}
 		}
 	}

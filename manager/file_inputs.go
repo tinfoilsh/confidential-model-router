@@ -118,8 +118,10 @@ func (em *EnclaveManager) ConvertFile(
 
 	// This path uses its own client and records no breaker outcomes, so it
 	// must not claim a recovery probe — a claimed probe with no recorded
-	// outcome strands the breaker half-open until restart.
-	enclave, _ := model.nextEnclave(nil, false, nil)
+	// outcome strands the breaker half-open until restart. Reservation
+	// pools apply via the caller org in ctx.
+	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
+	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
 	if enclave == nil {
 		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,

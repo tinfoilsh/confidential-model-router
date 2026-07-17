@@ -68,6 +68,35 @@ func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 	}
 }
 
+// Reserved hosts missing from the configured enclave list are dropped, and
+// an org left with no valid hosts is treated as unreserved rather than
+// pinned to an empty pool.
+func TestReservationPoolsDropUnknownHosts(t *testing.T) {
+	m := newTestModel("a", "b")
+	m.applyReservations(
+		[]config.ReservationConfig{
+			{OrgIDs: []string{"org-x"}, Enclaves: []string{"b", "typo-host"}},
+			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}},
+		},
+		[]string{"a", "b"},
+	)
+
+	primary, spill := m.ReservationPools("org-x")
+	if len(primary) != 1 || !primary["b"] {
+		t.Fatalf("primary = %v, want {b} with typo-host dropped", primary)
+	}
+	if len(spill) != 1 || !spill["a"] {
+		t.Fatalf("spill = %v, want {a}", spill)
+	}
+
+	// org-y's only host is unknown: it must fall back to the shared pool,
+	// not an empty primary.
+	primary, spill = m.ReservationPools("org-y")
+	if len(primary) != 1 || !primary["a"] || spill != nil {
+		t.Fatalf("pools for org-y = (%v, %v), want shared ({a}, nil)", primary, spill)
+	}
+}
+
 // One reservation entry can dedicate a pool to several orgs.
 func TestReservationPoolsMultiOrg(t *testing.T) {
 	m := newTestModel("a", "b", "c")

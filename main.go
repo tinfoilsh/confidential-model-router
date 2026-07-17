@@ -717,6 +717,27 @@ func main() {
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 				rateLimitModel := modelName
 
+				// Strip any user-supplied priority to prevent circumventing rate limits
+				// or jumping ahead of other users.
+				delete(body, "priority")
+
+				// Resolved before any internal dispatch (file conversion,
+				// tool loop) so they all select from the caller's
+				// reservation pools.
+				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
+					callerOrgID = routeCtx.OrgID
+					callerOrgResolved = true
+					r = r.WithContext(manager.WithCallerOrg(r.Context(), routeCtx.OrgID))
+					if routeCtx.Priority != nil {
+						body["priority"] = *routeCtx.Priority
+						hasConfiguredPriority = true
+						manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
+						log.WithFields(log.Fields{
+							"model": modelName,
+						}).Debug("injecting configured vLLM priority")
+					}
+				}
+
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
 					case "/v1/responses":
@@ -746,10 +767,6 @@ func main() {
 					}
 				}
 
-				// Strip any user-supplied priority to prevent circumventing rate limits
-				// or jumping ahead of other users.
-				delete(body, "priority")
-
 				// Identify the caller for rate limiting (see rateLimitIdentity).
 				rateLimitID := rateLimitIdentity(apiKey)
 
@@ -759,22 +776,6 @@ func main() {
 				// on endpoints that support it.
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
-
-				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
-					callerOrgID = routeCtx.OrgID
-					callerOrgResolved = true
-					// So the tool loop's internal dispatches select from
-					// the same reservation pools as the public path.
-					r = r.WithContext(manager.WithCallerOrg(r.Context(), routeCtx.OrgID))
-					if routeCtx.Priority != nil {
-						body["priority"] = *routeCtx.Priority
-						hasConfiguredPriority = true
-						manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
-						log.WithFields(log.Fields{
-							"model": modelName,
-						}).Debug("injecting configured vLLM priority")
-					}
-				}
 
 				// Check per-key rate limits: reject with 429 over the hard
 				// budget, inject lower vLLM priority over the soft budget.
