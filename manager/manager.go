@@ -37,7 +37,7 @@ type Enclave struct {
 
 	// inflight counts requests currently proxied through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
-	// to ~45s stale.
+	// to sampleStalenessLimit stale when scrapes fail.
 	inflight atomic.Int64
 }
 
