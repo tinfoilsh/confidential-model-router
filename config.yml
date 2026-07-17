@@ -47,3 +47,6 @@ models:
 
   gemma4-31b:
     repo: tinfoilsh/confidential-gemma4-31b
+
+  pii-filter:
+    repo: tinfoilsh/confidential-pii-cpu
