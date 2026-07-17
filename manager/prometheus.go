@@ -119,6 +119,17 @@ var (
 		[]string{"model"},
 	)
 
+	// ReservedPoolServesTotal tracks serves on models with reservations by
+	// landing pool: reserved, spilled (reserved org overflowing to shared),
+	// or shared.
+	ReservedPoolServesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_reserved_pool_serves_total",
+			Help: "Total serves on models with enclave reservations, by landing pool (reserved, spilled, shared)",
+		},
+		[]string{"model", "pool"},
+	)
+
 	// CacheSaltInjectionsTotal tracks requests injected with a derived cache_salt
 	CacheSaltInjectionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

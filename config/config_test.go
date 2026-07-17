@@ -82,3 +82,35 @@ models:
 		t.Fatal("absent cache_route must stay nil")
 	}
 }
+
+func TestReservationConfigParsing(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+models:
+  reserved:
+    repo: org/repo
+    enclaves: [a.example, b.example, c.example]
+    reservations:
+      - org_ids: [org_abc123, org_def456]
+        enclaves: [c.example]
+  plain:
+    repo: org/repo
+    enclaves: [d.example]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reservations := cfg.Models["reserved"].Reservations
+	if len(reservations) != 1 {
+		t.Fatalf("reservations = %+v, want one entry", reservations)
+	}
+	if len(reservations[0].OrgIDs) != 2 || reservations[0].OrgIDs[0] != "org_abc123" || reservations[0].OrgIDs[1] != "org_def456" {
+		t.Fatalf("reservation orgs = %+v", reservations[0])
+	}
+	if len(reservations[0].Enclaves) != 1 || reservations[0].Enclaves[0] != "c.example" {
+		t.Fatalf("reservation = %+v", reservations[0])
+	}
+	if cfg.Models["plain"].Reservations != nil {
+		t.Fatal("absent reservations must stay nil")
+	}
+}

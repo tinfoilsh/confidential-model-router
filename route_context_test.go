@@ -31,6 +31,7 @@ func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(routeContext{
 			Priority: &priority,
+			OrgID:    "org_test",
 		})
 	}))
 	defer server.Close()
@@ -50,6 +51,9 @@ func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
 	}
 	if second.Priority == nil || *second.Priority != priority {
 		t.Fatalf("second context = %#v, want high priority", second)
+	}
+	if first.OrgID != "org_test" || second.OrgID != "org_test" {
+		t.Fatalf("contexts = (%#v, %#v), want org_test org", first, second)
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want 1", requests)

@@ -37,13 +37,22 @@ type CacheRouteConfig struct {
 	SplitThresholdRPM      float64 `yaml:"split_threshold_rpm,omitempty"`
 }
 
+// ReservationConfig dedicates a subset of a model's enclaves to the listed
+// orgs: only their traffic may use those enclaves, spilling to the shared
+// pool when they are overloaded or unhealthy.
+type ReservationConfig struct {
+	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
+	Enclaves []string `yaml:"enclaves" json:"enclaves"`
+}
+
 // Model represents the configuration for a single model
 type Model struct {
-	Repo       string            `yaml:"repo"`
-	Hostnames  []string          `yaml:"enclaves"`
-	Overload   *OverloadConfig   `yaml:"overload,omitempty"`
-	RateLimit  *RateLimitConfig  `yaml:"rate_limit,omitempty"`
-	CacheRoute *CacheRouteConfig `yaml:"cache_route,omitempty"`
+	Repo         string              `yaml:"repo"`
+	Hostnames    []string            `yaml:"enclaves"`
+	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
+	RateLimit    *RateLimitConfig    `yaml:"rate_limit,omitempty"`
+	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.

@@ -119,7 +119,7 @@ func (em *EnclaveManager) ConvertFile(
 	// This path uses its own client and records no breaker outcomes, so it
 	// must not claim a recovery probe — a claimed probe with no recorded
 	// outcome strands the breaker half-open until restart.
-	enclave, _ := model.nextEnclave(nil, false)
+	enclave, _ := model.nextEnclave(nil, false, nil)
 	if enclave == nil {
 		return nil, &FileConversionError{
 			StatusCode: http.StatusBadGateway,

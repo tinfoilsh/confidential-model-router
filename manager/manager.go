@@ -49,9 +49,88 @@ type Model struct {
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
+	// Reservations is excluded from JSON: Status() feeds the public
+	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
+	// exposed there.
+	Reservations []config.ReservationConfig `json:"-"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
-	mu            sync.RWMutex
+
+	// Derived from Reservations (see applyReservations); replaced wholesale
+	// and never mutated after publish, so safe to return under RLock.
+	reservedByOrg map[string]map[string]bool // org id -> its reserved host set
+	sharedHosts   map[string]bool            // unreserved hosts; nil when no reservations
+
+	mu sync.RWMutex
+}
+
+// applyReservations rebuilds the derived reservation lookup sets. The caller
+// must hold m.mu or have exclusive access (addModel, before publish).
+func (m *Model) applyReservations(reservations []config.ReservationConfig, hostnames []string) {
+	m.Reservations = reservations
+
+	byOrg := make(map[string]map[string]bool, len(reservations))
+	reserved := make(map[string]bool)
+	for _, res := range reservations {
+		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
+			continue
+		}
+		for _, orgID := range res.OrgIDs {
+			if orgID == "" {
+				continue
+			}
+			set := byOrg[orgID]
+			if set == nil {
+				set = make(map[string]bool, len(res.Enclaves))
+				byOrg[orgID] = set
+			}
+			for _, host := range res.Enclaves {
+				set[host] = true
+				reserved[host] = true
+			}
+		}
+	}
+	if len(byOrg) == 0 {
+		m.reservedByOrg = nil
+		m.sharedHosts = nil
+		return
+	}
+
+	shared := make(map[string]bool, len(hostnames))
+	for _, host := range hostnames {
+		if !reserved[host] {
+			shared[host] = true
+		}
+	}
+	m.reservedByOrg = byOrg
+	m.sharedHosts = shared
+}
+
+// HasReservations reports whether any of this model's enclaves are reserved,
+// letting the hot path skip caller-org resolution for unreserved models.
+func (m *Model) HasReservations() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.reservedByOrg) > 0
+}
+
+// ReservationPools returns the caller's pool filters: primary is the host
+// set selection must draw from, spill what it may widen to when the primary
+// is exhausted. A reserved org gets its hosts + shared spill; everyone else
+// gets the shared hosts with no spill — reserved capacity is exclusive. Both
+// nil when the model has no reservations.
+func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.reservedByOrg) == 0 {
+		return nil, nil
+	}
+	if orgID != "" {
+		if hosts, ok := m.reservedByOrg[orgID]; ok {
+			return hosts, m.sharedHosts
+		}
+	}
+	return m.sharedHosts, nil
 }
 
 type EnclaveManager struct {
@@ -343,17 +422,22 @@ func (e *Enclave) claimProbe() *ProbeClaim {
 // A non-nil ProbeClaim means the pick is a claimed recovery probe: the
 // request dispatched to it must carry the claim (see ProbeClaim).
 func (m *Model) NextEnclave(skip map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.nextEnclave(skip, true)
+	return m.nextEnclave(skip, true, nil)
 }
 
-// nextEnclave is NextEnclave with probe claiming optional.
-func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) (*Enclave, *ProbeClaim) {
+// nextEnclave is NextEnclave with probe claiming optional and an optional
+// allowed host filter (nil = all hosts). The filter is hard: it applies to
+// every bucket including the degraded last resort and probe claiming.
+func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	all := make([]*Enclave, 0, len(m.Enclaves))
 	var closed, preferred []*Enclave
 	for _, enclave := range m.Enclaves {
+		if allowed != nil && !allowed[enclave.host] {
+			continue
+		}
 		all = append(all, enclave)
 		if enclave.cb != nil && !enclave.cb.Closed() {
 			if claimProbes {
@@ -392,17 +476,20 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool) (*Enclave, *
 // retry loop, SelectForDispatch for internal dispatches), so a flapping
 // load signal can never move a key's home.
 func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.nextEnclavePreferring(order, skip, true)
+	return m.nextEnclavePreferring(order, skip, true, nil)
 }
 
-func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool) (*Enclave, *ProbeClaim) {
+func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
 	if len(order) == 0 {
-		return m.nextEnclave(skip, claimProbes)
+		return m.nextEnclave(skip, claimProbes, allowed)
 	}
 
 	if claimProbes {
 		m.mu.RLock()
 		for _, enclave := range m.Enclaves {
+			if allowed != nil && !allowed[enclave.host] {
+				continue
+			}
 			if enclave.cb != nil && !enclave.cb.Closed() {
 				if claim := enclave.claimProbe(); claim != nil {
 					m.mu.RUnlock()
@@ -414,6 +501,9 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 	}
 	m.mu.RLock()
 	for _, host := range order {
+		if allowed != nil && !allowed[host] {
+			continue
+		}
 		enclave := m.Enclaves[host]
 		if enclave == nil || skip[host] {
 			continue
@@ -425,7 +515,7 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 		return enclave, nil
 	}
 	m.mu.RUnlock()
-	return m.nextEnclave(skip, claimProbes)
+	return m.nextEnclave(skip, claimProbes, allowed)
 }
 
 // SelectForDispatch picks the serving enclave for an internal dispatch (the
@@ -437,19 +527,57 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 // no closed replica exists at all. Internal dispatches record their outcomes,
 // so they may also claim a due recovery probe.
 func (m *Model) SelectForDispatch(order []string) (*Enclave, *ProbeClaim) {
-	return m.selectForDispatch(order, true)
+	return m.selectForDispatch(order, true, nil)
+}
+
+// SelectForDispatchPools picks like SelectForDispatch over the caller's
+// reservation pools: primary first, spill only when every primary candidate
+// is overloaded or unhealthy. Both exhausted serves through overload at the
+// primary pick (no-429 contract).
+func (m *Model) SelectForDispatchPools(order []string, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
+	return m.selectForDispatchPools(order, true, primary, spill)
+}
+
+func (m *Model) selectForDispatchPools(order []string, claimProbes bool, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
+	enclave, claim := m.selectForDispatch(order, claimProbes, primary)
+	// A claimed probe must be dispatched.
+	if len(spill) == 0 || claim != nil {
+		return enclave, claim
+	}
+	if enclave != nil && enclave.breakerClosed() {
+		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
+			return enclave, nil
+		}
+	}
+	spillEnclave, spillClaim := m.selectForDispatch(order, claimProbes, spill)
+	if spillEnclave != nil {
+		if spillClaim != nil {
+			return spillEnclave, spillClaim
+		}
+		if spillEnclave.breakerClosed() {
+			if overloaded, _, _ := spillEnclave.ShouldReject(); !overloaded {
+				return spillEnclave, nil
+			}
+		}
+	}
+	// Both pools exhausted: serve through overload at the primary pick.
+	if enclave != nil {
+		return enclave, nil
+	}
+	return spillEnclave, nil
 }
 
 // selectForDispatch is SelectForDispatch with probe claiming optional, for
 // callers that hand the connection to a transport that records no breaker
-// outcomes (a claimed probe there would strand the breaker half-open).
-func (m *Model) selectForDispatch(order []string, claimProbes bool) (*Enclave, *ProbeClaim) {
+// outcomes (a claimed probe there would strand the breaker half-open), and
+// an optional allowed host filter (see nextEnclave).
+func (m *Model) selectForDispatch(order []string, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
 	skip := map[string]bool{}
 	var firstOverloaded *Enclave
 	var enclave *Enclave
 	for range m.EnclaveCount() {
 		var claim *ProbeClaim
-		enclave, claim = m.nextEnclavePreferring(order, skip, claimProbes)
+		enclave, claim = m.nextEnclavePreferring(order, skip, claimProbes, allowed)
 		if enclave == nil {
 			break
 		}
@@ -477,6 +605,55 @@ func (m *Model) selectForDispatch(order []string, claimProbes bool) (*Enclave, *
 	return enclave, nil
 }
 
+// SelectServing picks the serving enclave for a public proxied request: the
+// overload skip loop over the caller's primary pool, widening to spill only
+// when every primary candidate is overloaded or unhealthy (nil primary =
+// all enclaves, no reservations). A nil enclave means 503; overloaded=true
+// is the 429 verdict with retryAfter/waiting; a non-nil ProbeClaim must
+// travel with the dispatched request.
+func (m *Model) SelectServing(order []string, primary, spill map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
+	enclave, claim, overloaded, retryAfter, waiting = m.selectServingFrom(order, primary)
+	// A claimed probe must be dispatched. Breaker-open last resorts do
+	// spill: an all-dead reserved pool should fail over to shared capacity,
+	// not serve at a dead host.
+	if len(spill) == 0 || claim != nil {
+		return
+	}
+	if enclave != nil && !overloaded && enclave.breakerClosed() {
+		return
+	}
+	spillEnclave, spillClaim, spillOverloaded, spillRetryAfter, spillWaiting := m.selectServingFrom(order, spill)
+	if spillEnclave == nil {
+		return
+	}
+	if enclave == nil || spillClaim != nil || (!spillOverloaded && spillEnclave.breakerClosed()) {
+		return spillEnclave, spillClaim, spillOverloaded, spillRetryAfter, spillWaiting
+	}
+	// Both pools exhausted: surface the primary pool's overload verdict.
+	return
+}
+
+func (m *Model) selectServingFrom(order []string, allowed map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
+	skip := map[string]bool{}
+	for range m.EnclaveCount() {
+		enclave, claim = m.nextEnclavePreferring(order, skip, true, allowed)
+		if enclave == nil {
+			return
+		}
+		// A claimed probe must be dispatched or the breaker strands
+		// half-open; overload skip applies to plain picks only.
+		if claim != nil {
+			overloaded = false
+			return
+		}
+		if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
+			return
+		}
+		skip[enclave.String()] = true
+	}
+	return
+}
+
 // EnclaveCount returns the number of configured enclaves under the model lock.
 // Callers that need to bound a retry loop on enclave cardinality should use
 // this rather than reading len(m.Enclaves) directly.
@@ -492,15 +669,29 @@ func (m *Model) EnclaveCount() int {
 // flag is deliberately ignored — membership must stay stable so a flapping
 // load signal can't move a key's home.
 func (m *Model) CacheRoutePool() cacheroute.Pool {
+	return m.CacheRoutePoolIn(nil)
+}
+
+// CacheRoutePoolIn is CacheRoutePool restricted to the caller's reservation
+// pool (nil = all), keeping HRW ranking — and a key's warm home — inside it.
+func (m *Model) CacheRoutePoolIn(allowed map[string]bool) cacheroute.Pool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	// Size comes from the config, not the live enclave map: during a
 	// release the map is cleared and re-attested one host at a time, and a
 	// multi-replica pool must not reclassify as pool_too_small (skipping
-	// warmth tracking) for that window.
-	pool := cacheroute.Pool{Size: m.expectedHosts}
+	// warmth tracking) for that window. A restricted pool's size is the
+	// configured size of that pool for the same reason.
+	size := m.expectedHosts
+	if allowed != nil {
+		size = len(allowed)
+	}
+	pool := cacheroute.Pool{Size: size}
 	for _, enclave := range m.Enclaves {
+		if allowed != nil && !allowed[enclave.host] {
+			continue
+		}
 		if enclave.cb != nil && !enclave.cb.Closed() {
 			continue
 		}
@@ -511,6 +702,9 @@ func (m *Model) CacheRoutePool() cacheroute.Pool {
 	}
 	if len(pool.Candidates) == 0 {
 		for _, enclave := range m.Enclaves {
+			if allowed != nil && !allowed[enclave.host] {
+				continue
+			}
 			pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
 				Host:     enclave.host,
 				InFlight: int(enclave.inflight.Load()),
@@ -563,6 +757,12 @@ func (em *EnclaveManager) ResolvePreferredModel(candidates []string) string {
 
 func (e *Enclave) isOverloaded() bool {
 	return e != nil && e.metrics != nil && e.metrics.overloaded.Load()
+}
+
+// breakerClosed reports whether the circuit breaker is closed (nil counts
+// as closed, matching selection's treatment).
+func (e *Enclave) breakerClosed() bool {
+	return e.cb == nil || e.cb.Closed()
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -664,7 +864,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 }
 
 func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
-	em.models.Store(modelName, &Model{
+	model := &Model{
 		Repo:              modelConfig.Repo,
 		Tag:               "",
 		SourceMeasurement: nil,
@@ -673,7 +873,9 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		RateLimit:         modelConfig.RateLimit,
 		CacheRoute:        modelConfig.CacheRoute,
 		expectedHosts:     len(modelConfig.Hostnames),
-	})
+	}
+	model.applyReservations(modelConfig.Reservations, modelConfig.Hostnames)
+	em.models.Store(modelName, model)
 	cacheroute.SetMode(modelName, modelConfig.CacheRoute)
 	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }
@@ -755,6 +957,7 @@ func (em *EnclaveManager) sync() error {
 				log.Warnf("model %s no longer in config", modelName)
 				model.mu.Lock()
 				model.expectedHosts = 0
+				model.applyReservations(nil, nil)
 				for _, enclave := range model.Enclaves {
 					enclave.shutdown()
 				}
@@ -781,6 +984,7 @@ func (em *EnclaveManager) sync() error {
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
+			model.applyReservations(configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}
