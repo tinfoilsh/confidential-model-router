@@ -38,11 +38,60 @@ var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
 
-// estBytesPerToken sizes the admission-time uncached-prompt-token debit from
-// the request body length. JSON framing and escaping make it overshoot the
-// real token count, which is the safe direction: the overshoot is refunded
-// along with the cached portion once the engine reports actual usage.
+// estBytesPerToken converts text length to the admission-time
+// uncached-prompt-token estimate.
 const estBytesPerToken = 4
+
+// mediaPartTokens is the flat estimate for a binary content part (image,
+// audio, file): its byte length wildly overstates its token cost.
+const mediaPartTokens = 1024
+
+// estimatePromptTokens sizes the admission-time uncached-token debit by
+// walking the request body and counting text at estBytesPerToken. Binary
+// content (data: URLs, base64 blobs) counts as mediaPartTokens per part.
+// Undercounting media is the safe direction: the debit stays below the
+// engine's real usage instead of falsely tripping a hard budget, and any
+// text overshoot is refunded once the engine reports actual usage.
+func estimatePromptTokens(v any) int64 {
+	switch x := v.(type) {
+	case string:
+		if strings.HasPrefix(x, "data:") || isBase64Blob(x) {
+			return mediaPartTokens
+		}
+		return int64(len(x)) / estBytesPerToken
+	case []any:
+		var sum int64
+		for _, e := range x {
+			sum += estimatePromptTokens(e)
+		}
+		return sum
+	case map[string]any:
+		var sum int64
+		for _, e := range x {
+			sum += estimatePromptTokens(e)
+		}
+		return sum
+	default:
+		return 0
+	}
+}
+
+// isBase64Blob reports whether s looks like a raw base64 payload rather than
+// prose: long, with nothing outside the base64 alphabet in its head. Prose
+// virtually always has whitespace or punctuation early.
+func isBase64Blob(s string) bool {
+	if len(s) < 4096 {
+		return false
+	}
+	for i := 0; i < 128; i++ {
+		c := s[i]
+		if !('A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' ||
+			c == '+' || c == '/' || c == '=' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
@@ -793,14 +842,13 @@ func main() {
 				// engine reports usage (see config.RateLimitConfig).
 				// Org-priority callers bypass both tiers.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
-					// Estimate from the body as it stands now — after base64
-					// file conversion — so document uploads are sized by
-					// their extracted text, not the raw upload.
+					// Estimate from the body as it stands now, after base64
+					// file conversion: document uploads are sized by their
+					// extracted text, and any remaining media parts by
+					// mediaPartTokens rather than their byte length.
 					var estTokens int64
 					if rlCfg.TracksTokens() {
-						if bb, err := json.Marshal(body); err == nil {
-							estTokens = int64(len(bb)) / estBytesPerToken
-						}
+						estTokens = estimatePromptTokens(body)
 					}
 					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.TokensWindow())
 

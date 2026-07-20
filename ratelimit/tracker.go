@@ -115,12 +115,13 @@ func (t *RequestTracker) Record(apiKey, model string, tokens int64, tokenWindow 
 	}
 }
 
-// RefundTokens returns unused debited tokens to the window they were debited
-// from, identified by windowStart. A refund whose window has already rolled
-// over is dropped: crediting the current window would let the caller
-// overdraw it.
-func (t *RequestTracker) RefundTokens(apiKey, model string, tokens int64, windowStart time.Time) {
-	if apiKey == "" || tokens <= 0 {
+// ReconcileTokens adjusts the window a debit landed in, identified by
+// windowStart, to the engine-reported usage: negative delta refunds an
+// over-estimate, positive delta charges the shortfall of an under-estimate.
+// A reconciliation whose window has already rolled over is dropped: the
+// debit it would correct has expired with the window.
+func (t *RequestTracker) ReconcileTokens(apiKey, model string, delta int64, windowStart time.Time) {
+	if apiKey == "" || delta == 0 {
 		return
 	}
 
@@ -131,7 +132,7 @@ func (t *RequestTracker) RefundTokens(apiKey, model string, tokens int64, window
 	if !ok || !b.tokenWindowStart.Equal(windowStart) {
 		return
 	}
-	b.tokens = max(0, b.tokens-tokens)
+	b.tokens = max(0, b.tokens+delta)
 }
 
 // cleanup removes entries whose windows have both been stale for at least a

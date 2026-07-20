@@ -106,7 +106,7 @@ func TestEmptyAPIKeyIgnored(t *testing.T) {
 	}
 }
 
-func TestRefundTokens(t *testing.T) {
+func TestReconcileRefundsOverEstimate(t *testing.T) {
 	tracker := NewRequestTracker()
 
 	charged := tracker.Record("key1", "model1", 1000, minute)
@@ -114,24 +114,35 @@ func TestRefundTokens(t *testing.T) {
 		t.Fatalf("expected tokens 1000, got %d", charged.Tokens)
 	}
 
-	// Engine reported 900 of the 1000 estimated tokens were cached
-	tracker.RefundTokens("key1", "model1", 900, charged.TokensWindowStart)
+	// Engine reported only 100 of the 1000 estimated tokens were uncached
+	tracker.ReconcileTokens("key1", "model1", -900, charged.TokensWindowStart)
 	if got := tracker.Record("key1", "model1", 0, minute); got.Tokens != 100 {
 		t.Fatalf("expected tokens 100 after refund, got %d", got.Tokens)
 	}
 }
 
-func TestRefundClampsAtZero(t *testing.T) {
+func TestReconcileChargesUnderEstimate(t *testing.T) {
+	tracker := NewRequestTracker()
+
+	// Estimated 1000 but the engine reported 5000 uncached
+	charged := tracker.Record("key1", "model1", 1000, minute)
+	tracker.ReconcileTokens("key1", "model1", 4000, charged.TokensWindowStart)
+	if got := tracker.Record("key1", "model1", 0, minute); got.Tokens != 5000 {
+		t.Fatalf("expected tokens 5000 after shortfall charged, got %d", got.Tokens)
+	}
+}
+
+func TestReconcileClampsAtZero(t *testing.T) {
 	tracker := NewRequestTracker()
 
 	charged := tracker.Record("key1", "model1", 100, minute)
-	tracker.RefundTokens("key1", "model1", 500, charged.TokensWindowStart)
+	tracker.ReconcileTokens("key1", "model1", -500, charged.TokensWindowStart)
 	if got := tracker.Record("key1", "model1", 0, minute); got.Tokens != 0 {
 		t.Fatalf("expected tokens clamped to 0, got %d", got.Tokens)
 	}
 }
 
-func TestRefundAfterWindowRollIsDropped(t *testing.T) {
+func TestReconcileAfterWindowRollIsDropped(t *testing.T) {
 	now := time.Date(2025, 1, 1, 10, 30, 0, 0, time.UTC)
 	tracker := NewRequestTracker(WithNowFunc(func() time.Time { return now }))
 
@@ -141,10 +152,10 @@ func TestRefundAfterWindowRollIsDropped(t *testing.T) {
 	now = time.Date(2025, 1, 1, 10, 31, 0, 0, time.UTC)
 	tracker.Record("key1", "model1", 300, minute)
 
-	// A refund for the expired window must not credit the current one
-	tracker.RefundTokens("key1", "model1", 1000, charged.TokensWindowStart)
+	// A reconciliation for the expired window must not touch the current one
+	tracker.ReconcileTokens("key1", "model1", -1000, charged.TokensWindowStart)
 	if got := tracker.Record("key1", "model1", 0, minute); got.Tokens != 300 {
-		t.Fatalf("expected tokens 300 after stale refund dropped, got %d", got.Tokens)
+		t.Fatalf("expected tokens 300 after stale reconciliation dropped, got %d", got.Tokens)
 	}
 }
 

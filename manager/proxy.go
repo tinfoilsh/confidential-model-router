@@ -304,17 +304,16 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				return
 			}
 
-			// Refund the unused portion of the admission-time uncached-token
-			// debit: the cached share plus any over-estimate goes back to
-			// the caller's budget (see the rate-limit check in main.go).
+			// Reconcile the admission-time uncached-token debit against the
+			// engine-reported usage: refund the cached share and any
+			// over-estimate, charge the shortfall of an under-estimate (see
+			// the rate-limit check in main.go).
 			if charge, ok := ratelimit.TokenChargeFromContext(req.Context()); ok && tracker != nil {
 				uncached := usage.PromptTokens
 				if cached, ok := usage.CachedPromptTokens(); ok {
 					uncached = max(0, usage.PromptTokens-cached)
 				}
-				if refund := charge.Tokens - int64(uncached); refund > 0 {
-					tracker.RefundTokens(charge.ID, charge.Model, refund, charge.WindowStart)
-				}
+				tracker.ReconcileTokens(charge.ID, charge.Model, int64(uncached)-charge.Tokens, charge.WindowStart)
 			}
 
 			// For streaming responses, set usage on wrapper for trailer
