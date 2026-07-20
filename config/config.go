@@ -20,7 +20,7 @@ import (
 // hard max: requests over this are rejected completely.
 // Also defines a configurable window per each ratelimit type
 //
-// Un-cached is handled unintuitively: token budgets are debited pesimistaclly on recieve of the requests.
+// Uncached is handled unintuitively: token budgets are debited pessimistically on receipt of a request.
 // After a request finishes, the cache % is credited back.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
