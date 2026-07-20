@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -36,6 +37,12 @@ var configFile []byte // Initial (attested) config
 var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
+
+// estBytesPerToken sizes the admission-time uncached-prompt-token debit from
+// the request body length. JSON framing and escaping make it overshoot the
+// real token count, which is the safe direction: the overshoot is refunded
+// along with the cached portion once the engine reports actual usage.
+const estBytesPerToken = 4
 
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
@@ -777,30 +784,66 @@ func main() {
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
 
-				// Check per-key rate limits: reject with 429 over the hard
-				// budget, inject lower vLLM priority over the soft budget.
-				// Org-priority callers bypass both.
+				// Check per-key rate limits: reject with 429 over a hard
+				// budget, inject lower vLLM priority over a soft budget.
+				// Requests are budgeted per minute two ways: by count and by
+				// uncached prompt tokens. Tokens are debited pessimistically
+				// from the body size at admission (as if nothing were
+				// cached); the proxy refunds the cached portion once the
+				// engine reports actual usage (see config.RateLimitConfig).
+				// Org-priority callers bypass both tiers.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
-					count, resetIn := em.RequestTracker().Record(rateLimitID, rateLimitModel)
-					if hard := rlCfg.HardMaxRequestsPerMinute; hard > 0 && count >= hard {
+					var estTokens int64
+					if rlCfg.TracksTokens() {
+						estTokens = int64(len(bodyBytes)) / estBytesPerToken
+					}
+					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens)
+
+					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardMaxRequestsPerMinute
+					overHardTokens := rlCfg.HardMaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.HardMaxUncachedPromptTokensPerMinute
+					if overHardCount || overHardTokens {
 						// Round up: rounding down would point the client back
 						// inside the window it was just rejected in.
-						secs := int((resetIn + time.Second - 1) / time.Second)
+						secs := int((totals.ResetIn + time.Second - 1) / time.Second)
 						w.Header().Set("Retry-After", strconv.Itoa(secs))
-						manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						if overHardCount {
+							manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
+						if overHardTokens {
+							manager.RateLimitTokenRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
 						log.WithFields(log.Fields{
-							"model":               rateLimitModel,
-							"retry_after_seconds": secs,
+							"model":                rateLimitModel,
+							"over_requests":        overHardCount,
+							"over_uncached_tokens": overHardTokens,
+							"retry_after_seconds":  secs,
 						}).Warn("rejecting request over hard per-key rate limit")
 						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
 						return
 					}
-					if soft := rlCfg.MaxRequestsPerMinute; soft > 0 && count >= soft {
+
+					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.MaxRequestsPerMinute
+					overSoftTokens := rlCfg.MaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.MaxUncachedPromptTokensPerMinute
+					if overSoftCount || overSoftTokens {
 						body["priority"] = 1
-						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						if overSoftCount {
+							manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
+						if overSoftTokens {
+							manager.RateLimitTokenDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
 						log.WithFields(log.Fields{
 							"model": rateLimitModel,
 						}).Debug("rate limited: injecting lower vLLM priority")
+					}
+
+					if estTokens > 0 {
+						r = r.WithContext(ratelimit.WithCharge(r.Context(), ratelimit.Charge{
+							ID:          rateLimitID,
+							Model:       rateLimitModel,
+							Tokens:      estTokens,
+							WindowStart: totals.WindowStart,
+						}))
 					}
 				}
 

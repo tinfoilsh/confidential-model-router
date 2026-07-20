@@ -312,7 +312,7 @@ func (em *EnclaveManager) addEnclave(
 		predicate: verification.Measurement.Type,
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
+		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, em.requestTracker, cb),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 	}

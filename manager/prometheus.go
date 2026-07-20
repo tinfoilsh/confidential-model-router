@@ -101,6 +101,24 @@ var (
 		[]string{"model"},
 	)
 
+	// RateLimitTokenDemotionsTotal tracks requests deprioritized due to soft per-key uncached-prompt-token limits
+	RateLimitTokenDemotionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_token_demotions_total",
+			Help: "Total number of requests sent with lower vLLM priority due to per-key uncached prompt token limits",
+		},
+		[]string{"model"},
+	)
+
+	// RateLimitTokenRejectionsTotal tracks requests rejected due to hard per-key uncached-prompt-token limits
+	RateLimitTokenRejectionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_token_rejections_total",
+			Help: "Total number of requests rejected with 429 due to hard per-key uncached prompt token limits",
+		},
+		[]string{"model"},
+	)
+
 	// PriorityAssignmentsTotal tracks requests assigned configured vLLM priority
 	PriorityAssignmentsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

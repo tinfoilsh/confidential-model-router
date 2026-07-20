@@ -13,16 +13,33 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key request rate limits for a
-// model. Requests over the soft per-minute budget are sent to vLLM with a
-// lower scheduling priority; requests over the hard budget are rejected with
-// HTTP 429. Zero disables a budget. The hard check runs first, so when both
-// are set the hard budget must sit above the soft one — a hard budget at or
-// below the soft budget rejects requests before they can be demoted, turning
-// the soft tier off entirely.
+// RateLimitConfig describes optional per-API-key rate limits for a model,
+// budgeted two ways per one-minute window: by request count and by uncached
+// prompt tokens. Requests over a soft budget are sent to vLLM with a lower
+// scheduling priority; requests over a hard budget are rejected with HTTP
+// 429. Zero disables a budget. The hard checks run first, so when both tiers
+// are set a hard budget must sit above its soft counterpart — a hard budget
+// at or below the soft one rejects requests before they can be demoted,
+// turning the soft tier off entirely.
+//
+// Token budgets are debited pessimistically at admission from the request
+// body size, as if nothing were cached; the cached portion is refunded once
+// the engine reports actual usage. Cache-friendly traffic therefore earns
+// most of its debits back within the window, while cache-missing traffic
+// does not. Rejected and failed requests keep their debit until the window
+// resets, and a single request estimated above the hard token budget is
+// always rejected.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
+
+	MaxUncachedPromptTokensPerMinute     int64 `yaml:"max_uncached_prompt_tokens_per_minute,omitempty"`
+	HardMaxUncachedPromptTokensPerMinute int64 `yaml:"hard_max_uncached_prompt_tokens_per_minute,omitempty"`
+}
+
+// TracksTokens reports whether any uncached-prompt-token budget is set.
+func (c *RateLimitConfig) TracksTokens() bool {
+	return c.MaxUncachedPromptTokensPerMinute > 0 || c.HardMaxUncachedPromptTokensPerMinute > 0
 }
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
