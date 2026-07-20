@@ -112,7 +112,7 @@ func TestProxyRefundsUncachedTokenCharge(t *testing.T) {
 	}
 	proxy.Transport = http.DefaultTransport
 
-	charged := tracker.Record("key1", "test-model", 1000)
+	charged := tracker.Record("key1", "test-model", 1000, time.Minute, time.Minute)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer test-key-1234567890")
@@ -124,12 +124,12 @@ func TestProxyRefundsUncachedTokenCharge(t *testing.T) {
 		ID:          "key1",
 		Model:       "test-model",
 		Tokens:      1000,
-		WindowStart: charged.WindowStart,
+		WindowStart: charged.TokensWindowStart,
 	})
 
 	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
 
-	if got := tracker.Record("key1", "test-model", 0); got.Tokens != 5 {
+	if got := tracker.Record("key1", "test-model", 0, time.Minute, time.Minute); got.Tokens != 5 {
 		t.Fatalf("expected 5 uncached tokens left after refund, got %d", got.Tokens)
 	}
 }

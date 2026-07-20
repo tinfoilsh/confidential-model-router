@@ -8,38 +8,76 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key rate limits for a model,
-// budgeted two ways per one-minute window: by request count and by uncached
-// prompt tokens. Requests over a soft budget are sent to vLLM with a lower
-// scheduling priority; requests over a hard budget are rejected with HTTP
-// 429. Zero disables a budget. The hard checks run first, so when both tiers
-// are set a hard budget must sit above its soft counterpart — a hard budget
-// at or below the soft one rejects requests before they can be demoted,
-// turning the soft tier off entirely.
+// RateLimitConfig describes optional per-API-key rate limits for a model, on
+// two independent axes: request count and uncached prompt tokens. Limits are
+// per-minute rates; each axis enforces rate × window over its own fixed
+// window, so a longer window allows larger bursts at the same sustained
+// rate. Requests over a soft budget are sent to vLLM with a lower scheduling
+// priority; over a hard budget they are rejected with HTTP 429. Zero
+// disables a budget. Hard checks run first, so a hard budget at or below its
+// soft counterpart turns the soft tier off.
 //
 // Token budgets are debited pessimistically at admission from the request
-// body size, as if nothing were cached; the cached portion is refunded once
-// the engine reports actual usage. Cache-friendly traffic therefore earns
-// most of its debits back within the window, while cache-missing traffic
-// does not. Rejected and failed requests keep their debit until the window
-// resets, and a single request estimated above the hard token budget is
-// always rejected.
+// body size, as if nothing were cached; the cached share is refunded when
+// the engine reports usage. Usage arrives only at response completion, so
+// the token window should comfortably exceed typical response times —
+// refunds whose window already rolled over are dropped. Rejected and failed
+// requests keep their debit until the window resets, and a single request
+// estimated above the hard token budget is always rejected.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
+	RequestsWindowMinutes    int64 `yaml:"requests_window_minutes,omitempty"`
 
 	MaxUncachedPromptTokensPerMinute     int64 `yaml:"max_uncached_prompt_tokens_per_minute,omitempty"`
 	HardMaxUncachedPromptTokensPerMinute int64 `yaml:"hard_max_uncached_prompt_tokens_per_minute,omitempty"`
+	TokensWindowMinutes                  int64 `yaml:"tokens_window_minutes,omitempty"`
 }
 
 // TracksTokens reports whether any uncached-prompt-token budget is set.
 func (c *RateLimitConfig) TracksTokens() bool {
 	return c.MaxUncachedPromptTokensPerMinute > 0 || c.HardMaxUncachedPromptTokensPerMinute > 0
+}
+
+func windowDuration(minutes int64) time.Duration {
+	if minutes < 1 {
+		minutes = 1
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// RequestsWindow is the enforcement window for the request-count axis.
+func (c *RateLimitConfig) RequestsWindow() time.Duration {
+	return windowDuration(c.RequestsWindowMinutes)
+}
+
+// TokensWindow is the enforcement window for the uncached-token axis.
+func (c *RateLimitConfig) TokensWindow() time.Duration {
+	return windowDuration(c.TokensWindowMinutes)
+}
+
+// Per-window budgets: the configured per-minute rate scaled by the window.
+
+func (c *RateLimitConfig) SoftRequestsBudget() int64 {
+	return c.MaxRequestsPerMinute * int64(c.RequestsWindow()/time.Minute)
+}
+
+func (c *RateLimitConfig) HardRequestsBudget() int64 {
+	return c.HardMaxRequestsPerMinute * int64(c.RequestsWindow()/time.Minute)
+}
+
+func (c *RateLimitConfig) SoftTokensBudget() int64 {
+	return c.MaxUncachedPromptTokensPerMinute * int64(c.TokensWindow()/time.Minute)
+}
+
+func (c *RateLimitConfig) HardTokensBudget() int64 {
+	return c.HardMaxUncachedPromptTokensPerMinute * int64(c.TokensWindow()/time.Minute)
 }
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the

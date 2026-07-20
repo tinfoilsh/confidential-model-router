@@ -786,25 +786,37 @@ func main() {
 
 				// Check per-key rate limits: reject with 429 over a hard
 				// budget, inject lower vLLM priority over a soft budget.
-				// Requests are budgeted per minute two ways: by count and by
+				// Two axes with independent windows: request count and
 				// uncached prompt tokens. Tokens are debited pessimistically
 				// from the body size at admission (as if nothing were
-				// cached); the proxy refunds the cached portion once the
-				// engine reports actual usage (see config.RateLimitConfig).
+				// cached); the proxy refunds the cached share once the
+				// engine reports usage (see config.RateLimitConfig).
 				// Org-priority callers bypass both tiers.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
 					var estTokens int64
 					if rlCfg.TracksTokens() {
 						estTokens = int64(len(bodyBytes)) / estBytesPerToken
 					}
-					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens)
+					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.RequestsWindow(), rlCfg.TokensWindow())
 
-					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardMaxRequestsPerMinute
-					overHardTokens := rlCfg.HardMaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.HardMaxUncachedPromptTokensPerMinute
+					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardRequestsBudget()
+					overHardTokens := rlCfg.HardMaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.HardTokensBudget()
 					if overHardCount || overHardTokens {
-						// Round up: rounding down would point the client back
-						// inside the window it was just rejected in.
-						secs := int((totals.ResetIn + time.Second - 1) / time.Second)
+						// Retry-After points at the reset of the axis that
+						// tripped; if both tripped, retrying before the
+						// later reset would be rejected again. Rounded up:
+						// rounding down would point back inside the window
+						// it was just rejected in.
+						var resetIn time.Duration
+						switch {
+						case overHardCount && overHardTokens:
+							resetIn = max(totals.CountResetIn, totals.TokensResetIn)
+						case overHardCount:
+							resetIn = totals.CountResetIn
+						default:
+							resetIn = totals.TokensResetIn
+						}
+						secs := int((resetIn + time.Second - 1) / time.Second)
 						w.Header().Set("Retry-After", strconv.Itoa(secs))
 						if overHardCount {
 							manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
@@ -822,8 +834,8 @@ func main() {
 						return
 					}
 
-					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.MaxRequestsPerMinute
-					overSoftTokens := rlCfg.MaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.MaxUncachedPromptTokensPerMinute
+					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.SoftRequestsBudget()
+					overSoftTokens := rlCfg.MaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.SoftTokensBudget()
 					if overSoftCount || overSoftTokens {
 						body["priority"] = 1
 						if overSoftCount {
@@ -842,7 +854,7 @@ func main() {
 							ID:          rateLimitID,
 							Model:       rateLimitModel,
 							Tokens:      estTokens,
-							WindowStart: totals.WindowStart,
+							WindowStart: totals.TokensWindowStart,
 						}))
 					}
 				}
