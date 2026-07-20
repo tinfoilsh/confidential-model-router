@@ -308,7 +308,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			// engine-reported usage: refund the cached share and any
 			// over-estimate, charge the shortfall of an under-estimate (see
 			// the rate-limit check in main.go).
-			if charge, ok := ratelimit.TokenChargeFromContext(req.Context()); ok && tracker != nil {
+			if charge, ok := ratelimit.ConsumeTokenCharge(req.Context()); ok && tracker != nil {
 				uncached := usage.PromptTokens
 				if cached, ok := usage.CachedPromptTokens(); ok {
 					uncached = max(0, usage.PromptTokens-cached)

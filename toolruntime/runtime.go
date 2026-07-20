@@ -15,6 +15,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolcontext"
 
@@ -449,12 +450,27 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {
+	usage := usageFromRaw(response.body["usage"])
+
+	// Settle the admission-time uncached-token debit against the loop's
+	// aggregated usage: tool requests bypass the proxy path where plain
+	// requests reconcile (see the rate-limit check in main.go).
+	if usage != nil {
+		if charge, ok := ratelimit.ConsumeTokenCharge(r.Context()); ok {
+			if tracker := em.RequestTracker(); tracker != nil {
+				uncached := usage.PromptTokens
+				if cached, ok := usage.CachedPromptTokens(); ok {
+					uncached = max(0, usage.PromptTokens-cached)
+				}
+				tracker.ReconcileTokens(charge.ID, charge.Model, int64(uncached)-charge.Tokens, charge.WindowStart)
+			}
+		}
+	}
+
 	apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 	if apiKey == "" {
 		return
 	}
-
-	usage := usageFromRaw(response.body["usage"])
 	promptTokens := 0
 	cachedPromptTokens := 0
 	completionTokens := 0

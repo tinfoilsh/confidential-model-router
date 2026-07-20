@@ -209,3 +209,18 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Fatalf("expected count 101 tokens 700 after concurrent records, got %d/%d", got.Count, got.Tokens)
 	}
 }
+
+func TestConsumeTokenChargeOnlyOnce(t *testing.T) {
+	ctx := WithTokenCharge(t.Context(), TokenCharge{ID: "key1", Model: "model1", Tokens: 100})
+
+	first, ok := ConsumeTokenCharge(ctx)
+	if !ok || first.Tokens != 100 {
+		t.Fatalf("first consume should return the charge, got %+v ok=%v", first, ok)
+	}
+	if _, ok := ConsumeTokenCharge(ctx); ok {
+		t.Fatal("second consume must not return the charge")
+	}
+	if _, ok := ConsumeTokenCharge(t.Context()); ok {
+		t.Fatal("consume without a charge must return false")
+	}
+}
