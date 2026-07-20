@@ -40,9 +40,6 @@ const (
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
 	websearchModel = "websearch"
-	// prompt token detail fields are only exposed in usage metrics for models
-	// that explicitly opt in, to avoid surprising existing consumers.
-	promptTokenDetailsMetricsModel = "kimi-k2-6"
 )
 
 // classifyProxyError maps a transport-level error to a bounded set of reason
@@ -305,7 +302,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			if usage == nil {
 				return
 			}
-			usage.ExposePromptTokenDetails = modelName == promptTokenDetailsMetricsModel
 
 			// For streaming responses, set usage on wrapper for trailer
 			// (non-streaming sets header directly in the buffering block below)
@@ -431,13 +427,10 @@ func formatUsage(usage *tokencount.Usage, model string) string {
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
 
-	if usage.ExposePromptTokenDetails {
-		cachedPromptTokens, ok := usage.CachedPromptTokens()
-		if ok {
-			uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
-			formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
-				",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
-		}
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
+		formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
+			",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
 	}
 
 	if model != "" {

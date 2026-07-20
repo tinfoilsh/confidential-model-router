@@ -412,9 +412,15 @@ func usageFromRaw(raw any) *tokencount.Usage {
 }
 
 func formatUsageHeader(usage *tokencount.Usage) string {
-	return "prompt=" + strconv.Itoa(usage.PromptTokens) +
+	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
+		formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
+			",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
+	}
+	return formatted
 }
 
 func chatUsageMap(usage *tokencount.Usage) map[string]any {

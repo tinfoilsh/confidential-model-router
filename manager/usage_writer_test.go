@@ -67,11 +67,10 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 		{
 			name: "appends model after cached prompt token details",
 			usage: &tokencount.Usage{
-				PromptTokens:             69,
-				CompletionTokens:         20,
-				TotalTokens:              89,
-				PromptTokensDetails:      &tokencount.PromptTokensDetails{CachedTokens: 64},
-				ExposePromptTokenDetails: true,
+				PromptTokens:        69,
+				CompletionTokens:    20,
+				TotalTokens:         89,
+				PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 64},
 			},
 			model:    "kimi-k2-6",
 			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5,model=kimi-k2-6",
@@ -97,23 +96,22 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 		{
 			name: "includes cached prompt token details when present",
 			usage: &tokencount.Usage{
-				PromptTokens:             69,
-				CompletionTokens:         20,
-				TotalTokens:              89,
-				PromptTokensDetails:      &tokencount.PromptTokensDetails{CachedTokens: 64},
-				ExposePromptTokenDetails: true,
-			},
-			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5",
-		},
-		{
-			name: "keeps legacy format when prompt token details are not exposed",
-			usage: &tokencount.Usage{
 				PromptTokens:        69,
 				CompletionTokens:    20,
 				TotalTokens:         89,
 				PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 64},
 			},
-			expected: "prompt=69,completion=20,total=89",
+			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5",
+		},
+		{
+			name: "clamps cached tokens to prompt tokens",
+			usage: &tokencount.Usage{
+				PromptTokens:        69,
+				CompletionTokens:    20,
+				TotalTokens:         89,
+				PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 100},
+			},
+			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=69,uncached_prompt_tokens=0",
 		},
 		{
 			name:     "nil usage",

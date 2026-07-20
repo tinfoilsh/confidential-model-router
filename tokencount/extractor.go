@@ -21,8 +21,6 @@ type Usage struct {
 	OutputTokens        int                  `json:"output_tokens"`
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 	InputTokensDetails  *PromptTokensDetails `json:"input_tokens_details,omitempty"`
-
-	ExposePromptTokenDetails bool `json:"-"`
 }
 
 type PromptTokensDetails struct {
