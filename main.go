@@ -902,7 +902,7 @@ func main() {
 						}).Debug("rate limited: injecting lower vLLM priority")
 					}
 
-					if estTokens > 0 {
+					if rlCfg.TracksTokens() {
 						r = r.WithContext(ratelimit.WithTokenCharge(r.Context(), ratelimit.TokenCharge{
 							ID:          rateLimitID,
 							Model:       rateLimitModel,
