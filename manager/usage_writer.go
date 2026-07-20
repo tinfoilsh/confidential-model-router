@@ -50,7 +50,7 @@ func (w *usageMetricsWriter) FormatUsage() string {
 	if w.usage == nil {
 		return ""
 	}
-	return formatUsage(w.usage, w.model)
+	return FormatUsage(w.usage, w.model)
 }
 
 // WriteTrailer writes the usage metrics as an HTTP trailer

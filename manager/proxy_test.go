@@ -65,7 +65,7 @@ func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	}
 }
 
-func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
+func TestProxyUsageMetrics_IncludesCachedTokensForAllModels(t *testing.T) {
 	proxy := setupTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -82,7 +82,7 @@ func TestProxyUsageMetrics_NonKimiModelKeepsLegacyUsageFormat(t *testing.T) {
 	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
 
 	got := rec.Header().Get(UsageMetricsResponseHeader)
-	want := "prompt=69,completion=20,total=89,model=test-model"
+	want := "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5,model=test-model"
 	if got != want {
 		t.Fatalf("usage header = %q, want %q", got, want)
 	}

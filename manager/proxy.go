@@ -40,9 +40,6 @@ const (
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
 	websearchModel = "websearch"
-	// prompt token detail fields are only exposed in usage metrics for models
-	// that explicitly opt in, to avoid surprising existing consumers.
-	promptTokenDetailsMetricsModel = "kimi-k2-6"
 )
 
 // classifyProxyError maps a transport-level error to a bounded set of reason
@@ -305,7 +302,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			if usage == nil {
 				return
 			}
-			usage.ExposePromptTokenDetails = modelName == promptTokenDetailsMetricsModel
 
 			// For streaming responses, set usage on wrapper for trailer
 			// (non-streaming sets header directly in the buffering block below)
@@ -379,7 +375,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage, modelName))
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -425,19 +421,18 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	return proxy
 }
 
-// formatUsage formats token usage for the response header
-func formatUsage(usage *tokencount.Usage, model string) string {
+// FormatUsage formats token usage for the response header. It is the single
+// source of truth for the header format so every path that emits usage
+// metrics produces an identical value.
+func FormatUsage(usage *tokencount.Usage, model string) string {
 	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
 
-	if usage.ExposePromptTokenDetails {
-		cachedPromptTokens, ok := usage.CachedPromptTokens()
-		if ok {
-			uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
-			formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
-				",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
-		}
+	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
+		uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
+		formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
+			",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
 	}
 
 	if model != "" {
