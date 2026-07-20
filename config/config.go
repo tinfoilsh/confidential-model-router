@@ -14,22 +14,14 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key rate limits for a model, on
-// two independent axes: request count and uncached prompt tokens. Limits are
-// per-minute rates; each axis enforces rate × window over its own fixed
-// window, so a longer window allows larger bursts at the same sustained
-// rate. Requests over a soft budget are sent to vLLM with a lower scheduling
-// priority; over a hard budget they are rejected with HTTP 429. Zero
-// disables a budget. Hard checks run first, so a hard budget at or below its
-// soft counterpart turns the soft tier off.
+// RateLimitConfig describes optional per-API-key rate limits for a model.
+// Enforcement types (hard should be calculated first)
+// soft max: requests over this are given a lower scheduling priority.
+// hard max: requests over this are rejected completely.
+// Also defines a configurable window per each ratelimit type
 //
-// Token budgets are debited pessimistically at admission from the request
-// body size, as if nothing were cached; the cached share is refunded when
-// the engine reports usage. Usage arrives only at response completion, so
-// the token window should comfortably exceed typical response times —
-// refunds whose window already rolled over are dropped. Rejected and failed
-// requests keep their debit until the window resets, and a single request
-// estimated above the hard token budget is always rejected.
+// Un-cached is handled unintuitively: token budgets are debited pesimistaclly on recieve of the requests.
+// After a request finishes, the cache % is credited back.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`

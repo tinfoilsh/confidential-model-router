@@ -120,7 +120,7 @@ func TestProxyRefundsUncachedTokenCharge(t *testing.T) {
 	rec := httptest.NewRecorder()
 	wrapper := &usageMetricsWriter{ResponseWriter: rec}
 	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
-	ctx = ratelimit.WithCharge(ctx, ratelimit.Charge{
+	ctx = ratelimit.WithTokenCharge(ctx, ratelimit.TokenCharge{
 		ID:          "key1",
 		Model:       "test-model",
 		Tokens:      1000,

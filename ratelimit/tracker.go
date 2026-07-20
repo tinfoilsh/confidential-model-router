@@ -5,10 +5,8 @@ import (
 	"time"
 )
 
-// RequestTracker tracks request counts and uncached prompt token debits per
-// API key per model. The two axes roll over independent fixed windows, so
-// e.g. request counts can be enforced per minute while token budgets are
-// enforced per 5 minutes. Safe for concurrent use.
+// RequestTracker tracks rate limits per
+// API key per model.  Safe for concurrent use.
 type RequestTracker struct {
 	mu          sync.Mutex
 	buckets     map[string]*bucketEntry // key: "apiKey\x00model"
@@ -26,9 +24,7 @@ type bucketEntry struct {
 	tokenWindowStart time.Time
 }
 
-// Totals is the accumulated usage for an API key and model, per axis.
-// TokensWindowStart identifies the window a token debit landed in so a later
-// refund can be dropped if the window has already rolled over.
+// Totals is the accumulated usage for an API key and model, per axis, along with window.
 type Totals struct {
 	Count             int64
 	CountResetIn      time.Duration

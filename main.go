@@ -850,7 +850,7 @@ func main() {
 					}
 
 					if estTokens > 0 {
-						r = r.WithContext(ratelimit.WithCharge(r.Context(), ratelimit.Charge{
+						r = r.WithContext(ratelimit.WithTokenCharge(r.Context(), ratelimit.TokenCharge{
 							ID:          rateLimitID,
 							Model:       rateLimitModel,
 							Tokens:      estTokens,
