@@ -166,7 +166,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested)
+		applyUsageMetrics(response, usageMetricsRequested, modelName)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
@@ -180,7 +180,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested)
+		applyUsageMetrics(response, usageMetricsRequested, modelName)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	default:
@@ -411,18 +411,6 @@ func usageFromRaw(raw any) *tokencount.Usage {
 	return &usage
 }
 
-func formatUsageHeader(usage *tokencount.Usage) string {
-	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
-		",completion=" + strconv.Itoa(usage.CompletionTokens) +
-		",total=" + strconv.Itoa(usage.TotalTokens)
-	if cachedPromptTokens, ok := usage.CachedPromptTokens(); ok {
-		uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
-		formatted += ",cached_prompt_tokens=" + strconv.Itoa(cachedPromptTokens) +
-			",uncached_prompt_tokens=" + strconv.Itoa(uncachedPromptTokens)
-	}
-	return formatted
-}
-
 func chatUsageMap(usage *tokencount.Usage) map[string]any {
 	return usageMap(usage, "prompt_tokens", "completion_tokens", "prompt_tokens_details")
 }
@@ -443,7 +431,7 @@ func usageMap(usage *tokencount.Usage, inputTokensKey, outputTokensKey, detailsK
 	return usageMap
 }
 
-func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool) {
+func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool, modelName string) {
 	if response == nil {
 		return
 	}
@@ -457,7 +445,7 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 	if usage == nil {
 		return
 	}
-	response.header.Set(manager.UsageMetricsResponseHeader, formatUsageHeader(usage))
+	response.header.Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usage, modelName))
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {

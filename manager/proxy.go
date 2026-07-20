@@ -375,7 +375,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, formatUsage(jsonResp.Usage, modelName))
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -421,8 +421,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	return proxy
 }
 
-// formatUsage formats token usage for the response header
-func formatUsage(usage *tokencount.Usage, model string) string {
+// FormatUsage formats token usage for the response header. It is the single
+// source of truth for the header format so every path that emits usage
+// metrics produces an identical value.
+func FormatUsage(usage *tokencount.Usage, model string) string {
 	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
