@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -36,6 +37,65 @@ var configFile []byte // Initial (attested) config
 var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
+
+// estBytesPerToken converts text length to the admission-time
+// uncached-prompt-token estimate.
+const estBytesPerToken = 4
+
+// mediaPartTokens is the flat estimate for a binary content part (image,
+// audio, file): its byte length wildly overstates its token cost.
+const mediaPartTokens = 1024
+
+// estimatePromptTokens sizes the admission-time uncached-token debit by
+// walking the request body and counting text at estBytesPerToken. Binary
+// content (data: URLs, base64 blobs) counts as mediaPartTokens per part.
+// Undercounting media is the safe direction: the debit stays below the
+// engine's real usage instead of falsely tripping a hard budget, and any
+// text overshoot is refunded once the engine reports actual usage.
+func estimatePromptTokens(v any) int64 {
+	switch x := v.(type) {
+	case string:
+		if strings.HasPrefix(x, "data:") || isBase64Blob(x) {
+			return mediaPartTokens
+		}
+		// Round up so fragmenting text into tiny parts can't sum to zero
+		if x == "" {
+			return 0
+		}
+		return int64((len(x) + estBytesPerToken - 1) / estBytesPerToken)
+	case []any:
+		var sum int64
+		for _, e := range x {
+			sum += estimatePromptTokens(e)
+		}
+		return sum
+	case map[string]any:
+		var sum int64
+		for _, e := range x {
+			sum += estimatePromptTokens(e)
+		}
+		return sum
+	default:
+		return 0
+	}
+}
+
+// isBase64Blob reports whether s looks like a raw base64 payload rather than
+// prose: long, with nothing outside the base64 alphabet anywhere. Prose
+// virtually always has whitespace or punctuation, so the scan exits early.
+func isBase64Blob(s string) bool {
+	if len(s) < 4096 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' ||
+			c == '+' || c == '/' || c == '=' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
@@ -777,30 +837,82 @@ func main() {
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
 
-				// Check per-key rate limits: reject with 429 over the hard
-				// budget, inject lower vLLM priority over the soft budget.
-				// Org-priority callers bypass both.
+				// Check per-key rate limits: reject with 429 over a hard
+				// budget, inject lower vLLM priority over a soft budget.
+				// Two axes with independent windows: request count and
+				// uncached prompt tokens. Tokens are debited pessimistically
+				// from the body size at admission (as if nothing were
+				// cached); the proxy refunds the cached share once the
+				// engine reports usage (see config.RateLimitConfig).
+				// Org-priority callers bypass both tiers.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
-					count, resetIn := em.RequestTracker().Record(rateLimitID, rateLimitModel)
-					if hard := rlCfg.HardMaxRequestsPerMinute; hard > 0 && count >= hard {
-						// Round up: rounding down would point the client back
-						// inside the window it was just rejected in.
+					// Estimate from the body as it stands now, after base64
+					// file conversion: document uploads are sized by their
+					// extracted text, and any remaining media parts by
+					// mediaPartTokens rather than their byte length.
+					var estTokens int64
+					if rlCfg.TracksTokens() {
+						estTokens = estimatePromptTokens(body)
+					}
+					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.TokensWindow())
+
+					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardMaxRequestsPerMinute
+					overHardTokens := rlCfg.HardMaxUncachedPromptTokens > 0 && totals.Tokens >= rlCfg.HardMaxUncachedPromptTokens
+					if overHardCount || overHardTokens {
+						// Retry-After points at the reset of the axis that
+						// tripped; if both tripped, retrying before the
+						// later reset would be rejected again. Rounded up:
+						// rounding down would point back inside the window
+						// it was just rejected in.
+						var resetIn time.Duration
+						switch {
+						case overHardCount && overHardTokens:
+							resetIn = max(totals.CountResetIn, totals.TokensResetIn)
+						case overHardCount:
+							resetIn = totals.CountResetIn
+						default:
+							resetIn = totals.TokensResetIn
+						}
 						secs := int((resetIn + time.Second - 1) / time.Second)
 						w.Header().Set("Retry-After", strconv.Itoa(secs))
-						manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						if overHardCount {
+							manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
+						if overHardTokens {
+							manager.RateLimitTokenRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
 						log.WithFields(log.Fields{
-							"model":               rateLimitModel,
-							"retry_after_seconds": secs,
+							"model":                rateLimitModel,
+							"over_requests":        overHardCount,
+							"over_uncached_tokens": overHardTokens,
+							"retry_after_seconds":  secs,
 						}).Warn("rejecting request over hard per-key rate limit")
 						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
 						return
 					}
-					if soft := rlCfg.MaxRequestsPerMinute; soft > 0 && count >= soft {
+
+					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.MaxRequestsPerMinute
+					overSoftTokens := rlCfg.MaxUncachedPromptTokens > 0 && totals.Tokens >= rlCfg.MaxUncachedPromptTokens
+					if overSoftCount || overSoftTokens {
 						body["priority"] = 1
-						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						if overSoftCount {
+							manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
+						if overSoftTokens {
+							manager.RateLimitTokenDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
+						}
 						log.WithFields(log.Fields{
 							"model": rateLimitModel,
 						}).Debug("rate limited: injecting lower vLLM priority")
+					}
+
+					if rlCfg.TracksTokens() {
+						r = r.WithContext(ratelimit.WithTokenCharge(r.Context(), ratelimit.TokenCharge{
+							ID:          rateLimitID,
+							Model:       rateLimitModel,
+							Tokens:      estTokens,
+							WindowStart: totals.TokensWindowStart,
+						}))
 					}
 				}
 

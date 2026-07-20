@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 )
 
 func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
@@ -22,7 +23,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker())
+	proxy := newProxy(backendURL.Host, "", modelName, collector, nil, newCircuitBreaker())
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -46,7 +47,7 @@ func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, newCircuitBreaker())
+	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, nil, newCircuitBreaker())
 
 	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
 	req.Host = "inference.tinfoil.sh"
@@ -85,6 +86,51 @@ func TestProxyUsageMetrics_IncludesCachedTokensForAllModels(t *testing.T) {
 	want := "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5,model=test-model"
 	if got != want {
 		t.Fatalf("usage header = %q, want %q", got, want)
+	}
+}
+
+// TestProxyRefundsUncachedTokenCharge verifies the proxy refunds the
+// admission-time uncached-token debit down to what the engine actually
+// reports as uncached: 1000 estimated − 5 actual uncached = 995 back.
+func TestProxyRefundsUncachedTokenCharge(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":69,"completion_tokens":20,"total_tokens":89,"prompt_tokens_details":{"cached_tokens":64}}}`))
+	}))
+	t.Cleanup(backend.Close)
+
+	backendURL, _ := url.Parse(backend.URL)
+	collector := billing.NewCollector("", "", "")
+	t.Cleanup(collector.Stop)
+	tracker := ratelimit.NewRequestTracker()
+
+	proxy := newProxy(backendURL.Host, "", "test-model", collector, tracker, newCircuitBreaker())
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = backendURL.Scheme
+		req.URL.Host = backendURL.Host
+	}
+	proxy.Transport = http.DefaultTransport
+
+	charged := tracker.Record("key1", "test-model", 1000, time.Minute)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	rec := httptest.NewRecorder()
+	wrapper := &usageMetricsWriter{ResponseWriter: rec}
+	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
+	ctx = ratelimit.WithTokenCharge(ctx, ratelimit.TokenCharge{
+		ID:          "key1",
+		Model:       "test-model",
+		Tokens:      1000,
+		WindowStart: charged.TokensWindowStart,
+	})
+
+	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
+
+	if got := tracker.Record("key1", "test-model", 0, time.Minute); got.Tokens != 5 {
+		t.Fatalf("expected 5 uncached tokens left after refund, got %d", got.Tokens)
 	}
 }
 
@@ -232,7 +278,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
-	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb)
+	proxy := newProxy("probe-host.test", "", "probe-model", collector, nil, cb)
 
 	// A cancelled request that does not own the claim must leave the
 	// in-flight probe alone.
@@ -264,7 +310,7 @@ func TestProxyOversizedBodyIsClientError(t *testing.T) {
 	cb := newCircuitBreaker()
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
-	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, cb)
+	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, nil, cb)
 
 	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
 	rec := httptest.NewRecorder()

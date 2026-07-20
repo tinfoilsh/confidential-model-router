@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
@@ -248,6 +249,59 @@ func TestUsageAccumulatorPreservesCachedPromptTokens(t *testing.T) {
 	}
 	if cachedPromptTokens != 20 {
 		t.Fatalf("cached prompt tokens = %d, want 20", cachedPromptTokens)
+	}
+}
+
+// TestEmitBillingEventSettlesTokenCharge runs the loop's real accounting
+// chain — per-iteration usage through the accumulator, applied to the final
+// response, settled by emitBillingEvent — and checks the tracker lands on the
+// aggregate uncached prompt tokens, exactly once.
+func TestEmitBillingEventSettlesTokenCharge(t *testing.T) {
+	em := manager.NewEnclaveManagerForTesting()
+	tracker := em.RequestTracker()
+
+	// Admission: the outer body estimated 1100 uncached tokens
+	charged := tracker.Record("key1", "test-model", 1100, time.Minute)
+
+	// Three loop iterations: 3600 prompt, 2100 cached => 1500 uncached
+	iterations := []map[string]any{
+		{"prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050},
+		{"prompt_tokens": 1200, "completion_tokens": 60, "total_tokens": 1260,
+			"prompt_tokens_details": map[string]any{"cached_tokens": 950}},
+		{"prompt_tokens": 1400, "completion_tokens": 40, "total_tokens": 1440,
+			"prompt_tokens_details": map[string]any{"cached_tokens": 1150}},
+	}
+	totals := usageAccumulator{}
+	final := &upstreamJSONResponse{body: map[string]any{}, header: make(http.Header)}
+	for i, usage := range iterations {
+		response := final
+		if i < len(iterations)-1 {
+			response = &upstreamJSONResponse{body: map[string]any{}}
+		}
+		response.body["usage"] = usage
+		totals.Add(response)
+	}
+	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "test-model", http.Header{}, nil)
+	adapter.applyUsage(final, totals.Usage())
+
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1234567890")
+	req = req.WithContext(ratelimit.WithTokenCharge(req.Context(), ratelimit.TokenCharge{
+		ID:          "key1",
+		Model:       "test-model",
+		Tokens:      1100,
+		WindowStart: charged.TokensWindowStart,
+	}))
+
+	emitBillingEvent(em, req, final, "test-model", false)
+	if got := tracker.Record("key1", "test-model", 0, time.Minute); got.Tokens != 1500 {
+		t.Fatalf("expected debit settled to 1500 aggregate uncached tokens, got %d", got.Tokens)
+	}
+
+	// A second emit (streaming fallback path) must not settle again
+	emitBillingEvent(em, req, final, "test-model", true)
+	if got := tracker.Record("key1", "test-model", 0, time.Minute); got.Tokens != 1500 {
+		t.Fatalf("second emit must not re-settle, got %d", got.Tokens)
 	}
 }
 

@@ -83,20 +83,38 @@ var (
 		[]string{"model", "enclave"},
 	)
 
-	// RateLimitDemotionsTotal tracks requests deprioritized due to token rate limits
+	// RateLimitDemotionsTotal tracks requests deprioritized due to soft per-key request-count limits
 	RateLimitDemotionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_ratelimit_demotions_total",
-			Help: "Total number of requests sent with lower vLLM priority due to token rate limits",
+			Help: "Total number of requests sent with lower vLLM priority due to per-key request-count limits",
 		},
 		[]string{"model"},
 	)
 
-	// RateLimitRejectionsTotal tracks requests rejected due to hard per-key rate limits
+	// RateLimitRejectionsTotal tracks requests rejected due to hard per-key request-count limits
 	RateLimitRejectionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_ratelimit_rejections_total",
-			Help: "Total number of requests rejected with 429 due to hard per-key rate limits",
+			Help: "Total number of requests rejected with 429 due to hard per-key request-count limits",
+		},
+		[]string{"model"},
+	)
+
+	// RateLimitTokenDemotionsTotal tracks requests deprioritized due to soft per-key uncached-prompt-token limits
+	RateLimitTokenDemotionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_token_demotions_total",
+			Help: "Total number of requests sent with lower vLLM priority due to per-key uncached prompt token limits",
+		},
+		[]string{"model"},
+	)
+
+	// RateLimitTokenRejectionsTotal tracks requests rejected due to hard per-key uncached-prompt-token limits
+	RateLimitTokenRejectionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_token_rejections_total",
+			Help: "Total number of requests rejected with 429 due to hard per-key uncached prompt token limits",
 		},
 		[]string{"model"},
 	)

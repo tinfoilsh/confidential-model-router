@@ -21,6 +21,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
@@ -141,7 +142,7 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, tracker *ratelimit.RequestTracker, cb *circuitBreaker) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -301,6 +302,18 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			handlerCalled.Store(true)
 			if usage == nil {
 				return
+			}
+
+			// Reconcile the admission-time uncached-token debit against the
+			// engine-reported usage: refund the cached share and any
+			// over-estimate, charge the shortfall of an under-estimate (see
+			// the rate-limit check in main.go).
+			if charge, ok := ratelimit.ConsumeTokenCharge(req.Context()); ok && tracker != nil {
+				uncached := usage.PromptTokens
+				if cached, ok := usage.CachedPromptTokens(); ok {
+					uncached = max(0, usage.PromptTokens-cached)
+				}
+				tracker.ReconcileTokens(charge.ID, charge.Model, int64(uncached)-charge.Tokens, charge.WindowStart)
 			}
 
 			// For streaming responses, set usage on wrapper for trailer

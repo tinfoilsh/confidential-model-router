@@ -8,21 +8,41 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key request rate limits for a
-// model. Requests over the soft per-minute budget are sent to vLLM with a
-// lower scheduling priority; requests over the hard budget are rejected with
-// HTTP 429. Zero disables a budget. The hard check runs first, so when both
-// are set the hard budget must sit above the soft one — a hard budget at or
-// below the soft budget rejects requests before they can be demoted, turning
-// the soft tier off entirely.
+// RateLimitConfig describes optional per-API-key rate limits for a model.
+// Request limits apply per minute; uncached-prompt-token budgets apply per
+// window (tokens_window_minutes, default one minute).
+// Enforcement types (hard should be calculated first)
+// soft max: requests over this are given a lower scheduling priority.
+// hard max: requests over this are rejected completely.
+//
+// Uncached is handled unintuitively: token budgets are debited pessimistically on receipt of a request.
+// After a request finishes, the cache % is credited back.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
+
+	MaxUncachedPromptTokens     int64 `yaml:"max_uncached_prompt_tokens,omitempty"`
+	HardMaxUncachedPromptTokens int64 `yaml:"hard_max_uncached_prompt_tokens,omitempty"`
+	TokensWindowMinutes         int64 `yaml:"tokens_window_minutes,omitempty"`
+}
+
+// TracksTokens reports whether any uncached-prompt-token budget is set.
+func (c *RateLimitConfig) TracksTokens() bool {
+	return c.MaxUncachedPromptTokens > 0 || c.HardMaxUncachedPromptTokens > 0
+}
+
+// TokensWindow is the enforcement window for the uncached-token axis.
+func (c *RateLimitConfig) TokensWindow() time.Duration {
+	if c.TokensWindowMinutes < 1 {
+		return time.Minute
+	}
+	return time.Duration(c.TokensWindowMinutes) * time.Minute
 }
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the

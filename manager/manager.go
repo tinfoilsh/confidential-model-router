@@ -199,6 +199,16 @@ func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
 	return em.requestTracker
 }
 
+// NewEnclaveManagerForTesting returns a bare manager with a live request
+// tracker and no billing collector, for tests in other packages that can't
+// construct one (NewEnclaveManager needs a config and network access).
+func NewEnclaveManagerForTesting() *EnclaveManager {
+	return &EnclaveManager{
+		models:         &sync.Map{},
+		requestTracker: ratelimit.NewRequestTracker(),
+	}
+}
+
 // CacheRouteShadow returns the cache-aware routing shadow tracker.
 func (em *EnclaveManager) CacheRouteShadow() *cacheroute.Shadow {
 	return em.cacheRouteShadow
@@ -312,7 +322,7 @@ func (em *EnclaveManager) addEnclave(
 		predicate: verification.Measurement.Type,
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
+		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, em.requestTracker, cb),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 	}

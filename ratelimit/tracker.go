@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// RequestTracker tracks request counts per API key per model with
-// fixed one-minute windows. Safe for concurrent use.
+// RequestTracker tracks request counts and token debits per API key per
+// model. Safe for concurrent use.
 type RequestTracker struct {
 	mu          sync.Mutex
 	buckets     map[string]*bucketEntry // key: "apiKey\x00model"
@@ -15,8 +15,21 @@ type RequestTracker struct {
 }
 
 type bucketEntry struct {
-	count       int64
-	windowStart time.Time
+	count            int64
+	countWindowStart time.Time
+
+	tokens           int64
+	tokenWindow      time.Duration
+	tokenWindowStart time.Time
+}
+
+// Totals is the accumulated usage for an API key and model, per axis, along with window.
+type Totals struct {
+	Count             int64
+	CountResetIn      time.Duration
+	Tokens            int64
+	TokensResetIn     time.Duration
+	TokensWindowStart time.Time
 }
 
 // Option configures a RequestTracker.
@@ -46,14 +59,24 @@ func bucketKey(apiKey, model string) string {
 	return apiKey + "\x00" + model
 }
 
-// Record atomically increments the request count for the API key and model
-// and returns the count in the current one-minute window along with the time
-// remaining until the window resets, always in (0, time.Minute]: a request
-// landing exactly on a minute boundary starts the next window. An empty API
-// key is not tracked and returns 0, 0.
-func (t *RequestTracker) Record(apiKey, model string) (int64, time.Duration) {
+// roll resets a window's accumulator if the window has changed. A request
+// landing exactly on a window boundary starts the next window.
+func roll(now time.Time, window time.Duration, windowStart *time.Time, acc *int64) {
+	start := now.Truncate(window)
+	if start.After(*windowStart) {
+		*acc = 0
+		*windowStart = start
+	}
+}
+
+// Record atomically increments the request count for the API key and model,
+// debits tokens from its uncached-prompt-token budget, and returns the
+// running totals. Request counts roll per minute; token debits roll per
+// tokenWindow, and changing it mid-flight starts the token window fresh. An
+// empty API key is not tracked and returns the zero Totals.
+func (t *RequestTracker) Record(apiKey, model string, tokens int64, tokenWindow time.Duration) Totals {
 	if apiKey == "" {
-		return 0, 0
+		return Totals{}
 	}
 
 	now := t.nowFunc()
@@ -63,21 +86,19 @@ func (t *RequestTracker) Record(apiKey, model string) (int64, time.Duration) {
 	defer t.mu.Unlock()
 
 	b, ok := t.buckets[key]
-	if !ok {
+	if !ok || b.tokenWindow != tokenWindow {
 		b = &bucketEntry{
-			count:       1,
-			windowStart: now.Truncate(time.Minute),
+			countWindowStart: now.Truncate(time.Minute),
+			tokenWindow:      tokenWindow,
+			tokenWindowStart: now.Truncate(tokenWindow),
 		}
 		t.buckets[key] = b
 	} else {
-		// Reset window if the minute has changed
-		windowStart := now.Truncate(time.Minute)
-		if windowStart.After(b.windowStart) {
-			b.count = 0
-			b.windowStart = windowStart
-		}
-		b.count++
+		roll(now, time.Minute, &b.countWindowStart, &b.count)
+		roll(now, tokenWindow, &b.tokenWindowStart, &b.tokens)
 	}
+	b.count++
+	b.tokens += tokens
 
 	// Lazy cleanup: at most once per minute
 	if now.Sub(t.lastCleanup) >= time.Minute {
@@ -85,15 +106,41 @@ func (t *RequestTracker) Record(apiKey, model string) (int64, time.Duration) {
 		t.lastCleanup = now
 	}
 
-	return b.count, b.windowStart.Add(time.Minute).Sub(now)
+	return Totals{
+		Count:             b.count,
+		CountResetIn:      b.countWindowStart.Add(time.Minute).Sub(now),
+		Tokens:            b.tokens,
+		TokensResetIn:     b.tokenWindowStart.Add(tokenWindow).Sub(now),
+		TokensWindowStart: b.tokenWindowStart,
+	}
 }
 
-// cleanup removes entries whose windows are more than 2 minutes old.
-// Must be called with t.mu held.
+// ReconcileTokens adjusts the window a debit landed in, identified by
+// windowStart, to the engine-reported usage: negative delta refunds an
+// over-estimate, positive delta charges the shortfall of an under-estimate.
+// A reconciliation whose window has already rolled over is dropped: the
+// debit it would correct has expired with the window.
+func (t *RequestTracker) ReconcileTokens(apiKey, model string, delta int64, windowStart time.Time) {
+	if apiKey == "" || delta == 0 {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	b, ok := t.buckets[bucketKey(apiKey, model)]
+	if !ok || !b.tokenWindowStart.Equal(windowStart) {
+		return
+	}
+	b.tokens = max(0, b.tokens+delta)
+}
+
+// cleanup removes entries whose windows have both been stale for at least a
+// full window length. Must be called with t.mu held.
 func (t *RequestTracker) cleanup(now time.Time) {
-	cutoff := now.Add(-2 * time.Minute)
 	for key, b := range t.buckets {
-		if b.windowStart.Before(cutoff) {
+		if now.After(b.countWindowStart.Add(2*time.Minute)) &&
+			now.After(b.tokenWindowStart.Add(2*b.tokenWindow)) {
 			delete(t.buckets, key)
 		}
 	}
