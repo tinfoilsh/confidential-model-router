@@ -58,7 +58,11 @@ func estimatePromptTokens(v any) int64 {
 		if strings.HasPrefix(x, "data:") || isBase64Blob(x) {
 			return mediaPartTokens
 		}
-		return int64(len(x)) / estBytesPerToken
+		// Round up so fragmenting text into tiny parts can't sum to zero
+		if x == "" {
+			return 0
+		}
+		return int64((len(x) + estBytesPerToken - 1) / estBytesPerToken)
 	case []any:
 		var sum int64
 		for _, e := range x {
@@ -77,13 +81,13 @@ func estimatePromptTokens(v any) int64 {
 }
 
 // isBase64Blob reports whether s looks like a raw base64 payload rather than
-// prose: long, with nothing outside the base64 alphabet in its head. Prose
-// virtually always has whitespace or punctuation early.
+// prose: long, with nothing outside the base64 alphabet anywhere. Prose
+// virtually always has whitespace or punctuation, so the scan exits early.
 func isBase64Blob(s string) bool {
 	if len(s) < 4096 {
 		return false
 	}
-	for i := 0; i < 128; i++ {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if !('A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' ||
 			c == '+' || c == '/' || c == '=' || c == '-' || c == '_') {

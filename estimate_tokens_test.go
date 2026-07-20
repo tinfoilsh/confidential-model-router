@@ -57,6 +57,31 @@ func TestEstimatePromptTokens_RawBase64CountsFlat(t *testing.T) {
 	}
 }
 
+func TestEstimatePromptTokens_FragmentedTextStillCharged(t *testing.T) {
+	// 400 three-char parts must not each truncate to zero.
+	parts := make([]any, 400)
+	for i := range parts {
+		parts[i] = map[string]any{"type": "text", "text": "abc"}
+	}
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": parts}},
+	}
+
+	if got := estimatePromptTokens(body); got < 400 {
+		t.Fatalf("fragmented content should charge at least 1 token per part, got %d", got)
+	}
+}
+
+func TestEstimatePromptTokens_AlphanumericHeadedProseIsNotBase64(t *testing.T) {
+	// Prose whose first 128+ chars are base64-alphabet must still count as
+	// text once a later character breaks the pattern.
+	s := strings.Repeat("a", 200) + " " + strings.Repeat("normal prose follows here. ", 200)
+	got := estimatePromptTokens(map[string]any{"content": s})
+	if got <= mediaPartTokens {
+		t.Fatalf("prose with an alphanumeric head should count as text (~%d), got %d", len(s)/estBytesPerToken, got)
+	}
+}
+
 func TestEstimatePromptTokens_LongProseIsNotMistakenForBase64(t *testing.T) {
 	prose := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 200) // 9000 chars
 	got := estimatePromptTokens(map[string]any{"content": prose})
