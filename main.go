@@ -793,9 +793,14 @@ func main() {
 				// engine reports usage (see config.RateLimitConfig).
 				// Org-priority callers bypass both tiers.
 				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
+					// Estimate from the body as it stands now — after base64
+					// file conversion — so document uploads are sized by
+					// their extracted text, not the raw upload.
 					var estTokens int64
 					if rlCfg.TracksTokens() {
-						estTokens = int64(len(bodyBytes)) / estBytesPerToken
+						if bb, err := json.Marshal(body); err == nil {
+							estTokens = int64(len(bb)) / estBytesPerToken
+						}
 					}
 					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.TokensWindow())
 
