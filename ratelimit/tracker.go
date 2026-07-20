@@ -16,7 +16,6 @@ type RequestTracker struct {
 
 type bucketEntry struct {
 	count            int64
-	countWindow      time.Duration
 	countWindowStart time.Time
 
 	tokens           int64
@@ -72,10 +71,10 @@ func roll(now time.Time, window time.Duration, windowStart *time.Time, acc *int6
 
 // Record atomically increments the request count for the API key and model,
 // debits tokens from its uncached-prompt-token budget, and returns the
-// running totals. countWindow and tokenWindow are the window lengths for the
-// two axes; changing a window mid-flight starts it fresh. An empty API key is
-// not tracked and returns the zero Totals.
-func (t *RequestTracker) Record(apiKey, model string, tokens int64, countWindow, tokenWindow time.Duration) Totals {
+// running totals. Request counts roll per minute; token debits roll per
+// tokenWindow, and changing it mid-flight starts the token window fresh. An
+// empty API key is not tracked and returns the zero Totals.
+func (t *RequestTracker) Record(apiKey, model string, tokens int64, tokenWindow time.Duration) Totals {
 	if apiKey == "" {
 		return Totals{}
 	}
@@ -87,16 +86,15 @@ func (t *RequestTracker) Record(apiKey, model string, tokens int64, countWindow,
 	defer t.mu.Unlock()
 
 	b, ok := t.buckets[key]
-	if !ok || b.countWindow != countWindow || b.tokenWindow != tokenWindow {
+	if !ok || b.tokenWindow != tokenWindow {
 		b = &bucketEntry{
-			countWindow:      countWindow,
-			countWindowStart: now.Truncate(countWindow),
+			countWindowStart: now.Truncate(time.Minute),
 			tokenWindow:      tokenWindow,
 			tokenWindowStart: now.Truncate(tokenWindow),
 		}
 		t.buckets[key] = b
 	} else {
-		roll(now, countWindow, &b.countWindowStart, &b.count)
+		roll(now, time.Minute, &b.countWindowStart, &b.count)
 		roll(now, tokenWindow, &b.tokenWindowStart, &b.tokens)
 	}
 	b.count++
@@ -110,7 +108,7 @@ func (t *RequestTracker) Record(apiKey, model string, tokens int64, countWindow,
 
 	return Totals{
 		Count:             b.count,
-		CountResetIn:      b.countWindowStart.Add(countWindow).Sub(now),
+		CountResetIn:      b.countWindowStart.Add(time.Minute).Sub(now),
 		Tokens:            b.tokens,
 		TokensResetIn:     b.tokenWindowStart.Add(tokenWindow).Sub(now),
 		TokensWindowStart: b.tokenWindowStart,
@@ -140,7 +138,7 @@ func (t *RequestTracker) RefundTokens(apiKey, model string, tokens int64, window
 // full window length. Must be called with t.mu held.
 func (t *RequestTracker) cleanup(now time.Time) {
 	for key, b := range t.buckets {
-		if now.After(b.countWindowStart.Add(2*b.countWindow)) &&
+		if now.After(b.countWindowStart.Add(2*time.Minute)) &&
 			now.After(b.tokenWindowStart.Add(2*b.tokenWindow)) {
 			delete(t.buckets, key)
 		}

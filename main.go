@@ -797,10 +797,10 @@ func main() {
 					if rlCfg.TracksTokens() {
 						estTokens = int64(len(bodyBytes)) / estBytesPerToken
 					}
-					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.RequestsWindow(), rlCfg.TokensWindow())
+					totals := em.RequestTracker().Record(rateLimitID, rateLimitModel, estTokens, rlCfg.TokensWindow())
 
-					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardRequestsBudget()
-					overHardTokens := rlCfg.HardMaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.HardTokensBudget()
+					overHardCount := rlCfg.HardMaxRequestsPerMinute > 0 && totals.Count >= rlCfg.HardMaxRequestsPerMinute
+					overHardTokens := rlCfg.HardMaxUncachedPromptTokens > 0 && totals.Tokens >= rlCfg.HardMaxUncachedPromptTokens
 					if overHardCount || overHardTokens {
 						// Retry-After points at the reset of the axis that
 						// tripped; if both tripped, retrying before the
@@ -834,8 +834,8 @@ func main() {
 						return
 					}
 
-					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.SoftRequestsBudget()
-					overSoftTokens := rlCfg.MaxUncachedPromptTokensPerMinute > 0 && totals.Tokens >= rlCfg.SoftTokensBudget()
+					overSoftCount := rlCfg.MaxRequestsPerMinute > 0 && totals.Count >= rlCfg.MaxRequestsPerMinute
+					overSoftTokens := rlCfg.MaxUncachedPromptTokens > 0 && totals.Tokens >= rlCfg.MaxUncachedPromptTokens
 					if overSoftCount || overSoftTokens {
 						body["priority"] = 1
 						if overSoftCount {

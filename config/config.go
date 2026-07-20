@@ -15,61 +15,34 @@ import (
 )
 
 // RateLimitConfig describes optional per-API-key rate limits for a model.
+// Request limits apply per minute; uncached-prompt-token budgets apply per
+// window (tokens_window_minutes, default one minute).
 // Enforcement types (hard should be calculated first)
 // soft max: requests over this are given a lower scheduling priority.
 // hard max: requests over this are rejected completely.
-// Also defines a configurable window per each ratelimit type
 //
 // Uncached is handled unintuitively: token budgets are debited pessimistically on receipt of a request.
 // After a request finishes, the cache % is credited back.
 type RateLimitConfig struct {
 	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
 	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
-	RequestsWindowMinutes    int64 `yaml:"requests_window_minutes,omitempty"`
 
-	MaxUncachedPromptTokensPerMinute     int64 `yaml:"max_uncached_prompt_tokens_per_minute,omitempty"`
-	HardMaxUncachedPromptTokensPerMinute int64 `yaml:"hard_max_uncached_prompt_tokens_per_minute,omitempty"`
-	TokensWindowMinutes                  int64 `yaml:"tokens_window_minutes,omitempty"`
+	MaxUncachedPromptTokens     int64 `yaml:"max_uncached_prompt_tokens,omitempty"`
+	HardMaxUncachedPromptTokens int64 `yaml:"hard_max_uncached_prompt_tokens,omitempty"`
+	TokensWindowMinutes         int64 `yaml:"tokens_window_minutes,omitempty"`
 }
 
 // TracksTokens reports whether any uncached-prompt-token budget is set.
 func (c *RateLimitConfig) TracksTokens() bool {
-	return c.MaxUncachedPromptTokensPerMinute > 0 || c.HardMaxUncachedPromptTokensPerMinute > 0
-}
-
-func windowDuration(minutes int64) time.Duration {
-	if minutes < 1 {
-		minutes = 1
-	}
-	return time.Duration(minutes) * time.Minute
-}
-
-// RequestsWindow is the enforcement window for the request-count axis.
-func (c *RateLimitConfig) RequestsWindow() time.Duration {
-	return windowDuration(c.RequestsWindowMinutes)
+	return c.MaxUncachedPromptTokens > 0 || c.HardMaxUncachedPromptTokens > 0
 }
 
 // TokensWindow is the enforcement window for the uncached-token axis.
 func (c *RateLimitConfig) TokensWindow() time.Duration {
-	return windowDuration(c.TokensWindowMinutes)
-}
-
-// Per-window budgets: the configured per-minute rate scaled by the window.
-
-func (c *RateLimitConfig) SoftRequestsBudget() int64 {
-	return c.MaxRequestsPerMinute * int64(c.RequestsWindow()/time.Minute)
-}
-
-func (c *RateLimitConfig) HardRequestsBudget() int64 {
-	return c.HardMaxRequestsPerMinute * int64(c.RequestsWindow()/time.Minute)
-}
-
-func (c *RateLimitConfig) SoftTokensBudget() int64 {
-	return c.MaxUncachedPromptTokensPerMinute * int64(c.TokensWindow()/time.Minute)
-}
-
-func (c *RateLimitConfig) HardTokensBudget() int64 {
-	return c.HardMaxUncachedPromptTokensPerMinute * int64(c.TokensWindow()/time.Minute)
+	if c.TokensWindowMinutes < 1 {
+		return time.Minute
+	}
+	return time.Duration(c.TokensWindowMinutes) * time.Minute
 }
 
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
