@@ -25,15 +25,49 @@ var (
 		[]string{"model"},
 	)
 
-	// TTFTSeconds tracks time to first response body byte for streaming
-	// requests, split by caller priority class for SLA tracking
+	// TTFTSeconds tracks time from backend dispatch to the first response
+	// body byte, split by caller priority class. The first byte is usually
+	// an SSE control frame (e.g. response.created), not a generated token,
+	// so this understates real first-token latency — dashboards should use
+	// FirstTokenSeconds; this series is kept for continuity.
 	TTFTSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_ttft_seconds",
-			Help:    "Time to first response body byte for streaming requests",
+			Help:    "Time to first response body byte for streaming requests (first byte, not first token; see router_first_token_seconds)",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 30, 60},
 		},
 		[]string{"model", "priority"},
+	)
+
+	// FirstTokenSeconds tracks time from request arrival at the router to
+	// the first generated token written to the client. SSE control frames
+	// (response.created, role-only deltas, pings) do not stop the clock;
+	// only an event carrying generated output does. Requests that end
+	// before producing one are counted in NoFirstTokenTotal instead, so
+	// this histogram only ever contains real token latencies. Requests
+	// served by the router's tool loop carry the "tool-runtime" sentinel
+	// in enclave and pool: the loop may touch several replicas before the
+	// first client-visible token, so no single value would be truthful.
+	FirstTokenSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_first_token_seconds",
+			Help:    "Time from request arrival at the router to the first generated (non-control) streamed token sent to the client",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 30, 60, 120},
+		},
+		[]string{"model", "enclave", "pool", "priority"},
+	)
+
+	// NoFirstTokenTotal counts streaming requests that ended before a first
+	// generated token was sent. Reasons: canceled (client disconnected),
+	// timeout (request deadline expired), error (HTTP error response,
+	// in-stream error event, or mid-stream abort), no_output (stream
+	// finished cleanly without generated output).
+	NoFirstTokenTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_no_first_token_total",
+			Help: "Streaming requests that ended before the first generated token was sent, by reason",
+		},
+		[]string{"model", "enclave", "pool", "priority", "reason"},
 	)
 
 	// InterTokenSeconds tracks gaps between streamed response chunks,
