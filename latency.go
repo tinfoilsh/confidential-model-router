@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -87,7 +88,7 @@ func (lw *latencyWriter) Write(b []byte) (int, error) {
 		now := lw.now()
 		if lw.last.IsZero() {
 			manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.start).Seconds())
-			if strings.Contains(lw.Header().Get("Content-Type"), "text/event-stream") {
+			if isEventStream(lw.Header().Get("Content-Type")) {
 				lw.detector = &sseTokenDetector{}
 			}
 		} else {
@@ -106,6 +107,20 @@ func (lw *latencyWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return lw.ResponseWriter.Write(b)
+}
+
+// isEventStream reports whether a Content-Type header declares an SSE body.
+// Media types are case-insensitive (RFC 9110 §8.3.1) and a substring match
+// would also hit unrelated types that merely embed this one, so parse
+// properly: misreading the type silently reverts first-token detection to
+// first-byte semantics. A malformed optional parameter doesn't obscure the
+// type itself, so it doesn't disqualify the stream.
+func isEventStream(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
+		return false
+	}
+	return mediaType == "text/event-stream"
 }
 
 func (lw *latencyWriter) observeFirstToken(now time.Time) {

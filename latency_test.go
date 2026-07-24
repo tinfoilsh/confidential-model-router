@@ -557,3 +557,53 @@ func TestFirstTokenThroughStreamingExtractor(t *testing.T) {
 		t.Fatalf("first token observed at %vs, want within [%v, %v]", sum, earliest, latest)
 	}
 }
+
+func TestFirstTokenContentTypeParsing(t *testing.T) {
+	// Media types are case-insensitive (RFC 9110 §8.3.1): every spelling of
+	// text/event-stream must engage SSE token detection, so a control frame
+	// is not counted as a token, while a type that merely embeds the string
+	// must take the non-SSE path, where the first byte is the first token.
+	const controlFrame = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		sse         bool
+	}{
+		{"canonical-with-params", "text/event-stream; charset=utf-8", true},
+		{"mixed-case", "Text/Event-Stream", true},
+		{"upper-case-with-params", "TEXT/EVENT-STREAM;CHARSET=UTF-8", true},
+		{"malformed-parameter", "text/event-stream; charset", true},
+		{"embeds-the-substring", "text/event-stream-json", false},
+		{"plain-json", "application/json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := "ft-ctype-" + tc.name
+			t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+			now := t0
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", tc.contentType)
+			lw := &latencyWriter{
+				ResponseWriter: rec,
+				model:          model,
+				enclave:        "enclave-1",
+				pool:           "reserved",
+				class:          "configured",
+				arrival:        t0,
+				start:          t0,
+				nowFunc:        func() time.Time { return now },
+			}
+
+			lw.WriteHeader(200)
+			now = t0.Add(time.Second)
+			writeChunk(t, lw, controlFrame)
+
+			count, _ := firstTokenState(t, model)
+			if tc.sse && count != 0 {
+				t.Fatalf("%q: control frame counted as first token, detector not engaged", tc.contentType)
+			}
+			if !tc.sse && count != 1 {
+				t.Fatalf("%q: non-SSE body must count its first byte as the first token, got count=%d", tc.contentType, count)
+			}
+		})
+	}
+}
