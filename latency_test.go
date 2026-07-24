@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -605,5 +606,87 @@ func TestFirstTokenContentTypeParsing(t *testing.T) {
 				t.Fatalf("%q: non-SSE body must count its first byte as the first token, got count=%d", tc.contentType, count)
 			}
 		})
+	}
+}
+
+// failingResponseWriter refuses all writes, like a connection whose client
+// has gone away.
+type failingResponseWriter struct{ header http.Header }
+
+func newFailingResponseWriter() *failingResponseWriter {
+	return &failingResponseWriter{header: make(http.Header)}
+}
+
+func (f *failingResponseWriter) Header() http.Header       { return f.header }
+func (f *failingResponseWriter) Write([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (f *failingResponseWriter) WriteHeader(int)           {}
+
+func TestFirstTokenNotRecordedOnFailedWrite(t *testing.T) {
+	const model = "ft-failed-write"
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := t0
+	fw := newFailingResponseWriter()
+	fw.Header().Set("Content-Type", "text/event-stream")
+	lw := &latencyWriter{
+		ResponseWriter: fw,
+		model:          model,
+		enclave:        "enclave-1",
+		pool:           "reserved",
+		class:          "configured",
+		arrival:        t0,
+		start:          t0,
+		nowFunc:        func() time.Time { return now },
+	}
+
+	lw.WriteHeader(200)
+	now = t0.Add(time.Second)
+	// The write carrying the token fails: the client never received it.
+	if _, err := lw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")); err == nil {
+		t.Fatal("expected the underlying write to fail")
+	}
+	if count, _ := firstTokenState(t, model); count != 0 {
+		t.Fatalf("token on a failed write must not be recorded, got count=%d", count)
+	}
+
+	// The disconnect that failed the write also cancels the request
+	// context; the request must land in the canceled bucket instead.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lw.finish(ctx)
+	if got := noFirstTokenCount(t, model, "canceled"); got != 1 {
+		t.Fatalf("expected one canceled count, got %v", got)
+	}
+}
+
+func TestFirstTokenIgnoresEmptyWrite(t *testing.T) {
+	// A zero-length write on a plain body delivers nothing and must not
+	// stop the clock; the first non-empty write is the first token.
+	const model = "ft-empty-write"
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := t0
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/json")
+	lw := &latencyWriter{
+		ResponseWriter: rec,
+		model:          model,
+		enclave:        "enclave-1",
+		pool:           "reserved",
+		class:          "configured",
+		arrival:        t0,
+		start:          t0,
+		nowFunc:        func() time.Time { return now },
+	}
+
+	lw.WriteHeader(200)
+	now = t0.Add(time.Second)
+	writeChunk(t, lw, "")
+	if count, _ := firstTokenState(t, model); count != 0 {
+		t.Fatal("zero-length write counted as first token")
+	}
+	now = t0.Add(2 * time.Second)
+	writeChunk(t, lw, `{"choices":[{"message":{"content":"Hello"}}]}`)
+	count, sum := firstTokenState(t, model)
+	if count != 1 || sum < 1.999 || sum > 2.001 {
+		t.Fatalf("expected first token at the first non-empty write (2.0s), got count=%d sum=%v", count, sum)
 	}
 }

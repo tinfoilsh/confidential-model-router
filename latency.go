@@ -84,8 +84,10 @@ func (lw *latencyWriter) WriteHeader(code int) {
 
 func (lw *latencyWriter) Write(b []byte) (int, error) {
 	// status 0 means an implicit 200 from a Write without WriteHeader
-	if lw.status < 300 {
-		now := lw.now()
+	observe := lw.status < 300
+	var now time.Time
+	if observe {
+		now = lw.now()
 		if lw.last.IsZero() {
 			manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.start).Seconds())
 			if isEventStream(lw.Header().Get("Content-Type")) {
@@ -95,18 +97,30 @@ func (lw *latencyWriter) Write(b []byte) (int, error) {
 			manager.InterTokenSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.last).Seconds())
 		}
 		lw.last = now
-		if !lw.tokenSeen {
-			if lw.detector == nil {
-				// The backend answered the streaming request with a plain
-				// 2xx body: the whole payload is the generation, so its
-				// first byte is the first token.
-				lw.observeFirstToken(now)
-			} else if lw.detector.feed(b) {
+	}
+
+	n, err := lw.ResponseWriter.Write(b)
+
+	// First-token detection runs after the delegated write and only on
+	// success: a chunk the connection refused was never sent to the client,
+	// and recording it would both fake a served token and let finish() skip
+	// the request's no-token count. err == nil is the strongest delivery
+	// signal this layer has (and implies n == len(b) per the io.Writer
+	// contract). On failure the proxy aborts the stream, so the unfed
+	// detector state is never consulted again.
+	if observe && err == nil && !lw.tokenSeen {
+		if lw.detector == nil {
+			// The backend answered the streaming request with a plain 2xx
+			// body: the whole payload is the generation, so its first
+			// non-empty write is the first token.
+			if n > 0 {
 				lw.observeFirstToken(now)
 			}
+		} else if lw.detector.feed(b) {
+			lw.observeFirstToken(now)
 		}
 	}
-	return lw.ResponseWriter.Write(b)
+	return n, err
 }
 
 // isEventStream reports whether a Content-Type header declares an SSE body.
