@@ -49,11 +49,11 @@ type latencyWriter struct {
 	last    time.Time
 	nowFunc func() time.Time
 
-	// observeLegacy feeds the dispatch-scoped TTFTSeconds and
-	// InterTokenSeconds metrics. Only the plain proxy path sets it: those
-	// series predate first-token detection, and widening their population
-	// (e.g. with tool-runtime streams) would silently shift dashboards
-	// that still read them.
+	// observeLegacy feeds the dispatch-scoped TTFTSeconds,
+	// ReplicaTTFTSeconds, and InterTokenSeconds metrics. Only the plain proxy
+	// path sets it: those series predate first-token detection, and widening
+	// their population (e.g. with tool-runtime streams) would silently shift
+	// dashboards that still read them.
 	observeLegacy bool
 
 	detector  *sseTokenDetector // non-nil while scanning an SSE body for the first token
@@ -123,7 +123,9 @@ func (lw *latencyWriter) Write(b []byte) (int, error) {
 		now = lw.now()
 		if lw.last.IsZero() {
 			if lw.observeLegacy {
-				manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.start).Seconds())
+				ttft := now.Sub(lw.start).Seconds()
+				manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(ttft)
+				manager.ReplicaTTFTSeconds.WithLabelValues(lw.model, lw.enclave, lw.pool, lw.class).Observe(ttft)
 			}
 			if isEventStream(lw.Header().Get("Content-Type")) {
 				lw.detector = &sseTokenDetector{}

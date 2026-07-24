@@ -49,6 +49,8 @@ func TestLatencyWriterObservesStreaming(t *testing.T) {
 	lw := &latencyWriter{
 		ResponseWriter: httptest.NewRecorder(),
 		model:          model,
+		enclave:        "enclave-1",
+		pool:           "reserved",
 		class:          "configured",
 		arrival:        now,
 		start:          now,
@@ -73,6 +75,10 @@ func TestLatencyWriterObservesStreaming(t *testing.T) {
 	if ttftCount != 1 || ttftSum != 0.5 {
 		t.Fatalf("expected one TTFT observation of 0.5s, got count=%d sum=%v", ttftCount, ttftSum)
 	}
+	replicaTTFTCount, replicaTTFTSum := histogramState(t, manager.ReplicaTTFTSeconds.WithLabelValues(model, "enclave-1", "reserved", "configured"))
+	if replicaTTFTCount != 1 || replicaTTFTSum != 0.5 {
+		t.Fatalf("expected one per-replica TTFT observation of 0.5s, got count=%d sum=%v", replicaTTFTCount, replicaTTFTSum)
+	}
 	itlCount, itlSum := histogramState(t, manager.InterTokenSeconds.WithLabelValues(model, "configured"))
 	if itlCount != 3 || itlSum < 0.0599 || itlSum > 0.0601 {
 		t.Fatalf("expected three 20ms inter-token observations, got count=%d sum=%v", itlCount, itlSum)
@@ -84,6 +90,8 @@ func TestLatencyWriterSkipsErrorResponses(t *testing.T) {
 	lw := &latencyWriter{
 		ResponseWriter: httptest.NewRecorder(),
 		model:          model,
+		enclave:        "enclave-1",
+		pool:           "shared",
 		class:          "none",
 		start:          time.Now(),
 		observeLegacy:  true,
@@ -96,6 +104,9 @@ func TestLatencyWriterSkipsErrorResponses(t *testing.T) {
 
 	if count, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "none")); count != 0 {
 		t.Fatalf("error response must not observe TTFT, got count=%d", count)
+	}
+	if count, _ := histogramState(t, manager.ReplicaTTFTSeconds.WithLabelValues(model, "enclave-1", "shared", "none")); count != 0 {
+		t.Fatalf("error response must not observe per-replica TTFT, got count=%d", count)
 	}
 }
 
@@ -380,6 +391,9 @@ func TestFirstTokenMeasuresFromArrival(t *testing.T) {
 	}
 	if _, sum := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "configured")); sum < 0.699 || sum > 0.701 {
 		t.Fatalf("legacy TTFT must measure from dispatch (want 0.7s), got %v", sum)
+	}
+	if _, sum := histogramState(t, manager.ReplicaTTFTSeconds.WithLabelValues(model, "enclave-1", "reserved", "configured")); sum < 0.699 || sum > 0.701 {
+		t.Fatalf("per-replica TTFT must measure from dispatch (want 0.7s), got %v", sum)
 	}
 }
 
@@ -730,6 +744,9 @@ func TestToolLatencyWriterObservesFirstTokenOnly(t *testing.T) {
 
 	if ttftCount, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "configured")); ttftCount != 0 {
 		t.Fatalf("tool-runtime stream must not feed legacy TTFT, got count=%d", ttftCount)
+	}
+	if ttftCount, _ := histogramState(t, manager.ReplicaTTFTSeconds.WithLabelValues(model, "tool-runtime", "tool-runtime", "configured")); ttftCount != 0 {
+		t.Fatalf("tool-runtime stream must not feed per-replica TTFT, got count=%d", ttftCount)
 	}
 	if itlCount, _ := histogramState(t, manager.InterTokenSeconds.WithLabelValues(model, "configured")); itlCount != 0 {
 		t.Fatalf("tool-runtime stream must not feed legacy inter-token gaps, got count=%d", itlCount)
