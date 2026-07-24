@@ -52,6 +52,7 @@ func TestLatencyWriterObservesStreaming(t *testing.T) {
 		class:          "configured",
 		arrival:        now,
 		start:          now,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return now },
 	}
 
@@ -85,6 +86,7 @@ func TestLatencyWriterSkipsErrorResponses(t *testing.T) {
 		model:          model,
 		class:          "none",
 		start:          time.Now(),
+		observeLegacy:  true,
 	}
 
 	lw.WriteHeader(502)
@@ -104,6 +106,7 @@ func TestLatencyWriterInformationalThenError(t *testing.T) {
 		model:          model,
 		class:          "none",
 		start:          time.Now(),
+		observeLegacy:  true,
 	}
 
 	lw.WriteHeader(100)
@@ -124,6 +127,7 @@ func TestLatencyWriterInformationalThenSuccess(t *testing.T) {
 		class:          "none",
 		arrival:        time.Now(),
 		start:          time.Now(),
+		observeLegacy:  true,
 	}
 
 	lw.WriteHeader(100)
@@ -144,6 +148,7 @@ func TestLatencyWriterImplicit200(t *testing.T) {
 		class:          "none",
 		arrival:        time.Now(),
 		start:          time.Now(),
+		observeLegacy:  true,
 	}
 
 	// Write without WriteHeader is an implicit 200 and must be observed
@@ -187,6 +192,7 @@ func newSSELatencyWriter(model string, now *time.Time) *latencyWriter {
 		class:          "configured",
 		arrival:        *now,
 		start:          *now,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return *now },
 	}
 }
@@ -361,6 +367,7 @@ func TestFirstTokenMeasuresFromArrival(t *testing.T) {
 		class:          "configured",
 		arrival:        t0,
 		start:          now,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return now },
 	}
 
@@ -392,6 +399,7 @@ func TestFirstTokenNonSSEBody(t *testing.T) {
 		class:          "configured",
 		arrival:        t0,
 		start:          t0,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return now },
 	}
 
@@ -591,6 +599,7 @@ func TestFirstTokenContentTypeParsing(t *testing.T) {
 				class:          "configured",
 				arrival:        t0,
 				start:          t0,
+				observeLegacy:  true,
 				nowFunc:        func() time.Time { return now },
 			}
 
@@ -635,6 +644,7 @@ func TestFirstTokenNotRecordedOnFailedWrite(t *testing.T) {
 		class:          "configured",
 		arrival:        t0,
 		start:          t0,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return now },
 	}
 
@@ -674,6 +684,7 @@ func TestFirstTokenIgnoresEmptyWrite(t *testing.T) {
 		class:          "configured",
 		arrival:        t0,
 		start:          t0,
+		observeLegacy:  true,
 		nowFunc:        func() time.Time { return now },
 	}
 
@@ -688,5 +699,61 @@ func TestFirstTokenIgnoresEmptyWrite(t *testing.T) {
 	count, sum := firstTokenState(t, model)
 	if count != 1 || sum < 1.999 || sum > 2.001 {
 		t.Fatalf("expected first token at the first non-empty write (2.0s), got count=%d sum=%v", count, sum)
+	}
+}
+
+func TestToolLatencyWriterObservesFirstTokenOnly(t *testing.T) {
+	// Tool-runtime streams must feed the first-token metrics under the
+	// tool-runtime sentinel labels while leaving the dispatch-scoped legacy
+	// TTFT / inter-token series untouched, so those keep their original
+	// plain-proxy population.
+	const model = "ft-tool-runtime"
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := t0
+	rec := httptest.NewRecorder()
+	lw := newToolLatencyWriter(rec, t0, model, "configured")
+	lw.nowFunc = func() time.Time { return now }
+
+	// The tool streamers set the SSE content type themselves before the
+	// first write; mirror that order here.
+	rec.Header().Set("Content-Type", "text/event-stream")
+	lw.WriteHeader(200)
+	now = t0.Add(time.Second)
+	writeChunk(t, lw, "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n")
+	now = t0.Add(3 * time.Second)
+	writeChunk(t, lw, "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tinfoil-event>{\\\"status\\\":\\\"in_progress\\\"}</tinfoil-event>\"}}]}\n\n")
+
+	count, sum := histogramState(t, manager.FirstTokenSeconds.WithLabelValues(model, "tool-runtime", "tool-runtime", "configured"))
+	if count != 1 || sum < 2.999 || sum > 3.001 {
+		t.Fatalf("expected one first-token observation of 3.0s under the tool-runtime sentinel, got count=%d sum=%v", count, sum)
+	}
+
+	if ttftCount, _ := histogramState(t, manager.TTFTSeconds.WithLabelValues(model, "configured")); ttftCount != 0 {
+		t.Fatalf("tool-runtime stream must not feed legacy TTFT, got count=%d", ttftCount)
+	}
+	if itlCount, _ := histogramState(t, manager.InterTokenSeconds.WithLabelValues(model, "configured")); itlCount != 0 {
+		t.Fatalf("tool-runtime stream must not feed legacy inter-token gaps, got count=%d", itlCount)
+	}
+}
+
+func TestToolLatencyWriterCountsTokenlessStream(t *testing.T) {
+	const model = "ft-tool-canceled"
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := t0
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "text/event-stream")
+	lw := newToolLatencyWriter(rec, t0, model, "none")
+	lw.nowFunc = func() time.Time { return now }
+
+	lw.WriteHeader(200)
+	writeChunk(t, lw, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lw.finish(ctx)
+
+	got := counterState(t, manager.NoFirstTokenTotal.WithLabelValues(model, "tool-runtime", "tool-runtime", "none", "canceled"))
+	if got != 1 {
+		t.Fatalf("expected one canceled count under the tool-runtime sentinel, got %v", got)
 	}
 }

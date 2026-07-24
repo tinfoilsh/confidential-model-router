@@ -44,7 +44,10 @@ var (
 	// (response.created, role-only deltas, pings) do not stop the clock;
 	// only an event carrying generated output does. Requests that end
 	// before producing one are counted in NoFirstTokenTotal instead, so
-	// this histogram only ever contains real token latencies.
+	// this histogram only ever contains real token latencies. Requests
+	// served by the router's tool loop carry the "tool-runtime" sentinel
+	// in enclave and pool: the loop may touch several replicas before the
+	// first client-visible token, so no single value would be truthful.
 	FirstTokenSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_first_token_seconds",

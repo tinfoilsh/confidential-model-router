@@ -831,13 +831,30 @@ func main() {
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
-					if err := toolruntime.Handle(w, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
+					// Streaming tool requests feed the same first-token SLA
+					// metrics as plain proxied streams. The loop may dispatch
+					// to several replicas and pools before the first
+					// client-visible token, so enclave and pool carry the
+					// tool-runtime sentinel; the deferred finish still counts
+					// requests that end token-less, including a panic unwind.
+					tw := http.ResponseWriter(w)
+					toolServed := false
+					if isStreaming && latencyMetricPaths[r.URL.Path] {
+						lw := newToolLatencyWriter(w, requestStart, modelName, priorityClass(hasConfiguredPriority))
+						tw = lw
+						defer func() {
+							lw.aborted = !toolServed
+							lw.finish(r.Context())
+						}()
+					}
+					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
 						log.WithError(err).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+						jsonError(tw, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 					}
+					toolServed = true
 					return
 				}
 

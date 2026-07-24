@@ -49,6 +49,13 @@ type latencyWriter struct {
 	last    time.Time
 	nowFunc func() time.Time
 
+	// observeLegacy feeds the dispatch-scoped TTFTSeconds and
+	// InterTokenSeconds metrics. Only the plain proxy path sets it: those
+	// series predate first-token detection, and widening their population
+	// (e.g. with tool-runtime streams) would silently shift dashboards
+	// that still read them.
+	observeLegacy bool
+
 	detector  *sseTokenDetector // non-nil while scanning an SSE body for the first token
 	tokenSeen bool
 	aborted   bool // ServeHTTP unwound by panic: the proxy aborted mid-stream
@@ -60,6 +67,32 @@ func newLatencyWriter(w http.ResponseWriter, arrival time.Time, model, enclave, 
 		model:          model,
 		enclave:        enclave,
 		pool:           pool,
+		class:          class,
+		arrival:        arrival,
+		start:          time.Now(),
+		observeLegacy:  true,
+	}
+}
+
+// toolRuntimeLabel marks first-token series for requests served by the
+// router's tool loop rather than one proxied replica. The loop may dispatch
+// to several replicas and pools before the first client-visible token, so
+// no single enclave or pool value would be truthful — and the sentinel keeps
+// tool traffic separable from per-replica latencies on dashboards.
+const toolRuntimeLabel = "tool-runtime"
+
+// newToolLatencyWriter observes first-token latency for SSE streams the
+// tool runtime writes to the client. The first client-visible output on
+// this path may be inline tool-progress content rather than model text;
+// both are generated stream output the caller is waiting on, and counting
+// only the final answer would misread a request the user is actively
+// watching as an SLA violation.
+func newToolLatencyWriter(w http.ResponseWriter, arrival time.Time, model, class string) *latencyWriter {
+	return &latencyWriter{
+		ResponseWriter: w,
+		model:          model,
+		enclave:        toolRuntimeLabel,
+		pool:           toolRuntimeLabel,
 		class:          class,
 		arrival:        arrival,
 		start:          time.Now(),
@@ -89,11 +122,13 @@ func (lw *latencyWriter) Write(b []byte) (int, error) {
 	if observe {
 		now = lw.now()
 		if lw.last.IsZero() {
-			manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.start).Seconds())
+			if lw.observeLegacy {
+				manager.TTFTSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.start).Seconds())
+			}
 			if isEventStream(lw.Header().Get("Content-Type")) {
 				lw.detector = &sseTokenDetector{}
 			}
-		} else {
+		} else if lw.observeLegacy {
 			manager.InterTokenSeconds.WithLabelValues(lw.model, lw.class).Observe(now.Sub(lw.last).Seconds())
 		}
 		lw.last = now
