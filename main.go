@@ -476,6 +476,12 @@ func main() {
 	cacheRouteShadow := em.CacheRouteShadow()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Timestamp arrival before any parsing or routing: the first-token
+		// SLA is measured from the edge of the router, so time spent on
+		// body handling, route-context lookups, and replica selection is
+		// part of what it reports.
+		requestStart := time.Now()
+
 		if !limitRequestBody(w, r) {
 			return
 		}
@@ -869,7 +875,7 @@ func main() {
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
-			mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+			mode, streamRequested, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 			if err != nil {
 				var tooLarge *http.MaxBytesError
 				if errors.As(err, &tooLarge) {
@@ -879,6 +885,9 @@ func main() {
 				jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 				return
 			}
+			// Subdomain-routed streams must feed the same SLA metrics as
+			// path-routed ones; this is the only place their body is parsed.
+			isStreaming = streamRequested
 			recordCacheSaltInjection(modelName, mode)
 		}
 
@@ -944,21 +953,23 @@ func main() {
 		}
 
 		// Meter landing pools on reserved models; poolSpill is only
-		// non-nil for reserved callers.
+		// non-nil for reserved callers. Models without reservations have
+		// no pool concept and carry "none" on the SLA metrics.
+		poolLabel := "none"
 		if poolPrimary != nil && !overloaded {
-			pool := "shared"
+			poolLabel = "shared"
 			if poolSpill != nil {
 				if poolPrimary[enclave.String()] {
-					pool = "reserved"
+					poolLabel = "reserved"
 				} else {
-					pool = "spilled"
+					poolLabel = "spilled"
 					log.WithFields(log.Fields{
 						"model":   modelName,
 						"enclave": enclave.String(),
 					}).Debug("reserved pool exhausted; spilling to shared pool")
 				}
 			}
-			manager.ReservedPoolServesTotal.WithLabelValues(modelName, pool).Inc()
+			manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
 		}
 
 		if overloaded {
@@ -1008,11 +1019,22 @@ func main() {
 			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
 
-		rw := http.ResponseWriter(w)
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
-			rw = newLatencyWriter(w, modelName, priorityClass(hasConfiguredPriority))
+			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
+			// finish must run via defer: a backend that dies mid-stream
+			// unwinds ServeHTTP with http.ErrAbortHandler, and that request
+			// must still be counted as failed-before-first-token. served
+			// distinguishes that unwind from a normal return.
+			served := false
+			defer func() {
+				lw.aborted = !served
+				lw.finish(r.Context())
+			}()
+			enclave.ServeHTTP(lw, r)
+			served = true
+			return
 		}
-		enclave.ServeHTTP(rw, r)
+		enclave.ServeHTTP(w, r)
 	})
 
 	// Setup graceful shutdown

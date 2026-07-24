@@ -215,7 +215,7 @@ func TestSaltProxiedBody(t *testing.T) {
 	t.Run("injects and strips on the salted body", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
 			strings.NewReader(`{"model":"m","cache_salt":"client-chosen","user_cache_secret":"s1"}`))
-		mode, err := saltProxiedBody(req, "tenant-a", true)
+		mode, _, err := saltProxiedBody(req, "tenant-a", true)
 		if err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
@@ -235,7 +235,7 @@ func TestSaltProxiedBody(t *testing.T) {
 	t.Run("strips client salt even when disabled", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
 			strings.NewReader(`{"model":"m","cache_salt":"client-chosen"}`))
-		mode, err := saltProxiedBody(req, "tenant-a", false)
+		mode, _, err := saltProxiedBody(req, "tenant-a", false)
 		if err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
@@ -249,7 +249,7 @@ func TestSaltProxiedBody(t *testing.T) {
 
 	t.Run("injects tenant salt with no secret", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"m"}`))
-		mode, err := saltProxiedBody(req, "tenant-a", true)
+		mode, _, err := saltProxiedBody(req, "tenant-a", true)
 		if err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
@@ -265,7 +265,7 @@ func TestSaltProxiedBody(t *testing.T) {
 		const raw = `{"model":"m","messages":[]}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
 		// Disabled + no salt fields: nothing to do, must not re-marshal.
-		if _, err := saltProxiedBody(req, "tenant-a", false); err != nil {
+		if _, _, err := saltProxiedBody(req, "tenant-a", false); err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
 		out, _ := io.ReadAll(req.Body)
@@ -279,7 +279,7 @@ func TestSaltProxiedBody(t *testing.T) {
 		// would silently turn it into ...992.
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
 			strings.NewReader(`{"model":"m","seed":9007199254740993}`))
-		if _, err := saltProxiedBody(req, "tenant-a", true); err != nil {
+		if _, _, err := saltProxiedBody(req, "tenant-a", true); err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
 		raw, _ := io.ReadAll(req.Body)
@@ -291,7 +291,7 @@ func TestSaltProxiedBody(t *testing.T) {
 	t.Run("rejects a non-JSON body", func(t *testing.T) {
 		const raw = `not json`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-		if _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
+		if _, _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
 			t.Fatal("expected malformed subdomain body to be rejected")
 		}
 	})
@@ -310,7 +310,7 @@ func TestSaltProxiedBody(t *testing.T) {
 			`{"model":"m"} x`,
 		} {
 			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-			if _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
+			if _, _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
 				t.Errorf("expected trailing-data body %q to be rejected", raw)
 			}
 		}
@@ -321,7 +321,7 @@ func TestSaltProxiedBody(t *testing.T) {
 		// must not regress ordinary clients that end the body with a newline.
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
 			strings.NewReader("{\"model\":\"m\"}\n\t "))
-		mode, err := saltProxiedBody(req, "tenant-a", true)
+		mode, _, err := saltProxiedBody(req, "tenant-a", true)
 		if err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
 		}
@@ -330,6 +330,25 @@ func TestSaltProxiedBody(t *testing.T) {
 		}
 		if got := decodeBody(t, req); got["cache_salt"] != tenantSalt {
 			t.Errorf("cache_salt = %v, want %q", got["cache_salt"], tenantSalt)
+		}
+	})
+
+	t.Run("reports the stream flag for SLA gating", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"m","stream":true}`))
+		_, streaming, err := saltProxiedBody(req, "tenant-a", true)
+		if err != nil {
+			t.Fatalf("saltProxiedBody: %v", err)
+		}
+		if !streaming {
+			t.Error("stream:true was not reported")
+		}
+
+		// A non-boolean stream value must read as non-streaming, not error.
+		req = httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"m","stream":"yes"}`))
+		if _, streaming, err = saltProxiedBody(req, "tenant-a", true); err != nil || streaming {
+			t.Errorf("non-boolean stream: streaming=%v err=%v, want false, nil", streaming, err)
 		}
 	})
 }
@@ -341,7 +360,7 @@ func TestCacheSaltMetricSkippedInjection(t *testing.T) {
 
 	// Skipped: empty identity on an allowlisted, enabled path.
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	mode, err := saltProxiedBody(req, "", true)
+	mode, _, err := saltProxiedBody(req, "", true)
 	if err != nil {
 		t.Fatalf("saltProxiedBody: %v", err)
 	}

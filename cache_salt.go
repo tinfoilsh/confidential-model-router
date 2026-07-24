@@ -64,14 +64,17 @@ func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cac
 
 // saltProxiedBody applies cache-salt handling to a request that the router
 // otherwise forwards verbatim (the subdomain routing path, which never
-// parses the body). It rewrites r.Body in place and returns the derivation
-// mode. The body must be one JSON object so router-owned cache fields can
-// never bypass stripping on a malformed request.
-func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mode, error) {
+// parses the body elsewhere). It rewrites r.Body in place and returns the
+// derivation mode plus whether the body requests a streaming response — the
+// one routing signal this path needs from the body, surfaced here so the
+// caller doesn't have to parse it a second time. The body must be one JSON
+// object so router-owned cache fields can never bypass stripping on a
+// malformed request.
+func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mode, bool, error) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		return cachesalt.ModeNone, err
+		return cachesalt.ModeNone, false, err
 	}
 
 	// UseNumber keeps numbers as their exact text across the re-marshal;
@@ -84,25 +87,26 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 	var body map[string]any
 	if err := dec.Decode(&body); err != nil || !decodeConsumedAll(dec) || body == nil {
 		if err != nil {
-			return cachesalt.ModeNone, err
+			return cachesalt.ModeNone, false, err
 		}
-		return cachesalt.ModeNone, errors.New("request body must be one JSON object")
+		return cachesalt.ModeNone, false, errors.New("request body must be one JSON object")
 	}
+	streaming, _ := body["stream"].(bool)
 
 	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
 	if !changed {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		return mode, nil
+		return mode, streaming, nil
 	}
 
 	newBytes, err := json.Marshal(body)
 	if err != nil {
-		return cachesalt.ModeNone, err
+		return cachesalt.ModeNone, false, err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(newBytes))
 	r.ContentLength = int64(len(newBytes))
 	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBytes)))
-	return mode, nil
+	return mode, streaming, nil
 }
 
 // recordCacheSaltInjection counts a performed injection. A skipped one
