@@ -39,6 +39,19 @@ var (
 		[]string{"model", "priority"},
 	)
 
+	// ReplicaTTFTSeconds mirrors TTFTSeconds with the selected enclave and
+	// landing pool attached. It intentionally keeps the same dispatch-scoped
+	// first-response-write semantics so the aggregate and per-replica views
+	// remain directly comparable.
+	ReplicaTTFTSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_replica_ttft_seconds",
+			Help:    "Time to first response body byte for streaming requests, by selected enclave and landing pool",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 30, 60},
+		},
+		[]string{"model", "enclave", "pool", "priority"},
+	)
+
 	// FirstTokenSeconds tracks time from request arrival at the router to
 	// the first generated token written to the client. SSE control frames
 	// (response.created, role-only deltas, pings) do not stop the clock;
