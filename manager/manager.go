@@ -230,10 +230,10 @@ func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimit
 	return model.RateLimit
 }
 
-// Bound network steps of enclave verification.
-const enclaveVerifyTimeout = 10 * time.Second
+// Bound network steps of enclave verification. Var for tests
+var enclaveVerifyTimeout = 10 * time.Second
 
-// attestation.TLSPublicKey, but dial & handshake are bounded w/ a timeout
+// attestation.TLSPublicKey, but dial & handshake are bounded w/ a timeout.
 func tlsPublicKeyFP(host string) (string, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: enclaveVerifyTimeout}, "tcp", host+":443", &tls.Config{})
 	if err != nil {
