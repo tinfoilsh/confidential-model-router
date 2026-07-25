@@ -2,10 +2,12 @@ package manager
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -228,6 +230,19 @@ func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimit
 	return model.RateLimit
 }
 
+// Bound network steps of enclave verification. Var for tests
+var enclaveVerifyTimeout = 10 * time.Second
+
+// attestation.TLSPublicKey, but dial & handshake are bounded w/ a timeout.
+func tlsPublicKeyFP(host string) (string, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: enclaveVerifyTimeout}, "tcp", host+":443", &tls.Config{})
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return attestation.ConnectionCertFP(conn.ConnectionState())
+}
+
 // attestationFetch retrieves the attestation document from a given enclave hostname.
 // This is a local implementation that disables HTTP connection pooling to prevent
 // certificate validation errors when multiple hostnames (e.g., router.inf4.tinfoil.sh
@@ -240,6 +255,7 @@ func attestationFetch(host string) (*attestation.Document, error) {
 	u.Path = "/.well-known/tinfoil-attestation"
 
 	httpClient := &http.Client{
+		Timeout: enclaveVerifyTimeout,
 		Transport: &http.Transport{
 			DisableKeepAlives: true, // Prevents connection reuse across different hostnames
 		},
@@ -268,14 +284,18 @@ func (em *EnclaveManager) addEnclave(
 		return fmt.Errorf("model %s not found", modelName)
 	}
 
-	model.mu.Lock()
-	defer model.mu.Unlock()
-
 	// If the enclave already exists and the TLS key fingerprint is the same, do nothing
+	// Take read lock only for this short check, don't hold it during network I/O below
+	model.mu.RLock()
 	currentEnclave, exists := model.Enclaves[host]
+	var currentFP string
 	if exists {
-		realTLSKeyFP, err := attestation.TLSPublicKey(host, false)
-		if err == nil && currentEnclave.tlsKeyFP == realTLSKeyFP {
+		currentFP = currentEnclave.tlsKeyFP
+	}
+	model.mu.RUnlock()
+	if exists {
+		realTLSKeyFP, err := tlsPublicKeyFP(host)
+		if err == nil && currentFP == realTLSKeyFP {
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
 		}
@@ -295,6 +315,9 @@ func (em *EnclaveManager) addEnclave(
 			return fmt.Errorf("failed to verify hardware measurements: %v", err)
 		}
 	}
+
+	model.mu.Lock()
+	defer model.mu.Unlock()
 
 	// Validate that the enclave's attested measurement matches the model's source measurement
 	// SECURITY: This check is critical - it ensures the enclave runs the expected code
