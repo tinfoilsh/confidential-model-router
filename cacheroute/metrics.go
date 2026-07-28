@@ -48,6 +48,26 @@ var (
 		[]string{"model", "outcome"},
 	)
 
+	// UsagePromptTokensTotal and UsageCachedPromptTokensTotal weight
+	// ReuseTotal by engine-reported usage, recorded at response time via
+	// RecordUsage. cached/prompt per outcome is the measured token hit
+	// rate of warm- vs cold-landed traffic — the number that sizes what
+	// enforcement would save.
+	UsagePromptTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_cache_route_usage_prompt_tokens_total",
+			Help: "Engine-reported prompt tokens of keyed requests by prefix-reuse classification (first_seen, repeat_warm, repeat_cold)",
+		},
+		[]string{"model", "outcome"},
+	)
+	UsageCachedPromptTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_cache_route_usage_cached_prompt_tokens_total",
+			Help: "Engine-reported cached prompt tokens of keyed requests by prefix-reuse classification (first_seen, repeat_warm, repeat_cold)",
+		},
+		[]string{"model", "outcome"},
+	)
+
 	// PicksTotal counts the would-be pick per enclave, with the key's
 	// replication factor at pick time. Requests served from outside the
 	// ranked membership (breaker probes) are excluded, so this is also the

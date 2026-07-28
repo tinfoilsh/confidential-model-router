@@ -1022,11 +1022,17 @@ func main() {
 
 		// Hand the landing to the cache-route pipeline. Observed at
 		// dispatch so the picked replica counts as warm from prefill
-		// start; cannot affect the request.
+		// start; cannot affect the request. The reuse classification rides
+		// the request context so response-time usage extraction can
+		// attribute engine-reported token counts per class.
+		var cacheRouteReuse string
 		if cacheRouteDecision != nil {
-			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
+			cacheRouteReuse = cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
 		} else if cacheRouteReq != nil {
-			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), enclave.String(), cacheRouteSettings)
+			cacheRouteReuse = cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), enclave.String(), cacheRouteSettings)
+		}
+		if cacheRouteReuse != "" {
+			r = r.WithContext(cacheroute.WithReuse(r.Context(), modelName, cacheRouteReuse))
 		}
 
 		// A claimed recovery probe travels with its request, so the

@@ -21,6 +21,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
@@ -311,6 +312,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				}
 			}
 
+			cachedPromptTokens := 0
+			if value, ok := usage.CachedPromptTokens(); ok {
+				cachedPromptTokens = value
+			}
+			cacheroute.RecordUsage(req.Context(), usage.PromptTokens, cachedPromptTokens)
+
 			// Add billing event
 			if billingCollector != nil {
 				if modelName == websearchModel {
@@ -320,10 +327,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 					// user's API key and gets billed there directly.
 					emitZeroTokenEvent()
 				} else {
-					cachedPromptTokens := 0
-					if value, ok := usage.CachedPromptTokens(); ok {
-						cachedPromptTokens = value
-					}
 					event := billing.Event{
 						Timestamp:          time.Now(),
 						UserID:             userID,

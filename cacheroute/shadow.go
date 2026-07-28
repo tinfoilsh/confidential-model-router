@@ -191,22 +191,27 @@ func (s *Shadow) Decide(model string, req *Request, pool Pool, cfg Settings) (d 
 // selector has picked a replica: classify the request against the table,
 // compute the would-be pick, update state, increment metrics. It must never
 // affect the request — panics are recovered into OutcomeError.
-func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost string, cfg Settings) {
-	s.observe(model, req, pool, actualHost, nil, cfg)
+//
+// It returns the reuse classification (ReuseFirstSeen, ReuseRepeatWarm,
+// ReuseRepeatCold), or "" when the request was not keyed or the pool was too
+// small, so the caller can attribute engine-reported usage via RecordUsage.
+func (s *Shadow) Observe(model string, req *Request, pool Pool, actualHost string, cfg Settings) string {
+	return s.observe(model, req, pool, actualHost, nil, cfg)
 }
 
 // ObserveLanding records the landing of a dispatch routed by d, reusing the
 // decision's pool snapshot and ranking so the metrics describe the decision
 // that was actually made.
-func (s *Shadow) ObserveLanding(model string, req *Request, d *Decision, actualHost string, cfg Settings) {
-	s.observe(model, req, d.pool, actualHost, d, cfg)
+func (s *Shadow) ObserveLanding(model string, req *Request, d *Decision, actualHost string, cfg Settings) string {
+	return s.observe(model, req, d.pool, actualHost, d, cfg)
 }
 
-func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost string, d *Decision, cfg Settings) {
+func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost string, d *Decision, cfg Settings) (reuse string) {
 	start := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			RequestsTotal.WithLabelValues(model, string(OutcomeError)).Inc()
+			reuse = ""
 		}
 		var elapsed time.Duration
 		if req != nil {
@@ -234,6 +239,7 @@ func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost strin
 	}
 
 	res := s.observeKeyed(model, req.Key, pool.Candidates, actualHost, d, cfg)
+	reuse = res.reuse
 
 	RequestsTotal.WithLabelValues(model, string(OutcomeKeyed)).Inc()
 	ReuseTotal.WithLabelValues(model, res.reuse).Inc()
@@ -266,6 +272,7 @@ func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost strin
 	if res.pick == actualHost {
 		RandomMatchTotal.WithLabelValues(model).Inc()
 	}
+	return
 }
 
 // peekRate reads a key's current request rate without recording an arrival.
