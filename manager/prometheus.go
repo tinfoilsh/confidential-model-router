@@ -247,4 +247,112 @@ var (
 		},
 		[]string{"model", "enclave"},
 	)
+
+	// RequestDurationSeconds tracks end-to-end request duration at the
+	// router, from arrival to the last byte written. Unlike the TTFT and
+	// first-token histograms this covers non-streaming requests too, so
+	// e2e latency budgets (e.g. a caller's client-side timeout) can be
+	// evaluated per pool and priority for every request mode.
+	RequestDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_request_duration_seconds",
+			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome",
+			Buckets: []float64{0.25, 0.5, 1, 2, 5, 7.5, 10, 15, 20, 30, 45, 60, 120, 300, 600},
+		},
+		[]string{"model", "pool", "priority", "stream", "outcome"},
+	)
+
+	// DispatchSeconds tracks time from request arrival at the router to
+	// backend dispatch: body handling, route-context lookup, rate-limit
+	// checks, and replica selection. This span is otherwise only buried
+	// inside FirstTokenSeconds, so a slow control-plane lookup would be
+	// indistinguishable from a slow backend.
+	DispatchSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_dispatch_seconds",
+			Help:    "Time from request arrival at the router to backend dispatch (parsing, route-context lookup, rate limiting, replica selection)",
+			Buckets: []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		},
+		[]string{"model"},
+	)
+
+	// BackendInflight mirrors each enclave's live in-flight request count —
+	// the signal least-loaded selection already uses. Series are not
+	// deleted at enclave shutdown: every increment is paired with exactly
+	// one decrement, so a retired enclave's series drains to zero.
+	BackendInflight = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_backend_inflight",
+			Help: "Requests currently in flight to each backend enclave, including internal dispatches",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// RequestErrorsTotal counts router-issued request errors that never
+	// reach a backend. The 404 and 413 sites fire before the model name is
+	// validated (or parsed), so they carry model="unknown" rather than an
+	// unbounded caller-controlled label value.
+	RequestErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_request_errors_total",
+			Help: "Router-issued request errors, by reason (model_not_found, no_available_enclave, body_too_large, tool_runtime_failed)",
+		},
+		[]string{"model", "reason"},
+	)
+
+	// BackendClientErrorsTotal counts backend 4xx responses. These are
+	// breaker successes (a 4xx is the backend answering) and so are
+	// otherwise invisible inside ProxySuccessTotal — including a vLLM 429,
+	// which is precisely the signal an overloaded backend emits.
+	BackendClientErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_backend_client_errors_total",
+			Help: "Backend 4xx responses proxied to clients, by status code",
+		},
+		[]string{"model", "enclave", "status"},
+	)
+
+	// BackendScrapeFailuresTotal counts failed backend /metrics scrapes.
+	// Sustained failures freeze BackendQueueDepth and, after the staleness
+	// limit, silently disable overload protection for the enclave.
+	BackendScrapeFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_backend_scrape_failures_total",
+			Help: "Failed backend /metrics scrapes, by stage (request, poll, parse)",
+		},
+		[]string{"model", "enclave", "stage"},
+	)
+
+	// BackendLastScrapeTimestamp is the unix time of the last successful
+	// backend /metrics scrape; time() - this > sampleStalenessLimit means
+	// the enclave's overload guard is running blind.
+	BackendLastScrapeTimestamp = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_backend_last_scrape_timestamp_seconds",
+			Help: "Unix time of the last successful backend /metrics scrape",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// OverloadFailOpenTotal counts requests admitted to an enclave whose
+	// overload sample was stale. A sustained rate means overload
+	// protection is effectively off for that enclave.
+	OverloadFailOpenTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_overload_failopen_total",
+			Help: "Requests admitted because the enclave's overload sample was stale (guard failed open)",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// OverloadSkipsTotal counts selection moving off an overloaded enclave
+	// to the next candidate — including moves off a cache-aware pick, which
+	// otherwise register only as repeat_cold cache misses.
+	OverloadSkipsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_overload_skips_total",
+			Help: "Times replica selection skipped an overloaded enclave and moved to the next candidate",
+		},
+		[]string{"model", "enclave"},
+	)
 )

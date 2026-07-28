@@ -634,6 +634,7 @@ func (m *Model) selectForDispatch(order []string, claimProbes bool, allowed map[
 		if firstOverloaded == nil {
 			firstOverloaded = enclave
 		}
+		OverloadSkipsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 		skip[enclave.String()] = true
 	}
 	if firstOverloaded != nil {
@@ -686,6 +687,7 @@ func (m *Model) selectServingFrom(order []string, allowed map[string]bool) (encl
 		if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
 			return
 		}
+		OverloadSkipsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 		skip[enclave.String()] = true
 	}
 	return
@@ -804,7 +806,11 @@ func (e *Enclave) breakerClosed() bool {
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.inflight.Add(1)
-	defer e.inflight.Add(-1)
+	BackendInflight.WithLabelValues(e.modelName, e.host).Inc()
+	defer func() {
+		e.inflight.Add(-1)
+		BackendInflight.WithLabelValues(e.modelName, e.host).Dec()
+	}()
 
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
@@ -1109,6 +1115,7 @@ func (e *Enclave) shutdown() {
 	BackendQueueDepth.DeleteLabelValues(e.modelName, e.host)
 	BackendOverloaded.DeleteLabelValues(e.modelName, e.host)
 	CircuitBreakerState.DeleteLabelValues(e.modelName, e.host)
+	BackendLastScrapeTimestamp.DeleteLabelValues(e.modelName, e.host)
 }
 
 func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {

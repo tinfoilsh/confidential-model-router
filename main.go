@@ -93,6 +93,7 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if r.ContentLength > maxRequestBodySize {
+		manager.RequestErrorsTotal.WithLabelValues("unknown", "body_too_large").Inc()
 		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return false
 	}
@@ -103,6 +104,7 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 func writeRequestBodyError(w http.ResponseWriter, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
+		manager.RequestErrorsTotal.WithLabelValues("unknown", "body_too_large").Inc()
 		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -845,6 +847,13 @@ func main() {
 						defer func() {
 							lw.aborted = !toolServed
 							lw.finish(r.Context())
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart)
+						}()
+					} else {
+						sr := &statusRecorder{ResponseWriter: w}
+						tw = sr
+						defer func() {
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, sr.status, !toolServed, requestStart)
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
@@ -852,6 +861,7 @@ func main() {
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
+						manager.RequestErrorsTotal.WithLabelValues(modelName, "tool_runtime_failed").Inc()
 						jsonError(tw, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 					}
 					toolServed = true
@@ -889,6 +899,7 @@ func main() {
 			// and the authoritative lookup below, forwarding an unsanitized
 			// body to the engine.
 			if _, found := em.GetModel(modelName); !found {
+				manager.RequestErrorsTotal.WithLabelValues("unknown", "model_not_found").Inc()
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
@@ -910,6 +921,7 @@ func main() {
 
 		model, found := em.GetModel(modelName)
 		if !found {
+			manager.RequestErrorsTotal.WithLabelValues("unknown", "model_not_found").Inc()
 			jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 			return
 		}
@@ -965,6 +977,10 @@ func main() {
 			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
 		if enclave == nil {
+			manager.RequestErrorsTotal.WithLabelValues(modelName, "no_available_enclave").Inc()
+			log.WithFields(log.Fields{
+				"model": modelName,
+			}).Error("no available enclave for model")
 			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
 			return
 		}
@@ -1020,6 +1036,11 @@ func main() {
 
 		log.Debugf("%s serving request\n", enclave)
 
+		// Everything between arrival and here — body handling, route-context
+		// lookup, rate limiting, selection — is router overhead; isolate it
+		// so backend latency and router latency stay attributable.
+		manager.DispatchSeconds.WithLabelValues(modelName).Observe(time.Since(requestStart).Seconds())
+
 		// Hand the landing to the cache-route pipeline. Observed at
 		// dispatch so the picked replica counts as warm from prefill
 		// start; cannot affect the request.
@@ -1046,12 +1067,26 @@ func main() {
 			defer func() {
 				lw.aborted = !served
 				lw.finish(r.Context())
+				observeRequestDuration(r.Context(), modelName, poolLabel, lw.class, true, lw.status, lw.aborted, requestStart)
 			}()
 			enclave.ServeHTTP(lw, r)
 			served = true
 			return
 		}
-		enclave.ServeHTTP(w, r)
+		// WebSocket sessions are hijacked connections whose lifetime is the
+		// session, not a request — a duration observation there would be
+		// noise, so they proxy unwrapped.
+		if isWebSocketUpgrade(r) {
+			enclave.ServeHTTP(w, r)
+			return
+		}
+		sr := &statusRecorder{ResponseWriter: w}
+		served := false
+		defer func() {
+			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, sr.status, !served, requestStart)
+		}()
+		enclave.ServeHTTP(sr, r)
+		served = true
 	})
 
 	// Setup graceful shutdown

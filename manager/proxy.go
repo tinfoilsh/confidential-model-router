@@ -189,6 +189,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// tripped recovery probe must still return the breaker to open.
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
+			RequestErrorsTotal.WithLabelValues(modelName, "body_too_large").Inc()
 			log.WithFields(log.Fields{
 				"model":   modelName,
 				"enclave": host,
@@ -237,6 +238,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		if resp.StatusCode >= 500 {
 			recordFailure(httpFailureReason(resp.StatusCode))
 		} else {
+			if resp.StatusCode >= 400 {
+				BackendClientErrorsTotal.WithLabelValues(modelName, host, strconv.Itoa(resp.StatusCode)).Inc()
+			}
 			recordSuccess()
 		}
 
