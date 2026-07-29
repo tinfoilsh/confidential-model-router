@@ -266,6 +266,29 @@ var (
 		[]string{"model", "pool", "priority", "stream", "outcome"},
 	)
 
+	// RequestPromptTokens and RequestCompletionTokens record per-request
+	// token counts from response usage. Engine-side token histograms carry
+	// no pool, priority, or stream labels, so they cannot split a model's
+	// traffic by caller class or request mode. Requests whose responses
+	// report no usage are not observed.
+	RequestPromptTokens = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_request_prompt_tokens",
+			Help:    "Prompt tokens per request from response usage, by pool, priority, and stream mode",
+			Buckets: []float64{1, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000},
+		},
+		[]string{"model", "pool", "priority", "stream"},
+	)
+
+	RequestCompletionTokens = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_request_completion_tokens",
+			Help:    "Completion tokens per request from response usage, by pool, priority, and stream mode",
+			Buckets: []float64{1, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
+		},
+		[]string{"model", "pool", "priority", "stream"},
+	)
+
 	// DispatchSeconds tracks time from request arrival at the router to
 	// backend dispatch: body handling, route-context lookup, rate-limit
 	// checks, and replica selection. This span is otherwise only buried
