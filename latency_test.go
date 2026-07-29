@@ -774,3 +774,13 @@ func TestToolLatencyWriterCountsTokenlessStream(t *testing.T) {
 		t.Fatalf("expected one canceled count under the tool-runtime sentinel, got %v", got)
 	}
 }
+
+func TestNewLatencyWriterInitsNoFirstTokenSeries(t *testing.T) {
+	const model = "no-first-token-init-test"
+	newLatencyWriter(httptest.NewRecorder(), time.Now(), model, "enclave-1", "reserved", "configured")
+	for _, reason := range noFirstTokenReasons {
+		if got := counterState(t, manager.NoFirstTokenTotal.WithLabelValues(model, "enclave-1", "reserved", "configured", reason)); got != 0 {
+			t.Errorf("reason %s: got %v, want series initialized at 0", reason, got)
+		}
+	}
+}

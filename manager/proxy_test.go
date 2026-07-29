@@ -406,10 +406,23 @@ func tokenHistogramState(t *testing.T, o prometheus.Observer) (count uint64, sum
 	return pb.GetHistogram().GetSampleCount(), pb.GetHistogram().GetSampleSum()
 }
 
+func tokenCounterState(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	pb := &dto.Metric{}
+	if err := c.Write(pb); err != nil {
+		t.Fatalf("failed to read counter: %v", err)
+	}
+	return pb.GetCounter().GetValue()
+}
+
 func TestObserveTokenUsage(t *testing.T) {
 	const model = "token-usage-test"
 	ctx := WithTokenMetricLabels(context.Background(), "reserved", "configured")
-	observeTokenUsage(ctx, model, true, &tokencount.Usage{PromptTokens: 1200, CompletionTokens: 340})
+	observeTokenUsage(ctx, model, true, &tokencount.Usage{
+		PromptTokens:        1200,
+		CompletionTokens:    340,
+		PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 900},
+	})
 
 	count, sum := tokenHistogramState(t, RequestPromptTokens.WithLabelValues(model, "reserved", "configured", "streaming"))
 	if count != 1 || sum != 1200 {
@@ -420,11 +433,19 @@ func TestObserveTokenUsage(t *testing.T) {
 		t.Errorf("completion histogram: got count=%d sum=%v, want 1/340", count, sum)
 	}
 
-	// Non-streaming lands on its own series.
+	if got := tokenCounterState(t, RequestCachedPromptTokensTotal.WithLabelValues(model, "reserved", "configured", "streaming")); got != 900 {
+		t.Errorf("cached counter: got %v, want 900", got)
+	}
+
+	// Non-streaming lands on its own series; usage without cached-token
+	// details counts as fully uncached.
 	observeTokenUsage(ctx, model, false, &tokencount.Usage{PromptTokens: 80, CompletionTokens: 20})
 	count, sum = tokenHistogramState(t, RequestPromptTokens.WithLabelValues(model, "reserved", "configured", "non_streaming"))
 	if count != 1 || sum != 80 {
 		t.Errorf("non-streaming prompt histogram: got count=%d sum=%v, want 1/80", count, sum)
+	}
+	if got := tokenCounterState(t, RequestCachedPromptTokensTotal.WithLabelValues(model, "reserved", "configured", "non_streaming")); got != 0 {
+		t.Errorf("non-streaming cached counter: got %v, want 0", got)
 	}
 
 	// A context without labels must not observe anything.
