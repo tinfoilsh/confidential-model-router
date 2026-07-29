@@ -88,9 +88,6 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		m.updateLatest(0, time.Time{})
 		BackendQueueDepth.WithLabelValues(m.model, m.host).Set(0)
 		BackendOverloaded.WithLabelValues(m.model, m.host).Set(0)
-		// No polling means no scrapes: drop the freshness series so a
-		// staleness alert can't fire for an enclave with the guard off.
-		BackendLastScrapeTimestamp.DeleteLabelValues(m.model, m.host)
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
@@ -155,7 +152,6 @@ func (m *enclaveMetrics) run(ctx context.Context, interval time.Duration) {
 func (m *enclaveMetrics) scrape(ctx context.Context) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s/metrics", m.host), nil)
 	if err != nil {
-		BackendScrapeFailuresTotal.WithLabelValues(m.model, m.host, "request").Inc()
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
@@ -168,7 +164,6 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		BackendScrapeFailuresTotal.WithLabelValues(m.model, m.host, "poll").Inc()
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
@@ -179,7 +174,6 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 
 	waiting, err := extractWaiting(resp.Body)
 	if err != nil {
-		BackendScrapeFailuresTotal.WithLabelValues(m.model, m.host, "parse").Inc()
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
@@ -194,7 +188,6 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 	}).Debug("polled vLLM metrics")
 
 	BackendQueueDepth.WithLabelValues(m.model, m.host).Set(waiting)
-	BackendLastScrapeTimestamp.WithLabelValues(m.model, m.host).SetToCurrentTime()
 
 	m.updateLatest(waiting, time.Now())
 	m.evaluateThresholds(waiting)

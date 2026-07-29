@@ -1115,7 +1115,6 @@ func (e *Enclave) shutdown() {
 	BackendQueueDepth.DeleteLabelValues(e.modelName, e.host)
 	BackendOverloaded.DeleteLabelValues(e.modelName, e.host)
 	CircuitBreakerState.DeleteLabelValues(e.modelName, e.host)
-	BackendLastScrapeTimestamp.DeleteLabelValues(e.modelName, e.host)
 }
 
 func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {

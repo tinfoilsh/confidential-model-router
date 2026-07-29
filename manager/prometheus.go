@@ -288,29 +288,6 @@ var (
 		[]string{"model", "enclave"},
 	)
 
-	// BackendScrapeFailuresTotal counts failed backend /metrics scrapes.
-	// Sustained failures freeze BackendQueueDepth and, after the staleness
-	// limit, silently disable overload protection for the enclave.
-	BackendScrapeFailuresTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "router_backend_scrape_failures_total",
-			Help: "Failed backend /metrics scrapes, by stage (request, poll, parse)",
-		},
-		[]string{"model", "enclave", "stage"},
-	)
-
-	// BackendLastScrapeTimestamp is the unix time of the last successful
-	// backend /metrics scrape; time() - this > the model's staleness limit
-	// (sampleStalenessLimit, scaled by poll_interval_ms — see stalenessLimit)
-	// means the enclave's overload guard is running blind.
-	BackendLastScrapeTimestamp = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "router_backend_last_scrape_timestamp_seconds",
-			Help: "Unix time of the last successful backend /metrics scrape",
-		},
-		[]string{"model", "enclave"},
-	)
-
 	// OverloadFailOpenTotal counts requests admitted to an enclave whose
 	// overload sample was stale. A sustained rate means overload
 	// protection is effectively off for that enclave.
