@@ -167,6 +167,10 @@ var (
 	// scrapes. Env resolved after parse, like cache-route-secret, so the
 	// secret never reaches flag output.
 	metricsAPIKey = flag.String("metrics-api-key", "", "admin API key sent as a bearer token when polling enclave /metrics (env: METRICS_API_KEY)")
+	// metricsPollInterval sets the enclave /metrics scrape cadence — the
+	// freshness of the queue-depth signal behind overload rejection and
+	// cache-aware routing's overload step-aside.
+	metricsPollInterval = flag.Duration("metrics-poll-interval", getEnvOrDefaultDuration("METRICS_POLL_INTERVAL", time.Second), "enclave /metrics poll interval driving overload detection (env: METRICS_POLL_INTERVAL)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -455,6 +459,7 @@ func main() {
 		}
 		manager.SetMetricsPollAPIKey(strings.TrimSpace(key))
 	}
+	manager.SetMetricsPollInterval(*metricsPollInterval)
 
 	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
 	if err != nil {

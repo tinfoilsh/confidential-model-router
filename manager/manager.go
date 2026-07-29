@@ -38,8 +38,8 @@ type Enclave struct {
 	cb        *circuitBreaker
 
 	// inflight counts requests currently proxied through this enclave —
-	// a live load signal, unlike the polled queue depth, which can be up
-	// to sampleStalenessLimit stale when scrapes fail.
+	// a live load signal, unlike the polled queue depth, which can be a
+	// full staleness window old (see stalenessLimit) when scrapes fail.
 	inflight atomic.Int64
 }
 
