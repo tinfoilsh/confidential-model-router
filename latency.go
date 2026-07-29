@@ -30,6 +30,40 @@ func priorityClass(hasConfiguredPriority bool) string {
 	return "none"
 }
 
+// requestOutcome classifies a finished request for the duration histogram.
+// Context state outranks status: a client disconnect aborts the proxy copy
+// too, and that must not be misfiled as a backend error.
+func requestOutcome(ctx context.Context, status int, aborted bool) string {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return "canceled"
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "timeout"
+	case aborted, status >= 500:
+		return "error"
+	case status >= 400:
+		return "http_4xx"
+	default:
+		return "ok"
+	}
+}
+
+// observeRequestDuration feeds the end-to-end duration histogram. It must
+// run deferred, like latencyWriter.finish: a mid-stream backend death
+// unwinds the handler with http.ErrAbortHandler and that request's
+// duration must still be recorded. Non-streaming paths have no writer
+// wrapper and pass status 0: their outcome classifies from context and
+// abort state only, so a relayed backend error still lands in "ok".
+func observeRequestDuration(ctx context.Context, model, pool, class string, streaming bool, status int, aborted bool, start time.Time) {
+	stream := "non_streaming"
+	if streaming {
+		stream = "streaming"
+	}
+	manager.RequestDurationSeconds.
+		WithLabelValues(model, pool, class, stream, requestOutcome(ctx, status, aborted)).
+		Observe(time.Since(start).Seconds())
+}
+
 // latencyWriter wraps http.ResponseWriter to observe streaming latency:
 // legacy time-to-first-byte, inter-chunk gaps, and — via an incremental SSE
 // scan of the bytes actually sent to the client — time to the first

@@ -57,7 +57,9 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 				ExpectedPublicKey: enclave.tlsKeyFP,
 			},
 			timeout: responseHeaderTimeout,
-			onSlow:  func() {},
+			onSlow: func() {
+				SlowHeadersTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
+			},
 		},
 	}
 
@@ -163,9 +165,11 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
 	enclave.inflight.Add(1)
+	BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
 	resp, err := client.Do(req)
 	if err != nil {
 		enclave.inflight.Add(-1)
+		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Dec()
 		reason := classifyProxyError(err)
 		if reason == "canceled" {
 			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
@@ -214,6 +218,7 @@ func (b *inflightBody) Close() error {
 		return nil
 	}
 	b.enclave.inflight.Add(-1)
+	BackendInflight.WithLabelValues(b.enclave.modelName, b.enclave.host).Dec()
 	return b.ReadCloser.Close()
 }
 

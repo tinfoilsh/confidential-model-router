@@ -329,6 +329,7 @@ func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 		return false, 0, waiting
 	}
 	if time.Since(collected) > sampleStalenessLimit {
+		OverloadFailOpenTotal.WithLabelValues(m.model, m.host).Inc()
 		log.WithFields(log.Fields{
 			"model":     m.model,
 			"enclave":   m.host,

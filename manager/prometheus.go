@@ -247,4 +247,70 @@ var (
 		},
 		[]string{"model", "enclave"},
 	)
+
+	// RequestDurationSeconds tracks end-to-end request duration at the
+	// router, from arrival to the last byte written. Unlike the TTFT and
+	// first-token histograms this covers non-streaming requests too, so
+	// e2e latency budgets (e.g. a caller's client-side timeout) can be
+	// evaluated per pool and priority for every request mode. Streaming
+	// outcomes classify the response status via the latency writer;
+	// non-streaming requests are observed without a writer wrapper, so
+	// their outcome is context/abort state only — never http_4xx, and a
+	// relayed backend error status lands in "ok".
+	RequestDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_request_duration_seconds",
+			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome (status-classified only for streaming)",
+			Buckets: []float64{0.25, 0.5, 1, 2, 5, 7.5, 10, 15, 20, 30, 45, 60, 120, 300, 600},
+		},
+		[]string{"model", "pool", "priority", "stream", "outcome"},
+	)
+
+	// DispatchSeconds tracks time from request arrival at the router to
+	// backend dispatch: body handling, route-context lookup, rate-limit
+	// checks, and replica selection. This span is otherwise only buried
+	// inside FirstTokenSeconds, so a slow control-plane lookup would be
+	// indistinguishable from a slow backend.
+	DispatchSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_dispatch_seconds",
+			Help:    "Time from request arrival at the router to backend dispatch (parsing, route-context lookup, rate limiting, replica selection)",
+			Buckets: []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		},
+		[]string{"model"},
+	)
+
+	// BackendInflight mirrors each enclave's live in-flight request count —
+	// the signal least-loaded selection already uses. Series are not
+	// deleted at enclave shutdown: every increment is paired with exactly
+	// one decrement, so a retired enclave's series drains to zero.
+	BackendInflight = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_backend_inflight",
+			Help: "Requests currently in flight to each backend enclave, including internal dispatches",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// OverloadFailOpenTotal counts requests admitted to an enclave whose
+	// overload sample was stale. A sustained rate means overload
+	// protection is effectively off for that enclave.
+	OverloadFailOpenTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_overload_failopen_total",
+			Help: "Requests admitted because the enclave's overload sample was stale (guard failed open)",
+		},
+		[]string{"model", "enclave"},
+	)
+
+	// OverloadSkipsTotal counts selection moving off an overloaded enclave
+	// to the next candidate — including moves off a cache-aware pick, which
+	// otherwise register only as repeat_cold cache misses.
+	OverloadSkipsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_overload_skips_total",
+			Help: "Times replica selection skipped an overloaded enclave and moved to the next candidate",
+		},
+		[]string{"model", "enclave"},
+	)
 )

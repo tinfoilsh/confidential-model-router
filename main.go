@@ -845,6 +845,11 @@ func main() {
 						defer func() {
 							lw.aborted = !toolServed
 							lw.finish(r.Context())
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart)
+						}()
+					} else {
+						defer func() {
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, 0, !toolServed, requestStart)
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
@@ -1020,6 +1025,11 @@ func main() {
 
 		log.Debugf("%s serving request\n", enclave)
 
+		// Everything between arrival and here — body handling, route-context
+		// lookup, rate limiting, selection — is router overhead; isolate it
+		// so backend latency and router latency stay attributable.
+		manager.DispatchSeconds.WithLabelValues(modelName).Observe(time.Since(requestStart).Seconds())
+
 		// Hand the landing to the cache-route pipeline. Observed at
 		// dispatch so the picked replica counts as warm from prefill
 		// start; cannot affect the request.
@@ -1046,12 +1056,25 @@ func main() {
 			defer func() {
 				lw.aborted = !served
 				lw.finish(r.Context())
+				observeRequestDuration(r.Context(), modelName, poolLabel, lw.class, true, lw.status, lw.aborted, requestStart)
 			}()
 			enclave.ServeHTTP(lw, r)
 			served = true
 			return
 		}
+		// WebSocket sessions are hijacked connections whose lifetime is the
+		// session, not a request — a duration observation there would be
+		// noise, so they proxy unwrapped.
+		if isWebSocketUpgrade(r) {
+			enclave.ServeHTTP(w, r)
+			return
+		}
+		served := false
+		defer func() {
+			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart)
+		}()
 		enclave.ServeHTTP(w, r)
+		served = true
 	})
 
 	// Setup graceful shutdown
