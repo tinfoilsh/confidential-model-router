@@ -252,11 +252,15 @@ var (
 	// router, from arrival to the last byte written. Unlike the TTFT and
 	// first-token histograms this covers non-streaming requests too, so
 	// e2e latency budgets (e.g. a caller's client-side timeout) can be
-	// evaluated per pool and priority for every request mode.
+	// evaluated per pool and priority for every request mode. Streaming
+	// outcomes classify the response status via the latency writer;
+	// non-streaming requests are observed without a writer wrapper, so
+	// their outcome is context/abort state only — never http_4xx, and a
+	// relayed backend error status lands in "ok".
 	RequestDurationSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_request_duration_seconds",
-			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome",
+			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome (status-classified only for streaming)",
 			Buckets: []float64{0.25, 0.5, 1, 2, 5, 7.5, 10, 15, 20, 30, 45, 60, 120, 300, 600},
 		},
 		[]string{"model", "pool", "priority", "stream", "outcome"},

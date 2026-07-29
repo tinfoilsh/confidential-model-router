@@ -51,7 +51,9 @@ func requestOutcome(ctx context.Context, status int, aborted bool) string {
 // observeRequestDuration feeds the end-to-end duration histogram. It must
 // run deferred, like latencyWriter.finish: a mid-stream backend death
 // unwinds the handler with http.ErrAbortHandler and that request's
-// duration must still be recorded.
+// duration must still be recorded. Non-streaming paths have no writer
+// wrapper and pass status 0: their outcome classifies from context and
+// abort state only, so a relayed backend error still lands in "ok".
 func observeRequestDuration(ctx context.Context, model, pool, class string, streaming bool, status int, aborted bool, start time.Time) {
 	stream := "non_streaming"
 	if streaming {
@@ -60,43 +62,6 @@ func observeRequestDuration(ctx context.Context, model, pool, class string, stre
 	manager.RequestDurationSeconds.
 		WithLabelValues(model, pool, class, stream, requestOutcome(ctx, status, aborted)).
 		Observe(time.Since(start).Seconds())
-}
-
-// statusRecorder captures the response status on paths where no
-// latencyWriter is installed (non-streaming requests), so the duration
-// histogram can label outcomes there too.
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (sr *statusRecorder) WriteHeader(code int) {
-	// 1xx headers are interim; keep updating until the first
-	// non-informational code, mirroring latencyWriter.
-	if sr.status < 200 {
-		sr.status = code
-	}
-	sr.ResponseWriter.WriteHeader(code)
-}
-
-// Flush implements http.Flusher
-func (sr *statusRecorder) Flush() {
-	if flusher, ok := sr.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-// Hijack implements http.Hijacker when supported by the underlying ResponseWriter.
-func (sr *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hijacker, ok := sr.ResponseWriter.(http.Hijacker); ok {
-		return hijacker.Hijack()
-	}
-	return nil, nil, http.ErrNotSupported
-}
-
-// Unwrap returns the underlying ResponseWriter (for http.ResponseController)
-func (sr *statusRecorder) Unwrap() http.ResponseWriter {
-	return sr.ResponseWriter
 }
 
 // latencyWriter wraps http.ResponseWriter to observe streaming latency:

@@ -848,10 +848,8 @@ func main() {
 							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart)
 						}()
 					} else {
-						sr := &statusRecorder{ResponseWriter: w}
-						tw = sr
 						defer func() {
-							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, sr.status, !toolServed, requestStart)
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, 0, !toolServed, requestStart)
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
@@ -1071,12 +1069,11 @@ func main() {
 			enclave.ServeHTTP(w, r)
 			return
 		}
-		sr := &statusRecorder{ResponseWriter: w}
 		served := false
 		defer func() {
-			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, sr.status, !served, requestStart)
+			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart)
 		}()
-		enclave.ServeHTTP(sr, r)
+		enclave.ServeHTTP(w, r)
 		served = true
 	})
 
