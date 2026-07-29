@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	log "github.com/sirupsen/logrus"
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
@@ -60,11 +59,6 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 			},
 			timeout: responseHeaderTimeout,
 			onSlow: func() {
-				log.WithFields(log.Fields{
-					"model":   enclave.modelName,
-					"enclave": enclave.host,
-					"timeout": responseHeaderTimeout,
-				}).Warn("backend slow: response headers not received within timeout")
 				SlowHeadersTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 			},
 		},

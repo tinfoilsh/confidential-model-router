@@ -978,9 +978,6 @@ func main() {
 		}
 		if enclave == nil {
 			manager.RequestErrorsTotal.WithLabelValues(modelName, "no_available_enclave").Inc()
-			log.WithFields(log.Fields{
-				"model": modelName,
-			}).Error("no available enclave for model")
 			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
 			return
 		}
