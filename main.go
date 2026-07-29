@@ -1046,6 +1046,10 @@ func main() {
 			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
 
+		// Per-request token counts surface only in the proxy's usage
+		// handler; carry the labels resolved here to it.
+		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
 			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
 			// finish must run via defer: a backend that dies mid-stream
