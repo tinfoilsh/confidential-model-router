@@ -170,12 +170,32 @@ func (s *Shadow) Decide(model string, req *Request, pool Pool, cfg Settings) (d 
 	}
 	ranked := rank(req.Key, pool.Candidates)
 	r := replicationFactor(s.peekRate(model, req.Key), cfg.SplitThresholdRPM, len(ranked))
-	pick := leastLoaded(ranked[:r]).Host
+	pick, demoted := cappedPick(ranked, r, cfg.MaxInflightDelta)
+	if demoted {
+		LoadDemotionsTotal.WithLabelValues(model).Inc()
+	}
+	// Over-cap hosts sink below every within-cap one so overload spill from
+	// the pick falls through to the key's next warm *eligible* copy instead
+	// of re-concentrating on an already-deep replica.
 	order := make([]string, 0, len(ranked))
 	order = append(order, pick)
-	for _, c := range ranked {
-		if c.Host != pick {
-			order = append(order, c.Host)
+	if delta := cfg.MaxInflightDelta; delta >= 0 {
+		limit := minInFlight(ranked) + delta
+		for _, c := range ranked {
+			if c.Host != pick && c.InFlight <= limit {
+				order = append(order, c.Host)
+			}
+		}
+		for _, c := range ranked {
+			if c.Host != pick && c.InFlight > limit {
+				order = append(order, c.Host)
+			}
+		}
+	} else {
+		for _, c := range ranked {
+			if c.Host != pick {
+				order = append(order, c.Host)
+			}
 		}
 	}
 	return &Decision{
@@ -242,6 +262,12 @@ func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost strin
 		RepeatIntervalSeconds.WithLabelValues(model).Observe(res.interval.Seconds())
 	}
 	KeyRPM.WithLabelValues(model).Observe(res.rpm)
+	// Enforced decisions count their demotions in Decide; this covers the
+	// shadow simulation, so the would-be demotion rate is visible before a
+	// pool is ever enforced.
+	if res.demoted {
+		LoadDemotionsTotal.WithLabelValues(model).Inc()
+	}
 
 	// A breaker probe serves from outside the ranked membership (health
 	// beats cache), so the dispatch was not a random draw from the
@@ -296,7 +322,8 @@ type keyedResult struct {
 	repeat   bool // the key was already in the table
 	interval time.Duration
 	rpm      float64
-	pick     string // least-loaded of the top-R ranking; unset when a Decision was supplied
+	pick     string // capped least-loaded of the top-R ranking; unset when a Decision was supplied
+	demoted  bool   // the load cap displaced the warm pick; unset when a Decision was supplied
 	r        int
 }
 
@@ -351,7 +378,10 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	} else {
 		ranked := rank(key, candidates)
 		res.r = replicationFactor(res.rpm, cfg.SplitThresholdRPM, len(ranked))
-		res.pick = leastLoaded(ranked[:res.r]).Host
+		// The cap applies to the shadow pick too, so the simulated
+		// placement distribution (PicksTotal) shows what enforcement
+		// would actually do under the same settings.
+		res.pick, res.demoted = cappedPick(ranked, res.r, cfg.MaxInflightDelta)
 		home = ranked[0].Host
 	}
 	s.shiftCountLocked(model, e.home, e.r, home, res.r)

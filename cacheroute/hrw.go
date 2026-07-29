@@ -79,3 +79,40 @@ func leastLoaded(ranked []Candidate) Candidate {
 	}
 	return best
 }
+
+// minInFlight returns the smallest in-flight count among candidates.
+func minInFlight(candidates []Candidate) int {
+	m := candidates[0].InFlight
+	for _, c := range candidates[1:] {
+		if c.InFlight < m {
+			m = c.InFlight
+		}
+	}
+	return m
+}
+
+// cappedPick is leastLoaded over the key's warm set (ranked[:r]) subject to
+// the load cap: a warm candidate is eligible only while it is at most delta
+// requests deeper than the least-loaded candidate in the whole ranking.
+// Comparing against the pool minimum rather than an absolute level means a
+// uniformly busy pool keeps its warm picks — the cap only bites when
+// stickiness has made a replica an outlier. When the entire warm set is over
+// the cap the pick falls back to the least-loaded candidate overall (within
+// the cap by definition) and demoted reports the sacrificed warm pick.
+// A negative delta disables the cap.
+func cappedPick(ranked []Candidate, r, delta int) (host string, demoted bool) {
+	if delta < 0 {
+		return leastLoaded(ranked[:r]).Host, false
+	}
+	limit := minInFlight(ranked) + delta
+	best := -1
+	for i, c := range ranked[:r] {
+		if c.InFlight <= limit && (best < 0 || c.InFlight < ranked[best].InFlight) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return ranked[best].Host, false
+	}
+	return leastLoaded(ranked).Host, true
+}

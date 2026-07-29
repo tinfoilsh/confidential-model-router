@@ -93,6 +93,7 @@ type Settings struct {
 	Retention         time.Duration // how long a replica stays warm for a key
 	MinPromptBytes    int           // eligibility floor on whole-prompt bytes
 	SplitThresholdRPM float64       // per-key rpm per replica of warm set
+	MaxInflightDelta  int           // load cap on warm picks; negative = disabled
 	Secret            string        // routing secret from SetSecret; "" when none installed
 }
 
@@ -104,6 +105,7 @@ func SettingsFrom(c *config.CacheRouteConfig) Settings {
 		Retention:         DefaultRetention,
 		MinPromptBytes:    DefaultMinPromptBytes,
 		SplitThresholdRPM: DefaultSplitThresholdRPM,
+		MaxInflightDelta:  -1,
 		Secret:            currentSecret(),
 	}
 	if c == nil {
@@ -118,6 +120,9 @@ func SettingsFrom(c *config.CacheRouteConfig) Settings {
 	}
 	if c.SplitThresholdRPM > 0 {
 		s.SplitThresholdRPM = c.SplitThresholdRPM
+	}
+	if c.MaxInflightDelta != nil && *c.MaxInflightDelta >= 0 {
+		s.MaxInflightDelta = *c.MaxInflightDelta
 	}
 	return s
 }
