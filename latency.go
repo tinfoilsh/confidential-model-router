@@ -95,7 +95,20 @@ type latencyWriter struct {
 	aborted   bool // ServeHTTP unwound by panic: the proxy aborted mid-stream
 }
 
+// noFirstTokenReasons enumerates every reason finish can record. Touching
+// all of them when a writer is created births the counter series at zero,
+// so the first failure after a router restart is a visible 0->1 increment
+// instead of a series appearing mid-air, which rate() cannot count.
+var noFirstTokenReasons = [...]string{"canceled", "timeout", "error", "no_output"}
+
+func initNoFirstTokenSeries(model, enclave, pool, class string) {
+	for _, reason := range noFirstTokenReasons {
+		manager.NoFirstTokenTotal.WithLabelValues(model, enclave, pool, class, reason).Add(0)
+	}
+}
+
 func newLatencyWriter(w http.ResponseWriter, arrival time.Time, model, enclave, pool, class string) *latencyWriter {
+	initNoFirstTokenSeries(model, enclave, pool, class)
 	return &latencyWriter{
 		ResponseWriter: w,
 		model:          model,
@@ -122,6 +135,7 @@ const toolRuntimeLabel = "tool-runtime"
 // only the final answer would misread a request the user is actively
 // watching as an SLA violation.
 func newToolLatencyWriter(w http.ResponseWriter, arrival time.Time, model, class string) *latencyWriter {
+	initNoFirstTokenSeries(model, toolRuntimeLabel, toolRuntimeLabel, class)
 	return &latencyWriter{
 		ResponseWriter: w,
 		model:          model,
