@@ -35,6 +35,7 @@ type Enclave struct {
 	predicate attestation.PredicateType
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
+	health    *enclaveHealthProber
 	cb        *circuitBreaker
 
 	// inflight counts requests currently proxied through this enclave —
@@ -330,7 +331,10 @@ func (em *EnclaveManager) addEnclave(
 	}
 
 	cb := newCircuitBreaker()
-	model.Enclaves[host] = &Enclave{
+	if current := model.Enclaves[host]; current != nil && current.health != nil {
+		current.health.shutdown()
+	}
+	enclave := &Enclave{
 		host:      host,
 		modelName: modelName,
 		predicate: verification.Measurement.Type,
@@ -338,9 +342,12 @@ func (em *EnclaveManager) addEnclave(
 		hpkeKey:   verification.HPKEPublicKey,
 		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
 		metrics:   newEnclaveMetrics(host, modelName),
+		health:    newEnclaveHealthProber(host, modelName, verification.TLSPublicKeyFP),
 		cb:        cb,
 	}
-	model.Enclaves[host].updateOverloadConfig(model.Overload)
+	model.Enclaves[host] = enclave
+	enclave.updateOverloadConfig(model.Overload)
+	enclave.health.start()
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
@@ -1109,6 +1116,9 @@ func (e *Enclave) shutdown() {
 	}
 	if e.metrics != nil {
 		e.metrics.shutdown()
+	}
+	if e.health != nil {
+		e.health.shutdown()
 	}
 	if e.cb != nil {
 		e.cb.Retire()
