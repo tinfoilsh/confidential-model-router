@@ -71,6 +71,21 @@ var (
 		[]string{"model"},
 	)
 
+	// LoadDemotionsTotal counts keyed requests whose whole warm set was
+	// over the load cap (max_inflight_delta), so the pick fell back to the
+	// least-loaded replica — a cache win given up to preserve balance.
+	// Recorded at landing for enforced decisions and shadow simulations
+	// alike (never for requests rejected before dispatch), so its rate is
+	// directly comparable to the other cache-route series; the demotion
+	// share of keyed traffic is the tuning signal for the cap.
+	LoadDemotionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_cache_route_load_demotions_total",
+			Help: "Keyed requests routed to the least-loaded replica instead of a warm one because the warm set exceeded the load cap",
+		},
+		[]string{"model"},
+	)
+
 	// RepeatIntervalSeconds measures time between sightings of a key.
 	// Buckets straddle every plausible retention window.
 	RepeatIntervalSeconds = promauto.NewHistogramVec(

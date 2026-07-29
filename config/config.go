@@ -35,6 +35,12 @@ type CacheRouteConfig struct {
 	RetentionWindowMinutes int     `yaml:"retention_window_minutes,omitempty"`
 	MinPromptBytes         int     `yaml:"min_prompt_bytes,omitempty"`
 	SplitThresholdRPM      float64 `yaml:"split_threshold_rpm,omitempty"`
+	// MaxInflightDelta caps how much deeper in-flight a warm pick may be
+	// than the pool's least-loaded replica before the pick falls back to
+	// least-loaded routing. 0 is the strictest cap (warm only on a tie);
+	// omitted or negative disables the cap. A pointer so 0 and omitted
+	// stay distinguishable.
+	MaxInflightDelta *int `yaml:"max_inflight_delta,omitempty"`
 }
 
 // ReservationConfig dedicates a subset of a model's enclaves to the listed
