@@ -289,6 +289,18 @@ var (
 		[]string{"model", "pool", "priority", "stream"},
 	)
 
+	// RequestCachedPromptTokensTotal accumulates the cached share of prompt
+	// tokens from response usage; RequestPromptTokens' _sum minus this is
+	// the recomputed-prefill volume per pool, priority, and stream mode.
+	// Usage without cached-token details counts as fully uncached.
+	RequestCachedPromptTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_request_cached_prompt_tokens_total",
+			Help: "Cached prompt tokens from response usage, by pool, priority, and stream mode",
+		},
+		[]string{"model", "pool", "priority", "stream"},
+	)
+
 	// DispatchSeconds tracks time from request arrival at the router to
 	// backend dispatch: body handling, route-context lookup, rate-limit
 	// checks, and replica selection. This span is otherwise only buried

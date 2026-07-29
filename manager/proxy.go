@@ -69,6 +69,9 @@ func observeTokenUsage(ctx context.Context, model string, streaming bool, usage 
 		Observe(float64(usage.PromptTokens))
 	RequestCompletionTokens.WithLabelValues(model, labels.pool, labels.priority, stream).
 		Observe(float64(usage.CompletionTokens))
+	cached, _ := usage.CachedPromptTokens()
+	RequestCachedPromptTokensTotal.WithLabelValues(model, labels.pool, labels.priority, stream).
+		Add(float64(cached))
 }
 
 // classifyProxyError maps a transport-level error to a bounded set of reason
