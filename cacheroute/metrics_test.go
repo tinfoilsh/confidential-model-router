@@ -35,6 +35,7 @@ func TestMetricContract(t *testing.T) {
 	// values.
 	KeyEvictionsTotal.WithLabelValues(model, "ttl")
 	RandomMatchTotal.WithLabelValues(model)
+	LoadDemotionsTotal.WithLabelValues(model)
 
 	want := map[string][]string{
 		"router_cache_route_requests_total":           {"model", "outcome"},
@@ -42,6 +43,7 @@ func TestMetricContract(t *testing.T) {
 		"router_cache_route_reuse_prompt_bytes_total": {"model", "outcome"},
 		"router_cache_route_picks_total":              {"model", "enclave", "r"},
 		"router_cache_route_random_match_total":       {"model"},
+		"router_cache_route_load_demotions_total":     {"model"},
 		"router_cache_route_repeat_interval_seconds":  {"model"},
 		"router_cache_route_key_rpm":                  {"model"},
 		"router_cache_route_key_evictions_total":      {"model", "reason"},

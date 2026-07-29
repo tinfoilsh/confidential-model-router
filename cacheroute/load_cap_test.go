@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
@@ -108,6 +109,47 @@ func TestDecideDisabledCapKeepsFullRanking(t *testing.T) {
 	d := s.Decide("m", req, pool, cfg)
 	if d == nil || len(d.Order) != 3 {
 		t.Fatalf("expected full order, got %+v", d)
+	}
+}
+
+// TestLoadDemotionCountedAtLandingNotDecision pins where the demotion is
+// metered: a decision alone must not move the counter — the request it
+// routes can still be rejected before dispatch — only the landing may.
+func TestLoadDemotionCountedAtLandingNotDecision(t *testing.T) {
+	s := NewShadow(prometheus.NewRegistry())
+	defer s.Close()
+
+	model := "demote-" + t.Name()
+	key := testKey(42)
+	candidates := hosts("a", "b", "c")
+	// Make the key's whole warm set (r=1: its home) the load outlier.
+	home := rank(key, candidates)[0].Host
+	for i := range candidates {
+		if candidates[i].Host == home {
+			candidates[i].InFlight = 9
+		}
+	}
+	pool := Pool{Size: 3, Candidates: candidates}
+	cfg := Settings{Mode: ModeEnforced, Retention: DefaultRetention, SplitThresholdRPM: DefaultSplitThresholdRPM, MaxInflightDelta: 4}
+	req := &Request{Outcome: OutcomeKeyed, Key: key, PromptBytes: 512}
+
+	counter := LoadDemotionsTotal.WithLabelValues(model)
+	before := testutil.ToFloat64(counter)
+
+	d := s.Decide(model, req, pool, cfg)
+	if d == nil {
+		t.Fatal("expected a decision")
+	}
+	if d.Order[0] == home {
+		t.Fatalf("outlier home must not be the pick: %v", d.Order)
+	}
+	if got := testutil.ToFloat64(counter); got != before {
+		t.Fatalf("demotion counted at decision time: %v -> %v", before, got)
+	}
+
+	s.ObserveLanding(model, req, d, d.Order[0], cfg)
+	if got := testutil.ToFloat64(counter); got != before+1 {
+		t.Fatalf("demotion not counted at landing: %v -> %v", before, got)
 	}
 }
 

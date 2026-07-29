@@ -148,6 +148,7 @@ type Decision struct {
 	pool    Pool
 	home    string
 	r       int
+	demoted bool // the load cap displaced the warm pick
 	elapsed time.Duration
 }
 
@@ -170,10 +171,11 @@ func (s *Shadow) Decide(model string, req *Request, pool Pool, cfg Settings) (d 
 	}
 	ranked := rank(req.Key, pool.Candidates)
 	r := replicationFactor(s.peekRate(model, req.Key), cfg.SplitThresholdRPM, len(ranked))
+	// The demotion is metered at landing (see observe), not here: a request
+	// this decision routes can still be rejected before dispatch, and a
+	// demotion count without a landing would diverge from every other
+	// cache-route series exactly during the overload windows it is read in.
 	pick, demoted := cappedPick(ranked, r, cfg.MaxInflightDelta)
-	if demoted {
-		LoadDemotionsTotal.WithLabelValues(model).Inc()
-	}
 	// Over-cap hosts sink below every within-cap one so overload spill from
 	// the pick falls through to the key's next warm *eligible* copy instead
 	// of re-concentrating on an already-deep replica.
@@ -203,6 +205,7 @@ func (s *Shadow) Decide(model string, req *Request, pool Pool, cfg Settings) (d 
 		pool:    pool,
 		home:    ranked[0].Host,
 		r:       r,
+		demoted: demoted,
 		elapsed: time.Since(start),
 	}
 }
@@ -262,9 +265,9 @@ func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost strin
 		RepeatIntervalSeconds.WithLabelValues(model).Observe(res.interval.Seconds())
 	}
 	KeyRPM.WithLabelValues(model).Observe(res.rpm)
-	// Enforced decisions count their demotions in Decide; this covers the
-	// shadow simulation, so the would-be demotion rate is visible before a
-	// pool is ever enforced.
+	// Counted here for enforced decisions and shadow simulations alike, so
+	// both modes meter demotions over the same population as every other
+	// series: requests that landed.
 	if res.demoted {
 		LoadDemotionsTotal.WithLabelValues(model).Inc()
 	}
@@ -375,6 +378,7 @@ func (s *Shadow) observeKeyed(model string, key Key, candidates []Candidate, act
 	home := ""
 	if d != nil {
 		home, res.r = d.home, d.r
+		res.demoted = d.demoted
 	} else {
 		ranked := rank(key, candidates)
 		res.r = replicationFactor(res.rpm, cfg.SplitThresholdRPM, len(ranked))
