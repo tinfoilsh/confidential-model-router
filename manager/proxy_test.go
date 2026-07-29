@@ -10,11 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
-
 	"github.com/tinfoilsh/confidential-model-router/billing"
-	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
@@ -390,47 +386,5 @@ func TestSlowHeaderTripper_SlowResponse_RequestNotKilled(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func tokenHistogramState(t *testing.T, o prometheus.Observer) (count uint64, sum float64) {
-	t.Helper()
-	m, ok := o.(prometheus.Metric)
-	if !ok {
-		t.Fatalf("observer is not a metric: %T", o)
-	}
-	pb := &dto.Metric{}
-	if err := m.Write(pb); err != nil {
-		t.Fatalf("failed to read histogram: %v", err)
-	}
-	return pb.GetHistogram().GetSampleCount(), pb.GetHistogram().GetSampleSum()
-}
-
-func TestObserveTokenUsage(t *testing.T) {
-	const model = "token-usage-test"
-	ctx := WithTokenMetricLabels(context.Background(), "reserved", "configured")
-	observeTokenUsage(ctx, model, true, &tokencount.Usage{PromptTokens: 1200, CompletionTokens: 340})
-
-	count, sum := tokenHistogramState(t, RequestPromptTokens.WithLabelValues(model, "reserved", "configured", "streaming"))
-	if count != 1 || sum != 1200 {
-		t.Errorf("prompt histogram: got count=%d sum=%v, want 1/1200", count, sum)
-	}
-	count, sum = tokenHistogramState(t, RequestCompletionTokens.WithLabelValues(model, "reserved", "configured", "streaming"))
-	if count != 1 || sum != 340 {
-		t.Errorf("completion histogram: got count=%d sum=%v, want 1/340", count, sum)
-	}
-
-	// Non-streaming lands on its own series.
-	observeTokenUsage(ctx, model, false, &tokencount.Usage{PromptTokens: 80, CompletionTokens: 20})
-	count, sum = tokenHistogramState(t, RequestPromptTokens.WithLabelValues(model, "reserved", "configured", "non_streaming"))
-	if count != 1 || sum != 80 {
-		t.Errorf("non-streaming prompt histogram: got count=%d sum=%v, want 1/80", count, sum)
-	}
-
-	// A context without labels must not observe anything.
-	observeTokenUsage(context.Background(), model, true, &tokencount.Usage{PromptTokens: 999})
-	count, _ = tokenHistogramState(t, RequestPromptTokens.WithLabelValues(model, "reserved", "configured", "streaming"))
-	if count != 1 {
-		t.Errorf("unlabeled context observed: count=%d, want 1", count)
 	}
 }

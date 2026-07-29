@@ -93,7 +93,6 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if r.ContentLength > maxRequestBodySize {
-		manager.RequestErrorsTotal.WithLabelValues("unknown", "body_too_large").Inc()
 		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return false
 	}
@@ -104,7 +103,6 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 func writeRequestBodyError(w http.ResponseWriter, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		manager.RequestErrorsTotal.WithLabelValues("unknown", "body_too_large").Inc()
 		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -861,7 +859,6 @@ func main() {
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
-						manager.RequestErrorsTotal.WithLabelValues(modelName, "tool_runtime_failed").Inc()
 						jsonError(tw, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
 					}
 					toolServed = true
@@ -899,7 +896,6 @@ func main() {
 			// and the authoritative lookup below, forwarding an unsanitized
 			// body to the engine.
 			if _, found := em.GetModel(modelName); !found {
-				manager.RequestErrorsTotal.WithLabelValues("unknown", "model_not_found").Inc()
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
@@ -921,7 +917,6 @@ func main() {
 
 		model, found := em.GetModel(modelName)
 		if !found {
-			manager.RequestErrorsTotal.WithLabelValues("unknown", "model_not_found").Inc()
 			jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 			return
 		}
@@ -977,7 +972,6 @@ func main() {
 			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
 		if enclave == nil {
-			manager.RequestErrorsTotal.WithLabelValues(modelName, "no_available_enclave").Inc()
 			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
 			return
 		}
@@ -1053,10 +1047,6 @@ func main() {
 		if probeClaim != nil {
 			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
 		}
-
-		// Per-request token counts surface only in the proxy's usage
-		// handler; carry the labels resolved here to it.
-		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
 
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
 			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))

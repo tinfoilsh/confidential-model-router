@@ -262,29 +262,6 @@ var (
 		[]string{"model", "pool", "priority", "stream", "outcome"},
 	)
 
-	// RequestPromptTokens and RequestCompletionTokens record per-request
-	// token counts from response usage. Engine-side token histograms carry
-	// no pool, priority, or stream labels, so they cannot split a model's
-	// traffic by caller class or request mode. Requests whose responses
-	// report no usage are not observed.
-	RequestPromptTokens = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "router_request_prompt_tokens",
-			Help:    "Prompt tokens per request from response usage, by pool, priority, and stream mode",
-			Buckets: []float64{1, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000},
-		},
-		[]string{"model", "pool", "priority", "stream"},
-	)
-
-	RequestCompletionTokens = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "router_request_completion_tokens",
-			Help:    "Completion tokens per request from response usage, by pool, priority, and stream mode",
-			Buckets: []float64{1, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
-		},
-		[]string{"model", "pool", "priority", "stream"},
-	)
-
 	// DispatchSeconds tracks time from request arrival at the router to
 	// backend dispatch: body handling, route-context lookup, rate-limit
 	// checks, and replica selection. This span is otherwise only buried
@@ -311,30 +288,6 @@ var (
 		[]string{"model", "enclave"},
 	)
 
-	// RequestErrorsTotal counts router-issued request errors that never
-	// reach a backend. The 404 and 413 sites fire before the model name is
-	// validated (or parsed), so they carry model="unknown" rather than an
-	// unbounded caller-controlled label value.
-	RequestErrorsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "router_request_errors_total",
-			Help: "Router-issued request errors, by reason (model_not_found, no_available_enclave, body_too_large, tool_runtime_failed)",
-		},
-		[]string{"model", "reason"},
-	)
-
-	// BackendClientErrorsTotal counts backend 4xx responses. These are
-	// breaker successes (a 4xx is the backend answering) and so are
-	// otherwise invisible inside ProxySuccessTotal — including a vLLM 429,
-	// which is precisely the signal an overloaded backend emits.
-	BackendClientErrorsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "router_backend_client_errors_total",
-			Help: "Backend 4xx responses proxied to clients, by status code",
-		},
-		[]string{"model", "enclave", "status"},
-	)
-
 	// BackendScrapeFailuresTotal counts failed backend /metrics scrapes.
 	// Sustained failures freeze BackendQueueDepth and, after the staleness
 	// limit, silently disable overload protection for the enclave.
@@ -347,8 +300,9 @@ var (
 	)
 
 	// BackendLastScrapeTimestamp is the unix time of the last successful
-	// backend /metrics scrape; time() - this > sampleStalenessLimit means
-	// the enclave's overload guard is running blind.
+	// backend /metrics scrape; time() - this > the model's staleness limit
+	// (sampleStalenessLimit, scaled by poll_interval_ms — see stalenessLimit)
+	// means the enclave's overload guard is running blind.
 	BackendLastScrapeTimestamp = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "router_backend_last_scrape_timestamp_seconds",

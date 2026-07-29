@@ -42,35 +42,6 @@ const (
 	websearchModel = "websearch"
 )
 
-// tokenLabelsKey carries the landing pool and priority class from the
-// dispatch site to the proxy's usage handler — the only place per-request
-// token counts are known.
-type tokenLabelsKey struct{}
-
-type tokenLabels struct{ pool, priority string }
-
-// WithTokenMetricLabels attaches the labels used on the per-request token
-// histograms. Requests dispatched without them (tool-loop internals,
-// websocket sessions) are not observed.
-func WithTokenMetricLabels(ctx context.Context, pool, priority string) context.Context {
-	return context.WithValue(ctx, tokenLabelsKey{}, tokenLabels{pool: pool, priority: priority})
-}
-
-func observeTokenUsage(ctx context.Context, model string, streaming bool, usage *tokencount.Usage) {
-	labels, ok := ctx.Value(tokenLabelsKey{}).(tokenLabels)
-	if !ok {
-		return
-	}
-	stream := "non_streaming"
-	if streaming {
-		stream = "streaming"
-	}
-	RequestPromptTokens.WithLabelValues(model, labels.pool, labels.priority, stream).
-		Observe(float64(usage.PromptTokens))
-	RequestCompletionTokens.WithLabelValues(model, labels.pool, labels.priority, stream).
-		Observe(float64(usage.CompletionTokens))
-}
-
 // classifyProxyError maps a transport-level error to a bounded set of reason
 // labels for Prometheus. The raw error message is logged but not exposed as a
 // label to avoid unbounded cardinality.
@@ -218,7 +189,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// tripped recovery probe must still return the breaker to open.
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			RequestErrorsTotal.WithLabelValues(modelName, "body_too_large").Inc()
 			log.WithFields(log.Fields{
 				"model":   modelName,
 				"enclave": host,
@@ -267,9 +237,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		if resp.StatusCode >= 500 {
 			recordFailure(httpFailureReason(resp.StatusCode))
 		} else {
-			if resp.StatusCode >= 400 {
-				BackendClientErrorsTotal.WithLabelValues(modelName, host, strconv.Itoa(resp.StatusCode)).Inc()
-			}
 			recordSuccess()
 		}
 
@@ -342,12 +309,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
 					wrapper.SetUsage(usage)
 				}
-			}
-
-			// The websearch parent call is skipped like its billing event:
-			// the inner responder call re-enters the proxy and records its own.
-			if modelName != websearchModel {
-				observeTokenUsage(req.Context(), modelName, streaming, usage)
 			}
 
 			// Add billing event

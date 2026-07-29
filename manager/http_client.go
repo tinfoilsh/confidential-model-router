@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"sync/atomic"
 
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
@@ -190,9 +189,6 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 			enclave.cb.RecordFailure()
 		}
 	} else {
-		if resp.StatusCode >= 400 {
-			BackendClientErrorsTotal.WithLabelValues(enclave.modelName, enclave.host, strconv.Itoa(resp.StatusCode)).Inc()
-		}
 		ProxySuccessTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 		if enclave.cb != nil {
 			enclave.cb.RecordSuccess()
