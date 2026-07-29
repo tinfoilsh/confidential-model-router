@@ -177,6 +177,18 @@ var (
 		[]string{"model", "pool"},
 	)
 
+	// ReservedPoolSize publishes each model's effective reserved-host count
+	// from config, so dashboards don't have to mirror the reservation by
+	// hand. Counts only reserved hosts that exist in the configured
+	// hostnames, matching what routing actually uses.
+	ReservedPoolSize = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_reserved_pool_size",
+			Help: "Configured reserved enclaves per model (0 when the model has no reservations)",
+		},
+		[]string{"model"},
+	)
+
 	// CacheSaltInjectionsTotal tracks requests injected with a derived cache_salt
 	CacheSaltInjectionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

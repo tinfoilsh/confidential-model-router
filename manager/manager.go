@@ -71,7 +71,7 @@ type Model struct {
 // counting them would silently shrink an org's effective pool (or leave it
 // empty, routing all its traffic to spill). The caller must hold m.mu or
 // have exclusive access (addModel, before publish).
-func (m *Model) applyReservations(reservations []config.ReservationConfig, hostnames []string) {
+func (m *Model) applyReservations(name string, reservations []config.ReservationConfig, hostnames []string) {
 	m.Reservations = reservations
 
 	known := make(map[string]bool, len(hostnames))
@@ -106,6 +106,7 @@ func (m *Model) applyReservations(reservations []config.ReservationConfig, hostn
 			}
 		}
 	}
+	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
 	if len(byOrg) == 0 {
 		m.reservedByOrg = nil
 		m.sharedHosts = nil
@@ -917,7 +918,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		CacheRoute:        modelConfig.CacheRoute,
 		expectedHosts:     len(modelConfig.Hostnames),
 	}
-	model.applyReservations(modelConfig.Reservations, modelConfig.Hostnames)
+	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
 	em.models.Store(modelName, model)
 	cacheroute.SetMode(modelName, modelConfig.CacheRoute)
 	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
@@ -1000,7 +1001,7 @@ func (em *EnclaveManager) sync() error {
 				log.Warnf("model %s no longer in config", modelName)
 				model.mu.Lock()
 				model.expectedHosts = 0
-				model.applyReservations(nil, nil)
+				model.applyReservations(modelName, nil, nil)
 				for _, enclave := range model.Enclaves {
 					enclave.shutdown()
 				}
@@ -1027,7 +1028,7 @@ func (em *EnclaveManager) sync() error {
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
-			model.applyReservations(configModel.Reservations, configModel.Hostnames)
+			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
 			}

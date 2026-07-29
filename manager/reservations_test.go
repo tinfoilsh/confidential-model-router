@@ -3,6 +3,9 @@ package manager
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
@@ -10,7 +13,7 @@ import (
 // for org-reserved. a and b form the shared pool.
 func newReservedTestModel() *Model {
 	m := newTestModel("a", "b", "c")
-	m.applyReservations(
+	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{{OrgIDs: []string{"org-reserved"}, Enclaves: []string{"c"}}},
 		[]string{"a", "b", "c"},
 	)
@@ -55,7 +58,7 @@ func TestReservationPools(t *testing.T) {
 // Reservations with no orgs or no enclaves are dropped.
 func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 	m := newTestModel("a", "b")
-	m.applyReservations(
+	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{
 			{OrgIDs: nil, Enclaves: []string{"a"}},
 			{OrgIDs: []string{""}, Enclaves: []string{"a"}},
@@ -73,7 +76,7 @@ func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 // pinned to an empty pool.
 func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 	m := newTestModel("a", "b")
-	m.applyReservations(
+	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{
 			{OrgIDs: []string{"org-x"}, Enclaves: []string{"b", "typo-host"}},
 			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}},
@@ -100,7 +103,7 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 // One reservation entry can dedicate a pool to several orgs.
 func TestReservationPoolsMultiOrg(t *testing.T) {
 	m := newTestModel("a", "b", "c")
-	m.applyReservations(
+	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{{OrgIDs: []string{"org-reserved", "org-partner"}, Enclaves: []string{"b", "c"}}},
 		[]string{"a", "b", "c"},
 	)
@@ -295,5 +298,30 @@ func TestCacheRoutePoolIn(t *testing.T) {
 	// nil filter preserves the unrestricted behavior.
 	if pool := m.CacheRoutePoolIn(nil); pool.Size != 3 {
 		t.Fatalf("unrestricted pool = %+v, want size 3", pool)
+	}
+}
+
+func gaugeState(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	pb := &dto.Metric{}
+	if err := g.Write(pb); err != nil {
+		t.Fatalf("failed to read gauge: %v", err)
+	}
+	return pb.GetGauge().GetValue()
+}
+
+func TestApplyReservationsPublishesPoolSize(t *testing.T) {
+	const model = "pool-size-test-model"
+	m := newTestModel("a", "b", "c")
+	m.applyReservations(model,
+		[]config.ReservationConfig{{OrgIDs: []string{"org-reserved"}, Enclaves: []string{"b", "c", "ghost"}}},
+		[]string{"a", "b", "c"},
+	)
+	if got := gaugeState(t, ReservedPoolSize.WithLabelValues(model)); got != 2 {
+		t.Errorf("reserved pool size = %v, want 2 (unknown host must not count)", got)
+	}
+	m.applyReservations(model, nil, nil)
+	if got := gaugeState(t, ReservedPoolSize.WithLabelValues(model)); got != 0 {
+		t.Errorf("cleared pool size = %v, want 0", got)
 	}
 }
