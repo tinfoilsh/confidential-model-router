@@ -140,9 +140,12 @@ func (s *Shadow) Close() {
 // ranking and one pool snapshot per request, so the recorded replication
 // factor is the one that actually shaped routing.
 type Decision struct {
-	// Order is the host preference: the pick (least-loaded of the key's
-	// top-R replicas) first, then the rest of the ranking, so an
-	// unacceptable pick spills to the next-warmest host.
+	// Order is the host preference. First the pick: the least-loaded of
+	// the key's top-R replicas within the load cap, or — when the whole
+	// warm set is over the cap — the least-loaded candidate overall. Then
+	// the rest of the ranking, within-cap hosts before over-cap ones, so
+	// an unacceptable pick spills to the next-warmest host that the cap
+	// still allows.
 	Order []string
 
 	pool    Pool
