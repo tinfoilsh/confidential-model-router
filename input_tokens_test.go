@@ -34,6 +34,7 @@ func TestHandleInputTokensChatRequest(t *testing.T) {
 		"model":"gpt-oss-120b",
 		"messages":[{"role":"user","content":"hello"}],
 		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+		"chat_template_kwargs":{"enable_thinking":false},
 		"max_completion_tokens":100
 	}`))
 	rec := httptest.NewRecorder()
@@ -53,6 +54,9 @@ func TestHandleInputTokensChatRequest(t *testing.T) {
 	}
 	if _, ok := dispatchedBody["messages"].([]any); !ok {
 		t.Fatalf("expected messages in tokenize body: %#v", dispatchedBody)
+	}
+	if !reflect.DeepEqual(dispatchedBody["chat_template_kwargs"], map[string]any{"enable_thinking": false}) {
+		t.Fatalf("expected chat template kwargs in tokenize body: %#v", dispatchedBody)
 	}
 
 	var response map[string]any
@@ -80,6 +84,7 @@ func TestHandleInputTokensResponsesRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, responsesInputTokensPath, strings.NewReader(`{
 		"model":"gpt-oss-120b",
 		"instructions":"Be concise.",
+		"reasoning":{"effort":"high"},
 		"input":[{
 			"role":"user",
 			"content":[
@@ -131,6 +136,10 @@ func TestHandleInputTokensResponsesRequest(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(dispatchedBody["tools"], expectedTools) {
 		t.Fatalf("unexpected converted tools:\nwant: %#v\n got: %#v", expectedTools, dispatchedBody["tools"])
+	}
+	expectedTemplateKwargs := map[string]any{"reasoning_effort": "high", "enable_thinking": true}
+	if !reflect.DeepEqual(dispatchedBody["chat_template_kwargs"], expectedTemplateKwargs) {
+		t.Fatalf("unexpected chat template kwargs:\nwant: %#v\n got: %#v", expectedTemplateKwargs, dispatchedBody["chat_template_kwargs"])
 	}
 	if !strings.Contains(rec.Body.String(), `"object":"response.input_tokens"`) {
 		t.Fatalf("unexpected response: %s", rec.Body.String())
@@ -184,6 +193,44 @@ func TestResponsesMessagesAcceptsNullInstructionsAndRefusal(t *testing.T) {
 	want := map[string]any{"type": "text", "text": "I cannot help with that."}
 	if !reflect.DeepEqual(content[0], want) {
 		t.Fatalf("unexpected refusal conversion: %#v", content[0])
+	}
+}
+
+func TestResponsesTokenizeBodyHonorsToolChoiceAndContinuation(t *testing.T) {
+	body := map[string]any{
+		"input": []any{map[string]any{
+			"type":    "message",
+			"role":    "assistant",
+			"status":  "incomplete",
+			"content": "partial",
+		}},
+		"tools": []any{map[string]any{
+			"type":       "function",
+			"name":       "lookup",
+			"parameters": map[string]any{"type": "object"},
+		}},
+		"tool_choice": "none",
+	}
+
+	tokenizeBody, err := responsesTokenizeBody(body, "gpt-oss-120b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tokenizeBody["tools"]; ok {
+		t.Fatal("tool_choice=none must omit tools from the rendered prompt")
+	}
+	if tokenizeBody["add_generation_prompt"] != false || tokenizeBody["continue_final_message"] != true {
+		t.Fatalf("expected partial assistant continuation options, got %#v", tokenizeBody)
+	}
+}
+
+func TestResponsesTokenizeBodyRejectsStatefulInputs(t *testing.T) {
+	_, err := responsesTokenizeBody(map[string]any{
+		"input":                "continue",
+		"previous_response_id": "resp_123",
+	}, "gpt-oss-120b")
+	if err == nil || !strings.Contains(err.Error(), "previous_response_id") {
+		t.Fatalf("expected unsupported stateful input error, got %v", err)
 	}
 }
 

@@ -18,6 +18,22 @@ const (
 	maxInputTokensErrorBytes = 1 << 20
 )
 
+var tokenizeChatFields = []string{
+	"add_generation_prompt",
+	"continue_final_message",
+	"add_special_tokens",
+	"chat_template",
+	"chat_template_kwargs",
+	"mm_processor_kwargs",
+	"media_io_kwargs",
+}
+
+var unsupportedResponsesCountFields = []string{
+	"conversation",
+	"previous_response_id",
+	"previous_input_messages",
+}
+
 type inputTokenDispatch func(context.Context, string, string, []byte, http.Header) (*http.Response, error)
 
 type inputTokenModelResolver func(map[string]any) (string, error)
@@ -153,10 +169,16 @@ func chatTokenizeBody(body map[string]any, modelName string) (map[string]any, er
 	if tools, ok := body["tools"]; ok {
 		tokenizeBody["tools"] = tools
 	}
+	copyTokenizeChatFields(tokenizeBody, body)
 	return tokenizeBody, nil
 }
 
 func responsesTokenizeBody(body map[string]any, modelName string) (map[string]any, error) {
+	for _, field := range unsupportedResponsesCountFields {
+		if value, ok := body[field]; ok && value != nil {
+			return nil, fmt.Errorf("Input-token counting does not support Responses parameter %q.", field)
+		}
+	}
 	messages, err := responsesMessages(body)
 	if err != nil {
 		return nil, err
@@ -165,14 +187,68 @@ func responsesTokenizeBody(body map[string]any, modelName string) (map[string]an
 		"model":    modelName,
 		"messages": messages,
 	}
-	if tools, ok := body["tools"]; ok {
+	toolChoice, _ := body["tool_choice"].(string)
+	if tools, ok := body["tools"]; ok && toolChoice != "none" {
 		converted, err := responsesTools(tools)
 		if err != nil {
 			return nil, err
 		}
 		tokenizeBody["tools"] = converted
 	}
+	copyTokenizeChatFields(tokenizeBody, body)
+	if reasoning, ok := body["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
+			kwargs, _ := tokenizeBody["chat_template_kwargs"].(map[string]any)
+			if kwargs == nil {
+				kwargs = make(map[string]any)
+			} else {
+				kwargs = cloneMap(kwargs)
+			}
+			kwargs["reasoning_effort"] = effort
+			if _, configured := kwargs["enable_thinking"]; !configured {
+				kwargs["enable_thinking"] = effort != "none"
+			}
+			tokenizeBody["chat_template_kwargs"] = kwargs
+		}
+	}
+	if responsesContinuesFinalMessage(body["input"]) {
+		tokenizeBody["add_generation_prompt"] = false
+		tokenizeBody["continue_final_message"] = true
+	}
 	return tokenizeBody, nil
+}
+
+func copyTokenizeChatFields(target, source map[string]any) {
+	for _, field := range tokenizeChatFields {
+		if value, ok := source[field]; ok {
+			target[field] = value
+		}
+	}
+}
+
+func cloneMap(source map[string]any) map[string]any {
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func responsesContinuesFinalMessage(input any) bool {
+	items, ok := input.([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	last, ok := items[len(items)-1].(map[string]any)
+	if !ok {
+		return false
+	}
+	itemType, _ := last["type"].(string)
+	if itemType != "" && itemType != "message" && itemType != "reasoning" {
+		return false
+	}
+	status, _ := last["status"].(string)
+	return status == "in_progress" || status == "incomplete"
 }
 
 func responsesMessages(body map[string]any) ([]any, error) {
