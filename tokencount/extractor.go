@@ -176,29 +176,47 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 // processStream processes the SSE stream, extracting token usage
 func (s *StreamingTokenExtractor) processStream() {
 	defer s.writer.Close()
+	defer s.reader.Close()
 
 	lastLineWasFiltered := false
+	terminalEventPending := false
+	terminalResponseEvent := false
+	eventHasData := false
 
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
 		shouldWrite := true
+		if strings.HasPrefix(line, "event:") {
+			eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			terminalResponseEvent = isTerminalResponseEvent(eventType)
+		}
 
 		// If the previous line was filtered and this is an empty line, skip it
 		// to avoid consecutive empty lines in the output
 		if lastLineWasFiltered && line == "" {
 			lastLineWasFiltered = false
+			terminalEventPending = false
+			terminalResponseEvent = false
+			eventHasData = false
 			continue
 		}
 
 		lastLineWasFiltered = false
 
 		// Parse SSE data lines
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data != "[DONE]" {
+		if strings.HasPrefix(line, "data:") {
+			eventHasData = true
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ")
+			if data == "[DONE]" {
+				terminalEventPending = true
+			} else {
 				// Try to parse the chunk
 				var chunk map[string]interface{}
 				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+					if eventType, ok := chunk["type"].(string); ok && isTerminalResponseEvent(eventType) {
+						terminalEventPending = true
+					}
 					// Check for usage in the chunk (Chat Completions API)
 					// or nested under "response" (Responses API streaming)
 					usageData, ok := chunk["usage"]
@@ -240,6 +258,9 @@ func (s *StreamingTokenExtractor) processStream() {
 					}
 				}
 			}
+			if terminalResponseEvent {
+				terminalEventPending = true
+			}
 		}
 
 		// Write the line to output if we should
@@ -249,6 +270,15 @@ func (s *StreamingTokenExtractor) processStream() {
 			} else {
 				s.writer.Write([]byte(line + "\n"))
 			}
+		}
+
+		if line == "" {
+			if terminalEventPending && eventHasData {
+				break
+			}
+			terminalEventPending = false
+			terminalResponseEvent = false
+			eventHasData = false
 		}
 	}
 
@@ -266,6 +296,15 @@ func (s *StreamingTokenExtractor) processStream() {
 	}
 
 	s.completed = true
+}
+
+func isTerminalResponseEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete":
+		return true
+	default:
+		return false
+	}
 }
 
 // Read implements io.Reader for compatibility

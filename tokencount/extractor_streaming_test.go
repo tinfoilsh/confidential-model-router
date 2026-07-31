@@ -385,6 +385,96 @@ func TestFilteredChunkMustNotLeaveEmptySSEEvent(t *testing.T) {
 	}
 }
 
+func TestDoneEventEndsOpenUpstreamStream(t *testing.T) {
+	upstreamReader, upstreamWriter := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: upstreamReader,
+	}
+	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
+	}
+	defer body.Close()
+	defer upstreamWriter.Close()
+
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\ndata:[DONE]\n\n")
+	}()
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		output, _ := io.ReadAll(body)
+		readDone <- output
+	}()
+
+	select {
+	case output := <-readDone:
+		expected := "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\ndata:[DONE]\n\n"
+		if string(output) != expected {
+			t.Fatalf("Expected:\n%q\nGot:\n%q", expected, output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream remained open after the done event")
+	}
+}
+
+func TestResponseCompletedEventEndsOpenUpstreamStream(t *testing.T) {
+	upstreamReader, upstreamWriter := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: upstreamReader,
+	}
+	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
+	}
+	defer body.Close()
+	defer upstreamWriter.Close()
+
+	input := "data: {\"response\":{\"status\":\"completed\"},\"type\":\"response.completed\"}\n\n"
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, input)
+	}()
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		output, _ := io.ReadAll(body)
+		readDone <- output
+	}()
+
+	select {
+	case output := <-readDone:
+		if string(output) != input {
+			t.Fatalf("Expected:\n%q\nGot:\n%q", input, output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream remained open after the response completed event")
+	}
+}
+
+func TestResponseTerminalEventWithoutDataDoesNotEndStream(t *testing.T) {
+	input := "event: response.completed\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"later\"}\n\ndata: [DONE]\n\n"
+	inputReader := io.NopCloser(strings.NewReader(input))
+	pr, pw := io.Pipe()
+	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+
+	go extractor.processStream()
+	output, err := io.ReadAll(pr)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(output) != input {
+		t.Fatalf("Expected:\n%q\nGot:\n%q", input, output)
+	}
+}
+
 func TestEdgeCases(t *testing.T) {
 	tests := []struct {
 		name                 string
