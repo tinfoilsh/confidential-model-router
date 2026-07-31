@@ -319,6 +319,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		// Check if client requested usage metrics in response header/trailer
 		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
+		var responsePricing *ModelPricing
+		if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
+			responsePricing = wrapper.pricing
+		}
 		if streaming && usageMetricsRequested {
 			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
 			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
@@ -327,6 +331,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		}
 
 		var handlerCalled atomic.Bool
+		if !streaming && usageMetricsRequested && resp.StatusCode == http.StatusOK &&
+			responsePricing != nil && responsePricing.CostKnownWithoutUsage() {
+			resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(&tokencount.Usage{}, modelName, responsePricing))
+		}
 
 		// Create a usage handler that will be called when usage is extracted
 		usageHandler := func(usage *tokencount.Usage) {
@@ -413,11 +421,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				var pricing *ModelPricing
-				if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
-					pricing = wrapper.pricing
-				}
-				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName, pricing))
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName, responsePricing))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}

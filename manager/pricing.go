@@ -12,6 +12,14 @@ const (
 	costDecimalPlaces = 12
 )
 
+// CostKnownWithoutUsage reports whether request price alone determines cost.
+func (p ModelPricing) CostKnownWithoutUsage() bool {
+	if p.InputTokenPricePer1M != 0 || p.OutputTokenPricePer1M != 0 {
+		return false
+	}
+	return p.CachedInputTokenPricePer1M == nil || *p.CachedInputTokenPricePer1M == 0
+}
+
 func requestCostUSD(usage *tokencount.Usage, pricing ModelPricing) float64 {
 	cachedPromptTokens, _ := usage.CachedPromptTokens()
 	uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)

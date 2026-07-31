@@ -816,12 +816,10 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 		"response": completed,
 	})
 
-	if s.usageMetricsRequested && usage != nil {
-		var pricing *manager.ModelPricing
-		if value, ok := em.ModelPricing(modelName); ok {
-			pricing = &value
+	if s.usageMetricsRequested {
+		if formatted := formatUsageMetrics(em, usageFromRaw(usage), modelName); formatted != "" {
+			s.w.Header().Set(manager.UsageMetricsResponseHeader, formatted)
 		}
-		s.w.Header().Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usageFromRaw(usage), modelName, pricing))
 	}
 	s.emitBillingEvent(r, em, modelName, usage)
 	return s.writeErr

@@ -25,6 +25,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/ratelimit"
+	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
 type Enclave struct {
@@ -833,6 +834,9 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	wrapper := &usageMetricsWriter{ResponseWriter: w, model: e.modelName, pricing: pricing}
+	if pricing != nil && pricing.CostKnownWithoutUsage() {
+		wrapper.usage = &tokencount.Usage{}
+	}
 
 	// Store wrapper in request context for ModifyResponse to access
 	ctx := context.WithValue(r.Context(), usageWriterKey{}, wrapper)

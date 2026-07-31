@@ -30,6 +30,7 @@ func handleInputTokens(
 	w http.ResponseWriter,
 	r *http.Request,
 	apiKey string,
+	routedModel string,
 	resolveModel inputTokenModelResolver,
 	dispatch inputTokenDispatch,
 ) {
@@ -56,7 +57,7 @@ func handleInputTokens(
 		return
 	}
 
-	modelName, err := inputTokensModel(body, resolveModel)
+	modelName, err := inputTokensModel(body, routedModel, resolveModel)
 	if err != nil {
 		jsonError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 		return
@@ -118,7 +119,10 @@ func handleInputTokens(
 	})
 }
 
-func inputTokensModel(body map[string]any, resolveModel inputTokenModelResolver) (string, error) {
+func inputTokensModel(body map[string]any, routedModel string, resolveModel inputTokenModelResolver) (string, error) {
+	if routedModel != "" {
+		return routedModel, nil
+	}
 	modelValue, ok := body["model"]
 	if !ok {
 		return "", fmt.Errorf("Missing required parameter: 'model'.")
@@ -174,6 +178,9 @@ func responsesTokenizeBody(body map[string]any, modelName string) (map[string]an
 func responsesMessages(body map[string]any) ([]any, error) {
 	messages := make([]any, 0)
 	if instructions, ok := body["instructions"]; ok {
+		if instructions == nil {
+			instructions = ""
+		}
 		text, ok := instructions.(string)
 		if !ok {
 			return nil, fmt.Errorf("Invalid parameter: 'instructions' must be a string.")
@@ -276,6 +283,12 @@ func responsesContent(content any) (any, error) {
 				image["detail"] = detail
 			}
 			converted = append(converted, map[string]any{"type": "image_url", "image_url": image})
+		case "refusal":
+			refusal, ok := part["refusal"].(string)
+			if !ok {
+				return nil, fmt.Errorf("Responses refusal content requires string 'refusal'.")
+			}
+			converted = append(converted, map[string]any{"type": "text", "text": refusal})
 		default:
 			return nil, fmt.Errorf("Unsupported Responses content part type %q.", partType)
 		}
@@ -330,10 +343,14 @@ func responsesFunctionCallOutput(item map[string]any) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("Responses function_call_output items require 'output'.")
 	}
+	converted, err := responsesContent(output)
+	if err != nil {
+		return nil, fmt.Errorf("Invalid function_call_output output: %w", err)
+	}
 	return map[string]any{
 		"role":         "tool",
 		"tool_call_id": callID,
-		"content":      output,
+		"content":      converted,
 	}, nil
 }
 

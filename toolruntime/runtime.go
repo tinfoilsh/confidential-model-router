@@ -442,14 +442,25 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 	}
 
 	usage := usageFromRaw(response.body["usage"])
-	if usage == nil {
+	formatted := formatUsageMetrics(em, usage, modelName)
+	if formatted == "" {
 		return
 	}
+	response.header.Set(manager.UsageMetricsResponseHeader, formatted)
+}
+
+func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, modelName string) string {
 	var pricing *manager.ModelPricing
 	if value, ok := em.ModelPricing(modelName); ok {
 		pricing = &value
 	}
-	response.header.Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usage, modelName, pricing))
+	if usage == nil {
+		if pricing == nil || !pricing.CostKnownWithoutUsage() {
+			return ""
+		}
+		usage = &tokencount.Usage{}
+	}
+	return manager.FormatUsage(usage, modelName, pricing)
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {
