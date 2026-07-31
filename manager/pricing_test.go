@@ -54,12 +54,12 @@ func TestRequestCostUSD(t *testing.T) {
 			expected: "0.001",
 		},
 		{
-			name:  "preserves sub-picodollar prices",
+			name:  "matches nanodollar billing precision",
 			usage: &tokencount.Usage{},
 			pricing: ModelPricing{
 				RequestPrice: 0.00000000000005,
 			},
-			expected: "0.00000000000005",
+			expected: "0",
 		},
 		{
 			name: "clamps negative token counts",
