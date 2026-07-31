@@ -148,6 +148,10 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 	}, nil, nil
 }
 
+// maxSSELineBytes bounds a single SSE line; mirrors the tool runtime's
+// sseReader limit so large frames survive both parsers.
+const maxSSELineBytes = 1 << 22 // 4 MiB
+
 // StreamingTokenExtractor handles token extraction for streaming responses
 type StreamingTokenExtractor struct {
 	reader               io.ReadCloser
@@ -170,35 +174,57 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 		usage:  &Usage{},
 	}
 	s.scanner = bufio.NewScanner(reader)
+	// Single SSE lines can exceed bufio's 64KiB default (for example a large
+	// tool-call argument blob in one chunk), which would abort the stream
+	// with ErrTooLong and surface as a silent truncation to the client.
+	s.scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
 	return s
 }
 
 // processStream processes the SSE stream, extracting token usage
 func (s *StreamingTokenExtractor) processStream() {
 	defer s.writer.Close()
+	defer s.reader.Close()
 
 	lastLineWasFiltered := false
+	terminalEventPending := false
+	terminalResponseEvent := false
+	eventHasData := false
 
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
 		shouldWrite := true
+		if strings.HasPrefix(line, "event:") {
+			eventType := strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			terminalResponseEvent = isTerminalResponseEvent(eventType)
+		}
 
 		// If the previous line was filtered and this is an empty line, skip it
 		// to avoid consecutive empty lines in the output
 		if lastLineWasFiltered && line == "" {
 			lastLineWasFiltered = false
+			terminalEventPending = false
+			terminalResponseEvent = false
+			eventHasData = false
 			continue
 		}
 
 		lastLineWasFiltered = false
 
 		// Parse SSE data lines
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			if data != "[DONE]" {
+		if strings.HasPrefix(line, "data:") {
+			eventHasData = true
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ")
+			if data == "[DONE]" {
+				terminalEventPending = true
+			} else {
 				// Try to parse the chunk
 				var chunk map[string]interface{}
 				if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+					if eventType, ok := chunk["type"].(string); ok && isTerminalResponseEvent(eventType) {
+						terminalEventPending = true
+					}
 					// Check for usage in the chunk (Chat Completions API)
 					// or nested under "response" (Responses API streaming)
 					usageData, ok := chunk["usage"]
@@ -250,6 +276,15 @@ func (s *StreamingTokenExtractor) processStream() {
 				s.writer.Write([]byte(line + "\n"))
 			}
 		}
+
+		if line == "" {
+			if (terminalEventPending || terminalResponseEvent) && eventHasData {
+				break
+			}
+			terminalEventPending = false
+			terminalResponseEvent = false
+			eventHasData = false
+		}
 	}
 
 	// Log final usage if we collected any
@@ -268,13 +303,17 @@ func (s *StreamingTokenExtractor) processStream() {
 	s.completed = true
 }
 
+func isTerminalResponseEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete", "error":
+		return true
+	default:
+		return false
+	}
+}
+
 // Read implements io.Reader for compatibility
 func (s *StreamingTokenExtractor) Read(p []byte) (n int, err error) {
 	// This is mainly for compatibility - actual processing happens in processStream
 	return s.buffer.Read(p)
-}
-
-// Close implements io.Closer
-func (s *StreamingTokenExtractor) Close() error {
-	return s.reader.Close()
 }
