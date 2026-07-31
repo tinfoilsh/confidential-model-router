@@ -13,10 +13,18 @@ import (
 
 const modelMetadataHTTPTimeout = 10 * time.Second
 
+type ModelPricing struct {
+	InputTokenPricePer1M       float64  `json:"inputTokenPricePer1M"`
+	OutputTokenPricePer1M      float64  `json:"outputTokenPricePer1M"`
+	CachedInputTokenPricePer1M *float64 `json:"cachedInputTokenPricePer1M,omitempty"`
+	RequestPrice               float64  `json:"requestPrice"`
+}
+
 type openAIModelEntry struct {
-	ID         string `json:"id"`
-	Multimodal bool   `json:"multimodal"`
-	Type       string `json:"type"`
+	ID         string        `json:"id"`
+	Multimodal bool          `json:"multimodal"`
+	Type       string        `json:"type"`
+	Pricing    *ModelPricing `json:"pricing"`
 }
 
 type openAIModelsList struct {
@@ -29,9 +37,29 @@ func (em *EnclaveManager) IsMultimodal(modelName string) bool {
 	return ok
 }
 
-// refreshMultimodalModels updates the sticky multimodal cache in the
-// background. Best-effort: failures and missing entries leave the cache as-is.
-func (em *EnclaveManager) refreshMultimodalModels() {
+// ModelPricing returns the latest published prices for a model.
+func (em *EnclaveManager) ModelPricing(modelName string) (ModelPricing, bool) {
+	if em == nil {
+		return ModelPricing{}, false
+	}
+	pricing := em.modelPricing.Load()
+	if pricing == nil {
+		return ModelPricing{}, false
+	}
+	value, ok := (*pricing)[modelName]
+	return value, ok
+}
+
+func (p ModelPricing) valid() bool {
+	if p.InputTokenPricePer1M < 0 || p.OutputTokenPricePer1M < 0 || p.RequestPrice < 0 {
+		return false
+	}
+	return p.CachedInputTokenPricePer1M == nil || *p.CachedInputTokenPricePer1M >= 0
+}
+
+// refreshModelMetadata updates the model pricing and sticky multimodal cache
+// in the background. Best-effort: failures leave both caches as-is.
+func (em *EnclaveManager) refreshModelMetadata() {
 	if em.controlPlaneURL == "" {
 		return
 	}
@@ -62,7 +90,11 @@ func (em *EnclaveManager) refreshMultimodalModels() {
 			return
 		}
 
+		pricing := make(map[string]ModelPricing, len(parsed.Data))
 		for _, e := range parsed.Data {
+			if e.ID != "" && e.Pricing != nil && e.Pricing.valid() {
+				pricing[e.ID] = *e.Pricing
+			}
 			// Restrict to chat-shaped models so non-chat services that carry
 			// multimodal:true don't route PDFs as page images.
 			if e.ID == "" || !e.Multimodal || (e.Type != "" && e.Type != "chat") {
@@ -70,5 +102,6 @@ func (em *EnclaveManager) refreshMultimodalModels() {
 			}
 			em.multimodalModels.Store(e.ID, struct{}{})
 		}
+		em.modelPricing.Store(&pricing)
 	}()
 }

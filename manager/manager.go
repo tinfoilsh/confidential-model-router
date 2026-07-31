@@ -36,6 +36,7 @@ type Enclave struct {
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
 	cb        *circuitBreaker
+	pricing   func(string) (ModelPricing, bool)
 
 	// inflight counts requests currently proxied through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
@@ -153,6 +154,7 @@ func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) 
 type EnclaveManager struct {
 	models               *sync.Map // model name -> *Model
 	multimodalModels     sync.Map  // sticky set of multimodal chat model names
+	modelPricing         atomic.Pointer[map[string]ModelPricing]
 	initConfigURL        string
 	updateConfigURL      string
 	controlPlaneURL      string
@@ -339,6 +341,7 @@ func (em *EnclaveManager) addEnclave(
 		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
+		pricing:   em.ModelPricing,
 	}
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
@@ -823,7 +826,13 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Wrap the ResponseWriter to capture usage and write trailer
-	wrapper := &usageMetricsWriter{ResponseWriter: w, model: e.modelName}
+	var pricing *ModelPricing
+	if e.pricing != nil {
+		if value, ok := e.pricing(e.modelName); ok {
+			pricing = &value
+		}
+	}
+	wrapper := &usageMetricsWriter{ResponseWriter: w, model: e.modelName, pricing: pricing}
 
 	// Store wrapper in request context for ModifyResponse to access
 	ctx := context.WithValue(r.Context(), usageWriterKey{}, wrapper)
@@ -980,7 +989,7 @@ func (em *EnclaveManager) sync() error {
 		return fmt.Errorf("failed to fetch config: %v", err)
 	}
 
-	em.refreshMultimodalModels()
+	em.refreshModelMetadata()
 
 	// Fetch hardware measurements
 	hwMeasurements, err := em.sigstoreClient.LatestHardwareMeasurements()

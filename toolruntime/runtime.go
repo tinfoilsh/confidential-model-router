@@ -166,7 +166,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested, modelName)
+		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
@@ -180,7 +180,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested, modelName)
+		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	default:
@@ -431,7 +431,7 @@ func usageMap(usage *tokencount.Usage, inputTokensKey, outputTokensKey, detailsK
 	return usageMap
 }
 
-func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool, modelName string) {
+func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool, modelName string, em *manager.EnclaveManager) {
 	if response == nil {
 		return
 	}
@@ -445,7 +445,11 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 	if usage == nil {
 		return
 	}
-	response.header.Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usage, modelName))
+	var pricing *manager.ModelPricing
+	if value, ok := em.ModelPricing(modelName); ok {
+		pricing = &value
+	}
+	response.header.Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usage, modelName, pricing))
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {

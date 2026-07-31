@@ -18,6 +18,7 @@ type usageMetricsWriter struct {
 	http.ResponseWriter
 	usage          *tokencount.Usage
 	model          string
+	pricing        *ModelPricing
 	trailerEnabled bool
 	mu             sync.Mutex
 }
@@ -50,7 +51,7 @@ func (w *usageMetricsWriter) FormatUsage() string {
 	if w.usage == nil {
 		return ""
 	}
-	return FormatUsage(w.usage, w.model)
+	return FormatUsage(w.usage, w.model, w.pricing)
 }
 
 // WriteTrailer writes the usage metrics as an HTTP trailer
