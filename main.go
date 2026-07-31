@@ -588,6 +588,17 @@ func main() {
 				// Expose Prometheus metrics
 				promhttp.Handler().ServeHTTP(w, r)
 				return
+			} else if isInputTokensPath(r.URL.Path) {
+				dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
+					if routeCtx, ok := routeContextClient.Lookup(ctx, apiKey, modelName); ok {
+						ctx = manager.WithCallerOrg(ctx, routeCtx.OrgID)
+					}
+					return em.DoModelRequest(ctx, modelName, path, body, headers)
+				}
+				handleInputTokens(w, r, apiKey, func(body map[string]any) (string, error) {
+					return resolveAutoModel(em, body)
+				}, dispatch)
+				return
 			} else if r.URL.Path == "/v1/models" {
 				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 				defer cancel()
