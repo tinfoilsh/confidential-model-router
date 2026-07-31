@@ -39,9 +39,6 @@ func (em *EnclaveManager) IsMultimodal(modelName string) bool {
 
 // ModelPricing returns the latest published prices for a model.
 func (em *EnclaveManager) ModelPricing(modelName string) (ModelPricing, bool) {
-	if em == nil {
-		return ModelPricing{}, false
-	}
 	pricing := em.modelPricing.Load()
 	if pricing == nil {
 		return ModelPricing{}, false

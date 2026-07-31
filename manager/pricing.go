@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -8,8 +9,8 @@ import (
 )
 
 const (
-	pricingTokenUnit  = 1_000_000
-	costDecimalPlaces = 12
+	pricingTokenUnit      = 1_000_000
+	costSignificantDigits = 15
 )
 
 // CostKnownWithoutUsage reports whether request price alone determines cost.
@@ -22,7 +23,9 @@ func (p ModelPricing) CostKnownWithoutUsage() bool {
 
 func requestCostUSD(usage *tokencount.Usage, pricing ModelPricing) float64 {
 	cachedPromptTokens, _ := usage.CachedPromptTokens()
+	cachedPromptTokens = max(0, cachedPromptTokens)
 	uncachedPromptTokens := max(0, usage.PromptTokens-cachedPromptTokens)
+	completionTokens := max(0, usage.CompletionTokens)
 	cachedInputPrice := pricing.InputTokenPricePer1M
 	if pricing.CachedInputTokenPricePer1M != nil {
 		cachedInputPrice = *pricing.CachedInputTokenPricePer1M
@@ -31,15 +34,19 @@ func requestCostUSD(usage *tokencount.Usage, pricing ModelPricing) float64 {
 	return pricing.RequestPrice +
 		float64(uncachedPromptTokens)*pricing.InputTokenPricePer1M/pricingTokenUnit +
 		float64(cachedPromptTokens)*cachedInputPrice/pricingTokenUnit +
-		float64(usage.CompletionTokens)*pricing.OutputTokenPricePer1M/pricingTokenUnit
+		float64(completionTokens)*pricing.OutputTokenPricePer1M/pricingTokenUnit
 }
 
 func formatRequestCostUSD(usage *tokencount.Usage, pricing ModelPricing) string {
-	formatted := strconv.FormatFloat(requestCostUSD(usage, pricing), 'f', costDecimalPlaces, 64)
-	formatted = strings.TrimRight(formatted, "0")
-	formatted = strings.TrimRight(formatted, ".")
-	if formatted == "" {
+	cost := requestCostUSD(usage, pricing)
+	if cost == 0 {
 		return "0"
 	}
-	return formatted
+	decimalPlaces := max(0, costSignificantDigits-1-int(math.Floor(math.Log10(math.Abs(cost)))))
+	formatted := strconv.FormatFloat(cost, 'f', decimalPlaces, 64)
+	if decimalPlaces == 0 {
+		return formatted
+	}
+	formatted = strings.TrimRight(formatted, "0")
+	return strings.TrimRight(formatted, ".")
 }

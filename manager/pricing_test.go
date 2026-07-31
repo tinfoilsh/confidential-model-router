@@ -53,6 +53,30 @@ func TestRequestCostUSD(t *testing.T) {
 			},
 			expected: "0.001",
 		},
+		{
+			name:  "preserves sub-picodollar prices",
+			usage: &tokencount.Usage{},
+			pricing: ModelPricing{
+				RequestPrice: 0.00000000000005,
+			},
+			expected: "0.00000000000005",
+		},
+		{
+			name: "clamps negative token counts",
+			usage: &tokencount.Usage{
+				PromptTokens:     -100,
+				CompletionTokens: -50,
+				PromptTokensDetails: &tokencount.PromptTokensDetails{
+					CachedTokens: 25,
+				},
+			},
+			pricing: ModelPricing{
+				InputTokenPricePer1M:  1,
+				OutputTokenPricePer1M: 2,
+				RequestPrice:          0.01,
+			},
+			expected: "0.01",
+		},
 	}
 
 	for _, tt := range tests {

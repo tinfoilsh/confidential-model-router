@@ -451,8 +451,10 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 
 func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, modelName string) string {
 	var pricing *manager.ModelPricing
-	if value, ok := em.ModelPricing(modelName); ok {
-		pricing = &value
+	if em != nil {
+		if value, ok := em.ModelPricing(modelName); ok {
+			pricing = &value
+		}
 	}
 	if usage == nil {
 		if pricing == nil || !pricing.CostKnownWithoutUsage() {
