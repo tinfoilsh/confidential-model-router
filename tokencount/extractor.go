@@ -148,6 +148,10 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 	}, nil, nil
 }
 
+// maxSSELineBytes bounds a single SSE line; mirrors the tool runtime's
+// sseReader limit so large frames survive both parsers.
+const maxSSELineBytes = 1 << 22 // 4 MiB
+
 // StreamingTokenExtractor handles token extraction for streaming responses
 type StreamingTokenExtractor struct {
 	reader               io.ReadCloser
@@ -170,6 +174,10 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 		usage:  &Usage{},
 	}
 	s.scanner = bufio.NewScanner(reader)
+	// Single SSE lines can exceed bufio's 64KiB default (for example a large
+	// tool-call argument blob in one chunk), which would abort the stream
+	// with ErrTooLong and surface as a silent truncation to the client.
+	s.scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
 	return s
 }
 
@@ -258,9 +266,6 @@ func (s *StreamingTokenExtractor) processStream() {
 					}
 				}
 			}
-			if terminalResponseEvent {
-				terminalEventPending = true
-			}
 		}
 
 		// Write the line to output if we should
@@ -273,7 +278,7 @@ func (s *StreamingTokenExtractor) processStream() {
 		}
 
 		if line == "" {
-			if terminalEventPending && eventHasData {
+			if (terminalEventPending || terminalResponseEvent) && eventHasData {
 				break
 			}
 			terminalEventPending = false
@@ -300,7 +305,7 @@ func (s *StreamingTokenExtractor) processStream() {
 
 func isTerminalResponseEvent(eventType string) bool {
 	switch eventType {
-	case "response.completed", "response.failed", "response.incomplete":
+	case "response.completed", "response.failed", "response.incomplete", "error":
 		return true
 	default:
 		return false
@@ -311,9 +316,4 @@ func isTerminalResponseEvent(eventType string) bool {
 func (s *StreamingTokenExtractor) Read(p []byte) (n int, err error) {
 	// This is mainly for compatibility - actual processing happens in processStream
 	return s.buffer.Read(p)
-}
-
-// Close implements io.Closer
-func (s *StreamingTokenExtractor) Close() error {
-	return s.reader.Close()
 }

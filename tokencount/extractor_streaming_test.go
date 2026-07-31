@@ -161,12 +161,14 @@ data: [DONE]
 
 func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	// Test that the function properly accepts and uses the clientRequestedUsage parameter
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header: http.Header{
-			"Content-Type": []string{"text/event-stream"},
-		},
-		Body: io.NopCloser(strings.NewReader("data: test\n")),
+	makeResponse := func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			},
+			Body: io.NopCloser(strings.NewReader("data: test\n")),
+		}
 	}
 
 	usageHandler := func(usage *Usage) {
@@ -174,7 +176,7 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 
 	// Call with clientRequestedUsage = true
-	body, usage, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, true)
+	body, usage, err := ExtractTokensFromResponseWithHandler(makeResponse(), "test-model", usageHandler, true)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 
 	// Test backward compatibility
-	body2, usage2, err2 := ExtractTokensFromResponse(resp, "test-model")
+	body2, usage2, err2 := ExtractTokensFromResponse(makeResponse(), "test-model")
 	if err2 != nil {
 		t.Errorf("Unexpected error in backward compatible function: %v", err2)
 	}
@@ -456,6 +458,97 @@ func TestResponseCompletedEventEndsOpenUpstreamStream(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("stream remained open after the response completed event")
+	}
+}
+
+func TestTerminalEventLineAfterDataLineEndsOpenUpstreamStream(t *testing.T) {
+	upstreamReader, upstreamWriter := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: upstreamReader,
+	}
+	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
+	}
+	defer body.Close()
+	defer upstreamWriter.Close()
+
+	input := "data: {\"response\":{\"status\":\"completed\"}}\nevent: response.completed\n\n"
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, input)
+	}()
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		output, _ := io.ReadAll(body)
+		readDone <- output
+	}()
+
+	select {
+	case output := <-readDone:
+		if string(output) != input {
+			t.Fatalf("Expected:\n%q\nGot:\n%q", input, output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream remained open when the event line followed the data line")
+	}
+}
+
+func TestResponsesErrorEventEndsOpenUpstreamStream(t *testing.T) {
+	upstreamReader, upstreamWriter := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+		Body: upstreamReader,
+	}
+	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
+	}
+	defer body.Close()
+	defer upstreamWriter.Close()
+
+	input := "event: error\ndata: {\"type\":\"error\",\"message\":\"upstream failure\"}\n\n"
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, input)
+	}()
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		output, _ := io.ReadAll(body)
+		readDone <- output
+	}()
+
+	select {
+	case output := <-readDone:
+		if string(output) != input {
+			t.Fatalf("Expected:\n%q\nGot:\n%q", input, output)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream remained open after the error event")
+	}
+}
+
+func TestLargeSSELineSurvivesScannerBuffer(t *testing.T) {
+	largeContent := strings.Repeat("a", 128*1024)
+	input := "data: {\"choices\":[{\"delta\":{\"content\":\"" + largeContent + "\"}}]}\n\ndata: [DONE]\n\n"
+	inputReader := io.NopCloser(strings.NewReader(input))
+	pr, pw := io.Pipe()
+	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+
+	go extractor.processStream()
+	output, err := io.ReadAll(pr)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(output) != input {
+		t.Fatalf("large SSE line was truncated: got %d bytes, want %d", len(output), len(input))
 	}
 }
 
