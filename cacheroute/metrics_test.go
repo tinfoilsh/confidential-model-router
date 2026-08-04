@@ -39,8 +39,8 @@ func TestMetricContract(t *testing.T) {
 
 	want := map[string][]string{
 		"router_cache_route_requests_total":           {"model", "outcome"},
-		"router_cache_route_reuse_total":              {"model", "outcome"},
-		"router_cache_route_reuse_prompt_bytes_total": {"model", "outcome"},
+		"router_cache_route_reuse_total":              {"model", "priority", "outcome"},
+		"router_cache_route_reuse_prompt_bytes_total": {"model", "priority", "outcome"},
 		"router_cache_route_picks_total":              {"model", "enclave", "r"},
 		"router_cache_route_random_match_total":       {"model"},
 		"router_cache_route_load_demotions_total":     {"model"},

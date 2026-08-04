@@ -261,9 +261,13 @@ func (s *Shadow) observe(model string, req *Request, pool Pool, actualHost strin
 
 	res := s.observeKeyed(model, req.Key, pool.Candidates, actualHost, d, cfg)
 
+	priority := req.Priority
+	if priority == "" {
+		priority = "none"
+	}
 	RequestsTotal.WithLabelValues(model, string(OutcomeKeyed)).Inc()
-	ReuseTotal.WithLabelValues(model, res.reuse).Inc()
-	ReusePromptBytesTotal.WithLabelValues(model, res.reuse).Add(float64(req.PromptBytes))
+	ReuseTotal.WithLabelValues(model, priority, res.reuse).Inc()
+	ReusePromptBytesTotal.WithLabelValues(model, priority, res.reuse).Add(float64(req.PromptBytes))
 	if res.repeat {
 		RepeatIntervalSeconds.WithLabelValues(model).Observe(res.interval.Seconds())
 	}

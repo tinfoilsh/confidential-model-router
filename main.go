@@ -742,6 +742,13 @@ func main() {
 							"model": modelName,
 						}).Debug("injecting configured vLLM priority")
 					}
+					// Like the caller org above, the priority class must
+					// reach internal dispatches (the tool loop) so their
+					// cache-route reuse metrics split by the originating
+					// caller the way proxied requests do.
+					if hasConfiguredPriority {
+						r = r.WithContext(manager.WithCallerPriority(r.Context(), "configured"))
+					}
 				}
 
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
@@ -875,6 +882,7 @@ func main() {
 							salt, _ := body["cache_salt"].(string)
 							cacheRouteSettings = s
 							cacheRouteReq = cacheroute.ExtractRequest(body, r.URL.Path, salt, s)
+							cacheRouteReq.Priority = priorityClass(hasConfiguredPriority)
 						}
 					}
 				}
