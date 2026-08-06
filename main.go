@@ -37,6 +37,23 @@ var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
 
+const (
+	// serverReadTimeout is the absolute deadline armed on the connection at
+	// request start. In net/http it is never cleared while the handler runs,
+	// so it also caps how long a streaming response can live: when it fires,
+	// the server's background read errors and the request context is
+	// canceled, aborting the proxied stream. It must therefore exceed the
+	// longest legitimate completion stream.
+	serverReadTimeout = 60 * time.Minute
+	// serverReadHeaderTimeout bounds reading request headers. Set explicitly
+	// because an unset value falls back to serverReadTimeout, which would
+	// allow slow-header (slowloris) connections to linger for an hour.
+	serverReadHeaderTimeout = time.Minute
+	// serverIdleTimeout bounds idle keep-alive connections between requests.
+	// Set explicitly because an unset value falls back to serverReadTimeout.
+	serverIdleTimeout = 2 * time.Minute
+)
+
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
 // stable across the short-lived token's ~15m refreshes (and across multiple
@@ -1083,10 +1100,12 @@ func main() {
 
 	// Setup graceful shutdown
 	server := &http.Server{
-		Addr:         ":" + *port,
-		Handler:      nil,             // Use default ServeMux
-		ReadTimeout:  5 * time.Minute, // Increased to support large RAG payloads
-		WriteTimeout: 0,               // Disabled to support long-running streaming responses
+		Addr:              ":" + *port,
+		Handler:           nil, // Use default ServeMux
+		ReadTimeout:       serverReadTimeout,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		WriteTimeout:      0, // Disabled to support long-running streaming responses
 	}
 
 	// Handle shutdown signals
