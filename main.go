@@ -515,6 +515,19 @@ func main() {
 			return
 		}
 
+		if isInputTokensPath(r.URL.Path) {
+			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
+				if routeCtx, ok := routeContextClient.Lookup(ctx, apiKey, modelName); ok {
+					ctx = manager.WithCallerOrg(ctx, routeCtx.OrgID)
+				}
+				return em.DoModelRequest(ctx, modelName, path, body, headers)
+			}
+			handleInputTokens(w, r, apiKey, modelName, func(body map[string]any) (string, error) {
+				return resolveAutoModel(em, body)
+			}, dispatch)
+			return
+		}
+
 		// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing
 		if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
 			if modelName == "" {

@@ -141,7 +141,7 @@ func TestResponsesStreamerFinalizeEmitsCompletedEvent(t *testing.T) {
 	}})
 
 	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", responsesIterationResult{}); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", responsesIterationResult{}); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 
@@ -306,7 +306,7 @@ func TestResponsesStreamerFinalizeAttachesAnnotationsToCompletedOutput(t *testin
 		},
 	}
 	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", responsesIterationResult{}); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", responsesIterationResult{}); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 	body := rec.Body.String()
@@ -618,7 +618,7 @@ func TestResponsesStreamerCompletedOutputKeepsPersistedAutoContinueCalls(t *test
 	}
 
 	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", responsesIterationResult{}); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", responsesIterationResult{}); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 
