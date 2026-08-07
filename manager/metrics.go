@@ -21,7 +21,36 @@ import (
 // 1s poll reads fresh data each time. A scrape that outlives the interval
 // blocks the loop and the ticker coalesces missed ticks, so a slow backend
 // is polled at scrape-duration cadence rather than piling up requests.
+// Process-wide override: SetMetricsPollInterval (see pollInterval).
 const defaultMetricsPollInterval = time.Second
+
+// metricsPollIntervalNanos is the process-wide scrape-cadence override in
+// nanoseconds; zero means defaultMetricsPollInterval. Stored atomically so
+// startup wiring can't race a running poller.
+var metricsPollIntervalNanos atomic.Int64
+
+// SetMetricsPollInterval installs the process-wide backend /metrics scrape
+// cadence — the freshness of the queue-depth signal behind overload
+// rejection and cache-aware routing's step-aside. Non-positive restores the
+// 1s default. It applies to pollers (re)started afterwards; every config
+// sync restarts them, so in production only startup wiring calls this. The
+// sample staleness window scales with the interval (see stalenessLimit), so
+// a slow cadence doesn't permanently fail open.
+func SetMetricsPollInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	metricsPollIntervalNanos.Store(int64(d))
+}
+
+// pollInterval resolves the scrape cadence: the installed override when
+// positive, else the 1s default.
+func pollInterval() time.Duration {
+	if d := time.Duration(metricsPollIntervalNanos.Load()); d > 0 {
+		return d
+	}
+	return defaultMetricsPollInterval
+}
 
 // pollAPIKey, when set, is sent as a bearer token on backend /metrics
 // scrapes (enclaves require an admin key). Stored atomically so startup
@@ -113,10 +142,11 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 	// lands (which can take a while if the backend is unreachable). For an
 	// unchanged config the evaluation is a fixed point, so the per-sync
 	// config reinstall does not disturb hysteresis state.
-	if waiting, collected := m.latestSample(); !collected.IsZero() && time.Since(collected) <= sampleStalenessLimit {
+	if waiting, collected := m.latestSample(); !collected.IsZero() && time.Since(collected) <= stalenessLimit() {
 		m.evaluateThresholds(waiting)
 	}
 
+	interval := pollInterval()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.wg.Add(1)
@@ -126,8 +156,9 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		"max_requests_waiting":   trip,
 		"clear_requests_waiting": clear,
 		"retry_after_minutes":    cfg.RetryAfterMinutes,
+		"poll_interval":          interval,
 	}).Info("starting vLLM metrics polling")
-	go m.run(ctx, defaultMetricsPollInterval)
+	go m.run(ctx, interval)
 }
 
 func (m *enclaveMetrics) run(ctx context.Context, interval time.Duration) {
@@ -250,13 +281,27 @@ func (m *enclaveMetrics) latestSample() (float64, time.Time) {
 	return m.latestWaiting, m.latestCollected
 }
 
-// sampleStalenessLimit bounds how long the overload flag keeps driving
-// shouldReject without a fresh sample. It is a fixed window rather than a
-// multiple of the poll interval: at a 1s cadence, deriving it from the
-// interval would fail open after a single slow scrape (the scrape client
-// timeout alone is 5s). 15s means roughly three consecutive timed-out
-// scrapes must elapse before the safety net is dropped.
+// sampleStalenessLimit is the floor on how long the overload flag keeps
+// driving shouldReject without a fresh sample. It is a fixed floor rather
+// than a pure multiple of the poll interval: at the default 1s cadence,
+// deriving it from the interval would fail open after a single slow scrape
+// (the scrape client timeout alone is 5s). 15s means roughly three
+// consecutive timed-out scrapes must elapse before the safety net is
+// dropped.
 const sampleStalenessLimit = 15 * time.Second
+
+// stalenessLimit resolves the freshness window for the current poll cadence:
+// the sampleStalenessLimit floor, or three poll intervals when the
+// configured cadence is slow enough that the floor would expire between
+// scrapes. Without the scaling, any interval above the floor would mark
+// every sample stale before the next scrape lands, silently turning the
+// overload guard off everywhere.
+func stalenessLimit() time.Duration {
+	if scaled := 3 * pollInterval(); scaled > sampleStalenessLimit {
+		return scaled
+	}
+	return sampleStalenessLimit
+}
 
 // evaluateThresholds updates the overload flag from the latest queue depth
 // with hysteresis: trip at the high mark, clear at the lower mark, hold the
@@ -328,7 +373,7 @@ func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 	if collected.IsZero() {
 		return false, 0, waiting
 	}
-	if time.Since(collected) > sampleStalenessLimit {
+	if time.Since(collected) > stalenessLimit() {
 		OverloadFailOpenTotal.WithLabelValues(m.model, m.host).Inc()
 		log.WithFields(log.Fields{
 			"model":     m.model,

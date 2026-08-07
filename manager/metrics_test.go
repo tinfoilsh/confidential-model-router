@@ -341,6 +341,82 @@ func TestScrape_EndToEndHysteresis(t *testing.T) {
 	}
 }
 
+func TestPollIntervalResolution(t *testing.T) {
+	defer SetMetricsPollInterval(0)
+
+	tests := []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"unset", 0, time.Second},
+		{"negative resets to default", -time.Second, time.Second},
+		{"sub-second", 250 * time.Millisecond, 250 * time.Millisecond},
+		{"slow", 30 * time.Second, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			SetMetricsPollInterval(tt.interval)
+			if got := pollInterval(); got != tt.want {
+				t.Fatalf("pollInterval = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStalenessLimitScalesWithPollInterval(t *testing.T) {
+	defer SetMetricsPollInterval(0)
+
+	tests := []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"default cadence keeps floor", 0, sampleStalenessLimit},
+		{"fast cadence keeps floor", 250 * time.Millisecond, sampleStalenessLimit},
+		{"at floor boundary keeps floor", 5 * time.Second, sampleStalenessLimit},
+		{"slow cadence scales to three intervals", 10 * time.Second, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			SetMetricsPollInterval(tt.interval)
+			if got := stalenessLimit(); got != tt.want {
+				t.Fatalf("stalenessLimit = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestShouldReject_SlowCadenceSampleStaysFresh pins the interval/staleness
+// coupling: with a poll interval slower than the fixed floor, a sample older
+// than the floor but within three intervals must still drive rejection.
+// Without the scaling, every sample would expire before the next scrape and
+// the overload guard would silently fail open.
+func TestShouldReject_SlowCadenceSampleStaysFresh(t *testing.T) {
+	SetMetricsPollInterval(20 * time.Second)
+	defer SetMetricsPollInterval(0)
+
+	m := newTestMetrics("slow-cadence-host", &config.OverloadConfig{
+		MaxRequestsWaiting: 16,
+	})
+	observe(m, 16)
+	if reject, _, _ := m.shouldReject(); !reject {
+		t.Fatal("expected reject at trip mark")
+	}
+
+	// Older than the 15s floor, within the scaled 60s window: still fresh.
+	m.updateLatest(16, time.Now().Add(-sampleStalenessLimit-time.Second))
+	if reject, _, _ := m.shouldReject(); !reject {
+		t.Fatal("expected reject with sample inside the scaled staleness window")
+	}
+
+	// Beyond the scaled window: fail open.
+	m.updateLatest(16, time.Now().Add(-61*time.Second))
+	if reject, _, _ := m.shouldReject(); reject {
+		t.Fatal("expected allow once the sample outlives the scaled window")
+	}
+}
+
 func TestShouldReject_FailsOpen(t *testing.T) {
 	// No config.
 	m := newTestMetrics("open-nil-host", nil)
