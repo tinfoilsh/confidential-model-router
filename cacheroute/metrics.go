@@ -30,12 +30,14 @@ var (
 	// ReuseTotal classifies keyed requests against where the actual pick
 	// landed. repeat_cold = the prefix was warm on a replica the pick
 	// missed, i.e. the reuse cache-aware routing would have captured.
+	// Split by caller priority class so reserved-org traffic
+	// (priority=configured) reads separately from public traffic.
 	ReuseTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_reuse_total",
-			Help: "Keyed requests by prefix-reuse classification against the actual pick (first_seen, repeat_warm, repeat_cold)",
+			Help: "Keyed requests by caller priority class (configured, none) and prefix-reuse classification against the actual pick (first_seen, repeat_warm, repeat_cold)",
 		},
-		[]string{"model", "outcome"},
+		[]string{"model", "priority", "outcome"},
 	)
 
 	// ReusePromptBytesTotal weights ReuseTotal by prompt bytes, since
@@ -43,9 +45,9 @@ var (
 	ReusePromptBytesTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_cache_route_reuse_prompt_bytes_total",
-			Help: "Prompt bytes of keyed requests by prefix-reuse classification (first_seen, repeat_warm, repeat_cold)",
+			Help: "Prompt bytes of keyed requests by caller priority class (configured, none) and prefix-reuse classification (first_seen, repeat_warm, repeat_cold)",
 		},
-		[]string{"model", "outcome"},
+		[]string{"model", "priority", "outcome"},
 	)
 
 	// PicksTotal counts the would-be pick per enclave, with the key's
