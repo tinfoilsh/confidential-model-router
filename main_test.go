@@ -309,6 +309,24 @@ func TestJSONRoutingUnchanged(t *testing.T) {
 			},
 			expectedModel: "nomic-embed-text",
 		},
+		{
+			name: "legacy completions extracts model from JSON",
+			path: "/v1/completions",
+			body: map[string]interface{}{
+				"model":  "gpt-oss-120b",
+				"prompt": "test",
+			},
+			expectedModel: "gpt-oss-120b",
+		},
+		{
+			name: "responses extracts model from JSON",
+			path: "/v1/responses",
+			body: map[string]interface{}{
+				"model": "glm-5-2",
+				"input": "test",
+			},
+			expectedModel: "glm-5-2",
+		},
 	}
 
 	for _, tt := range tests {
@@ -404,7 +422,9 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			headers := make(http.Header)
 
-			ensureStreamingUsageOptions(tt.body, headers)
+			if err := ensureStreamingUsageOptions(tt.body, headers); err != nil {
+				t.Fatalf("ensureStreamingUsageOptions() error = %v", err)
+			}
 
 			streamOptions, ok := tt.body["stream_options"].(map[string]interface{})
 			if !ok {
@@ -432,6 +452,35 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 				t.Fatalf("client usage header = %v, want %v", gotHeader, tt.wantClientUsageHeader)
 			}
 		})
+	}
+}
+
+func TestEnsureStreamingUsageOptionsRejectsInvalidValues(t *testing.T) {
+	tests := []map[string]any{
+		{"stream_options": nil},
+		{"stream_options": "invalid"},
+		{"stream_options": map[string]any{"include_usage": "true"}},
+		{"stream_options": map[string]any{"continuous_usage_stats": 1}},
+	}
+	for _, body := range tests {
+		headers := http.Header{"X-Tinfoil-Client-Requested-Usage": []string{"true"}}
+		if err := ensureStreamingUsageOptions(body, headers); err == nil {
+			t.Fatalf("ensureStreamingUsageOptions(%v) succeeded, want error", body)
+		}
+		if got := headers.Get("X-Tinfoil-Client-Requested-Usage"); got != "" {
+			t.Fatalf("internal usage header survived invalid request: %q", got)
+		}
+	}
+}
+
+func TestEnsureStreamingUsageOptionsClearsSpoofedHeader(t *testing.T) {
+	headers := http.Header{"X-Tinfoil-Client-Requested-Usage": []string{"true"}}
+	body := map[string]any{"stream": true}
+	if err := ensureStreamingUsageOptions(body, headers); err != nil {
+		t.Fatalf("ensureStreamingUsageOptions() error = %v", err)
+	}
+	if got := headers.Get("X-Tinfoil-Client-Requested-Usage"); got != "" {
+		t.Fatalf("spoofed internal usage header survived: %q", got)
 	}
 }
 
