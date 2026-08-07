@@ -426,7 +426,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		// For streaming responses, use the standard token extraction with handler
 		// (usage will be set as trailer via the wrapper)
-		newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage)
+		newBody, err := tokencount.ExtractTokensFromResponseWithHandler(resp, modelName, usageHandler, clientRequestedUsage)
 		if err != nil {
 			log.WithError(err).Error("Failed to extract tokens from response")
 			// Don't fail the request, just log the error

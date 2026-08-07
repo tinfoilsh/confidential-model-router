@@ -532,7 +532,7 @@ func TestFirstTokenThroughStreamingExtractor(t *testing.T) {
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       io.NopCloser(strings.NewReader(backendSSE)),
 	}
-	newBody, _, err := tokencount.ExtractTokensFromResponseWithHandler(resp, model, nil, false)
+	newBody, err := tokencount.ExtractTokensFromResponseWithHandler(resp, model, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

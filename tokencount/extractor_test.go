@@ -90,7 +90,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}
 
 			// Extract tokens with handler
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -198,7 +198,7 @@ data: [DONE]
 			}
 
 			// Extract tokens
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v", err)
 				return
@@ -272,7 +272,7 @@ data: [DONE]
 			}
 
 			// Should handle errors gracefully
-			newBody, _, err := ExtractTokensFromResponse(resp, "test-model")
+			newBody, err := ExtractTokensFromResponse(resp, "test-model")
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponse() unexpected error = %v", err)
 				return
@@ -285,6 +285,65 @@ data: [DONE]
 
 			if output.String() != tt.streamData {
 				t.Errorf("Stream output doesn't match input despite errors")
+			}
+		})
+	}
+}
+
+func TestStreamingPromptOnlyUsage(t *testing.T) {
+	streamData := `data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":0,"total_tokens":0}}
+
+data: [DONE]
+
+`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(streamData)),
+	}
+
+	var capturedUsage *Usage
+	newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", func(usage *Usage) {
+		capturedUsage = usage
+	}, true)
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponseWithHandler() error = %v", err)
+	}
+	if _, err := io.Copy(io.Discard, newBody); err != nil {
+		t.Fatalf("copy stream: %v", err)
+	}
+	if err := newBody.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+
+	if capturedUsage == nil {
+		t.Fatal("usage handler was not called")
+	}
+	if capturedUsage.PromptTokens != 42 || capturedUsage.TotalTokens != 42 {
+		t.Fatalf("usage = %+v, want prompt_tokens=42 total_tokens=42", capturedUsage)
+	}
+}
+
+func TestNormalizeDerivesTotalTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		usage     Usage
+		wantTotal int
+	}{
+		{name: "derives total from prompt and completion", usage: Usage{PromptTokens: 10, CompletionTokens: 5}, wantTotal: 15},
+		{name: "preserves explicit total", usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 99}, wantTotal: 99},
+		{name: "derives total from responses API fields", usage: Usage{InputTokens: 8, OutputTokens: 3}, wantTotal: 11},
+		{name: "zero usage stays zero", usage: Usage{}, wantTotal: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := tt.usage
+			u.Normalize()
+			if u.TotalTokens != tt.wantTotal {
+				t.Fatalf("TotalTokens = %d, want %d", u.TotalTokens, tt.wantTotal)
 			}
 		})
 	}

@@ -176,27 +176,20 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 
 	// Call with clientRequestedUsage = true
-	body, usage, err := ExtractTokensFromResponseWithHandler(makeResponse(), "test-model", usageHandler, true)
+	body, err := ExtractTokensFromResponseWithHandler(makeResponse(), "test-model", usageHandler, true)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 	if body == nil {
 		t.Error("Expected non-nil body")
 	}
-	if usage != nil {
-		t.Error("Expected nil usage for streaming response")
-	}
 
-	// Test backward compatibility
-	body2, usage2, err2 := ExtractTokensFromResponse(makeResponse(), "test-model")
+	body2, err2 := ExtractTokensFromResponse(makeResponse(), "test-model")
 	if err2 != nil {
 		t.Errorf("Unexpected error in backward compatible function: %v", err2)
 	}
 	if body2 == nil {
 		t.Error("Expected non-nil body from backward compatible function")
-	}
-	if usage2 != nil {
-		t.Error("Expected nil usage for streaming response from backward compatible function")
 	}
 }
 
@@ -357,6 +350,32 @@ data: [DONE]
 	}
 }
 
+func TestStreamingUsageHandlerCalledWithoutUsageChunk(t *testing.T) {
+	input := "data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n"
+	inputReader := io.NopCloser(strings.NewReader(input))
+	pr, pw := io.Pipe()
+
+	called := make(chan *Usage, 1)
+	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor.usageHandler = func(usage *Usage) {
+		called <- usage
+	}
+
+	go extractor.processStream()
+	if _, err := io.ReadAll(pr); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+
+	select {
+	case usage := <-called:
+		if usage == nil || *usage != (Usage{}) {
+			t.Fatalf("usage = %+v, want zero usage", usage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("usage handler was not called")
+	}
+}
+
 func TestFilteredChunkMustNotLeaveEmptySSEEvent(t *testing.T) {
 	// When a usage-only chunk is filtered, its trailing blank line must also be
 	// suppressed. Otherwise the client receives an empty SSE event (blank data)
@@ -396,7 +415,7 @@ func TestDoneEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp, "test-model")
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -433,7 +452,7 @@ func TestResponseCompletedEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp, "test-model")
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -470,7 +489,7 @@ func TestTerminalEventLineAfterDataLineEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp, "test-model")
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -507,7 +526,7 @@ func TestResponsesErrorEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, _, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp, "test-model")
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
