@@ -23,6 +23,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 const (
@@ -173,7 +174,7 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, usageContextSecret string) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -211,6 +212,29 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	proxy.Director = func(req *http.Request) {
 		defaultDirector(req)
 		req.Host = host
+		// These are router-owned headers. Never forward a client-supplied
+		// context, including when signing is disabled or fails.
+		req.Header.Del(usagereporting.HeaderContext)
+		req.Header.Del(usagereporting.HeaderUsageContextSignature)
+		// Sign a usage-context header declaring that the router has already
+		// counted this customer request, so the downstream model enclave
+		// (shim) suppresses its own billing event and the request is not
+		// double-billed on the cloud path (router → shim). Direct-path
+		// clients hold no signing secret and cannot forge this header, so
+		// they are still billed normally. Fail open for inference: on error
+		// the request is forwarded without the header and the shim bills.
+		apiKey := BearerToken(req.Header.Get("Authorization"))
+		if billingCollector != nil && billingCollector.Enabled() && usageContextSecret != "" && apiKey != "" {
+			if err := usagereporting.SetHeaders(req.Header, usagereporting.Context{
+				ParentService:       usagereporting.ServiceRouter,
+				APIKeyHash:          usagereporting.HashAPIKey(apiKey),
+				BillCustomerRequest: false,
+				Depth:               1,
+				IssuedAt:            time.Now().UTC(),
+			}, usageContextSecret); err != nil {
+				log.WithError(err).Warn("failed to sign usage context for billing suppression; forwarding without header")
+			}
+		}
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
