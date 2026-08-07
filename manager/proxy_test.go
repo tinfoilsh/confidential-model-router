@@ -13,7 +13,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
@@ -23,10 +22,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	t.Cleanup(backend.Close)
 
 	backendURL, _ := url.Parse(backend.URL)
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-
-	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker())
+	proxy := newProxy(backendURL.Host, "", modelName, nil, newCircuitBreaker())
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -47,10 +43,7 @@ func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	const enclaveHost = "voxtral-tts.realtime.inf9.tinfoil.sh"
 
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-
-	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, newCircuitBreaker())
+	proxy := newProxy(enclaveHost, "", "voxtral-tts", nil, newCircuitBreaker())
 
 	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
 	req.Host = "inference.tinfoil.sh"
@@ -234,9 +227,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 	}
 	claim := &ProbeClaim{cb: cb, token: token, modelName: "probe-model", host: "probe-host.test"}
 
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb)
+	proxy := newProxy("probe-host.test", "", "probe-model", nil, cb)
 
 	// A cancelled request that does not own the claim must leave the
 	// in-flight probe alone.
@@ -266,9 +257,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 // cheap oversized uploads cannot open a healthy enclave's breaker.
 func TestProxyOversizedBodyIsClientError(t *testing.T) {
 	cb := newCircuitBreaker()
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, cb)
+	proxy := newProxy("oversize-host.test", "", "oversize-model", nil, cb)
 
 	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
 	rec := httptest.NewRecorder()

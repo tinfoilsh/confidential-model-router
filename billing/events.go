@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -48,14 +50,25 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:3] + strings.Repeat("*", len(apiKey)-7) + apiKey[len(apiKey)-4:]
 }
 
-// NewCollector creates a new billing event collector.
-//
-// Events are delivered to the signed usage-reports ingestion endpoint
-// using the shared usage-reporting client.
-func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector {
-	endpoint := ""
-	if controlPlaneURL != "" {
-		endpoint = strings.TrimRight(controlPlaneURL, "/") + usagereporting.IngestionPath
+// NewCollector creates a billing event collector. Incomplete configuration is
+// an error rather than an implicit disabled mode.
+func NewCollector(controlPlaneURL, reporterID, reporterSecret string) (*Collector, error) {
+	return newCollector(controlPlaneURL, reporterID, reporterSecret, nil)
+}
+
+func newCollector(controlPlaneURL, reporterID, reporterSecret string, httpClient *http.Client) (*Collector, error) {
+	endpoint, err := ingestionEndpoint(controlPlaneURL)
+	if err != nil {
+		return nil, err
+	}
+	if reporterID == "" {
+		return nil, fmt.Errorf("usage reporter ID is required")
+	}
+	if reporterID != strings.TrimSpace(reporterID) {
+		return nil, fmt.Errorf("usage reporter ID must not have leading or trailing whitespace")
+	}
+	if reporterSecret == "" {
+		return nil, fmt.Errorf("usage reporter secret is required")
 	}
 
 	c := &Collector{
@@ -63,14 +76,38 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 			Endpoint:   endpoint,
 			ReporterID: reporterID,
 			Secret:     reporterSecret,
+			HTTPClient: httpClient,
 		}),
 	}
-	return c
+	if !c.reporter.Enabled() {
+		return nil, fmt.Errorf("usage reporter initialization returned a disabled client")
+	}
+	return c, nil
 }
 
-// AddEvent forwards a billing event to the usage reporter and writes a
-// masked log line for local observability.
+func ingestionEndpoint(controlPlaneURL string) (string, error) {
+	u, err := url.Parse(controlPlaneURL)
+	if err != nil {
+		return "", fmt.Errorf("parse control plane URL: %w", err)
+	}
+	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("control plane URL must be an absolute https URL without credentials, query, or fragment")
+	}
+	return strings.TrimRight(controlPlaneURL, "/") + usagereporting.IngestionPath, nil
+}
+
+// Enabled reports whether the collector has a configured reporter.
+func (c *Collector) Enabled() bool {
+	return c != nil && c.reporter != nil && c.reporter.Enabled()
+}
+
+// AddEvent forwards a billing event to the usage reporter and writes a masked
+// log line for local observability.
 func (c *Collector) AddEvent(event Event) {
+	if !c.Enabled() {
+		panic("billing: AddEvent called on an uninitialized collector")
+	}
+
 	// Create a safe version for logging with masked API key
 	safeEvent := event
 	safeEvent.APIKey = maskAPIKey(event.APIKey)
@@ -81,47 +118,45 @@ func (c *Collector) AddEvent(event Event) {
 		return
 	}
 
-	if c.reporter != nil {
-		inputTokens := int64(event.PromptTokens)
-		outputTokens := int64(event.CompletionTokens)
-		if inputTokens == 0 && outputTokens == 0 && event.TotalTokens > 0 {
-			inputTokens = int64(event.TotalTokens)
-		}
+	inputTokens := int64(event.PromptTokens)
+	outputTokens := int64(event.CompletionTokens)
+	if inputTokens == 0 && outputTokens == 0 && event.TotalTokens > 0 {
+		inputTokens = int64(event.TotalTokens)
+	}
 
-		cachedInputTokens := int64(event.CachedPromptTokens)
-		if cachedInputTokens > inputTokens {
-			cachedInputTokens = inputTokens
-		}
+	cachedInputTokens := int64(event.CachedPromptTokens)
+	if cachedInputTokens > inputTokens {
+		cachedInputTokens = inputTokens
+	}
 
-		meters := []usagereporting.Meter{
-			{Name: usagereporting.MeterInputTokens, Quantity: inputTokens},
-			{Name: usagereporting.MeterOutputTokens, Quantity: outputTokens},
-		}
-		if cachedInputTokens > 0 {
-			meters = append(meters, usagereporting.Meter{
-				Name:     usagereporting.MeterCachedInputTokens,
-				Quantity: cachedInputTokens,
-			})
-		}
-
-		c.reporter.AddEvent(usagereporting.Event{
-			RequestID:  event.RequestID,
-			OccurredAt: event.Timestamp,
-			APIKey:     event.APIKey,
-			Operation: usagereporting.Operation{
-				Service: usagereporting.ServiceRouter,
-				Name:    usagereporting.OperationRouterModelRequest,
-			},
-			CustomerRequests: 1,
-			Meters:           meters,
-			Attributes: map[string]string{
-				"model":     event.Model,
-				"route":     event.RequestPath,
-				"streaming": fmt.Sprintf("%t", event.Streaming),
-				"enclave":   event.Enclave,
-			},
+	meters := []usagereporting.Meter{
+		{Name: usagereporting.MeterInputTokens, Quantity: inputTokens},
+		{Name: usagereporting.MeterOutputTokens, Quantity: outputTokens},
+	}
+	if cachedInputTokens > 0 {
+		meters = append(meters, usagereporting.Meter{
+			Name:     usagereporting.MeterCachedInputTokens,
+			Quantity: cachedInputTokens,
 		})
 	}
+
+	c.reporter.AddEvent(usagereporting.Event{
+		RequestID:  event.RequestID,
+		OccurredAt: event.Timestamp,
+		APIKey:     event.APIKey,
+		Operation: usagereporting.Operation{
+			Service: usagereporting.ServiceRouter,
+			Name:    usagereporting.OperationRouterModelRequest,
+		},
+		CustomerRequests: 1,
+		Meters:           meters,
+		Attributes: map[string]string{
+			"model":     event.Model,
+			"route":     event.RequestPath,
+			"streaming": fmt.Sprintf("%t", event.Streaming),
+			"enclave":   event.Enclave,
+		},
+	})
 
 	log.WithFields(log.Fields{
 		"type": "billing_event",
@@ -129,11 +164,14 @@ func (c *Collector) AddEvent(event Event) {
 	}).Info("Billing event collected")
 }
 
-// Stop gracefully shuts down the collector
+// Stop gracefully shuts down the collector, flushing pending events with a
+// bounded timeout so a network stall cannot block shutdown indefinitely.
 func (c *Collector) Stop() {
 	c.stopOnce.Do(func() {
 		if c.reporter != nil {
-			c.reporter.Stop(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			c.reporter.Stop(ctx)
 		}
 	})
 }

@@ -884,6 +884,10 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch trust root: %v", err)
 	}
+	billingCollector, err := billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret)
+	if err != nil {
+		return nil, fmt.Errorf("initialize billing collector: %w", err)
+	}
 
 	em := &EnclaveManager{
 		models:             &sync.Map{},
@@ -891,7 +895,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		updateConfigURL:    updateConfigURL,
 		controlPlaneURL:    controlPlaneURL,
 		sigstoreClient:     sigstoreClient,
-		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		billingCollector:   billingCollector,
 		usageContextSecret: usageContextSecret,
 		requestTracker:     ratelimit.NewRequestTracker(),
 		cacheRouteShadow:   cacheroute.NewShadow(nil),
