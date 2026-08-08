@@ -38,6 +38,9 @@ models:
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6-b200
 
+  kimi-k3:
+    repo: tinfoilsh/confidential-kimi-k3
+
   websearch:
     repo: tinfoilsh/confidential-websearch
 
