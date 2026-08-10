@@ -948,6 +948,24 @@ func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
 	}
 }
 
+func TestSearchToolCallSourcesFallsBackToFormattedOutput(t *testing.T) {
+	sources := toolCallSourcesForResult("search", nil, strings.Join([]string{
+		"Source: Text-only result",
+		"URL: https://example.com/text-only",
+		"Excerpt without structured metadata.",
+	}, "\n"))
+
+	if len(sources) != 1 {
+		t.Fatalf("expected one fallback source, got %#v", sources)
+	}
+	if sources[0].url != "https://example.com/text-only" || sources[0].title != "Text-only result" {
+		t.Fatalf("unexpected fallback source: %#v", sources[0])
+	}
+	if sources[0].snippet != "" {
+		t.Fatalf("formatted output must not be parsed as a snippet, got %q", sources[0].snippet)
+	}
+}
+
 // TestParseIncludeActionSourcesReadsRequestFlag pins the request body
 // parser for OpenAI's documented `include: ["..."]` opt-in list.
 func TestParseIncludeActionSourcesReadsRequestFlag(t *testing.T) {

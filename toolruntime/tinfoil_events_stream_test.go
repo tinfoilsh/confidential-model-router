@@ -228,6 +228,24 @@ func TestResponsesStreamerIncludesSourceMetadataOnTerminalSearchItem(t *testing.
 	}
 }
 
+func TestResponsesStreamerOmitsSourceMetadataWithoutInclude(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
+	emitter := &responsesToolProgressEmitter{streamer: streamer}
+	details := map[string]any{"type": "search", "query": "q"}
+	handle := emitter.open("ws_1", "search", details)
+	emitter.close(handle, "search", details, toolProgressResult{
+		sources: []toolCallSource{{
+			url:     "https://example.com",
+			title:   "Example",
+			snippet: "An Exa highlight.",
+		}},
+	}, "completed", "")
+
+	if strings.Contains(rec.Body.String(), `"sources"`) {
+		t.Fatalf("sources must be omitted without the include option: %s", rec.Body.String())
+	}
+}
+
 // TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent pins the
 // failure path: the OpenAI spec only defines .in_progress, .searching,
 // and .completed envelopes for web_search_call; failures surface solely

@@ -182,8 +182,8 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 }
 
 func toolCallSourcesForResult(name string, structured any, output string) []toolCallSource {
-	if isRouterSearchToolName(name) {
-		return structuredSearchToolCallSources(name, structured)
+	if sources := structuredSearchToolCallSources(name, structured); len(sources) > 0 {
+		return sources
 	}
 	return toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 }
