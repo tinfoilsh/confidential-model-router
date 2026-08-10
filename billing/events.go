@@ -40,14 +40,19 @@ type Collector struct {
 	stopOnce sync.Once
 }
 
-// maskAPIKey masks an API key for safe logging
-// Shows first 3 and last 4 characters, masking the rest
+const (
+	apiKeyVisiblePrefix = 3
+	apiKeyVisibleSuffix = 4
+	apiKeyMinimumLength = apiKeyVisiblePrefix + apiKeyVisibleSuffix + 4
+)
+
 func maskAPIKey(apiKey string) string {
-	if len(apiKey) <= 10 {
-		// Too short to mask safely
+	if len(apiKey) < apiKeyMinimumLength {
 		return "***"
 	}
-	return apiKey[:3] + strings.Repeat("*", len(apiKey)-7) + apiKey[len(apiKey)-4:]
+	return apiKey[:apiKeyVisiblePrefix] +
+		strings.Repeat("*", len(apiKey)-apiKeyVisiblePrefix-apiKeyVisibleSuffix) +
+		apiKey[len(apiKey)-apiKeyVisibleSuffix:]
 }
 
 // NewCollector creates a billing event collector. Incomplete configuration is
@@ -107,14 +112,12 @@ func (c *Collector) Enabled() bool {
 	return c != nil && c.reporter != nil && c.reporter.Enabled()
 }
 
-// AddEvent forwards a billing event to the usage reporter and writes a masked
-// log line for local observability.
+// AddEvent converts the normalized token fields into canonical usage meters.
 func (c *Collector) AddEvent(event Event) {
 	if !c.Enabled() {
 		panic("billing: AddEvent called on an uninitialized collector")
 	}
 
-	// Create a safe version for logging with masked API key
 	safeEvent := event
 	safeEvent.APIKey = maskAPIKey(event.APIKey)
 
