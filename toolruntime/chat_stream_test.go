@@ -699,6 +699,43 @@ func TestChatStreamerPumpForwardsReasoningDelta(t *testing.T) {
 	}
 }
 
+func TestChatStreamerPumpPreservesReasoningForNextToolIteration(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{name: "Moonshot reasoning_content", field: chatReasoningContentField},
+		{name: "current vLLM reasoning", field: chatReasoningField},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streamer, _ := newTestChatStreamer(t)
+			upstream := strings.Join([]string{
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"` + tt.field + `":"first "}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"` + tt.field + `":"second"}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				"data: [DONE]",
+				"",
+			}, "\n\n")
+
+			result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+			if err != nil {
+				t.Fatalf("pumpUpstream returned error: %v", err)
+			}
+			message := result.assistantMessage()
+			if got := stringValue(message[tt.field]); got != "first second" {
+				t.Fatalf("expected complete %s in assistant message, got %q", tt.field, got)
+			}
+			toolCalls, ok := message["tool_calls"].([]any)
+			if !ok || len(toolCalls) != 1 {
+				t.Fatalf("expected tool call preserved in assistant message, got %#v", message)
+			}
+		})
+	}
+}
+
 // TestChatStreamerPumpEmitsReasoningBeforeContentOnCombinedDelta pins the
 // chunk ordering when one upstream delta carries both the final reasoning
 // fragment and the first content tokens (how reasoning parsers emit the
