@@ -2,10 +2,13 @@ package manager
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +20,25 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
+
+type recordingBillingCollector struct {
+	mu     sync.Mutex
+	events []billing.Event
+}
+
+func (c *recordingBillingCollector) AddEvent(event billing.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, event)
+}
+
+func (*recordingBillingCollector) Enabled() bool { return true }
+
+func (c *recordingBillingCollector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.events)
+}
 
 func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
 	t.Helper()
@@ -46,6 +68,26 @@ func newEnabledTestCollector(t *testing.T) *billing.Collector {
 
 func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 	return setupTestProxyWithModel(t, handler, "test-model")
+}
+
+func TestLargeUsageMetricsResponseEmitsBillingFallback(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", int(maxUsageMetricsBodyBytes+1)))),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
 }
 
 // TestProxyDirector_RewritesHostHeader ensures the outbound Host header is

@@ -43,6 +43,11 @@ const (
 	websearchModel = "websearch"
 )
 
+type billingEventCollector interface {
+	AddEvent(billing.Event)
+	Enabled() bool
+}
+
 // tokenLabelsKey carries the landing pool and priority class from the
 // dispatch site to the proxy's usage handler — the only place per-request
 // token counts are known.
@@ -174,7 +179,7 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, usageContextSecret string) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector billingEventCollector, cb *circuitBreaker, usageContextSecret string) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -423,6 +428,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				log.WithField("max_bytes", maxUsageMetricsBodyBytes).
 					Warn("Usage metrics extraction skipped: response body exceeds limit")
 				resp.Body = withPrefixedBody(bodyBytes, resp.Body)
+				emitZeroTokenEvent()
 				return nil
 			}
 			resp.Body.Close()
