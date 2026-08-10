@@ -48,6 +48,35 @@ type billingEventCollector interface {
 	Enabled() bool
 }
 
+type routerBillingStateKey struct{}
+
+type routerBillingState struct {
+	owned atomic.Bool
+	once  sync.Once
+}
+
+func billingStateFromRequest(req *http.Request) *routerBillingState {
+	state, _ := req.Context().Value(routerBillingStateKey{}).(*routerBillingState)
+	return state
+}
+
+func removeConnectionToken(header http.Header, token string) {
+	var kept []string
+	for _, value := range header.Values("Connection") {
+		for _, candidate := range strings.Split(value, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" && !strings.EqualFold(candidate, token) {
+				kept = append(kept, candidate)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		header.Del("Connection")
+		return
+	}
+	header.Set("Connection", strings.Join(kept, ", "))
+}
+
 // tokenLabelsKey carries the landing pool and priority class from the
 // dispatch site to the proxy's usage handler — the only place per-request
 // token counts are known.
@@ -180,6 +209,14 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 }
 
 func newProxy(host, publicKeyFP, modelName string, billingCollector billingEventCollector, cb *circuitBreaker, usageContextSecret string) *httputil.ReverseProxy {
+	collectorEnabled := billingCollector != nil && billingCollector.Enabled()
+	emitBillingEvent := func(req *http.Request, event billing.Event) {
+		state := billingStateFromRequest(req)
+		if !collectorEnabled || state == nil || !state.owned.Load() || event.APIKey == "" {
+			return
+		}
+		state.once.Do(func() { billingCollector.AddEvent(event) })
+	}
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -217,10 +254,16 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 	proxy.Director = func(req *http.Request) {
 		defaultDirector(req)
 		req.Host = host
+		state := &routerBillingState{}
+		*req = *req.WithContext(context.WithValue(req.Context(), routerBillingStateKey{}, state))
 		// These are router-owned headers. Never forward a client-supplied
 		// context, including when signing is disabled or fails.
 		req.Header.Del(usagereporting.HeaderContext)
 		req.Header.Del(usagereporting.HeaderUsageContextSignature)
+		// ReverseProxy removes headers named by Connection after Director runs.
+		// Remove these nominations before installing the signed context.
+		removeConnectionToken(req.Header, usagereporting.HeaderContext)
+		removeConnectionToken(req.Header, usagereporting.HeaderUsageContextSignature)
 		// Sign a usage-context header declaring that the router has already
 		// counted this customer request, so the downstream model enclave
 		// (shim) suppresses its own billing event and the request is not
@@ -229,7 +272,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		// they are still billed normally. Fail open for inference: on error
 		// the request is forwarded without the header and the shim bills.
 		apiKey := BearerToken(req.Header.Get("Authorization"))
-		if billingCollector != nil && billingCollector.Enabled() && usageContextSecret != "" && apiKey != "" {
+		if collectorEnabled && usageContextSecret != "" && apiKey != "" {
 			if err := usagereporting.SetHeaders(req.Header, usagereporting.Context{
 				ParentService:       usagereporting.ServiceRouter,
 				APIKeyHash:          usagereporting.HashAPIKey(apiKey),
@@ -237,7 +280,11 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 				Depth:               1,
 				IssuedAt:            time.Now().UTC(),
 			}, usageContextSecret); err != nil {
+				req.Header.Del(usagereporting.HeaderContext)
+				req.Header.Del(usagereporting.HeaderUsageContextSignature)
 				log.WithError(err).Warn("failed to sign usage context for billing suppression; forwarding without header")
+			} else {
+				state.owned.Store(true)
 			}
 		}
 	}
@@ -283,6 +330,15 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		} else {
 			recordFailure(reason)
 		}
+		apiKey := BearerToken(r.Header.Get("Authorization"))
+		emitBillingEvent(r, billing.Event{
+			Timestamp:   time.Now(),
+			UserID:      "authenticated_user",
+			APIKey:      apiKey,
+			Model:       modelName,
+			Enclave:     host,
+			RequestPath: r.URL.Path,
+		})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -323,10 +379,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 		emitZeroTokenEvent := func() {
-			if billingCollector == nil || apiKey == "" {
-				return
-			}
-			billingCollector.AddEvent(billing.Event{
+			emitBillingEvent(req, billing.Event{
 				Timestamp:   time.Now(),
 				UserID:      userID,
 				APIKey:      apiKey,
@@ -342,6 +395,10 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		// connections and copy bidirectionally after this callback returns.
 		// We must not touch the body or wrap it, but still emit a billing event.
 		if resp.StatusCode == http.StatusSwitchingProtocols {
+			emitZeroTokenEvent()
+			return nil
+		}
+		if resp.StatusCode >= http.StatusInternalServerError {
 			emitZeroTokenEvent()
 			return nil
 		}
@@ -379,7 +436,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 			}
 
 			// Add billing event
-			if billingCollector != nil {
+			if collectorEnabled {
 				if modelName == websearchModel {
 					// Only emit the per-request websearch fee. Skip the
 					// token-based event because the websearch service's
@@ -405,7 +462,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 						RequestPath:        requestPath,
 						Streaming:          streaming,
 					}
-					billingCollector.AddEvent(event)
+					emitBillingEvent(req, event)
 				}
 			}
 		}
@@ -444,7 +501,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 
 				// Set usage header directly on response
 				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName))
-			} else if billingCollector != nil && apiKey != "" {
+			} else if collectorEnabled && apiKey != "" {
 				emitZeroTokenEvent()
 			}
 
@@ -471,7 +528,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		// (e.g. docling, whisper). The billingCloser only fires if the
 		// usageHandler was never called, preventing double-billing for models
 		// that do include usage.
-		if !streaming && billingCollector != nil && apiKey != "" && resp.StatusCode == http.StatusOK {
+		if !streaming && collectorEnabled && apiKey != "" && resp.StatusCode == http.StatusOK {
 			resp.Body = &billingCloser{
 				ReadCloser:    resp.Body,
 				handlerCalled: &handlerCalled,

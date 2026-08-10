@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,10 +73,11 @@ func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 
 func TestLargeUsageMetricsResponseEmitsBillingFallback(t *testing.T) {
 	collector := &recordingBillingCollector{}
-	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "")
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer sk-test-key")
 	req.Header.Set(UsageMetricsRequestHeader, "true")
+	proxy.Director(req)
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -135,6 +137,7 @@ func TestProxyDirector_SignsUsageContext(t *testing.T) {
 	// both headers and must replace any values received at ingress.
 	req.Header.Set(usagereporting.HeaderContext, "client-supplied")
 	req.Header.Set(usagereporting.HeaderUsageContextSignature, "client-supplied")
+	req.Header.Set("Connection", "keep-alive, "+usagereporting.HeaderContext+", "+usagereporting.HeaderUsageContextSignature)
 	req.URL.Scheme = ""
 
 	proxy.Director(req)
@@ -157,6 +160,67 @@ func TestProxyDirector_SignsUsageContext(t *testing.T) {
 	}
 	if !usagereporting.VerifyAPIKeyHash(apiKey, ctx.APIKeyHash) {
 		t.Fatalf("APIKeyHash does not match the request's bearer token")
+	}
+	if got := req.Header.Get("Connection"); got != "keep-alive" {
+		t.Fatalf("Connection = %q, want router-owned header nominations removed", got)
+	}
+}
+
+func TestProxyDoesNotBillWithoutSignedSuppression(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 0 {
+		t.Fatalf("billing event count = %d, want shim fallback ownership", got)
+	}
+}
+
+func TestProxyBillsOwnedTransportFailure(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	proxy.ErrorHandler(httptest.NewRecorder(), req, errors.New("synthetic transport failure"))
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
+}
+
+func TestProxyBillsOwnedServerErrorOnce(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("upstream error")),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
 	}
 }
 
