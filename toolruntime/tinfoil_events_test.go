@@ -123,7 +123,7 @@ func TestTinfoilEventMarkersForRecordsMapsSearch(t *testing.T) {
 
 // TestExtractToolOutputSourcesPairsSourceAndURL pins that the
 // formatted search tool output is parsed into the correct ordered
-// {url, title, snippet} list so terminal markers can attribute citations to
+// {url, title} list so terminal markers can attribute citations to
 // the call that produced them. URLs missing a `Source:` line yield an
 // empty title; duplicate URLs are dropped.
 func TestExtractToolOutputSourcesPairsSourceAndURL(t *testing.T) {
@@ -147,14 +147,8 @@ func TestExtractToolOutputSourcesPairsSourceAndURL(t *testing.T) {
 	if sources[0].URL != "https://one.example" || sources[0].Title != "First Hit" {
 		t.Fatalf("first source mismatch: %#v", sources[0])
 	}
-	if sources[0].Snippet != "snippet one" {
-		t.Fatalf("first source snippet mismatch: %#v", sources[0])
-	}
 	if sources[1].URL != "https://no-title.example" || sources[1].Title != "" {
 		t.Fatalf("second source mismatch: %#v", sources[1])
-	}
-	if sources[1].Snippet != "snippet two" {
-		t.Fatalf("second source snippet mismatch: %#v", sources[1])
 	}
 }
 

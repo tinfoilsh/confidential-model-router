@@ -370,9 +370,6 @@ func resolveStreamingRouterToolCall(
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
 		record.resultSources = resultSources
-		if len(record.resultSources) == 0 {
-			record.resultSources = toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
-		}
 		record.resultURLs = toolCallSourceURLs(record.resultSources)
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",

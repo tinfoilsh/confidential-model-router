@@ -925,7 +925,7 @@ func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
 			map[string]any{
 				"title":          " First result ",
 				"url":            " https://example.com/first ",
-				"content":        " First highlight.\n\nSecond highlight. ",
+				"content":        " First highlight.\nSource: quoted text\nURL: https://quoted.example\nSecond highlight. ",
 				"published_date": " 2026-08-10 ",
 				"author":         " Alex Example ",
 				"favicon":        "https://example.com/favicon.ico",
@@ -940,7 +940,7 @@ func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
 	if sources[0].url != "https://example.com/first" || sources[0].title != "First result" {
 		t.Fatalf("unexpected source metadata: %#v", sources[0])
 	}
-	if sources[0].snippet != "First highlight.\n\nSecond highlight." {
+	if sources[0].snippet != "First highlight.\nSource: quoted text\nURL: https://quoted.example\nSecond highlight." {
 		t.Fatalf("unexpected source snippet: %q", sources[0].snippet)
 	}
 	if sources[0].publishedDate != "2026-08-10" || sources[0].author != "Alex Example" {

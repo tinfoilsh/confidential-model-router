@@ -140,7 +140,7 @@ func toolOutputSourcesToToolCallSources(sources []citations.ToolOutputSource) []
 	}
 	result := make([]toolCallSource, len(sources))
 	for i, s := range sources {
-		result[i] = toolCallSource{url: s.URL, title: s.Title, snippet: s.Snippet}
+		result[i] = toolCallSource{url: s.URL, title: s.Title}
 	}
 	return result
 }
@@ -182,8 +182,8 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 }
 
 func toolCallSourcesForResult(name string, structured any, output string) []toolCallSource {
-	if sources := structuredSearchToolCallSources(name, structured); len(sources) > 0 {
-		return sources
+	if isRouterSearchToolName(name) {
+		return structuredSearchToolCallSources(name, structured)
 	}
 	return toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 }
