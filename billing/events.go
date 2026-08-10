@@ -173,10 +173,15 @@ func (c *Collector) AddEvent(event Event) {
 // Stop gracefully shuts down the collector, flushing pending events with a
 // bounded timeout so a network stall cannot block shutdown indefinitely.
 func (c *Collector) Stop() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.StopContext(ctx)
+}
+
+// StopContext flushes pending events within the caller's shutdown budget.
+func (c *Collector) StopContext(ctx context.Context) {
 	c.stopOnce.Do(func() {
 		if c.reporter != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
 			c.reporter.Stop(ctx)
 		}
 	})

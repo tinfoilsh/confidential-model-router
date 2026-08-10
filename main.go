@@ -555,7 +555,6 @@ func main() {
 	if *debug {
 		log.Warn("debug mode enabled: local development overrides are active; do not use in production")
 	}
-	defer em.Shutdown()
 	go em.StartWorker()
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
@@ -1208,6 +1207,7 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.WithError(err).Error("Failed to gracefully shutdown server")
 	}
+	em.ShutdownContext(ctx)
 
 	log.Info("Server stopped")
 }

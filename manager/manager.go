@@ -423,8 +423,15 @@ func (em *EnclaveManager) PrometheusTargets() []PrometheusTargetGroup {
 
 // Shutdown gracefully stops the billing collector
 func (em *EnclaveManager) Shutdown() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	em.ShutdownContext(ctx)
+}
+
+// ShutdownContext stops runtime resources within the caller's shutdown budget.
+func (em *EnclaveManager) ShutdownContext(ctx context.Context) {
 	if em.billingCollector != nil {
-		em.billingCollector.Stop()
+		em.billingCollector.StopContext(ctx)
 	}
 	if em.cacheRouteShadow != nil {
 		em.cacheRouteShadow.Close()
