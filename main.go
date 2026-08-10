@@ -1223,7 +1223,9 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.WithError(err).Error("Failed to gracefully shutdown server")
 	}
-	em.ShutdownContext(ctx)
+	// Runtime cleanup, including the billing flush, gets its own budget after
+	// the listener has finished draining.
+	em.Shutdown()
 
 	log.Info("Server stopped")
 }
