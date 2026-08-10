@@ -67,8 +67,11 @@ func newCollector(controlPlaneURL, reporterID, reporterSecret string, httpClient
 	if reporterID != strings.TrimSpace(reporterID) {
 		return nil, fmt.Errorf("usage reporter ID must not have leading or trailing whitespace")
 	}
-	if reporterSecret == "" {
+	if strings.TrimSpace(reporterSecret) == "" {
 		return nil, fmt.Errorf("usage reporter secret is required")
+	}
+	if reporterSecret != strings.TrimSpace(reporterSecret) {
+		return nil, fmt.Errorf("usage reporter secret must not have leading or trailing whitespace")
 	}
 
 	c := &Collector{
@@ -86,6 +89,9 @@ func newCollector(controlPlaneURL, reporterID, reporterSecret string, httpClient
 }
 
 func ingestionEndpoint(controlPlaneURL string) (string, error) {
+	if strings.TrimSpace(controlPlaneURL) == "" {
+		return "", fmt.Errorf("control plane URL is required")
+	}
 	u, err := url.Parse(controlPlaneURL)
 	if err != nil {
 		return "", fmt.Errorf("parse control plane URL: %w", err)

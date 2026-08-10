@@ -208,6 +208,7 @@ func TestNewCollectorRejectsInvalidConfiguration(t *testing.T) {
 		{name: "missing reporter ID", endpoint: "https://api.example", secret: "secret"},
 		{name: "padded reporter ID", endpoint: "https://api.example", id: " model-router", secret: "secret"},
 		{name: "missing reporter secret", endpoint: "https://api.example", id: "model-router"},
+		{name: "whitespace reporter secret", endpoint: "https://api.example", id: "model-router", secret: "   "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			collector, err := NewCollector(test.endpoint, test.id, test.secret)
