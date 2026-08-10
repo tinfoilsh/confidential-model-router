@@ -39,7 +39,7 @@ type toolProgressEmitter interface {
 	// close emits the terminal progress frame for a tool call.
 	// result carries surface-specific metadata: .output for code
 	// exec (the tool's text result), .sources for web search (the
-	// URL/title pairs the search produced). Each implementation
+	// source metadata the search produced). Each implementation
 	// picks the fields it needs and ignores the rest.
 	close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string)
 
@@ -55,7 +55,7 @@ type toolProgressEmitter interface {
 // emitter implementation reads the fields relevant to its tool type.
 type toolProgressResult struct {
 	output  string           // code exec: the tool's text output
-	sources []toolCallSource // web search: URL/title pairs
+	sources []toolCallSource // web search: source metadata
 }
 
 // toolProgressHandle is the opaque per-call handle returned by

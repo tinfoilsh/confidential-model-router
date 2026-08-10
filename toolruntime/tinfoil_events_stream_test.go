@@ -200,7 +200,7 @@ func TestResponsesStreamerEmitsSpecWebSearchCallEvents(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamerIncludesSnippetsOnTerminalSearchItem(t *testing.T) {
+func TestResponsesStreamerIncludesSourceMetadataOnTerminalSearchItem(t *testing.T) {
 	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
 	streamer.includeActionSources = true
 	emitter := &responsesToolProgressEmitter{streamer: streamer}
@@ -208,18 +208,23 @@ func TestResponsesStreamerIncludesSnippetsOnTerminalSearchItem(t *testing.T) {
 	handle := emitter.open("ws_1", "search", details)
 	emitter.close(handle, "search", details, toolProgressResult{
 		sources: []toolCallSource{{
-			url:     "https://example.com",
-			title:   "Example",
-			snippet: "An Exa highlight.",
+			url:           "https://example.com",
+			title:         "Example",
+			snippet:       "An Exa highlight.",
+			publishedDate: "2026-08-10",
+			author:        "Alex Example",
 		}},
 	}, "completed", "")
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `"sources":[{"snippet":"An Exa highlight.","type":"url","url":"https://example.com"}]`) {
-		t.Fatalf("terminal search item missing snippet source: %s", body)
+	if !strings.Contains(body, `"sources":[{"author":"Alex Example","published_date":"2026-08-10","snippet":"An Exa highlight.","title":"Example","type":"url","url":"https://example.com"}]`) {
+		t.Fatalf("terminal search item missing source metadata: %s", body)
 	}
 	if strings.Count(body, `"snippet":"An Exa highlight."`) != 1 {
-		t.Fatalf("snippet must only appear on the terminal item: %s", body)
+		t.Fatalf("source metadata must only appear on the terminal item: %s", body)
+	}
+	if strings.Contains(body, `"favicon"`) {
+		t.Fatalf("favicon must not be returned: %s", body)
 	}
 }
 

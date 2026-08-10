@@ -852,14 +852,20 @@ func TestWebSearchCallEventGenericFailureCarriesErrorCode(t *testing.T) {
 // TestBuildWebSearchCallOutputItemsGatesActionSources pins the include
 // opt-in: without `web_search_call.action.sources` the field is
 // omitted entirely; with it, the URLs are shipped in OpenAI's
-// documented source shape, extended with the Exa snippet.
+// documented source shape, extended with available Exa metadata.
 func TestBuildWebSearchCallOutputItemsGatesActionSources(t *testing.T) {
 	records := []toolCallRecord{
 		{
 			name:      "search",
 			arguments: map[string]any{"query": "cats"},
 			resultSources: []toolCallSource{
-				{url: "https://a.test", title: "A", snippet: "Relevant excerpt from A."},
+				{
+					url:           "https://a.test",
+					title:         "A",
+					snippet:       "Relevant excerpt from A.",
+					publishedDate: "2026-08-10",
+					author:        "Alex Example",
+				},
 				{url: "https://b.test", title: "B"},
 			},
 		},
@@ -889,9 +895,27 @@ func TestBuildWebSearchCallOutputItemsGatesActionSources(t *testing.T) {
 	if stringValue(first["snippet"]) != "Relevant excerpt from A." {
 		t.Fatalf("expected first source snippet, got %#v", first)
 	}
+	if stringValue(first["title"]) != "A" {
+		t.Fatalf("expected first source title, got %#v", first)
+	}
+	if stringValue(first["published_date"]) != "2026-08-10" {
+		t.Fatalf("expected first source published date, got %#v", first)
+	}
+	if stringValue(first["author"]) != "Alex Example" {
+		t.Fatalf("expected first source author, got %#v", first)
+	}
+	if _, present := first["favicon"]; present {
+		t.Fatalf("favicon must not be returned, got %#v", first)
+	}
 	second, _ := sources[1].(map[string]any)
 	if _, present := second["snippet"]; present {
 		t.Fatalf("expected empty snippet to be omitted, got %#v", second)
+	}
+	if _, present := second["published_date"]; present {
+		t.Fatalf("expected empty published date to be omitted, got %#v", second)
+	}
+	if _, present := second["author"]; present {
+		t.Fatalf("expected empty author to be omitted, got %#v", second)
 	}
 }
 
@@ -899,9 +923,12 @@ func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
 	structured := map[string]any{
 		"results": []any{
 			map[string]any{
-				"title":   " First result ",
-				"url":     " https://example.com/first ",
-				"content": " First highlight.\n\nSecond highlight. ",
+				"title":          " First result ",
+				"url":            " https://example.com/first ",
+				"content":        " First highlight.\n\nSecond highlight. ",
+				"published_date": " 2026-08-10 ",
+				"author":         " Alex Example ",
+				"favicon":        "https://example.com/favicon.ico",
 			},
 		},
 	}
@@ -915,6 +942,9 @@ func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
 	}
 	if sources[0].snippet != "First highlight.\n\nSecond highlight." {
 		t.Fatalf("unexpected source snippet: %q", sources[0].snippet)
+	}
+	if sources[0].publishedDate != "2026-08-10" || sources[0].author != "Alex Example" {
+		t.Fatalf("unexpected source metadata: %#v", sources[0])
 	}
 }
 

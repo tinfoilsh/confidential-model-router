@@ -70,7 +70,7 @@ func (l *toolCallLog) list() []toolCallRecord {
 // web_search_call items can honestly report status:"failed" instead of
 // silently claiming completion on a request that never returned results.
 //
-// resultSources carries the ordered {url, title, snippet} results this specific call
+// resultSources carries the ordered source metadata this specific call
 // produced (search results, fetched pages) so terminal tinfoil-event
 // markers can attribute sources to the exact search call that surfaced
 // them. resultURLs is the same list in URL-only form kept for the
@@ -89,9 +89,11 @@ type toolCallRecord struct {
 // missing or empty title is surfaced as an empty string so clients can
 // fall back to displaying the bare URL.
 type toolCallSource struct {
-	url     string
-	title   string
-	snippet string
+	url           string
+	title         string
+	snippet       string
+	publishedDate string
+	author        string
 }
 
 // publicToolErrorReason returns a short, opaque status string safe to
@@ -166,9 +168,11 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 		}
 		seen[url] = struct{}{}
 		sources = append(sources, toolCallSource{
-			url:     url,
-			title:   strings.TrimSpace(stringValue(result["title"])),
-			snippet: strings.TrimSpace(stringValue(result["content"])),
+			url:           url,
+			title:         strings.TrimSpace(stringValue(result["title"])),
+			snippet:       strings.TrimSpace(stringValue(result["content"])),
+			publishedDate: strings.TrimSpace(stringValue(result["published_date"])),
+			author:        strings.TrimSpace(stringValue(result["author"])),
 		})
 	}
 	if len(sources) == 0 {
@@ -474,7 +478,7 @@ func tinfoilToolCallMarkersForRecords(records []toolCallRecord) string {
 // ---------------------------------------------------------------------------
 
 // toActionSources wraps search results in the OpenAI-spec source shape and
-// includes the Exa excerpt as a `snippet` extension when one is available.
+// includes available Exa metadata as vendor extensions.
 // Returns nil when the input is empty so callers can omit the field entirely.
 func toActionSources(results []toolCallSource) []any {
 	if len(results) == 0 {
@@ -491,6 +495,15 @@ func toActionSources(results []toolCallSource) []any {
 		}
 		if result.snippet != "" {
 			source["snippet"] = result.snippet
+		}
+		if result.title != "" {
+			source["title"] = result.title
+		}
+		if result.publishedDate != "" {
+			source["published_date"] = result.publishedDate
+		}
+		if result.author != "" {
+			source["author"] = result.author
 		}
 		sources = append(sources, source)
 	}
