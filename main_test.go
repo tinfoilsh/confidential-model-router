@@ -63,6 +63,53 @@ func TestJSONRequestRejectsUnsupportedContentEncoding(t *testing.T) {
 	}
 }
 
+func TestSetForwardedJSONRequestBodyToolRequestRemovesGzipEncoding(t *testing.T) {
+	plain := []byte(`{"model":"test","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Encoding", "gzip")
+
+	if err := setForwardedJSONRequestBody(req, plain, "gzip", true); err != nil {
+		t.Fatalf("setForwardedJSONRequestBody() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty for tool dispatch", got)
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("request body = %q, want plaintext %q", got, plain)
+	}
+}
+
+func TestSetForwardedJSONRequestBodyProxyRequestPreservesGzipEncoding(t *testing.T) {
+	plain := []byte(`{"model":"test","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Encoding", "gzip")
+
+	if err := setForwardedJSONRequestBody(req, plain, "gzip", false); err != nil {
+		t.Fatalf("setForwardedJSONRequestBody() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	zr, err := gzip.NewReader(req.Body)
+	if err != nil {
+		t.Fatalf("open gzip request body: %v", err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("read gzip request body: %v", err)
+	}
+	if err := zr.Close(); err != nil {
+		t.Fatalf("close gzip request body: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("decoded request body = %q, want %q", got, plain)
+	}
+}
+
 func TestRateLimitIdentity(t *testing.T) {
 	// mkJWT builds a compact-JWS-shaped token (header.payload.sig) with the
 	// given JSON payload; the signature is irrelevant here since rateLimitIdentity

@@ -93,6 +93,23 @@ func setRequestBody(r *http.Request, payload []byte) {
 	r.ContentLength = int64(len(payload))
 }
 
+func setForwardedJSONRequestBody(r *http.Request, plain []byte, contentEncoding string, toolRequest bool) error {
+	if toolRequest {
+		// The tool runtime re-marshals its internal dispatches from the parsed
+		// body, so they are plaintext JSON regardless of the client's encoding.
+		r.Header.Del("Content-Encoding")
+		setRequestBody(r, plain)
+		return nil
+	}
+
+	encoded, err := encodeJSONRequestBody(plain, contentEncoding)
+	if err != nil {
+		return err
+	}
+	setRequestBody(r, encoded)
+	return nil
+}
+
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
 // stable across the short-lived token's ~15m refreshes (and across multiple
@@ -918,14 +935,13 @@ func main() {
 					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 					return
 				}
-				bodyBytes, err = encodeJSONRequestBody(bodyBytes, contentEncoding)
-				if err != nil {
+				toolRequest := len(activeProfiles) > 0 || hasAutoContinueTools
+				if err := setForwardedJSONRequestBody(r, bodyBytes, contentEncoding, toolRequest); err != nil {
 					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 					return
 				}
-				setRequestBody(r, bodyBytes)
 
-				if len(activeProfiles) > 0 || hasAutoContinueTools {
+				if toolRequest {
 					// Streaming tool requests feed the same first-token SLA
 					// metrics as plain proxied streams. The loop may dispatch
 					// to several replicas and pools before the first
