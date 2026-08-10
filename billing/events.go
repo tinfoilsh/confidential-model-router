@@ -90,7 +90,7 @@ func ingestionEndpoint(controlPlaneURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse control plane URL: %w", err)
 	}
-	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || strings.Contains(controlPlaneURL, "#") {
 		return "", fmt.Errorf("control plane URL must be an absolute https URL without credentials, query, or fragment")
 	}
 	return strings.TrimRight(controlPlaneURL, "/") + usagereporting.IngestionPath, nil
