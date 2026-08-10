@@ -164,6 +164,36 @@ func TestProxyDirector_SignsUsageContext(t *testing.T) {
 	if got := req.Header.Get("Connection"); got != "keep-alive" {
 		t.Fatalf("Connection = %q, want router-owned header nominations removed", got)
 	}
+	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want identity for billing extraction", got)
+	}
+}
+
+func TestNonSSEEventStreamMediaTypeRemainsNonStreaming(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/custom", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"text/event-streaming"}, "Content-Length": []string{"4"}},
+		Body:          io.NopCloser(strings.NewReader("data")),
+		ContentLength: 4,
+		Request:       req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "4" {
+		t.Fatalf("Content-Length = %q, want pass-through", got)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
 }
 
 func TestProxyDoesNotBillWithoutSignedSuppression(t *testing.T) {

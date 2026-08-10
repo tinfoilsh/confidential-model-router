@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -75,6 +76,11 @@ func removeConnectionToken(header http.Header, token string) {
 		return
 	}
 	header.Set("Connection", strings.Join(kept, ", "))
+}
+
+func hasMediaType(header, want string) bool {
+	mediaType, _, err := mime.ParseMediaType(header)
+	return err == nil && strings.EqualFold(mediaType, want)
 }
 
 // tokenLabelsKey carries the landing pool and priority class from the
@@ -256,6 +262,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		req.Host = host
 		state := &routerBillingState{}
 		*req = *req.WithContext(context.WithValue(req.Context(), routerBillingStateKey{}, state))
+		if collectorEnabled {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		// These are router-owned headers. Never forward a client-supplied
 		// context, including when signing is disabled or fails.
 		req.Header.Del(usagereporting.HeaderContext)
@@ -376,7 +385,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector billingEvent
 		}
 
 		requestPath := req.URL.Path
-		streaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+		streaming := hasMediaType(resp.Header.Get("Content-Type"), "text/event-stream")
 
 		emitZeroTokenEvent := func() {
 			emitBillingEvent(req, billing.Event{
