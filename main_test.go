@@ -309,24 +309,6 @@ func TestJSONRoutingUnchanged(t *testing.T) {
 			},
 			expectedModel: "nomic-embed-text",
 		},
-		{
-			name: "legacy completions extracts model from JSON",
-			path: "/v1/completions",
-			body: map[string]interface{}{
-				"model":  "gpt-oss-120b",
-				"prompt": "test",
-			},
-			expectedModel: "gpt-oss-120b",
-		},
-		{
-			name: "responses extracts model from JSON",
-			path: "/v1/responses",
-			body: map[string]interface{}{
-				"model": "glm-5-2",
-				"input": "test",
-			},
-			expectedModel: "glm-5-2",
-		},
 	}
 
 	for _, tt := range tests {

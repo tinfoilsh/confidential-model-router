@@ -779,6 +779,19 @@ func main() {
 					}
 				}
 
+				// Reject malformed streaming metadata before file conversion or any
+				// other helper can dispatch work on behalf of this request.
+				streamingRequest, err := prepareStreamingRequest(body, r.Header)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if streamingRequest {
+					isStreaming = true
+					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
+						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
+				}
+
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
 					case "/v1/responses":
@@ -843,18 +856,6 @@ func main() {
 							"model": rateLimitModel,
 						}).Debug("rate limited: injecting lower vLLM priority")
 					}
-				}
-
-				// If streaming request, ensure upstream usage is available for billing.
-				streamingRequest, err := prepareStreamingRequest(body, r.Header)
-				if err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
-					return
-				}
-				if streamingRequest {
-					isStreaming = true
-					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
-						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}
 
 				// Always re-marshal in case there were any changes
