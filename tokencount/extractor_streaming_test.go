@@ -183,6 +183,12 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	if body == nil {
 		t.Error("Expected non-nil body")
 	}
+	if _, err := io.Copy(io.Discard, body); err != nil {
+		t.Fatalf("drain body: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close body: %v", err)
+	}
 
 	body2, err2 := ExtractTokensFromResponse(makeResponse(), "test-model")
 	if err2 != nil {
@@ -190,6 +196,12 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 	if body2 == nil {
 		t.Error("Expected non-nil body from backward compatible function")
+	}
+	if _, err := io.Copy(io.Discard, body2); err != nil {
+		t.Fatalf("drain body2: %v", err)
+	}
+	if err := body2.Close(); err != nil {
+		t.Fatalf("close body2: %v", err)
 	}
 }
 

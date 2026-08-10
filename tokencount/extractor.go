@@ -364,9 +364,7 @@ func (s *StreamingTokenExtractor) processStream() {
 	// Always invoke the handler so streams that end without a usage chunk still
 	// produce a zero-token customer-request event.
 	if s.usageHandler != nil {
-		if s.usage.TotalTokens == 0 {
-			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
-		}
+		s.usage.Normalize()
 		s.usageHandler(s.usage)
 	}
 
