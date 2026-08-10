@@ -200,6 +200,29 @@ func TestResponsesStreamerEmitsSpecWebSearchCallEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamerIncludesSnippetsOnTerminalSearchItem(t *testing.T) {
+	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
+	streamer.includeActionSources = true
+	emitter := &responsesToolProgressEmitter{streamer: streamer}
+	details := map[string]any{"type": "search", "query": "q"}
+	handle := emitter.open("ws_1", "search", details)
+	emitter.close(handle, "search", details, toolProgressResult{
+		sources: []toolCallSource{{
+			url:     "https://example.com",
+			title:   "Example",
+			snippet: "An Exa highlight.",
+		}},
+	}, "completed", "")
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"sources":[{"snippet":"An Exa highlight.","type":"url","url":"https://example.com"}]`) {
+		t.Fatalf("terminal search item missing snippet source: %s", body)
+	}
+	if strings.Count(body, `"snippet":"An Exa highlight."`) != 1 {
+		t.Fatalf("snippet must only appear on the terminal item: %s", body)
+	}
+}
+
 // TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent pins the
 // failure path: the OpenAI spec only defines .in_progress, .searching,
 // and .completed envelopes for web_search_call; failures surface solely

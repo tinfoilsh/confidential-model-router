@@ -75,13 +75,14 @@ func (c *State) ResolveHarmonyCitations(text string) string {
 	})
 }
 
-// ToolOutputSource is a {url, title} pair extracted from router-formatted
+// ToolOutputSource is a {url, title, snippet} result extracted from router-formatted
 // tool output. This is separate from Source (which carries an Index for
 // cursor-based citation resolution) because extraction happens after
 // formatting and the cursor is not needed at the extraction site.
 type ToolOutputSource struct {
-	URL   string
-	Title string
+	URL     string
+	Title   string
+	Snippet string
 }
 
 var toolOutputURLPattern = regexp.MustCompile(`(?m)^URL:\s*(\S+)`)
@@ -125,27 +126,46 @@ func ExtractToolOutputSources(output string) []ToolOutputSource {
 	sources := make([]ToolOutputSource, 0)
 	seen := make(map[string]struct{})
 	var pendingTitle string
+	var current *ToolOutputSource
+	var snippetLines []string
+	appendCurrent := func() {
+		if current == nil {
+			return
+		}
+		current.Snippet = strings.TrimSpace(strings.Join(snippetLines, "\n"))
+		if _, dup := seen[current.URL]; !dup {
+			seen[current.URL] = struct{}{}
+			sources = append(sources, *current)
+		}
+		current = nil
+		snippetLines = nil
+	}
 	for _, line := range lines {
 		trimmed := strings.TrimRight(line, "\r")
 		if after, ok := strings.CutPrefix(trimmed, "Source:"); ok {
+			appendCurrent()
 			pendingTitle = strings.TrimSpace(after)
 			continue
 		}
 		if after, ok := strings.CutPrefix(trimmed, "URL:"); ok {
+			appendCurrent()
 			url := strings.TrimSpace(after)
 			if url == "" {
 				pendingTitle = ""
 				continue
 			}
-			if _, dup := seen[url]; dup {
-				pendingTitle = ""
+			current = &ToolOutputSource{URL: url, Title: pendingTitle}
+			pendingTitle = ""
+			continue
+		}
+		if current != nil {
+			if len(snippetLines) == 0 && strings.HasPrefix(trimmed, "Published:") {
 				continue
 			}
-			seen[url] = struct{}{}
-			sources = append(sources, ToolOutputSource{URL: url, Title: pendingTitle})
-			pendingTitle = ""
+			snippetLines = append(snippetLines, trimmed)
 		}
 	}
+	appendCurrent()
 	if len(sources) == 0 {
 		return nil
 	}

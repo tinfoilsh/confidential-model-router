@@ -852,13 +852,16 @@ func TestWebSearchCallEventGenericFailureCarriesErrorCode(t *testing.T) {
 // TestBuildWebSearchCallOutputItemsGatesActionSources pins the include
 // opt-in: without `web_search_call.action.sources` the field is
 // omitted entirely; with it, the URLs are shipped in OpenAI's
-// documented `[{type:"url", url:"..."}]` shape.
+// documented source shape, extended with the Exa snippet.
 func TestBuildWebSearchCallOutputItemsGatesActionSources(t *testing.T) {
 	records := []toolCallRecord{
 		{
-			name:       "search",
-			arguments:  map[string]any{"query": "cats"},
-			resultURLs: []string{"https://a.test", "https://b.test"},
+			name:      "search",
+			arguments: map[string]any{"query": "cats"},
+			resultSources: []toolCallSource{
+				{url: "https://a.test", title: "A", snippet: "Relevant excerpt from A."},
+				{url: "https://b.test", title: "B"},
+			},
 		},
 	}
 
@@ -882,6 +885,36 @@ func TestBuildWebSearchCallOutputItemsGatesActionSources(t *testing.T) {
 	}
 	if stringValue(first["url"]) != "https://a.test" {
 		t.Fatalf("expected first source url=https://a.test, got %#v", first)
+	}
+	if stringValue(first["snippet"]) != "Relevant excerpt from A." {
+		t.Fatalf("expected first source snippet, got %#v", first)
+	}
+	second, _ := sources[1].(map[string]any)
+	if _, present := second["snippet"]; present {
+		t.Fatalf("expected empty snippet to be omitted, got %#v", second)
+	}
+}
+
+func TestStructuredSearchToolCallSourcesPreservesContent(t *testing.T) {
+	structured := map[string]any{
+		"results": []any{
+			map[string]any{
+				"title":   " First result ",
+				"url":     " https://example.com/first ",
+				"content": " First highlight.\n\nSecond highlight. ",
+			},
+		},
+	}
+
+	sources := structuredSearchToolCallSources("search", structured)
+	if len(sources) != 1 {
+		t.Fatalf("expected one source, got %#v", sources)
+	}
+	if sources[0].url != "https://example.com/first" || sources[0].title != "First result" {
+		t.Fatalf("unexpected source metadata: %#v", sources[0])
+	}
+	if sources[0].snippet != "First highlight.\n\nSecond highlight." {
+		t.Fatalf("unexpected source snippet: %q", sources[0].snippet)
 	}
 }
 
