@@ -139,15 +139,15 @@ func (t *teeReaderCloser) Close() error {
 // ExtractTokensFromResponse extracts token counts from an HTTP response. The
 // response body is returned as a pass-through reader so the client receives
 // bytes without delay; usage is delivered through the optional callback.
-func ExtractTokensFromResponse(resp *http.Response, model string) (io.ReadCloser, error) {
-	return ExtractTokensFromResponseWithHandler(resp, model, nil, false)
+func ExtractTokensFromResponse(resp *http.Response) (io.ReadCloser, error) {
+	return ExtractTokensFromResponseWithHandler(resp, nil, false)
 }
 
 // ExtractTokensFromResponseWithHandler wraps the response body to extract
 // token usage with an optional usage handler. For streaming responses the
 // handler is invoked when the stream ends; for non-streaming JSON responses it
 // is invoked on Close. clientRequestedUsage controls usage-only SSE filtering.
-func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usageHandler func(*Usage), clientRequestedUsage bool) (io.ReadCloser, error) {
+func ExtractTokensFromResponseWithHandler(resp *http.Response, usageHandler func(*Usage), clientRequestedUsage bool) (io.ReadCloser, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, fmt.Errorf("tokencount: response and response body are required")
 	}
@@ -156,7 +156,7 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 	// For streaming responses, use the streaming extractor
 	if hasMediaType(contentType, "text/event-stream") {
 		pr, pw := io.Pipe()
-		extractor := NewStreamingTokenExtractor(resp.Body, pw, model)
+		extractor := NewStreamingTokenExtractor(resp.Body, pw)
 		extractor.usageHandler = usageHandler
 		extractor.clientRequestedUsage = clientRequestedUsage
 		go extractor.processStream()
@@ -228,7 +228,7 @@ type StreamingTokenExtractor struct {
 }
 
 // NewStreamingTokenExtractor creates a new streaming token extractor that intercepts SSE chunks
-func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, model string) *StreamingTokenExtractor {
+func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser) *StreamingTokenExtractor {
 	s := &StreamingTokenExtractor{
 		reader: reader,
 		writer: writer,

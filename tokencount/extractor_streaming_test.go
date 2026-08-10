@@ -121,7 +121,7 @@ data: [DONE]
 			pr, pw := io.Pipe()
 
 			// Create extractor
-			extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+			extractor := NewStreamingTokenExtractor(inputReader, pw)
 			extractor.clientRequestedUsage = tt.clientRequestedUsage
 
 			// Start processing in background
@@ -176,7 +176,7 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 	}
 
 	// Call with clientRequestedUsage = true
-	body, err := ExtractTokensFromResponseWithHandler(makeResponse(), "test-model", usageHandler, true)
+	body, err := ExtractTokensFromResponseWithHandler(makeResponse(), usageHandler, true)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestExtractTokensFromResponseWithHandler_Parameters(t *testing.T) {
 		t.Fatalf("close body: %v", err)
 	}
 
-	body2, err2 := ExtractTokensFromResponse(makeResponse(), "test-model")
+	body2, err2 := ExtractTokensFromResponse(makeResponse())
 	if err2 != nil {
 		t.Errorf("Unexpected error in backward compatible function: %v", err2)
 	}
@@ -249,7 +249,7 @@ data: [DONE]
 			outputBuffer := &bytes.Buffer{}
 			pr, pw := io.Pipe()
 
-			extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+			extractor := NewStreamingTokenExtractor(inputReader, pw)
 			extractor.clientRequestedUsage = tt.clientRequestedUsage
 
 			processingDone := make(chan bool)
@@ -306,7 +306,7 @@ data: [DONE]
 
 	var capturedUsage *Usage
 	usageHandlerCalled := make(chan bool, 1)
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 	extractor.clientRequestedUsage = false
 	extractor.usageHandler = func(usage *Usage) {
 		capturedUsage = usage
@@ -368,7 +368,7 @@ func TestStreamingUsageHandlerCalledWithoutUsageChunk(t *testing.T) {
 	pr, pw := io.Pipe()
 
 	called := make(chan *Usage, 1)
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 	extractor.usageHandler = func(usage *Usage) {
 		called <- usage
 	}
@@ -397,7 +397,7 @@ func TestFilteredChunkMustNotLeaveEmptySSEEvent(t *testing.T) {
 	inputReader := io.NopCloser(strings.NewReader(input))
 	pr, pw := io.Pipe()
 
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 	extractor.clientRequestedUsage = false // should filter usage-only chunk
 
 	go extractor.processStream()
@@ -427,7 +427,7 @@ func TestDoneEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp)
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -464,7 +464,7 @@ func TestResponseCompletedEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp)
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -501,7 +501,7 @@ func TestTerminalEventLineAfterDataLineEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp)
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -538,7 +538,7 @@ func TestResponsesErrorEventEndsOpenUpstreamStream(t *testing.T) {
 		},
 		Body: upstreamReader,
 	}
-	body, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp)
 	if err != nil {
 		t.Fatalf("ExtractTokensFromResponse() error = %v", err)
 	}
@@ -571,7 +571,7 @@ func TestLargeSSELineSurvivesScannerBuffer(t *testing.T) {
 	input := "data: {\"choices\":[{\"delta\":{\"content\":\"" + largeContent + "\"}}]}\n\ndata: [DONE]\n\n"
 	inputReader := io.NopCloser(strings.NewReader(input))
 	pr, pw := io.Pipe()
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 
 	go extractor.processStream()
 	output, err := io.ReadAll(pr)
@@ -587,7 +587,7 @@ func TestResponseTerminalEventWithoutDataDoesNotEndStream(t *testing.T) {
 	input := "event: response.completed\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"later\"}\n\ndata: [DONE]\n\n"
 	inputReader := io.NopCloser(strings.NewReader(input))
 	pr, pw := io.Pipe()
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 
 	go extractor.processStream()
 	output, err := io.ReadAll(pr)
@@ -664,7 +664,7 @@ data: [DONE]
 			outputBuffer := &bytes.Buffer{}
 			pr, pw := io.Pipe()
 
-			extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+			extractor := NewStreamingTokenExtractor(inputReader, pw)
 			extractor.clientRequestedUsage = tt.clientRequestedUsage
 
 			processingDone := make(chan bool)
@@ -719,10 +719,10 @@ data: [DONE]
 	pr1, pw1 := io.Pipe()
 	pr2, pw2 := io.Pipe()
 
-	extractor1 := NewStreamingTokenExtractor(io.NopCloser(strings.NewReader(input1)), pw1, "model1")
+	extractor1 := NewStreamingTokenExtractor(io.NopCloser(strings.NewReader(input1)), pw1)
 	extractor1.clientRequestedUsage = false // Should filter
 
-	extractor2 := NewStreamingTokenExtractor(io.NopCloser(strings.NewReader(input2)), pw2, "model2")
+	extractor2 := NewStreamingTokenExtractor(io.NopCloser(strings.NewReader(input2)), pw2)
 	extractor2.clientRequestedUsage = true // Should NOT filter
 
 	done := make(chan bool, 4)
@@ -784,7 +784,7 @@ data: {"response":{"id":"resp_abc123","status":"completed","output":[{"id":"msg_
 	pr, pw := io.Pipe()
 
 	var capturedUsage *Usage
-	extractor := NewStreamingTokenExtractor(inputReader, pw, "gpt-oss-120b")
+	extractor := NewStreamingTokenExtractor(inputReader, pw)
 	extractor.usageHandler = func(usage *Usage) {
 		capturedUsage = usage
 	}
@@ -858,7 +858,7 @@ data: [DONE]
 			outputBuffer := &bytes.Buffer{}
 			pr, pw := io.Pipe()
 
-			extractor := NewStreamingTokenExtractor(inputReader, pw, "test-model")
+			extractor := NewStreamingTokenExtractor(inputReader, pw)
 			extractor.clientRequestedUsage = tt.clientRequestedUsage
 
 			processingDone := make(chan bool)

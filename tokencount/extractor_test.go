@@ -102,7 +102,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}
 
 			// Extract tokens with handler
-			newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, usageHandler, false)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -142,7 +142,7 @@ func TestNonStreamingExtractionIsBounded(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 	called := false
-	wrapped, err := ExtractTokensFromResponseWithHandler(resp, "test-model", func(*Usage) { called = true }, false)
+	wrapped, err := ExtractTokensFromResponseWithHandler(resp, func(*Usage) { called = true }, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestClosingStreamingBodyClosesUpstream(t *testing.T) {
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       upstream,
 	}
-	body, err := ExtractTokensFromResponse(resp, "test-model")
+	body, err := ExtractTokensFromResponse(resp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestClosingStreamingBodyClosesUpstream(t *testing.T) {
 }
 
 func TestExtractTokensRejectsNilResponseBody(t *testing.T) {
-	if _, err := ExtractTokensFromResponseWithHandler(&http.Response{}, "test-model", nil, false); err == nil {
+	if _, err := ExtractTokensFromResponseWithHandler(&http.Response{}, nil, false); err == nil {
 		t.Fatal("nil response body accepted")
 	}
 }
@@ -281,7 +281,7 @@ data: [DONE]
 			}
 
 			// Extract tokens
-			newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, usageHandler, false)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v", err)
 				return
@@ -355,7 +355,7 @@ data: [DONE]
 			}
 
 			// Should handle errors gracefully
-			newBody, err := ExtractTokensFromResponse(resp, "test-model")
+			newBody, err := ExtractTokensFromResponse(resp)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponse() unexpected error = %v", err)
 				return
@@ -388,7 +388,7 @@ data: [DONE]
 	}
 
 	var capturedUsage *Usage
-	newBody, err := ExtractTokensFromResponseWithHandler(resp, "test-model", func(usage *Usage) {
+	newBody, err := ExtractTokensFromResponseWithHandler(resp, func(usage *Usage) {
 		capturedUsage = usage
 	}, true)
 	if err != nil {
