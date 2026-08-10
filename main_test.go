@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -14,6 +15,53 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
+
+func TestGzipJSONRequestRoundTrip(t *testing.T) {
+	plain := []byte(`{"model":"glm-5-2","stream":true}`)
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(compressed.Bytes()))
+	req.Header.Set("Content-Encoding", "gzip")
+	decoded, original, encoding, err := readJSONRequestBody(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, plain) {
+		t.Fatalf("decoded body = %q, want %q", decoded, plain)
+	}
+	if !bytes.Equal(original, compressed.Bytes()) || encoding != "gzip" {
+		t.Fatal("encoded request metadata was not preserved")
+	}
+	encoded, err := encodeJSONRequestBody(decoded, encoding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("round-trip body = %q, want %q", got, plain)
+	}
+}
+
+func TestJSONRequestRejectsUnsupportedContentEncoding(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Encoding", "br")
+	if _, _, _, err := readJSONRequestBody(req); err == nil {
+		t.Fatal("unsupported JSON content encoding accepted")
+	}
+}
 
 func TestRateLimitIdentity(t *testing.T) {
 	// mkJWT builds a compact-JWS-shaped token (header.payload.sig) with the

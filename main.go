@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/base64"
@@ -36,6 +37,61 @@ var configFile []byte // Initial (attested) config
 var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
+
+func readJSONRequestBody(r *http.Request) (plain, original []byte, contentEncoding string, err error) {
+	original, err = io.ReadAll(r.Body)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := r.Body.Close(); err != nil {
+		return nil, nil, "", fmt.Errorf("close request body: %w", err)
+	}
+	contentEncoding = strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch contentEncoding {
+	case "":
+		return original, original, "", nil
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(original))
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("decode gzip request body: %w", err)
+		}
+		plain, readErr := io.ReadAll(io.LimitReader(zr, maxRequestBodySize+1))
+		closeErr := zr.Close()
+		if readErr != nil {
+			return nil, nil, "", fmt.Errorf("read gzip request body: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, nil, "", fmt.Errorf("close gzip request body: %w", closeErr)
+		}
+		if int64(len(plain)) > maxRequestBodySize {
+			return nil, nil, "", &http.MaxBytesError{Limit: maxRequestBodySize}
+		}
+		return plain, original, contentEncoding, nil
+	default:
+		return nil, nil, "", fmt.Errorf("unsupported content encoding %q", r.Header.Get("Content-Encoding"))
+	}
+}
+
+func encodeJSONRequestBody(plain []byte, contentEncoding string) ([]byte, error) {
+	if contentEncoding == "" {
+		return plain, nil
+	}
+	var encoded bytes.Buffer
+	zw := gzip.NewWriter(&encoded)
+	if _, err := zw.Write(plain); err != nil {
+		return nil, fmt.Errorf("encode gzip request body: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("close gzip request body: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+func setRequestBody(r *http.Request, payload []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(payload))
+	r.Header.Set("Content-Length", strconv.Itoa(len(payload)))
+	r.ContentLength = int64(len(payload))
+}
 
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
@@ -665,12 +721,11 @@ func main() {
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
 				var body map[string]any
-				bodyBytes, err := io.ReadAll(r.Body)
+				bodyBytes, originalBody, _, err := readJSONRequestBody(r)
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				r.Body.Close()
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
@@ -680,7 +735,7 @@ func main() {
 				} else {
 					modelName = "qwen3-tts"
 				}
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				setRequestBody(r, originalBody)
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
@@ -702,7 +757,7 @@ func main() {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
 				var body map[string]any
-				bodyBytes, err := io.ReadAll(r.Body)
+				bodyBytes, _, contentEncoding, err := readJSONRequestBody(r)
 
 				if err != nil {
 					writeRequestBodyError(w, err)
@@ -864,11 +919,12 @@ func main() {
 					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 					return
 				}
-				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-				r.ContentLength = int64(len(bodyBytes))
-
-				r.Body.Close()
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				bodyBytes, err = encodeJSONRequestBody(bodyBytes, contentEncoding)
+				if err != nil {
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					return
+				}
+				setRequestBody(r, bodyBytes)
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
 					// Streaming tool requests feed the same first-token SLA
