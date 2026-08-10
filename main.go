@@ -361,6 +361,24 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) error
 	return nil
 }
 
+func prepareStreamingRequest(body map[string]any, headers http.Header) (bool, error) {
+	raw, present := body["stream"]
+	if !present {
+		return false, nil
+	}
+	stream, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("'stream' must be a boolean")
+	}
+	if !stream {
+		return false, nil
+	}
+	if err := ensureStreamingUsageOptions(body, headers); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // autoModelParamReservedKeys lists body fields that a per-candidate param block
 // must never overwrite when merged, so client-supplied auto params cannot
 // clobber the routing model, conversation, streaming, or tool/option blobs.
@@ -828,12 +846,13 @@ func main() {
 				}
 
 				// If streaming request, ensure upstream usage is available for billing.
-				if stream, ok := body["stream"].(bool); ok && stream {
+				streamingRequest, err := prepareStreamingRequest(body, r.Header)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if streamingRequest {
 					isStreaming = true
-					if err := ensureStreamingUsageOptions(body, r.Header); err != nil {
-						jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
-						return
-					}
 					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
 						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
 				}

@@ -473,6 +473,13 @@ func TestEnsureStreamingUsageOptionsRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestPrepareStreamingRequestRejectsInvalidStream(t *testing.T) {
+	headers := make(http.Header)
+	if _, err := prepareStreamingRequest(map[string]any{"stream": "true"}, headers); err == nil {
+		t.Fatal("prepareStreamingRequest() accepted non-boolean stream")
+	}
+}
+
 func TestEnsureStreamingUsageOptionsClearsSpoofedHeader(t *testing.T) {
 	headers := http.Header{"X-Tinfoil-Client-Requested-Usage": []string{"true"}}
 	body := map[string]any{"stream": true}
