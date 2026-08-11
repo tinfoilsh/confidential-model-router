@@ -87,6 +87,7 @@ type clientToolCallDeltaForwarder struct {
 	clientIndexByUpstream map[int]int
 	nextClientIndex       int
 	streamedIDs           map[string]bool
+	streamedWithoutIDs    map[string]int
 	bufferingFromIndex    int
 	bufferingActive       bool
 }
@@ -717,6 +718,7 @@ func newClientToolCallDeltaForwarder(
 		stateByUpstreamIndex:  map[int]*clientToolCallDeltaState{},
 		clientIndexByUpstream: map[int]int{},
 		streamedIDs:           map[string]bool{},
+		streamedWithoutIDs:    map[string]int{},
 	}
 }
 
@@ -730,6 +732,7 @@ func (f *clientToolCallDeltaForwarder) resetIteration() {
 	}
 	f.stateByUpstreamIndex = map[int]*clientToolCallDeltaState{}
 	f.clientIndexByUpstream = map[int]int{}
+	f.streamedWithoutIDs = map[string]int{}
 	f.bufferingFromIndex = 0
 	f.bufferingActive = false
 }
@@ -821,7 +824,13 @@ func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntr
 	}
 	for upstreamIndex, entry := range entries {
 		state := f.stateByUpstreamIndex[upstreamIndex]
-		if state == nil || entry == nil || (state.mode != clientToolCallForwardBuffered && state.mode != clientToolCallForwardDeferred) {
+		if state == nil || entry == nil {
+			continue
+		}
+		if entry.id == "" && (state.mode == clientToolCallForwardLive || state.mode == clientToolCallForwardBuffered || state.mode == clientToolCallForwardDeferred) {
+			f.streamedWithoutIDs[entry.functionName]++
+		}
+		if state.mode != clientToolCallForwardBuffered && state.mode != clientToolCallForwardDeferred {
 			continue
 		}
 		arguments := entry.arguments
@@ -862,12 +871,16 @@ func (f *clientToolCallDeltaForwarder) clientIndex(upstreamIndex int) int {
 }
 
 func (f *clientToolCallDeltaForwarder) unstreamed(calls []toolCall) []toolCall {
-	if f == nil || len(f.streamedIDs) == 0 {
+	if f == nil || (len(f.streamedIDs) == 0 && len(f.streamedWithoutIDs) == 0) {
 		return calls
 	}
 	out := make([]toolCall, 0, len(calls))
 	for _, call := range calls {
 		if call.id != "" && f.streamedIDs[call.id] {
+			continue
+		}
+		if call.id == "" && f.streamedWithoutIDs[call.name] > 0 {
+			f.streamedWithoutIDs[call.name]--
 			continue
 		}
 		out = append(out, call)

@@ -434,6 +434,35 @@ func TestChatStreamerFinalizeSkipsAlreadyStreamedClientToolCalls(t *testing.T) {
 	}
 }
 
+func TestChatStreamerFinalizeSkipsMultipleStreamedToolCallsWithoutIDs(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"lookup_order","arguments":"{\"id\":1}"}},{"index":1,"type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo\"}"}},{"index":2,"type":"function","function":{"name":"lookup_order","arguments":"{\"id\":2}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	_, clientToolCalls := splitToolCalls(testOwnedTools, result.toolCalls)
+	_, externalClientCalls := splitClientToolCalls(streamer.autoContinueTools, clientToolCalls)
+	if err := streamer.finalize(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), nil, "gpt-oss-120b", result, externalClientCalls); err != nil {
+		t.Fatalf("finalize returned error: %v", err)
+	}
+
+	calls := emittedChatToolCallDeltas(t, rec.Body.String())
+	if len(calls) != 3 {
+		t.Fatalf("expected each empty-ID tool call once, got %d: %s", len(calls), rec.Body.String())
+	}
+	assertChatToolCallDelta(t, calls[0], 0, "", "lookup_order", `{"id":1}`)
+	assertChatToolCallDelta(t, calls[1], 1, "", "render_artifact_preview", `{"title":"Demo"}`)
+	assertChatToolCallDelta(t, calls[2], 2, "", "lookup_order", `{"id":2}`)
+}
+
 func TestChatStreamerFinalizeEmitsFinishAndUsage(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{
