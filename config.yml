@@ -24,7 +24,7 @@ models:
     repo: tinfoilsh/confidential-llama3-3-70b
 
   glm-5-2:
-    repo: tinfoilsh/confidential-glm5-2
+    repo: tinfoilsh/confidential-glm5-2-b200
 
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
