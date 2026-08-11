@@ -290,8 +290,8 @@ func executeRouterToolCall(
 		output = humanizeToolArgError(call.name, err, call.arguments)
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
-		record.resultURLs = citations.ExtractToolOutputURLs(output)
-		record.resultSources = toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
+		record.resultSources = toolCallSourcesForResult(call.name, structured, output)
+		record.resultURLs = toolCallSourceURLs(record.resultSources)
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))

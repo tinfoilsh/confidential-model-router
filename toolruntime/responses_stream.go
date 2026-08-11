@@ -663,7 +663,7 @@ func (s *responsesStreamer) forwardEvent(eventType string, event map[string]any)
 // `status` strings on the terminal `web_search_call` output item carried
 // in `response.completed.output`, which is collapsed onto `failed` at
 // the envelope level but preserved on the record for tooling.
-func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
+func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, []toolCallSource, error) {
 	return executeToolWithProgress(ctx, registry, s.citations, &responsesToolProgressEmitter{streamer: s}, call)
 }
 
@@ -966,7 +966,7 @@ func runResponsesStreaming(
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
-				func(ctx context.Context, call toolCall) (string, error) {
+				func(ctx context.Context, call toolCall) (string, []toolCallSource, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
 				"", "",

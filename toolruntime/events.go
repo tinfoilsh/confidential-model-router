@@ -70,7 +70,7 @@ func (l *toolCallLog) list() []toolCallRecord {
 // web_search_call items can honestly report status:"failed" instead of
 // silently claiming completion on a request that never returned results.
 //
-// resultSources carries the ordered {url, title} pairs this specific call
+// resultSources carries the ordered source metadata this specific call
 // produced (search results, fetched pages) so terminal tinfoil-event
 // markers can attribute sources to the exact search call that surfaced
 // them. resultURLs is the same list in URL-only form kept for the
@@ -84,13 +84,16 @@ type toolCallRecord struct {
 	output        string // raw tool output text; used by code-exec events
 }
 
-// toolCallSource is a single {url, title} pair produced by a router tool
+// toolCallSource is a single search result produced by a router tool
 // call (a search hit or a fetched page). Titles are best-effort: a
 // missing or empty title is surfaced as an empty string so clients can
 // fall back to displaying the bare URL.
 type toolCallSource struct {
-	url   string
-	title string
+	url           string
+	title         string
+	snippet       string
+	publishedDate string
+	author        string
 }
 
 // publicToolErrorReason returns a short, opaque status string safe to
@@ -140,6 +143,65 @@ func toolOutputSourcesToToolCallSources(sources []citations.ToolOutputSource) []
 		result[i] = toolCallSource{url: s.URL, title: s.Title}
 	}
 	return result
+}
+
+func structuredSearchToolCallSources(name string, structured any) []toolCallSource {
+	if !isRouterSearchToolName(name) {
+		return nil
+	}
+	content, _ := structured.(map[string]any)
+	results, _ := content["results"].([]any)
+	if len(results) == 0 {
+		return nil
+	}
+
+	sources := make([]toolCallSource, 0, len(results))
+	seen := make(map[string]struct{}, len(results))
+	for _, rawResult := range results {
+		result, _ := rawResult.(map[string]any)
+		url := strings.TrimSpace(stringValue(result["url"]))
+		if url == "" {
+			continue
+		}
+		if _, duplicate := seen[url]; duplicate {
+			continue
+		}
+		seen[url] = struct{}{}
+		sources = append(sources, toolCallSource{
+			url:           url,
+			title:         strings.TrimSpace(stringValue(result["title"])),
+			snippet:       strings.TrimSpace(stringValue(result["content"])),
+			publishedDate: strings.TrimSpace(stringValue(result["published_date"])),
+			author:        strings.TrimSpace(stringValue(result["author"])),
+		})
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return sources
+}
+
+func toolCallSourcesForResult(name string, structured any, output string) []toolCallSource {
+	if sources := structuredSearchToolCallSources(name, structured); len(sources) > 0 {
+		return sources
+	}
+	return toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
+}
+
+func toolCallSourceURLs(sources []toolCallSource) []string {
+	if len(sources) == 0 {
+		return nil
+	}
+	urls := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source.url != "" {
+			urls = append(urls, source.url)
+		}
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	return urls
 }
 
 // statusForRecord maps a recorded router tool call to the web_search_call
@@ -415,22 +477,35 @@ func tinfoilToolCallMarkersForRecords(records []toolCallRecord) string {
 // Web-search-call output items (Responses API)
 // ---------------------------------------------------------------------------
 
-// toActionSources wraps a list of URLs in the OpenAI-spec shape
-// `[{type: "url", url: "..."}]` documented for `WebSearchCall.action.sources`.
+// toActionSources wraps search results in the OpenAI-spec source shape and
+// includes available Exa metadata as vendor extensions.
 // Returns nil when the input is empty so callers can omit the field entirely.
-func toActionSources(urls []string) []any {
-	if len(urls) == 0 {
+func toActionSources(results []toolCallSource) []any {
+	if len(results) == 0 {
 		return nil
 	}
-	sources := make([]any, 0, len(urls))
-	for _, url := range urls {
-		if url == "" {
+	sources := make([]any, 0, len(results))
+	for _, result := range results {
+		if result.url == "" {
 			continue
 		}
-		sources = append(sources, map[string]any{
+		source := map[string]any{
 			"type": "url",
-			"url":  url,
-		})
+			"url":  result.url,
+		}
+		if result.snippet != "" {
+			source["snippet"] = result.snippet
+		}
+		if result.title != "" {
+			source["title"] = result.title
+		}
+		if result.publishedDate != "" {
+			source["published_date"] = result.publishedDate
+		}
+		if result.author != "" {
+			source["author"] = result.author
+		}
+		sources = append(sources, source)
 	}
 	if len(sources) == 0 {
 		return nil
@@ -497,8 +572,8 @@ func webSearchCallEvent(id, status, errorCode string, action map[string]any) map
 // web_search_call output items documented by OpenAI's Responses API.
 //   - search tool calls become one action.type:"search" event with the query
 //     and (when the caller opted in via `include:
-//     ["web_search_call.action.sources"]`) the resolved source URLs in the
-//     spec shape `[{type:"url", url:"..."}]`.
+//     ["web_search_call.action.sources"]`) the resolved source URLs and
+//     snippets in the action's sources list.
 //   - fetch tool calls become one action.type:"open_page" event per URL so
 //     clients can correlate each fetched page with its surrounding search.
 func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSources bool) []any {
@@ -512,7 +587,14 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 				action["query"] = query
 			}
 			if includeActionSources {
-				if sources := toActionSources(record.resultURLs); len(sources) > 0 {
+				resultSources := record.resultSources
+				if len(resultSources) == 0 {
+					resultSources = make([]toolCallSource, 0, len(record.resultURLs))
+					for _, url := range record.resultURLs {
+						resultSources = append(resultSources, toolCallSource{url: url})
+					}
+				}
+				if sources := toActionSources(resultSources); len(sources) > 0 {
 					action["sources"] = sources
 				}
 			}

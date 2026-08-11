@@ -451,7 +451,7 @@ func (s *chatStreamer) flushCitations() {
 // Failures are still returned to the caller so the tool output carries
 // the raw error text (matching the non-streaming path that serializes
 // err.Error() into the tool-result message).
-func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, error) {
+func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, []toolCallSource, error) {
 	return executeToolWithProgress(ctx, registry, s.citations, &chatToolProgressEmitter{streamer: s}, call)
 }
 
@@ -977,7 +977,7 @@ func runChatStreaming(
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
-				func(ctx context.Context, call toolCall) (string, error) {
+				func(ctx context.Context, call toolCall) (string, []toolCallSource, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
 				tracePhase, tid,
