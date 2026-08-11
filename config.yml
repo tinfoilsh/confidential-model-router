@@ -38,6 +38,9 @@ models:
   kimi-k2-6:
     repo: tinfoilsh/confidential-kimi-k2-6-b200
 
+  deepseek-v4-flash:
+    repo: tinfoilsh/confidential-deepseek-v4-flash
+
   kimi-k3:
     repo: tinfoilsh/confidential-kimi-k3
 
