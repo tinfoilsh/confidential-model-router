@@ -736,6 +736,49 @@ func TestChatStreamerPumpPreservesReasoningForNextToolIteration(t *testing.T) {
 	}
 }
 
+func TestChatStreamerPumpPreservesDualReasoningFields(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning_content":"legacy ","reasoning":"current"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	if got := stringValue(result.assistantMessage()[chatReasoningContentField]); got != "legacy current" {
+		t.Fatalf("expected both reasoning fields to be preserved, got %q", got)
+	}
+}
+
+func TestChatStreamerPumpIgnoresEmptyReasoningFieldPrelude(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning_content":""}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning":"actual"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	message := result.assistantMessage()
+	if _, exists := message[chatReasoningContentField]; exists {
+		t.Fatalf("expected empty prelude field to be omitted, got %#v", message)
+	}
+	if got := stringValue(message[chatReasoningField]); got != "actual" {
+		t.Fatalf("expected non-empty reasoning field to be preserved, got %q", got)
+	}
+}
+
 // TestChatStreamerPumpEmitsReasoningBeforeContentOnCombinedDelta pins the
 // chunk ordering when one upstream delta carries both the final reasoning
 // fragment and the first content tokens (how reasoning parsers emit the

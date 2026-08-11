@@ -226,12 +226,13 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		// the final reasoning fragment and the first content tokens,
 		// and splitting it content-first would hand clients the tail of
 		// the reasoning after the answer already started.
-		if r, ok := delta[chatReasoningContentField].(string); ok {
+		if r := stringValue(delta[chatReasoningContentField]); r != "" {
 			if result.reasoningField == "" {
 				result.reasoningField = chatReasoningContentField
 			}
 			result.reasoning += r
-		} else if r, ok := delta[chatReasoningField].(string); ok {
+		}
+		if r := stringValue(delta[chatReasoningField]); r != "" {
 			if result.reasoningField == "" {
 				result.reasoningField = chatReasoningField
 			}
