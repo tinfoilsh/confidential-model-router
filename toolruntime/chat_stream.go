@@ -41,6 +41,7 @@ type chatStreamer struct {
 	identityPinned bool
 
 	ownedTools              map[string]struct{}
+	autoContinueTools       map[string]struct{}
 	clientToolCallForwarder *clientToolCallDeltaForwarder
 }
 
@@ -64,7 +65,7 @@ const (
 )
 
 // chatToolCallBuilder assembles OpenAI streaming tool_call deltas into
-// final tool_call objects while forwarding client-owned deltas live.
+// final tool_call objects while forwarding ordinary client-owned deltas live.
 type chatToolCallBuilder struct {
 	entries         []*chatToolCallEntry
 	clientForwarder *clientToolCallDeltaForwarder
@@ -80,11 +81,14 @@ type chatToolCallEntry struct {
 
 type clientToolCallDeltaForwarder struct {
 	ownedTools            map[string]struct{}
+	autoContinueTools     map[string]struct{}
 	emit                  func(map[string]any)
 	stateByUpstreamIndex  map[int]*clientToolCallDeltaState
 	clientIndexByUpstream map[int]int
 	nextClientIndex       int
 	streamedIDs           map[string]bool
+	bufferingFromIndex    int
+	bufferingActive       bool
 }
 
 type clientToolCallDeltaState struct {
@@ -98,6 +102,8 @@ const (
 	clientToolCallForwardPending clientToolCallForwardMode = iota
 	clientToolCallForwardLive
 	clientToolCallForwardDrop
+	clientToolCallForwardBuffered
+	clientToolCallForwardDeferred
 )
 
 // ---------------------------------------------------------------------------
@@ -262,6 +268,7 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 	if !doneSeen {
 		return result, newUpstreamStreamError("upstream stream ended without a terminal [DONE] marker")
 	}
+	forwarder.flushBuffered(builder.entries)
 	return result, nil
 }
 
@@ -415,6 +422,7 @@ func (s *chatStreamer) getClientToolCallForwarder() *clientToolCallDeltaForwarde
 	if s.clientToolCallForwarder == nil {
 		s.clientToolCallForwarder = newClientToolCallDeltaForwarder(
 			s.ownedTools,
+			s.autoContinueTools,
 			s.emitClientToolCallDelta,
 		)
 	}
@@ -659,7 +667,7 @@ func (s *chatStreamer) terminateWithError(r *http.Request, em *manager.EnclaveMa
 // chatToolCallBuilder methods
 // ---------------------------------------------------------------------------
 
-// ingest merges tool_call fragments and forwards client-owned deltas live.
+// ingest merges tool_call fragments and forwards ordinary client-owned deltas live.
 func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 	for _, item := range rawCalls {
 		m, _ := item.(map[string]any)
@@ -699,10 +707,12 @@ func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 
 func newClientToolCallDeltaForwarder(
 	ownedTools map[string]struct{},
+	autoContinueTools map[string]struct{},
 	emit func(map[string]any),
 ) *clientToolCallDeltaForwarder {
 	return &clientToolCallDeltaForwarder{
 		ownedTools:            ownedTools,
+		autoContinueTools:     autoContinueTools,
 		emit:                  emit,
 		stateByUpstreamIndex:  map[int]*clientToolCallDeltaState{},
 		clientIndexByUpstream: map[int]int{},
@@ -720,6 +730,8 @@ func (f *clientToolCallDeltaForwarder) resetIteration() {
 	}
 	f.stateByUpstreamIndex = map[int]*clientToolCallDeltaState{}
 	f.clientIndexByUpstream = map[int]int{}
+	f.bufferingFromIndex = 0
+	f.bufferingActive = false
 }
 
 func (f *clientToolCallDeltaForwarder) ingest(
@@ -737,6 +749,10 @@ func (f *clientToolCallDeltaForwarder) ingest(
 		return
 	case clientToolCallForwardDrop:
 		return
+	case clientToolCallForwardBuffered:
+		return
+	case clientToolCallForwardDeferred:
+		return
 	}
 	if toolName == "" {
 		state.pending = append(state.pending, rawDelta)
@@ -745,6 +761,19 @@ func (f *clientToolCallDeltaForwarder) ingest(
 	if _, isRouterOwned := f.ownedTools[toolName]; isRouterOwned {
 		state.mode = clientToolCallForwardDrop
 		state.pending = nil
+		return
+	}
+	if _, isAutoContinue := f.autoContinueTools[toolName]; isAutoContinue {
+		state.mode = clientToolCallForwardBuffered
+		state.pending = nil
+		f.beginBufferingAt(upstreamIndex)
+		f.clientIndex(upstreamIndex)
+		return
+	}
+	if f.bufferingActive && upstreamIndex > f.bufferingFromIndex {
+		state.mode = clientToolCallForwardDeferred
+		state.pending = nil
+		f.clientIndex(upstreamIndex)
 		return
 	}
 	state.mode = clientToolCallForwardLive
@@ -777,6 +806,48 @@ func (f *clientToolCallDeltaForwarder) forward(upstreamIndex int, rawDelta map[s
 		forwarded["function"] = fn
 	}
 	f.emit(forwarded)
+}
+
+func (f *clientToolCallDeltaForwarder) beginBufferingAt(upstreamIndex int) {
+	if !f.bufferingActive || upstreamIndex < f.bufferingFromIndex {
+		f.bufferingFromIndex = upstreamIndex
+	}
+	f.bufferingActive = true
+}
+
+func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntry) {
+	if f == nil || f.emit == nil {
+		return
+	}
+	for upstreamIndex, entry := range entries {
+		state := f.stateByUpstreamIndex[upstreamIndex]
+		if state == nil || entry == nil || (state.mode != clientToolCallForwardBuffered && state.mode != clientToolCallForwardDeferred) {
+			continue
+		}
+		arguments := entry.arguments
+		if state.mode == clientToolCallForwardBuffered {
+			if repaired, changed := sanitizeToolCallArgumentsJSON(arguments); changed && jsonBytesValid(repaired) {
+				arguments = repaired
+			}
+		}
+		toolType := entry.toolType
+		if toolType == "" {
+			toolType = "function"
+		}
+		forwarded := map[string]any{
+			"index": f.clientIndex(upstreamIndex),
+			"id":    entry.id,
+			"type":  toolType,
+			"function": map[string]any{
+				"name":      entry.functionName,
+				"arguments": string(arguments),
+			},
+		}
+		if entry.id != "" {
+			f.streamedIDs[entry.id] = true
+		}
+		f.emit(forwarded)
+	}
 }
 
 func (f *clientToolCallDeltaForwarder) clientIndex(upstreamIndex int) int {
@@ -934,6 +1005,7 @@ func runChatStreaming(
 		eventFlags:           eventFlags,
 		emitter:              nil,
 		ownedTools:           ownedTools,
+		autoContinueTools:    autoContinueTools,
 	}
 	streamer.emitter = citations.NewEmitter(streamer.citations)
 
