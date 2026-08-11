@@ -750,8 +750,12 @@ func TestChatStreamerPumpPreservesDualReasoningFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pumpUpstream returned error: %v", err)
 	}
-	if got := stringValue(result.assistantMessage()[chatReasoningContentField]); got != "legacy current" {
-		t.Fatalf("expected both reasoning fields to be preserved, got %q", got)
+	message := result.assistantMessage()
+	if got := stringValue(message[chatReasoningContentField]); got != "legacy " {
+		t.Fatalf("expected reasoning_content to be preserved independently, got %q", got)
+	}
+	if got := stringValue(message[chatReasoningField]); got != "current" {
+		t.Fatalf("expected reasoning to be preserved independently, got %q", got)
 	}
 }
 
