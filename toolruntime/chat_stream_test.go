@@ -699,6 +699,90 @@ func TestChatStreamerPumpForwardsReasoningDelta(t *testing.T) {
 	}
 }
 
+func TestChatStreamerPumpPreservesReasoningForNextToolIteration(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{name: "Moonshot reasoning_content", field: chatReasoningContentField},
+		{name: "current vLLM reasoning", field: chatReasoningField},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streamer, _ := newTestChatStreamer(t)
+			upstream := strings.Join([]string{
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"` + tt.field + `":"first "}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"` + tt.field + `":"second"}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+				`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				"data: [DONE]",
+				"",
+			}, "\n\n")
+
+			result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+			if err != nil {
+				t.Fatalf("pumpUpstream returned error: %v", err)
+			}
+			message := result.assistantMessage()
+			if got := stringValue(message[tt.field]); got != "first second" {
+				t.Fatalf("expected complete %s in assistant message, got %q", tt.field, got)
+			}
+			toolCalls, ok := message["tool_calls"].([]any)
+			if !ok || len(toolCalls) != 1 {
+				t.Fatalf("expected tool call preserved in assistant message, got %#v", message)
+			}
+		})
+	}
+}
+
+func TestChatStreamerPumpPreservesDualReasoningFields(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning_content":"legacy ","reasoning":"current"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	message := result.assistantMessage()
+	if got := stringValue(message[chatReasoningContentField]); got != "legacy " {
+		t.Fatalf("expected reasoning_content to be preserved independently, got %q", got)
+	}
+	if got := stringValue(message[chatReasoningField]); got != "current" {
+		t.Fatalf("expected reasoning to be preserved independently, got %q", got)
+	}
+}
+
+func TestChatStreamerPumpIgnoresEmptyReasoningFieldPrelude(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning_content":""}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"reasoning":"actual"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	result, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+	message := result.assistantMessage()
+	if _, exists := message[chatReasoningContentField]; exists {
+		t.Fatalf("expected empty prelude field to be omitted, got %#v", message)
+	}
+	if got := stringValue(message[chatReasoningField]); got != "actual" {
+		t.Fatalf("expected non-empty reasoning field to be preserved, got %q", got)
+	}
+}
+
 // TestChatStreamerPumpEmitsReasoningBeforeContentOnCombinedDelta pins the
 // chunk ordering when one upstream delta carries both the final reasoning
 // fragment and the first content tokens (how reasoning parsers emit the

@@ -45,18 +45,23 @@ type chatStreamer struct {
 }
 
 // chatIterationResult summarizes one upstream stream's payload once the
-// stream terminated: accumulated content, any parsed tool calls, and the
-// finish reason the upstream reported. Callers use this to decide whether
-// to loop (router-owned tool calls present) or finalize (no tool calls or
-// only client-owned tool calls remain).
+// stream terminated: accumulated reasoning and content, any parsed tool
+// calls, and the finish reason the upstream reported. Callers use this to
+// decide whether to loop (router-owned tool calls present) or finalize (no
+// tool calls or only client-owned tool calls remain).
 type chatIterationResult struct {
-	content      string
-	reasoning    string
-	toolCalls    []toolCall
-	rawToolCalls []any
-	finishReason string
-	usage        map[string]any
+	content          string
+	reasoningByField map[string]string
+	toolCalls        []toolCall
+	rawToolCalls     []any
+	finishReason     string
+	usage            map[string]any
 }
+
+const (
+	chatReasoningField        = "reasoning"
+	chatReasoningContentField = "reasoning_content"
+)
 
 // chatToolCallBuilder assembles OpenAI streaming tool_call deltas into
 // final tool_call objects while forwarding client-owned deltas live.
@@ -101,18 +106,38 @@ const (
 
 // assistantMessage builds the OpenAI-shaped assistant message that the
 // router appends to the messages array between iterations so the next
-// upstream call sees the tool_calls the model just emitted. We preserve
-// the exact raw tool_calls from the stream so serialization round-trips
-// byte-for-byte; the parsed form is only used for loop control.
+// upstream call sees the reasoning and tool_calls the model just emitted.
+// We preserve the exact raw tool_calls from the stream so serialization
+// round-trips byte-for-byte; the parsed form is only used for loop control.
 func (r *chatIterationResult) assistantMessage() map[string]any {
 	message := map[string]any{
 		"role":    "assistant",
 		"content": r.content,
 	}
+	for _, field := range []string{chatReasoningContentField, chatReasoningField} {
+		if reasoning := r.reasoningByField[field]; reasoning != "" {
+			message[field] = reasoning
+		}
+	}
 	if len(r.rawToolCalls) > 0 {
 		message["tool_calls"] = r.rawToolCalls
 	}
 	return message
+}
+
+func (r *chatIterationResult) accumulateReasoning(delta map[string]any, field string) {
+	reasoning := stringValue(delta[field])
+	if reasoning == "" {
+		return
+	}
+	if r.reasoningByField == nil {
+		r.reasoningByField = make(map[string]string, 2)
+	}
+	r.reasoningByField[field] += reasoning
+}
+
+func (r chatIterationResult) reasoningText() string {
+	return r.reasoningByField[chatReasoningContentField] + r.reasoningByField[chatReasoningField]
 }
 
 // ---------------------------------------------------------------------------
@@ -217,11 +242,8 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		// the final reasoning fragment and the first content tokens,
 		// and splitting it content-first would hand clients the tail of
 		// the reasoning after the answer already started.
-		if r := stringValue(delta["reasoning_content"]); r != "" {
-			result.reasoning += r
-		} else if r := stringValue(delta["reasoning"]); r != "" {
-			result.reasoning += r
-		}
+		result.accumulateReasoning(delta, chatReasoningContentField)
+		result.accumulateReasoning(delta, chatReasoningField)
 		s.emitReasoningDelta(delta)
 		if content := stringValue(delta["content"]); content != "" {
 			result.content += content
@@ -370,11 +392,11 @@ func (s *chatStreamer) emitReasoningDelta(delta map[string]any) {
 		return
 	}
 	reasoningDelta := map[string]any{}
-	if reasoning := stringValue(delta["reasoning_content"]); reasoning != "" {
-		reasoningDelta["reasoning_content"] = reasoning
+	if reasoning := stringValue(delta[chatReasoningContentField]); reasoning != "" {
+		reasoningDelta[chatReasoningContentField] = reasoning
 	}
-	if reasoning := stringValue(delta["reasoning"]); reasoning != "" {
-		reasoningDelta["reasoning"] = reasoning
+	if reasoning := stringValue(delta[chatReasoningField]); reasoning != "" {
+		reasoningDelta[chatReasoningField] = reasoning
 	}
 	if len(reasoningDelta) == 0 {
 		return
@@ -940,7 +962,7 @@ func runChatStreaming(
 			return nil
 		}
 
-		dl.WriteStreamedTurn(i+1, result.usage, result.reasoning, result.content)
+		dl.WriteStreamedTurn(i+1, result.usage, result.reasoningText(), result.content)
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
 		autoContinueCalls, externalClientCalls := splitClientToolCalls(autoContinueTools, clientToolCalls)
