@@ -2,10 +2,14 @@ package manager
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +19,27 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
+	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
+
+type recordingBillingCollector struct {
+	mu     sync.Mutex
+	events []billing.Event
+}
+
+func (c *recordingBillingCollector) AddEvent(event billing.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, event)
+}
+
+func (*recordingBillingCollector) Enabled() bool { return true }
+
+func (c *recordingBillingCollector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.events)
+}
 
 func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName string) *httputil.ReverseProxy {
 	t.Helper()
@@ -23,10 +47,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	t.Cleanup(backend.Close)
 
 	backendURL, _ := url.Parse(backend.URL)
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-
-	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker())
+	proxy := newProxy(backendURL.Host, "", modelName, nil, newCircuitBreaker(), "")
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -36,8 +57,39 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	return proxy
 }
 
+func newEnabledTestCollector(t *testing.T) *billing.Collector {
+	t.Helper()
+	collector, err := billing.NewCollector("https://unused.invalid", "router-test", "test-reporter-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(collector.Stop)
+	return collector
+}
+
 func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 	return setupTestProxyWithModel(t, handler, "test-model")
+}
+
+func TestLargeUsageMetricsResponseEmitsBillingFallback(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", int(maxUsageMetricsBodyBytes+1)))),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
 }
 
 // TestProxyDirector_RewritesHostHeader ensures the outbound Host header is
@@ -47,10 +99,7 @@ func setupTestProxy(t *testing.T, handler http.Handler) *httputil.ReverseProxy {
 func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	const enclaveHost = "voxtral-tts.realtime.inf9.tinfoil.sh"
 
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-
-	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, newCircuitBreaker())
+	proxy := newProxy(enclaveHost, "", "voxtral-tts", nil, newCircuitBreaker(), "")
 
 	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
 	req.Host = "inference.tinfoil.sh"
@@ -66,6 +115,216 @@ func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	}
 	if req.URL.Scheme != "https" {
 		t.Fatalf("req.URL.Scheme = %q, want %q", req.URL.Scheme, "https")
+	}
+}
+
+// TestProxyDirector_SignsUsageContext verifies that the Director signs a
+// usage-context header declaring BillCustomerRequest=false when a
+// usageContextSecret is configured, so the downstream shim suppresses its own
+// billing event on the cloud path (router → shim).
+func TestProxyDirector_SignsUsageContext(t *testing.T) {
+	const enclaveHost = "glm-5-2.inf9.tinfoil.sh"
+	const secret = "test-usage-context-secret-32-bytes-long!"
+	const apiKey = "sk-test-key-1234567890"
+
+	collector := newEnabledTestCollector(t)
+
+	proxy := newProxy(enclaveHost, "", "glm-5-2", collector, newCircuitBreaker(), secret)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// A custom client cannot choose the suppression context. The router owns
+	// both headers and must replace any values received at ingress.
+	req.Header.Set(usagereporting.HeaderContext, "client-supplied")
+	req.Header.Set(usagereporting.HeaderUsageContextSignature, "client-supplied")
+	req.Header.Set("Connection", "keep-alive, "+usagereporting.HeaderContext+", "+usagereporting.HeaderUsageContextSignature)
+	req.URL.Scheme = ""
+
+	proxy.Director(req)
+
+	ctx, present, err := usagereporting.FromHeaders(req.Header, secret, time.Now(), time.Minute)
+	if !present {
+		t.Fatalf("usage-context header not present after Director")
+	}
+	if err != nil {
+		t.Fatalf("usage-context verification failed: %v", err)
+	}
+	if ctx.BillCustomerRequest {
+		t.Fatalf("BillCustomerRequest = true, want false (router already counted)")
+	}
+	if ctx.ParentService != usagereporting.ServiceRouter {
+		t.Fatalf("ParentService = %q, want %q", ctx.ParentService, usagereporting.ServiceRouter)
+	}
+	if ctx.Depth != 1 {
+		t.Fatalf("Depth = %d, want 1", ctx.Depth)
+	}
+	if !usagereporting.VerifyAPIKeyHash(apiKey, ctx.APIKeyHash) {
+		t.Fatalf("APIKeyHash does not match the request's bearer token")
+	}
+	if got := req.Header.Get("Connection"); got != "keep-alive" {
+		t.Fatalf("Connection = %q, want router-owned header nominations removed", got)
+	}
+	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want identity for billing extraction", got)
+	}
+}
+
+func TestNonSSEEventStreamMediaTypeRemainsNonStreaming(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/custom", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"text/event-streaming"}, "Content-Length": []string{"4"}},
+		Body:          io.NopCloser(strings.NewReader("data")),
+		ContentLength: 4,
+		Request:       req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "4" {
+		t.Fatalf("Content-Length = %q, want pass-through", got)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
+}
+
+func TestProxyDoesNotBillWithoutSignedSuppression(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 0 {
+		t.Fatalf("billing event count = %d, want shim fallback ownership", got)
+	}
+}
+
+func TestProxyBillsOwnedTransportFailure(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	proxy.ErrorHandler(httptest.NewRecorder(), req, errors.New("synthetic transport failure"))
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
+}
+
+func TestProxyBillsOwnedServerErrorOnce(t *testing.T) {
+	collector := &recordingBillingCollector{}
+	proxy := newProxy("example.invalid", "", "test-model", collector, newCircuitBreaker(), "test-usage-context-secret-32-bytes-long!")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	proxy.Director(req)
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("upstream error")),
+		Request:    req,
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := collector.count(); got != 1 {
+		t.Fatalf("billing event count = %d, want 1", got)
+	}
+}
+
+// TestProxyDirector_NoUsageContextWithoutSecret verifies that no
+// usage-context header is set when the secret is empty (fail-open for
+// inference; the shim bills normally).
+func TestProxyDirector_NoUsageContextWithoutSecret(t *testing.T) {
+	const enclaveHost = "glm-5-2.inf9.tinfoil.sh"
+
+	collector := newEnabledTestCollector(t)
+
+	proxy := newProxy(enclaveHost, "", "glm-5-2", collector, newCircuitBreaker(), "")
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set(usagereporting.HeaderContext, "client-supplied")
+	req.Header.Set(usagereporting.HeaderUsageContextSignature, "client-supplied")
+	req.URL.Scheme = ""
+
+	proxy.Director(req)
+
+	if h := req.Header.Get(usagereporting.HeaderContext); h != "" {
+		t.Fatalf("usage-context header should be absent without secret, got %q", h)
+	}
+	if h := req.Header.Get(usagereporting.HeaderUsageContextSignature); h != "" {
+		t.Fatalf("usage-context signature should be absent without secret, got %q", h)
+	}
+}
+
+// TestProxyDirector_NoUsageContextWithoutCollector verifies that a proxy with
+// no billing responsibility leaves the downstream shim responsible for it.
+func TestProxyDirector_NoUsageContextWithoutCollector(t *testing.T) {
+	const enclaveHost = "glm-5-2.inf9.tinfoil.sh"
+	const secret = "test-usage-context-secret-32-bytes-long!"
+
+	proxy := newProxy(enclaveHost, "", "glm-5-2", nil, newCircuitBreaker(), secret)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set(usagereporting.HeaderContext, "client-supplied")
+	req.Header.Set(usagereporting.HeaderUsageContextSignature, "client-supplied")
+	req.URL.Scheme = ""
+	proxy.Director(req)
+
+	if h := req.Header.Get(usagereporting.HeaderContext); h != "" {
+		t.Fatalf("usage-context header should be absent without a collector, got %q", h)
+	}
+	if h := req.Header.Get(usagereporting.HeaderUsageContextSignature); h != "" {
+		t.Fatalf("usage-context signature should be absent without a collector, got %q", h)
+	}
+}
+
+// TestProxyDirector_NoUsageContextWithoutAuth verifies that the Director does
+// not mint an unbound suppression context when there is no API key.
+func TestProxyDirector_NoUsageContextWithoutAuth(t *testing.T) {
+	const enclaveHost = "glm-5-2.inf9.tinfoil.sh"
+	const secret = "test-usage-context-secret-32-bytes-long!"
+
+	collector := newEnabledTestCollector(t)
+
+	proxy := newProxy(enclaveHost, "", "glm-5-2", collector, newCircuitBreaker(), secret)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set(usagereporting.HeaderContext, "client-supplied")
+	req.Header.Set(usagereporting.HeaderUsageContextSignature, "client-supplied")
+	req.URL.Scheme = ""
+
+	proxy.Director(req)
+
+	if h := req.Header.Get(usagereporting.HeaderContext); h != "" {
+		t.Fatalf("usage-context header should be absent without auth, got %q", h)
+	}
+	if h := req.Header.Get(usagereporting.HeaderUsageContextSignature); h != "" {
+		t.Fatalf("usage-context signature should be absent without auth, got %q", h)
 	}
 }
 
@@ -234,9 +493,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 	}
 	claim := &ProbeClaim{cb: cb, token: token, modelName: "probe-model", host: "probe-host.test"}
 
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb)
+	proxy := newProxy("probe-host.test", "", "probe-model", nil, cb, "")
 
 	// A cancelled request that does not own the claim must leave the
 	// in-flight probe alone.
@@ -266,9 +523,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 // cheap oversized uploads cannot open a healthy enclave's breaker.
 func TestProxyOversizedBodyIsClientError(t *testing.T) {
 	cb := newCircuitBreaker()
-	collector := billing.NewCollector("", "", "")
-	t.Cleanup(collector.Stop)
-	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, cb)
+	proxy := newProxy("oversize-host.test", "", "oversize-model", nil, cb, "")
 
 	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
 	rec := httptest.NewRecorder()

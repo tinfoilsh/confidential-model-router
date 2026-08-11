@@ -16,7 +16,7 @@ func setupCollectorTest(t *testing.T) (*Collector, func() usagereporting.Batch) 
 	t.Helper()
 
 	bodies := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read body: %v", err)
@@ -26,7 +26,10 @@ func setupCollectorTest(t *testing.T) (*Collector, func() usagereporting.Batch) 
 	}))
 	t.Cleanup(server.Close)
 
-	c := NewCollector(server.URL, "router-test", "test-secret")
+	c, err := newCollector(server.URL, "router-test", "test-secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(c.Stop)
 
 	readBatch := func() usagereporting.Batch {
@@ -105,6 +108,12 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 	if got.Attributes["streaming"] != "true" {
 		t.Errorf("streaming attribute mismatch: got %q", got.Attributes["streaming"])
 	}
+	if got.Attributes["enclave"] != "enclave-1" {
+		t.Errorf("enclave attribute mismatch: got %q", got.Attributes["enclave"])
+	}
+	if got.Attributes["route"] != "/v1/chat/completions" {
+		t.Errorf("route attribute mismatch: got %q", got.Attributes["route"])
+	}
 }
 
 func TestCollectorEmitsCachedInputTokensMeterWhenPresent(t *testing.T) {
@@ -178,5 +187,34 @@ func TestCollectorFallsBackToTotalTokensWhenSplitMissing(t *testing.T) {
 	}
 	if meters[usagereporting.MeterOutputTokens] != 0 {
 		t.Errorf("output_tokens mismatch: got %d want 0", meters[usagereporting.MeterOutputTokens])
+	}
+}
+
+func TestNewCollectorRejectsInvalidConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		id       string
+		secret   string
+	}{
+		{name: "missing endpoint", id: "model-router", secret: "secret"},
+		{name: "plaintext endpoint", endpoint: "http://api.example", id: "model-router", secret: "secret"},
+		{name: "missing endpoint host", endpoint: "https://", id: "model-router", secret: "secret"},
+		{name: "empty endpoint hostname", endpoint: "https://:443", id: "model-router", secret: "secret"},
+		{name: "endpoint credentials", endpoint: "https://user@api.example", id: "model-router", secret: "secret"},
+		{name: "endpoint query", endpoint: "https://api.example?target=other", id: "model-router", secret: "secret"},
+		{name: "endpoint empty query", endpoint: "https://api.example?", id: "model-router", secret: "secret"},
+		{name: "endpoint empty fragment", endpoint: "https://api.example#", id: "model-router", secret: "secret"},
+		{name: "missing reporter ID", endpoint: "https://api.example", secret: "secret"},
+		{name: "padded reporter ID", endpoint: "https://api.example", id: " model-router", secret: "secret"},
+		{name: "missing reporter secret", endpoint: "https://api.example", id: "model-router"},
+		{name: "whitespace reporter secret", endpoint: "https://api.example", id: "model-router", secret: "   "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			collector, err := NewCollector(test.endpoint, test.id, test.secret)
+			if err == nil || collector != nil {
+				t.Fatalf("NewCollector() = (%v, %v), want nil collector and error", collector, err)
+			}
+		})
 	}
 }

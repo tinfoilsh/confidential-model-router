@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -14,6 +15,100 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
+
+func TestGzipJSONRequestRoundTrip(t *testing.T) {
+	plain := []byte(`{"model":"glm-5-2","stream":true}`)
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(compressed.Bytes()))
+	req.Header.Set("Content-Encoding", "gzip")
+	decoded, original, encoding, err := readJSONRequestBody(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, plain) {
+		t.Fatalf("decoded body = %q, want %q", decoded, plain)
+	}
+	if !bytes.Equal(original, compressed.Bytes()) || encoding != "gzip" {
+		t.Fatal("encoded request metadata was not preserved")
+	}
+	encoded, err := encodeJSONRequestBody(decoded, encoding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("round-trip body = %q, want %q", got, plain)
+	}
+}
+
+func TestJSONRequestRejectsUnsupportedContentEncoding(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Encoding", "br")
+	if _, _, _, err := readJSONRequestBody(req); err == nil {
+		t.Fatal("unsupported JSON content encoding accepted")
+	}
+}
+
+func TestSetForwardedJSONRequestBodyToolRequestRemovesGzipEncoding(t *testing.T) {
+	plain := []byte(`{"model":"test","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Encoding", "gzip")
+
+	if err := setForwardedJSONRequestBody(req, plain, "gzip", true); err != nil {
+		t.Fatalf("setForwardedJSONRequestBody() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty for tool dispatch", got)
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("request body = %q, want plaintext %q", got, plain)
+	}
+}
+
+func TestSetForwardedJSONRequestBodyProxyRequestPreservesGzipEncoding(t *testing.T) {
+	plain := []byte(`{"model":"test","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Encoding", "gzip")
+
+	if err := setForwardedJSONRequestBody(req, plain, "gzip", false); err != nil {
+		t.Fatalf("setForwardedJSONRequestBody() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	zr, err := gzip.NewReader(req.Body)
+	if err != nil {
+		t.Fatalf("open gzip request body: %v", err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("read gzip request body: %v", err)
+	}
+	if err := zr.Close(); err != nil {
+		t.Fatalf("close gzip request body: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("decoded request body = %q, want %q", got, plain)
+	}
+}
 
 func TestRateLimitIdentity(t *testing.T) {
 	// mkJWT builds a compact-JWS-shaped token (header.payload.sig) with the
@@ -404,7 +499,9 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			headers := make(http.Header)
 
-			ensureStreamingUsageOptions(tt.body, headers)
+			if err := ensureStreamingUsageOptions(tt.body, headers); err != nil {
+				t.Fatalf("ensureStreamingUsageOptions() error = %v", err)
+			}
 
 			streamOptions, ok := tt.body["stream_options"].(map[string]interface{})
 			if !ok {
@@ -432,6 +529,42 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 				t.Fatalf("client usage header = %v, want %v", gotHeader, tt.wantClientUsageHeader)
 			}
 		})
+	}
+}
+
+func TestEnsureStreamingUsageOptionsRejectsInvalidValues(t *testing.T) {
+	tests := []map[string]any{
+		{"stream_options": nil},
+		{"stream_options": "invalid"},
+		{"stream_options": map[string]any{"include_usage": "true"}},
+		{"stream_options": map[string]any{"continuous_usage_stats": 1}},
+	}
+	for _, body := range tests {
+		headers := http.Header{"X-Tinfoil-Client-Requested-Usage": []string{"true"}}
+		if err := ensureStreamingUsageOptions(body, headers); err == nil {
+			t.Fatalf("ensureStreamingUsageOptions(%v) succeeded, want error", body)
+		}
+		if got := headers.Get("X-Tinfoil-Client-Requested-Usage"); got != "" {
+			t.Fatalf("internal usage header survived invalid request: %q", got)
+		}
+	}
+}
+
+func TestPrepareStreamingRequestRejectsInvalidStream(t *testing.T) {
+	headers := make(http.Header)
+	if _, err := prepareStreamingRequest(map[string]any{"stream": "true"}, headers); err == nil {
+		t.Fatal("prepareStreamingRequest() accepted non-boolean stream")
+	}
+}
+
+func TestEnsureStreamingUsageOptionsClearsSpoofedHeader(t *testing.T) {
+	headers := http.Header{"X-Tinfoil-Client-Requested-Usage": []string{"true"}}
+	body := map[string]any{"stream": true}
+	if err := ensureStreamingUsageOptions(body, headers); err != nil {
+		t.Fatalf("ensureStreamingUsageOptions() error = %v", err)
+	}
+	if got := headers.Get("X-Tinfoil-Client-Requested-Usage"); got != "" {
+		t.Fatalf("spoofed internal usage header survived: %q", got)
 	}
 }
 

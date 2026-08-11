@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,6 +42,17 @@ func TestExtractTokensFromResponse(t *testing.T) {
 				PromptTokens:     10,
 				CompletionTokens: 20,
 				TotalTokens:      30,
+			},
+		},
+		{
+			name:         "vendor JSON response",
+			responseBody: `{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`,
+			contentType:  "application/vnd.openai+json; charset=utf-8",
+			statusCode:   http.StatusOK,
+			wantUsage: &Usage{
+				PromptTokens:     3,
+				CompletionTokens: 4,
+				TotalTokens:      7,
 			},
 		},
 		{
@@ -90,7 +102,7 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			}
 
 			// Extract tokens with handler
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, usageHandler, false)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -115,8 +127,79 @@ func TestExtractTokensFromResponse(t *testing.T) {
 				} else if *capturedUsage != *tt.wantUsage {
 					t.Errorf("Usage mismatch: got %+v, want %+v", capturedUsage, tt.wantUsage)
 				}
+			} else if capturedUsage != nil {
+				t.Errorf("Expected no usage to be captured, got %+v", capturedUsage)
 			}
 		})
+	}
+}
+
+func TestNonStreamingExtractionIsBounded(t *testing.T) {
+	body := strings.Repeat("x", maxJSONResponseBytes+1)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	called := false
+	wrapped, err := ExtractTokensFromResponseWithHandler(resp, func(*Usage) { called = true }, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(wrapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(body) {
+		t.Fatalf("pass-through body length = %d, want %d", len(got), len(body))
+	}
+	if called {
+		t.Fatal("usage handler called for oversized response")
+	}
+}
+
+type blockingReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *blockingReadCloser) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingReadCloser) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestClosingStreamingBodyClosesUpstream(t *testing.T) {
+	upstream := &blockingReadCloser{closed: make(chan struct{})}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       upstream,
+	}
+	body, err := ExtractTokensFromResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-upstream.closed:
+	case <-time.After(time.Second):
+		t.Fatal("closing downstream body did not close upstream")
+	}
+}
+
+func TestExtractTokensRejectsNilResponseBody(t *testing.T) {
+	if _, err := ExtractTokensFromResponseWithHandler(&http.Response{}, nil, false); err == nil {
+		t.Fatal("nil response body accepted")
 	}
 }
 
@@ -198,7 +281,7 @@ data: [DONE]
 			}
 
 			// Extract tokens
-			newBody, _, err := ExtractTokensFromResponseWithHandler(resp, "test-model", usageHandler, false)
+			newBody, err := ExtractTokensFromResponseWithHandler(resp, usageHandler, false)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponseWithHandler() error = %v", err)
 				return
@@ -272,7 +355,7 @@ data: [DONE]
 			}
 
 			// Should handle errors gracefully
-			newBody, _, err := ExtractTokensFromResponse(resp, "test-model")
+			newBody, err := ExtractTokensFromResponse(resp)
 			if err != nil {
 				t.Errorf("ExtractTokensFromResponse() unexpected error = %v", err)
 				return
@@ -285,6 +368,65 @@ data: [DONE]
 
 			if output.String() != tt.streamData {
 				t.Errorf("Stream output doesn't match input despite errors")
+			}
+		})
+	}
+}
+
+func TestStreamingPromptOnlyUsage(t *testing.T) {
+	streamData := `data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":0,"total_tokens":0}}
+
+data: [DONE]
+
+`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(streamData)),
+	}
+
+	var capturedUsage *Usage
+	newBody, err := ExtractTokensFromResponseWithHandler(resp, func(usage *Usage) {
+		capturedUsage = usage
+	}, true)
+	if err != nil {
+		t.Fatalf("ExtractTokensFromResponseWithHandler() error = %v", err)
+	}
+	if _, err := io.Copy(io.Discard, newBody); err != nil {
+		t.Fatalf("copy stream: %v", err)
+	}
+	if err := newBody.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+
+	if capturedUsage == nil {
+		t.Fatal("usage handler was not called")
+	}
+	if capturedUsage.PromptTokens != 42 || capturedUsage.TotalTokens != 42 {
+		t.Fatalf("usage = %+v, want prompt_tokens=42 total_tokens=42", capturedUsage)
+	}
+}
+
+func TestNormalizeDerivesTotalTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		usage     Usage
+		wantTotal int
+	}{
+		{name: "derives total from prompt and completion", usage: Usage{PromptTokens: 10, CompletionTokens: 5}, wantTotal: 15},
+		{name: "preserves explicit total", usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 99}, wantTotal: 99},
+		{name: "derives total from responses API fields", usage: Usage{InputTokens: 8, OutputTokens: 3}, wantTotal: 11},
+		{name: "zero usage stays zero", usage: Usage{}, wantTotal: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := tt.usage
+			u.Normalize()
+			if u.TotalTokens != tt.wantTotal {
+				t.Fatalf("TotalTokens = %d, want %d", u.TotalTokens, tt.wantTotal)
 			}
 		})
 	}

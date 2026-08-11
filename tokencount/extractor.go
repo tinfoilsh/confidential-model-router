@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,7 +32,8 @@ type PromptTokensDetails struct {
 
 // Normalize maps Responses API fields (input_tokens/output_tokens) into
 // Chat Completions fields (prompt_tokens/completion_tokens) so billing
-// works uniformly regardless of which API produced the usage data.
+// works uniformly regardless of which API produced the usage data. It also
+// derives TotalTokens when the upstream omits it.
 func (u *Usage) Normalize() {
 	if u.PromptTokens == 0 && u.InputTokens > 0 {
 		u.PromptTokens = u.InputTokens
@@ -39,6 +43,9 @@ func (u *Usage) Normalize() {
 	}
 	if u.PromptTokensDetails == nil && u.InputTokensDetails != nil {
 		u.PromptTokensDetails = u.InputTokensDetails
+	}
+	if u.TotalTokens == 0 {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	}
 }
 
@@ -58,26 +65,46 @@ type OpenAIResponse struct {
 
 // JSONTokenExtractor accumulates JSON response data and extracts tokens
 type JSONTokenExtractor struct {
-	buffer bytes.Buffer
-	model  string
-	usage  *Usage
-	mu     sync.Mutex
+	buffer   bytes.Buffer
+	usage    *Usage
+	overflow bool
+	mu       sync.Mutex
 }
+
+const maxJSONResponseBytes = 10 << 20
 
 // Write implements io.Writer, accumulating data
 func (j *JSONTokenExtractor) Write(p []byte) (n int, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.buffer.Write(p)
+	if j.overflow {
+		return len(p), nil
+	}
+	remaining := maxJSONResponseBytes - j.buffer.Len()
+	if len(p) > remaining {
+		_, _ = j.buffer.Write(p[:max(0, remaining)])
+		j.overflow = true
+		return len(p), nil
+	}
+	_, _ = j.buffer.Write(p)
+	return len(p), nil
 }
 
 // ExtractUsage parses the accumulated JSON and extracts token usage
 func (j *JSONTokenExtractor) ExtractUsage() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.overflow {
+		log.Printf("tokencount: non-streaming response exceeded %d-byte extraction limit", maxJSONResponseBytes)
+		return
+	}
 
 	var resp OpenAIResponse
-	if err := json.Unmarshal(j.buffer.Bytes(), &resp); err == nil && resp.Usage != nil {
+	if err := json.Unmarshal(j.buffer.Bytes(), &resp); err != nil {
+		log.Printf("tokencount: failed to parse non-streaming usage response: %v", err)
+		return
+	}
+	if resp.Usage != nil {
 		resp.Usage.Normalize()
 		j.usage = resp.Usage
 	}
@@ -91,7 +118,11 @@ type teeReaderCloser struct {
 	usageHandler func(*Usage)
 }
 
-// Close extracts tokens and closes the original body
+// Close extracts usage from the data accumulated so far and closes the
+// original body. If the caller closes early (e.g. client disconnect), the
+// buffered JSON may be incomplete and usage extraction will silently fail,
+// leading to under-billing for that request. Draining the remaining upstream
+// body on early close would waste bandwidth on a disconnected client.
 func (t *teeReaderCloser) Close() error {
 	// Extract usage from accumulated data
 	t.extractor.ExtractUsage()
@@ -105,38 +136,43 @@ func (t *teeReaderCloser) Close() error {
 	return t.origBody.Close()
 }
 
-// ExtractTokensFromResponse extracts token counts from HTTP response using TeeReader
-// It doesn't buffer the response, allowing streaming to work properly
-func ExtractTokensFromResponse(resp *http.Response, model string) (io.ReadCloser, *Usage, error) {
-	return ExtractTokensFromResponseWithHandler(resp, model, nil, false)
+// ExtractTokensFromResponse extracts token counts from an HTTP response. The
+// response body is returned as a pass-through reader so the client receives
+// bytes without delay; usage is delivered through the optional callback.
+func ExtractTokensFromResponse(resp *http.Response) (io.ReadCloser, error) {
+	return ExtractTokensFromResponseWithHandler(resp, nil, false)
 }
 
-// ExtractTokensFromResponseWithHandler extracts token counts with an optional usage handler for streaming
-// clientRequestedUsage indicates if the client explicitly requested usage stats in their request
-func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usageHandler func(*Usage), clientRequestedUsage bool) (io.ReadCloser, *Usage, error) {
+// ExtractTokensFromResponseWithHandler wraps the response body to extract
+// token usage with an optional usage handler. For streaming responses the
+// handler is invoked when the stream ends; for non-streaming JSON responses it
+// is invoked on Close. clientRequestedUsage controls usage-only SSE filtering.
+func ExtractTokensFromResponseWithHandler(resp *http.Response, usageHandler func(*Usage), clientRequestedUsage bool) (io.ReadCloser, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("tokencount: response and response body are required")
+	}
 	contentType := resp.Header.Get("Content-Type")
 
 	// For streaming responses, use the streaming extractor
-	if strings.Contains(contentType, "text/event-stream") {
+	if hasMediaType(contentType, "text/event-stream") {
 		pr, pw := io.Pipe()
-		extractor := NewStreamingTokenExtractor(resp.Body, pw, model)
+		extractor := NewStreamingTokenExtractor(resp.Body, pw)
 		extractor.usageHandler = usageHandler
 		extractor.clientRequestedUsage = clientRequestedUsage
 		go extractor.processStream()
-		return pr, nil, nil
+		return &streamReadCloser{PipeReader: pr, upstream: resp.Body}, nil
 	}
 
 	// For non-JSON or non-200 responses, pass through unchanged
-	if resp.StatusCode != http.StatusOK || !strings.Contains(contentType, "application/json") {
-		return resp.Body, nil, nil
+	if resp.StatusCode != http.StatusOK || !hasJSONMediaType(contentType) {
+		return resp.Body, nil
 	}
 
-	// For JSON responses, use TeeReader to avoid buffering
-	extractor := &JSONTokenExtractor{
-		model: model,
-	}
+	// For JSON responses, tee the body to the client while accumulating a
+	// bounded prefix for usage extraction on Close.
+	extractor := &JSONTokenExtractor{}
 
-	// TeeReader copies data to extractor while passing it through
+	// TeeReader copies data to the extractor while passing it through unchanged.
 	teeReader := io.TeeReader(resp.Body, extractor)
 
 	// Return a custom closer that logs tokens when closed
@@ -145,7 +181,35 @@ func ExtractTokensFromResponseWithHandler(resp *http.Response, model string, usa
 		origBody:     resp.Body,
 		extractor:    extractor,
 		usageHandler: usageHandler,
-	}, nil, nil
+	}, nil
+}
+
+type streamReadCloser struct {
+	*io.PipeReader
+	upstream io.Closer
+}
+
+func (s *streamReadCloser) Close() error {
+	pipeErr := s.PipeReader.Close()
+	upstreamErr := s.upstream.Close()
+	if pipeErr != nil {
+		return pipeErr
+	}
+	return upstreamErr
+}
+
+func hasMediaType(header, want string) bool {
+	mediaType, _, err := mime.ParseMediaType(header)
+	return err == nil && strings.EqualFold(mediaType, want)
+}
+
+func hasJSONMediaType(header string) bool {
+	mediaType, _, err := mime.ParseMediaType(header)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // maxSSELineBytes bounds a single SSE line; mirrors the tool runtime's
@@ -156,9 +220,7 @@ const maxSSELineBytes = 1 << 22 // 4 MiB
 type StreamingTokenExtractor struct {
 	reader               io.ReadCloser
 	writer               io.WriteCloser
-	model                string
 	usage                *Usage
-	buffer               bytes.Buffer
 	scanner              *bufio.Scanner
 	completed            bool
 	usageHandler         func(*Usage) // Callback for when usage is extracted
@@ -166,11 +228,10 @@ type StreamingTokenExtractor struct {
 }
 
 // NewStreamingTokenExtractor creates a new streaming token extractor that intercepts SSE chunks
-func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, model string) *StreamingTokenExtractor {
+func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser) *StreamingTokenExtractor {
 	s := &StreamingTokenExtractor{
 		reader: reader,
 		writer: writer,
-		model:  model,
 		usage:  &Usage{},
 	}
 	s.scanner = bufio.NewScanner(reader)
@@ -181,7 +242,9 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 	return s
 }
 
-// processStream processes the SSE stream, extracting token usage
+// processStream processes the SSE stream, extracting token usage. The usage
+// handler is always invoked when the stream ends so a zero-token request event
+// is still recorded after truncation or downstream disconnect.
 func (s *StreamingTokenExtractor) processStream() {
 	defer s.writer.Close()
 	defer s.reader.Close()
@@ -268,12 +331,17 @@ func (s *StreamingTokenExtractor) processStream() {
 			}
 		}
 
-		// Write the line to output if we should
+		// Write the line to output if we should. Stop reading upstream when the
+		// downstream has closed, so the deferred reader.Close runs promptly.
 		if shouldWrite {
+			var writeErr error
 			if line == "" {
-				s.writer.Write([]byte("\n"))
+				_, writeErr = s.writer.Write([]byte("\n"))
 			} else {
-				s.writer.Write([]byte(line + "\n"))
+				_, writeErr = s.writer.Write([]byte(line + "\n"))
+			}
+			if writeErr != nil {
+				break
 			}
 		}
 
@@ -287,17 +355,17 @@ func (s *StreamingTokenExtractor) processStream() {
 		}
 	}
 
-	// Log final usage if we collected any
-	if s.usage != nil && (s.usage.TotalTokens > 0 || s.usage.CompletionTokens > 0) {
-		// If we only have completion tokens, estimate total
-		if s.usage.TotalTokens == 0 && s.usage.CompletionTokens > 0 {
-			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
-		}
+	// Preserve the shim's diagnostic for oversized/malformed stream lines while
+	// keeping the existing clean pipe-close behavior.
+	if err := s.scanner.Err(); err != nil {
+		log.Printf("tokencount: streaming scanner error (truncated response): %v", err)
+	}
 
-		// Call usage handler if provided
-		if s.usageHandler != nil {
-			s.usageHandler(s.usage)
-		}
+	// Always invoke the handler so streams that end without a usage chunk still
+	// produce a zero-token customer-request event.
+	if s.usageHandler != nil {
+		s.usage.Normalize()
+		s.usageHandler(s.usage)
 	}
 
 	s.completed = true
@@ -310,10 +378,4 @@ func isTerminalResponseEvent(eventType string) bool {
 	default:
 		return false
 	}
-}
-
-// Read implements io.Reader for compatibility
-func (s *StreamingTokenExtractor) Read(p []byte) (n int, err error) {
-	// This is mainly for compatibility - actual processing happens in processStream
-	return s.buffer.Read(p)
 }

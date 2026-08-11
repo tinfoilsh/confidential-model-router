@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/base64"
@@ -36,6 +37,78 @@ var configFile []byte // Initial (attested) config
 var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
+
+func readJSONRequestBody(r *http.Request) (plain, original []byte, contentEncoding string, err error) {
+	original, err = io.ReadAll(r.Body)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := r.Body.Close(); err != nil {
+		return nil, nil, "", fmt.Errorf("close request body: %w", err)
+	}
+	contentEncoding = strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch contentEncoding {
+	case "":
+		return original, original, "", nil
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(original))
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("decode gzip request body: %w", err)
+		}
+		plain, readErr := io.ReadAll(io.LimitReader(zr, maxRequestBodySize+1))
+		closeErr := zr.Close()
+		if readErr != nil {
+			return nil, nil, "", fmt.Errorf("read gzip request body: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, nil, "", fmt.Errorf("close gzip request body: %w", closeErr)
+		}
+		if int64(len(plain)) > maxRequestBodySize {
+			return nil, nil, "", &http.MaxBytesError{Limit: maxRequestBodySize}
+		}
+		return plain, original, contentEncoding, nil
+	default:
+		return nil, nil, "", fmt.Errorf("unsupported content encoding %q", r.Header.Get("Content-Encoding"))
+	}
+}
+
+func encodeJSONRequestBody(plain []byte, contentEncoding string) ([]byte, error) {
+	if contentEncoding == "" {
+		return plain, nil
+	}
+	var encoded bytes.Buffer
+	zw := gzip.NewWriter(&encoded)
+	if _, err := zw.Write(plain); err != nil {
+		return nil, fmt.Errorf("encode gzip request body: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("close gzip request body: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+func setRequestBody(r *http.Request, payload []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(payload))
+	r.Header.Set("Content-Length", strconv.Itoa(len(payload)))
+	r.ContentLength = int64(len(payload))
+}
+
+func setForwardedJSONRequestBody(r *http.Request, plain []byte, contentEncoding string, toolRequest bool) error {
+	if toolRequest {
+		// The tool runtime re-marshals its internal dispatches from the parsed
+		// body, so they are plaintext JSON regardless of the client's encoding.
+		r.Header.Del("Content-Encoding")
+		setRequestBody(r, plain)
+		return nil
+	}
+
+	encoded, err := encodeJSONRequestBody(plain, contentEncoding)
+	if err != nil {
+		return err
+	}
+	setRequestBody(r, encoded)
+	return nil
+}
 
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
@@ -317,11 +390,19 @@ func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
 // models follow the same streaming usage behavior. If the client explicitly
 // asked for usage stats, we mark that in a header so the proxy can preserve
 // usage-only chunks instead of filtering them out.
-func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
+func ensureStreamingUsageOptions(body map[string]any, headers http.Header) error {
+	const clientRequestedUsageHeader = "X-Tinfoil-Client-Requested-Usage"
+	headers.Del(clientRequestedUsageHeader)
 	clientRequestedUsage := false
 
-	streamOptions, ok := body["stream_options"].(map[string]any)
-	if !ok {
+	streamOptions := map[string]any{}
+	if raw, present := body["stream_options"]; present {
+		var ok bool
+		streamOptions, ok = raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("'stream_options' must be an object")
+		}
+	} else {
 		streamOptions = map[string]any{}
 		body["stream_options"] = streamOptions
 	}
@@ -329,19 +410,46 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	// Check if the client explicitly requested usage stats before we modify the
 	// request. The proxy uses this signal to decide whether to filter
 	// usage-only chunks from the streamed response.
-	if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
-		clientRequestedUsage = true
+	if raw, present := streamOptions["include_usage"]; present {
+		includeUsage, ok := raw.(bool)
+		if !ok {
+			return fmt.Errorf("'stream_options.include_usage' must be a boolean")
+		}
+		clientRequestedUsage = includeUsage
 	}
-	if continuousUsage, ok := streamOptions["continuous_usage_stats"].(bool); ok && continuousUsage {
-		clientRequestedUsage = true
+	if raw, present := streamOptions["continuous_usage_stats"]; present {
+		continuousUsage, ok := raw.(bool)
+		if !ok {
+			return fmt.Errorf("'stream_options.continuous_usage_stats' must be a boolean")
+		}
+		clientRequestedUsage = clientRequestedUsage || continuousUsage
 	}
 
 	streamOptions["include_usage"] = true
 	streamOptions["continuous_usage_stats"] = true
 
 	if clientRequestedUsage {
-		headers.Set("X-Tinfoil-Client-Requested-Usage", "true")
+		headers.Set(clientRequestedUsageHeader, "true")
 	}
+	return nil
+}
+
+func prepareStreamingRequest(body map[string]any, headers http.Header) (bool, error) {
+	raw, present := body["stream"]
+	if !present {
+		return false, nil
+	}
+	stream, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("'stream' must be a boolean")
+	}
+	if !stream {
+		return false, nil
+	}
+	if err := ensureStreamingUsageOptions(body, headers); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // autoModelParamReservedKeys lists body fields that a per-candidate param block
@@ -464,7 +572,6 @@ func main() {
 	if *debug {
 		log.Warn("debug mode enabled: local development overrides are active; do not use in production")
 	}
-	defer em.Shutdown()
 	go em.StartWorker()
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
@@ -630,12 +737,11 @@ func main() {
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
 				var body map[string]any
-				bodyBytes, err := io.ReadAll(r.Body)
+				bodyBytes, originalBody, _, err := readJSONRequestBody(r)
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				r.Body.Close()
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
 					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
@@ -645,7 +751,7 @@ func main() {
 				} else {
 					modelName = "qwen3-tts"
 				}
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				setRequestBody(r, originalBody)
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
@@ -667,7 +773,7 @@ func main() {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
 				var body map[string]any
-				bodyBytes, err := io.ReadAll(r.Body)
+				bodyBytes, _, contentEncoding, err := readJSONRequestBody(r)
 
 				if err != nil {
 					writeRequestBodyError(w, err)
@@ -744,6 +850,19 @@ func main() {
 					}
 				}
 
+				// Reject malformed streaming metadata before file conversion or any
+				// other helper can dispatch work on behalf of this request.
+				streamingRequest, err := prepareStreamingRequest(body, r.Header)
+				if err != nil {
+					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if streamingRequest {
+					isStreaming = true
+					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
+						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
+				}
+
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
 					case "/v1/responses":
@@ -810,27 +929,19 @@ func main() {
 					}
 				}
 
-				// If streaming request, ensure upstream usage is available for billing.
-				if stream, ok := body["stream"].(bool); ok && stream {
-					isStreaming = true
-					ensureStreamingUsageOptions(body, r.Header)
-					log.Debugf("Modified streaming request body to include usage for billing, client requested usage: %v",
-						r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true")
-				}
-
 				// Always re-marshal in case there were any changes
 				bodyBytes, err = json.Marshal(body)
 				if err != nil {
 					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
 					return
 				}
-				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-				r.ContentLength = int64(len(bodyBytes))
+				toolRequest := len(activeProfiles) > 0 || hasAutoContinueTools
+				if err := setForwardedJSONRequestBody(r, bodyBytes, contentEncoding, toolRequest); err != nil {
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					return
+				}
 
-				r.Body.Close()
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-				if len(activeProfiles) > 0 || hasAutoContinueTools {
+				if toolRequest {
 					// Streaming tool requests feed the same first-token SLA
 					// metrics as plain proxied streams. The loop may dispatch
 					// to several replicas and pools before the first
@@ -1112,6 +1223,9 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.WithError(err).Error("Failed to gracefully shutdown server")
 	}
+	// Runtime cleanup, including the billing flush, gets its own budget after
+	// the listener has finished draining.
+	em.Shutdown()
 
 	log.Info("Server stopped")
 }

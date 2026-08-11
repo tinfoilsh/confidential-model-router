@@ -336,7 +336,7 @@ func (em *EnclaveManager) addEnclave(
 		predicate: verification.Measurement.Type,
 		tlsKeyFP:  verification.TLSPublicKeyFP,
 		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
+		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb, em.usageContextSecret),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 	}
@@ -421,10 +421,20 @@ func (em *EnclaveManager) PrometheusTargets() []PrometheusTargetGroup {
 	return targetGroups
 }
 
-// Shutdown gracefully stops the billing collector
+const shutdownTimeout = 10 * time.Second
+
+// Shutdown gracefully stops the billing collector.
 func (em *EnclaveManager) Shutdown() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	em.ShutdownContext(ctx)
+}
+
+// ShutdownContext bounds the billing flush with ctx, then stops the remaining
+// runtime resources using their existing synchronous shutdown paths.
+func (em *EnclaveManager) ShutdownContext(ctx context.Context) {
 	if em.billingCollector != nil {
-		em.billingCollector.Stop()
+		em.billingCollector.StopContext(ctx)
 	}
 	if em.cacheRouteShadow != nil {
 		em.cacheRouteShadow.Close()
@@ -884,6 +894,10 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch trust root: %v", err)
 	}
+	billingCollector, err := billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret)
+	if err != nil {
+		return nil, fmt.Errorf("initialize billing collector: %w", err)
+	}
 
 	em := &EnclaveManager{
 		models:             &sync.Map{},
@@ -891,7 +905,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		updateConfigURL:    updateConfigURL,
 		controlPlaneURL:    controlPlaneURL,
 		sigstoreClient:     sigstoreClient,
-		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		billingCollector:   billingCollector,
 		usageContextSecret: usageContextSecret,
 		requestTracker:     ratelimit.NewRequestTracker(),
 		cacheRouteShadow:   cacheroute.NewShadow(nil),
