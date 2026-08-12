@@ -421,7 +421,7 @@ func TestChatStreamerFinalizeSkipsAlreadyStreamedClientToolCalls(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", result, clientToolCalls); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", result, clientToolCalls); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 
@@ -480,9 +480,7 @@ func TestChatStreamerFinalizeEmitsFinishAndUsage(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	// nil enclave manager is fine because the auth header is absent so
-	// emitBillingEvent short-circuits before dereferencing it.
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", result, nil); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", result, nil); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 
@@ -519,7 +517,7 @@ func TestChatStreamerFinalizeForcesToolCallsFinishReason(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	if err := streamer.finalize(req, nil, "gpt-oss-120b", result, clientToolCalls); err != nil {
+	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", result, clientToolCalls); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 

@@ -43,6 +43,7 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 		name     string
 		usage    *tokencount.Usage
 		model    string
+		pricing  *ModelPricing
 		expected string
 	}{
 		{
@@ -74,6 +75,21 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 			},
 			model:    "kimi-k2-6",
 			expected: "prompt=69,completion=20,total=89,cached_prompt_tokens=64,uncached_prompt_tokens=5,model=kimi-k2-6",
+		},
+		{
+			name: "appends request cost when pricing is available",
+			usage: &tokencount.Usage{
+				PromptTokens:        100,
+				CompletionTokens:    50,
+				TotalTokens:         150,
+				PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 40},
+			},
+			model: "priced-model",
+			pricing: &ModelPricing{
+				InputTokenPricePer1M:  0.15,
+				OutputTokenPricePer1M: 0.6,
+			},
+			expected: "prompt=100,completion=50,total=150,cached_prompt_tokens=40,uncached_prompt_tokens=60,model=priced-model,cost_usd=0.000045",
 		},
 		{
 			name: "zero values",
@@ -123,7 +139,7 @@ func TestUsageMetricsWriter_FormatUsage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			wrapper := &usageMetricsWriter{ResponseWriter: rec, model: tt.model}
+			wrapper := &usageMetricsWriter{ResponseWriter: rec, model: tt.model, pricing: tt.pricing}
 
 			if tt.usage != nil {
 				wrapper.SetUsage(tt.usage)
@@ -278,7 +294,13 @@ func TestUsageMetrics_NonStreamingFlow(t *testing.T) {
 		}
 
 		// Wrap writer
-		wrapper := &usageMetricsWriter{ResponseWriter: w}
+		wrapper := &usageMetricsWriter{
+			ResponseWriter: w,
+			pricing: &ModelPricing{
+				InputTokenPricePer1M:  0.15,
+				OutputTokenPricePer1M: 0.6,
+			},
+		}
 
 		// Simulate usage extraction (normally done by tokencount)
 		usage := &tokencount.Usage{
@@ -304,7 +326,7 @@ func TestUsageMetrics_NonStreamingFlow(t *testing.T) {
 
 	// Check response header
 	usageHeader := rec.Header().Get(UsageMetricsResponseHeader)
-	expected := "prompt=100,completion=25,total=125"
+	expected := "prompt=100,completion=25,total=125,cost_usd=0.00003"
 	if usageHeader != expected {
 		t.Errorf("expected usage header %q, got %q", expected, usageHeader)
 	}
@@ -325,7 +347,13 @@ func TestUsageMetrics_StreamingFlow(t *testing.T) {
 		w.Header().Set("Transfer-Encoding", "chunked")
 
 		// Wrap writer
-		wrapper := &usageMetricsWriter{ResponseWriter: w}
+		wrapper := &usageMetricsWriter{
+			ResponseWriter: w,
+			pricing: &ModelPricing{
+				InputTokenPricePer1M:  0.15,
+				OutputTokenPricePer1M: 0.6,
+			},
+		}
 
 		// Write streaming data
 		w.WriteHeader(http.StatusOK)
@@ -366,7 +394,7 @@ func TestUsageMetrics_StreamingFlow(t *testing.T) {
 
 	// Check the usage header was set (httptest.ResponseRecorder stores trailers in Header)
 	usageHeader := rec.Header().Get(UsageMetricsResponseHeader)
-	expected := "prompt=50,completion=10,total=60"
+	expected := "prompt=50,completion=10,total=60,cost_usd=0.0000135"
 	if usageHeader != expected {
 		t.Errorf("expected usage trailer %q, got %q", expected, usageHeader)
 	}

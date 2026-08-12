@@ -622,8 +622,10 @@ func (s *chatStreamer) finalize(
 		}
 	}
 
-	if s.usageMetricsRequested && finalUsage != nil {
-		s.w.Header().Set(manager.UsageMetricsResponseHeader, manager.FormatUsage(usageFromRaw(finalUsage), modelName))
+	if s.usageMetricsRequested {
+		if formatted := formatUsageMetrics(em, usageFromRaw(finalUsage), modelName); formatted != "" {
+			s.w.Header().Set(manager.UsageMetricsResponseHeader, formatted)
+		}
 	}
 	s.emitBillingEvent(r, em, modelName, finalUsage)
 	return s.writeErr

@@ -19,6 +19,10 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
+func newTestEnclaveManager() *manager.EnclaveManager {
+	return &manager.EnclaveManager{}
+}
+
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
 	replaced := replaceRouterOwnedResponsesTools([]any{
 		map[string]any{"type": "web_search"},

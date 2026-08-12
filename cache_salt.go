@@ -62,14 +62,12 @@ func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cac
 	return mode, true
 }
 
-// saltProxiedBody applies cache-salt handling to a request that the router
-// otherwise forwards verbatim (the subdomain routing path, which never
-// parses the body elsewhere). It rewrites r.Body in place and returns the
-// derivation mode plus whether the body requests a streaming response — the
-// one routing signal this path needs from the body, surfaced here so the
-// caller doesn't have to parse it a second time. The body must be one JSON
-// object so router-owned cache fields can never bypass stripping on a
-// malformed request.
+// saltProxiedBody applies cache-salt and streaming-usage handling to a request
+// that the router otherwise forwards verbatim (the subdomain routing path,
+// which never parses the body elsewhere). It rewrites r.Body in place and
+// returns the derivation mode plus whether the body requests a streaming
+// response. The body must be one JSON object so router-owned fields can never
+// bypass rewriting on a malformed request.
 func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mode, bool, error) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
@@ -94,6 +92,10 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (cachesalt.Mo
 	streaming, _ := body["stream"].(bool)
 
 	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
+	if streaming {
+		ensureStreamingUsageOptions(body, r.Header)
+		changed = true
+	}
 	if !changed {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		return mode, streaming, nil

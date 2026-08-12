@@ -343,6 +343,11 @@ func TestSaltProxiedBody(t *testing.T) {
 		if !streaming {
 			t.Error("stream:true was not reported")
 		}
+		body := decodeBody(t, req)
+		streamOptions, ok := body["stream_options"].(map[string]any)
+		if !ok || streamOptions["include_usage"] != true || streamOptions["continuous_usage_stats"] != true {
+			t.Fatalf("streaming usage options were not injected: %#v", body)
+		}
 
 		// A non-boolean stream value must read as non-streaming, not error.
 		req = httptest.NewRequest("POST", "/v1/chat/completions",

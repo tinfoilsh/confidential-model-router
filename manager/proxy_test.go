@@ -92,6 +92,84 @@ func TestProxyUsageMetrics_IncludesCachedTokensForAllModels(t *testing.T) {
 	}
 }
 
+func TestProxyUsageMetrics_IncludesRequestPriceWithoutUsage(t *testing.T) {
+	proxy := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response body"))
+	}), "request-priced-model")
+
+	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	rec := httptest.NewRecorder()
+	wrapper := &usageMetricsWriter{
+		ResponseWriter: rec,
+		pricing:        &ModelPricing{RequestPrice: 0.02},
+	}
+	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
+
+	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
+
+	got := rec.Header().Get(UsageMetricsResponseHeader)
+	want := "prompt=0,completion=0,total=0,model=request-priced-model,cost_usd=0.02"
+	if got != want {
+		t.Fatalf("usage header = %q, want %q", got, want)
+	}
+}
+
+func TestProxyUsageMetrics_OmitsUnknownTokenCostWithoutUsage(t *testing.T) {
+	proxy := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response body"))
+	}), "token-priced-model")
+
+	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	rec := httptest.NewRecorder()
+	wrapper := &usageMetricsWriter{
+		ResponseWriter: rec,
+		pricing: &ModelPricing{
+			InputTokenPricePer1M: 0.15,
+			RequestPrice:         0.02,
+		},
+	}
+	ctx := context.WithValue(req.Context(), usageWriterKey{}, wrapper)
+
+	proxy.ServeHTTP(wrapper, req.WithContext(ctx))
+
+	if got := rec.Header().Get(UsageMetricsResponseHeader); got != "" {
+		t.Fatalf("expected unknown cost to be omitted, got %q", got)
+	}
+}
+
+func TestProxyUsageMetrics_IncludesRequestPriceInTrailerWithoutUsage(t *testing.T) {
+	proxy := setupTestProxyWithModel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: [DONE]\n\n"))
+	}), "request-priced-model")
+	enclave := &Enclave{
+		host:      "test-enclave",
+		modelName: "request-priced-model",
+		proxy:     proxy,
+		pricing: func(string) (ModelPricing, bool) {
+			return ModelPricing{RequestPrice: 0.02}, true
+		},
+	}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set(UsageMetricsRequestHeader, "true")
+	rec := httptest.NewRecorder()
+
+	enclave.ServeHTTP(rec, req)
+
+	got := rec.Header().Get(UsageMetricsResponseHeader)
+	want := "prompt=0,completion=0,total=0,model=request-priced-model,cost_usd=0.02"
+	if got != want {
+		t.Fatalf("usage trailer = %q, want %q", got, want)
+	}
+}
+
 // --- Circuit breaker tests ---
 
 func TestCircuitBreaker_StartsClosed(t *testing.T) {
