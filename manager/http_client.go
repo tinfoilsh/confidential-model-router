@@ -161,6 +161,12 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 			req.Header.Add(key, value)
 		}
 	}
+	if authorization, ok, err := authorizationFromContext(ctx); err != nil {
+		claim.Abort()
+		return nil, fmt.Errorf("resolve delegated authorization: %w", err)
+	} else if ok {
+		req.Header.Set("Authorization", authorization)
+	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 

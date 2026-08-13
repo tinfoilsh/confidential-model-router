@@ -92,8 +92,12 @@ func (a *usageAccumulator) Usage() *tokencount.Usage {
 }
 
 type headerRoundTripper struct {
-	base    http.RoundTripper
-	headers http.Header
+	base               http.RoundTripper
+	headers            http.Header
+	authorization      manager.AuthorizationProvider
+	usageContext       usagereporting.Context
+	usageContextSecret string
+	now                func() time.Time
 }
 
 func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -103,6 +107,21 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			if value != "" {
 				cloned.Header.Add(key, value)
 			}
+		}
+	}
+	if t.authorization != nil {
+		authorization, err := t.authorization.Authorization(req.Context())
+		if err != nil {
+			return nil, fmt.Errorf("resolve delegated tool authorization: %w", err)
+		}
+		cloned.Header.Set("Authorization", authorization)
+	}
+	if t.usageContextSecret != "" {
+		usageContext := t.usageContext
+		usageContext.APIKeyHash = usagereporting.HashAPIKey(manager.BearerToken(cloned.Header.Get("Authorization")))
+		usageContext.IssuedAt = t.now().UTC()
+		if err := usagereporting.SetHeaders(cloned.Header, usageContext, t.usageContextSecret); err != nil {
+			return nil, fmt.Errorf("sign tool usage context: %w", err)
 		}
 	}
 	base := t.base
@@ -129,13 +148,24 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 // toolcontext.ExtractRouterOptions).
 func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []Profile, body map[string]any, modelName string, routerOpts *RouterOptions) error {
 	ctx := r.Context()
+	rootRequestID := ""
+	delegationRootRequestID := uuid.NewString()
+	delegatedCtx, delegated, err := em.WithDelegatedAuthorization(ctx, r.Header.Get("Authorization"), delegationRootRequestID)
+	if err != nil {
+		return err
+	}
+	if delegated {
+		rootRequestID = delegationRootRequestID
+		ctx = delegatedCtx
+		r = r.WithContext(ctx)
+	}
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventFlags := parseTinfoilEventFlags(r.Header)
 	safetyOpts := parseSafetyOptIns(routerOpts, body)
 
 	dial := func(ctx context.Context, p Profile) (*mcp.ClientSession, error) {
-		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
+		return connectToolSession(ctx, em, p, r, rootRequestID, modelName, body, safetyOpts)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, dial)
 	if err != nil {
@@ -209,22 +239,26 @@ func newToolSessionRequestID(_ *http.Request) string {
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, rootRequestID, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(ctx, profile.ToolServerModel)
 	if err != nil {
 		return nil, err
 	}
 
 	requestID := newToolSessionRequestID(r)
-
-	headers, err := toolSessionHeaders(r, requestID, modelName, body, safety, em.UsageContextSecret(), time.Now)
-	if err != nil {
-		return nil, err
+	if rootRequestID == "" {
+		rootRequestID = requestID
 	}
 
+	headers, usageContext := toolSessionHeaders(r, requestID, rootRequestID, modelName, body, safety)
+
 	httpClient.Transport = &headerRoundTripper{
-		base:    httpClient.Transport,
-		headers: headers,
+		base:               httpClient.Transport,
+		headers:            headers,
+		authorization:      manager.AuthorizationProviderFromContext(ctx),
+		usageContext:       usageContext,
+		usageContextSecret: em.UsageContextSecret(),
+		now:                time.Now,
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "router-tool-runtime", Version: "v1"}, nil)
@@ -234,16 +268,14 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 	}, nil)
 }
 
-// toolSessionHeaders builds the per-request HTTP headers attached to an
-// outbound MCP tool session. When usageContextSecret is set, it also signs a
-// usage-context header carrying BillCustomerRequest=true so the downstream
-// tool service bills its own per-session line item alongside the router's
-// token-based chat-completion billing. Double-charging is prevented by the
-// downstream reporter's per-RequestID dedup window: every internal MCP HTTP
-// call within one chat completion shares the same X-Tinfoil-Tool-Request-Id
-// (set by connectToolSession), so multiple model-initiated tool calls inside
-// a single chat completion collapse into a single billable session event.
-func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[string]any, safety safetyOptIns, usageContextSecret string, now func() time.Time) (http.Header, error) {
+// toolSessionHeaders builds the stable HTTP headers and usage context attached
+// to an outbound MCP tool session. The transport refreshes the context's
+// IssuedAt and signature for every HTTP request while preserving its billing
+// identity. Double-charging is prevented by the downstream reporter's
+// per-RequestID dedup window: every internal MCP HTTP call within one chat
+// completion shares the same X-Tinfoil-Tool-Request-Id, so multiple
+// model-initiated tool calls collapse into a single billable session event.
+func toolSessionHeaders(r *http.Request, requestID, rootRequestID, modelName string, body map[string]any, safety safetyOptIns) (http.Header, usagereporting.Context) {
 	headers := make(http.Header)
 	headers.Set(toolcontext.HeaderRequestID, requestID)
 	headers.Set(toolcontext.HeaderModel, modelName)
@@ -255,25 +287,16 @@ func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[s
 	if safety.injection != nil {
 		headers.Set(toolcontext.HeaderInjectionCheck, strconv.FormatBool(*safety.injection))
 	}
-	apiKey := ""
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		headers.Set("Authorization", auth)
-		apiKey = manager.BearerToken(auth)
 	}
-	if usageContextSecret != "" {
-		if err := usagereporting.SetHeaders(headers, usagereporting.Context{
-			ContextID:           requestID,
-			RootRequestID:       requestID,
-			ParentService:       usagereporting.ServiceRouter,
-			APIKeyHash:          usagereporting.HashAPIKey(apiKey),
-			Depth:               1,
-			BillCustomerRequest: true,
-			IssuedAt:            now().UTC(),
-		}, usageContextSecret); err != nil {
-			return nil, fmt.Errorf("sign tool usage context: %w", err)
-		}
+	return headers, usagereporting.Context{
+		ContextID:           requestID,
+		RootRequestID:       rootRequestID,
+		ParentService:       usagereporting.ServiceRouter,
+		Depth:               1,
+		BillCustomerRequest: true,
 	}
-	return headers, nil
 }
 
 // ---------------------------------------------------------------------------

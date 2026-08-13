@@ -17,6 +17,7 @@ containers:
     secrets:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
+      - INFERENCE_DELEGATION_SECRET
       - CACHE_ROUTE_SECRET
       - METRICS_API_KEY
     healthcheck:

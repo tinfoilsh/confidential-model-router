@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,23 @@ import (
 
 func newTestEnclaveManager() *manager.EnclaveManager {
 	return &manager.EnclaveManager{}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type sequenceAuthorizationProvider struct {
+	tokens []string
+	next   int
+}
+
+func (p *sequenceAuthorizationProvider) Authorization(context.Context) (string, error) {
+	token := p.tokens[p.next]
+	p.next++
+	return "Bearer " + token, nil
 }
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -1097,70 +1115,142 @@ func TestChatAdapterStripRouterToolCallsPreservesUnparseableEntries(t *testing.T
 	}
 }
 
-// TestToolSessionHeadersSignsUsageContext asserts that outbound MCP tool
-// session headers carry a usage-context signed with BillCustomerRequest=true
-// and ParentService=router, so downstream tool services bill their own
-// per-session line item alongside the router's chat-completion billing.
-// Per-RequestID dedup in the downstream reporter prevents double-charging
-// across multiple internal tool calls within one chat completion.
-func TestToolSessionHeadersSignsUsageContext(t *testing.T) {
+// TestHeaderRoundTripperRefreshesUsageContext asserts that every outbound MCP
+// request receives a fresh usage-context signature without changing the
+// session's billing identity.
+func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 	const secret = "tool-session-secret"
-	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	times := []time.Time{
+		time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 7, 14, 0, 0, 0, time.UTC),
+	}
 	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer tk_test")
 
-	headers, err := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{}, secret, func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("build tool session headers: %v", err)
+	headers, usageContext := toolSessionHeaders(req, "req-1", "root-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	var sentHeaders []http.Header
+	nowIndex := 0
+	transport := &headerRoundTripper{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			sentHeaders = append(sentHeaders, req.Header.Clone())
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+		headers:            headers,
+		authorization:      &sequenceAuthorizationProvider{tokens: []string{"child-1", "child-2"}},
+		usageContext:       usageContext,
+		usageContextSecret: secret,
+		now: func() time.Time {
+			now := times[nowIndex]
+			nowIndex++
+			return now
+		},
 	}
 
-	got, ok, err := usagereporting.FromHeaders(headers, secret, now, time.Minute)
+	outbound, err := http.NewRequest(http.MethodPost, "https://tool.example/mcp", nil)
 	if err != nil {
-		t.Fatalf("parse usage context: %v", err)
+		t.Fatalf("build outbound request: %v", err)
 	}
-	if !ok {
-		t.Fatal("expected signed usage context to be present")
+	for range times {
+		resp, err := transport.RoundTrip(outbound)
+		if err != nil {
+			t.Fatalf("round trip: %v", err)
+		}
+		resp.Body.Close()
 	}
-	if got.RootRequestID != "req-1" {
-		t.Fatalf("root request id mismatch: got %q want req-1", got.RootRequestID)
+
+	if len(sentHeaders) != len(times) {
+		t.Fatalf("sent request count mismatch: got %d want %d", len(sentHeaders), len(times))
 	}
-	if got.ContextID != "req-1" {
-		t.Fatalf("context id mismatch: got %q want req-1", got.ContextID)
+	if headers.Get(usagereporting.HeaderContext) != "" || outbound.Header.Get(usagereporting.HeaderContext) != "" {
+		t.Fatal("usage context must only be added to cloned outbound requests")
 	}
-	if got.ParentService != usagereporting.ServiceRouter {
-		t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, usagereporting.ServiceRouter)
+	if got := req.Header.Get("Authorization"); got != "Bearer tk_test" {
+		t.Fatalf("original request authorization changed to %q", got)
 	}
-	if !usagereporting.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
-		t.Fatalf("api key hash does not match forwarded authorization")
+	if sentHeaders[0].Get(usagereporting.HeaderContext) == sentHeaders[1].Get(usagereporting.HeaderContext) {
+		t.Fatal("usage context must be re-signed with a fresh timestamp")
 	}
-	if got.Depth != 1 {
-		t.Fatalf("depth mismatch: got %d want 1", got.Depth)
-	}
-	if !got.BillCustomerRequest {
-		t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=true so downstream services bill their own session line item")
+
+	for i, sent := range sentHeaders {
+		got, ok, err := usagereporting.FromHeaders(sent, secret, times[i], time.Minute)
+		if err != nil {
+			t.Fatalf("parse usage context %d: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("expected signed usage context on request %d", i)
+		}
+		if !got.IssuedAt.Equal(times[i]) {
+			t.Fatalf("issued at mismatch: got %s want %s", got.IssuedAt, times[i])
+		}
+		if got.RootRequestID != "root-1" || got.ContextID != "req-1" {
+			t.Fatalf("request identity mismatch: got context=%q root=%q", got.ContextID, got.RootRequestID)
+		}
+		if got.ParentService != usagereporting.ServiceRouter {
+			t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, usagereporting.ServiceRouter)
+		}
+		if !usagereporting.VerifyAPIKeyHash(fmt.Sprintf("child-%d", i+1), got.APIKeyHash) {
+			t.Fatal("api key hash does not match forwarded authorization")
+		}
+		if authorization := sent.Get("Authorization"); authorization != fmt.Sprintf("Bearer child-%d", i+1) {
+			t.Fatalf("authorization mismatch: got %q", authorization)
+		}
+		if got.Depth != 1 {
+			t.Fatalf("depth mismatch: got %d want 1", got.Depth)
+		}
+		if !got.BillCustomerRequest {
+			t.Fatal("router-fanned-out tool calls must set BillCustomerRequest=true")
+		}
+		if sent.Get("X-Tinfoil-Tool-Request-Id") != "req-1" {
+			t.Fatalf("tool request id mismatch: got %q", sent.Get("X-Tinfoil-Tool-Request-Id"))
+		}
 	}
 }
 
-// TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty guards against the
+// TestHeaderRoundTripperOmitsUsageContextWhenSecretEmpty guards against the
 // router silently signing tool sessions with an empty secret if startup
-// validation is bypassed in tests; the helper must skip signing rather than
+// validation is bypassed in tests; the transport must skip signing rather than
 // produce a zero-secret HMAC.
-func TestToolSessionHeadersOmitsUsageContextWhenSecretEmpty(t *testing.T) {
+func TestHeaderRoundTripperOmitsUsageContextWhenSecretEmpty(t *testing.T) {
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 	req, err := http.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
 
-	headers, err := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{}, "", func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("build tool session headers: %v", err)
+	headers, usageContext := toolSessionHeaders(req, "req-1", "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	var sentHeaders http.Header
+	transport := &headerRoundTripper{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			sentHeaders = req.Header.Clone()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+		headers:      headers,
+		usageContext: usageContext,
 	}
+	outbound, err := http.NewRequest(http.MethodPost, "https://tool.example/mcp", nil)
+	if err != nil {
+		t.Fatalf("build outbound request: %v", err)
+	}
+	resp, err := transport.RoundTrip(outbound)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	resp.Body.Close()
 
-	if _, ok, err := usagereporting.FromHeaders(headers, "irrelevant", now, time.Minute); err != nil || ok {
+	if _, ok, err := usagereporting.FromHeaders(sentHeaders, "irrelevant", now, time.Minute); err != nil || ok {
 		t.Fatalf("expected no usage context when secret is empty (ok=%v err=%v)", ok, err)
 	}
 }
