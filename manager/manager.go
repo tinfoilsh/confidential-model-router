@@ -912,7 +912,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret:        usageContextSecret,
 		inferenceDelegationSecret: inferenceDelegationSecret,
-		delegationHTTPClient:      &http.Client{Timeout: delegationHTTPTimeout},
+		delegationHTTPClient:      &http.Client{},
 		requestTracker:            ratelimit.NewRequestTracker(),
 		cacheRouteShadow:          cacheroute.NewShadow(nil),
 		refreshInterval:           refreshInterval,
