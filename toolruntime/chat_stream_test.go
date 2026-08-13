@@ -450,7 +450,7 @@ func TestChatStreamerFinalizeSkipsMultipleStreamedToolCallsWithoutIDs(t *testing
 	}
 	_, clientToolCalls := splitToolCalls(testOwnedTools, result.toolCalls)
 	_, externalClientCalls := splitClientToolCalls(streamer.autoContinueTools, clientToolCalls)
-	if err := streamer.finalize(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), nil, "gpt-oss-120b", result, externalClientCalls); err != nil {
+	if err := streamer.finalize(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), newTestEnclaveManager(), "gpt-oss-120b", result, externalClientCalls); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 
