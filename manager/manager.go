@@ -153,23 +153,25 @@ func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) 
 }
 
 type EnclaveManager struct {
-	models               *sync.Map // model name -> *Model
-	multimodalModels     sync.Map  // sticky set of multimodal chat model names
-	modelPricing         atomic.Pointer[map[string]ModelPricing]
-	initConfigURL        string
-	updateConfigURL      string
-	controlPlaneURL      string
-	sigstoreClient       *sigstore.Client
-	billingCollector     *billing.Collector
-	usageContextSecret   string
-	requestTracker       *ratelimit.RequestTracker
-	cacheRouteShadow     *cacheroute.Shadow
-	refreshInterval      time.Duration
-	stateMu              sync.Mutex
-	errors               []string
-	lastSuccessfulUpdate time.Time
-	lastAttemptedUpdate  time.Time
-	debug                bool
+	models                    *sync.Map // model name -> *Model
+	multimodalModels          sync.Map  // sticky set of multimodal chat model names
+	modelPricing              atomic.Pointer[map[string]ModelPricing]
+	initConfigURL             string
+	updateConfigURL           string
+	controlPlaneURL           string
+	sigstoreClient            *sigstore.Client
+	billingCollector          *billing.Collector
+	usageContextSecret        string
+	inferenceDelegationSecret string
+	delegationHTTPClient      *http.Client
+	requestTracker            *ratelimit.RequestTracker
+	cacheRouteShadow          *cacheroute.Shadow
+	refreshInterval           time.Duration
+	stateMu                   sync.Mutex
+	errors                    []string
+	lastSuccessfulUpdate      time.Time
+	lastAttemptedUpdate       time.Time
+	debug                     bool
 }
 
 // SetDebugMode enables debug-only behaviors such as honoring the
@@ -877,9 +879,12 @@ func (e *Enclave) String() string {
 }
 
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, inferenceDelegationSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration, debug bool) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
+	}
+	if err := validateDelegationControlPlaneURL(controlPlaneURL, debug); err != nil {
+		return nil, err
 	}
 
 	var cfg *config.Config
@@ -899,16 +904,19 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	}
 
 	em := &EnclaveManager{
-		models:             &sync.Map{},
-		initConfigURL:      initConfigURL,
-		updateConfigURL:    updateConfigURL,
-		controlPlaneURL:    controlPlaneURL,
-		sigstoreClient:     sigstoreClient,
-		billingCollector:   billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
-		usageContextSecret: usageContextSecret,
-		requestTracker:     ratelimit.NewRequestTracker(),
-		cacheRouteShadow:   cacheroute.NewShadow(nil),
-		refreshInterval:    refreshInterval,
+		models:                    &sync.Map{},
+		initConfigURL:             initConfigURL,
+		updateConfigURL:           updateConfigURL,
+		controlPlaneURL:           controlPlaneURL,
+		sigstoreClient:            sigstoreClient,
+		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		usageContextSecret:        usageContextSecret,
+		inferenceDelegationSecret: inferenceDelegationSecret,
+		delegationHTTPClient:      &http.Client{},
+		requestTracker:            ratelimit.NewRequestTracker(),
+		cacheRouteShadow:          cacheroute.NewShadow(nil),
+		refreshInterval:           refreshInterval,
+		debug:                     debug,
 	}
 
 	for modelName, modelConfig := range cfg.Models {

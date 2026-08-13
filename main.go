@@ -136,16 +136,17 @@ func getEnvBool(envKey string) bool {
 }
 
 var (
-	port                = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
-	controlPlaneURL     = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
-	usageReporterID     = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
-	usageReporterSecret = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
-	usageContextSecret  = flag.String("usage-context-secret", getEnvOrDefault("USAGE_CONTEXT_SECRET", ""), "usage-context HMAC secret used to sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
-	verbose             = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
-	initConfigURL       = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
-	updateConfigURL     = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	domain              = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
-	refreshInterval     = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	port                      = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL           = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	usageReporterID           = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
+	usageReporterSecret       = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
+	usageContextSecret        = flag.String("usage-context-secret", getEnvOrDefault("USAGE_CONTEXT_SECRET", ""), "usage-context HMAC secret used to sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
+	inferenceDelegationSecret = flag.String("inference-delegation-secret", "", "secret used to delegate inference access tokens (env: INFERENCE_DELEGATION_SECRET)")
+	verbose                   = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL             = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL           = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	domain                    = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
+	refreshInterval           = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 	// debug enables non-production behaviors such as honoring
 	// LOCAL_MCP_ENDPOINT_<MODEL> env vars to bypass attested TLS
 	// pinning for MCP tool servers during local development. MUST
@@ -432,6 +433,12 @@ func main() {
 	if *usageContextSecret == "" {
 		log.Fatal("USAGE_CONTEXT_SECRET is required")
 	}
+	if *inferenceDelegationSecret == "" {
+		*inferenceDelegationSecret = os.Getenv("INFERENCE_DELEGATION_SECRET")
+	}
+	if *inferenceDelegationSecret == "" && !*debug {
+		log.Fatal("INFERENCE_DELEGATION_SECRET is required")
+	}
 
 	// A routing-secret skew between replicas silently re-homes keys on only
 	// the skewed instance, so tolerate the classic source — a trailing
@@ -456,7 +463,7 @@ func main() {
 		manager.SetMetricsPollAPIKey(strings.TrimSpace(key))
 	}
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *inferenceDelegationSecret, *initConfigURL, *updateConfigURL, *refreshInterval, *debug)
 	if err != nil {
 		log.Fatal(err)
 	}
