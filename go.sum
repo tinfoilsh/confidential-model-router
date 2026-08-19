@@ -169,8 +169,6 @@ github.com/google/go-configfs-tsm v0.2.2 h1:YnJ9rXIOj5BYD7/0DNnzs8AOp7UcvjfTvt21
 github.com/google/go-configfs-tsm v0.2.2/go.mod h1:EL1GTDFMb5PZQWDviGfZV9n87WeGTR/JUg13RfwkgRo=
 github.com/google/go-containerregistry v0.21.7 h1:/vPFuVXDjtFREsVArW+0h1CIl5urnOhzei4X2DMW9IU=
 github.com/google/go-containerregistry v0.21.7/go.mod h1:kjSbt7/zMsKLWfnHrIvKvhXHUw91jbe9DNjPPJ32gXE=
-github.com/google/go-sev-guest v0.15.0 h1:Xzfut5mbhcVb7TyPiyc5PolLUzdai7VH3QpyvXwcW9Y=
-github.com/google/go-sev-guest v0.15.0/go.mod h1:SK9vW+uyfuzYdVN0m8BShL3OQCtXZe/JPF7ZkpD3760=
 github.com/google/go-tdx-guest v0.3.1 h1:gl0KvjdsD4RrJzyLefDOvFOUH3NAJri/3qvaL5m83Iw=
 github.com/google/go-tdx-guest v0.3.1/go.mod h1:/rc3d7rnPykOPuY8U9saMyEps0PZDThLk/RygXm04nE=
 github.com/google/jsonschema-go v0.4.2 h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbcqoRA8=
@@ -314,8 +312,10 @@ github.com/theupdateframework/go-tuf v0.7.0 h1:CqbQFrWo1ae3/I0UCblSbczevCCbS31Qv
 github.com/theupdateframework/go-tuf v0.7.0/go.mod h1:uEB7WSY+7ZIugK6R1hiBMBjQftaFzn7ZCDJcp1tCUug=
 github.com/theupdateframework/go-tuf/v2 v2.4.2 h1:w7976/W8uTwlsegP5nRymlpjPgrwSh+AXUf85is6nJk=
 github.com/theupdateframework/go-tuf/v2 v2.4.2/go.mod h1:JqBrIUnNLAaNq/8GmBcEMFWfAFBbqp/MkJEJseXKbks=
-github.com/tinfoilsh/tinfoil-go v0.15.2 h1:etQEW4S0o4C/b1c2JaT/fNrtn9Ll4vPrjq230yF2FDg=
-github.com/tinfoilsh/tinfoil-go v0.15.2/go.mod h1:efO+aJz4bZsfzSEJo5EuXetJoxk2DQTSAzb9teydnvY=
+github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd h1:qprAQDbhLiW9wxztGqgZgxUlKTnN6jJZx/FQl9HyLH8=
+github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd/go.mod h1:2L/TPoX4xeq44MkhftLSU6JBpdwzLPIsFvijrGKKe1s=
+github.com/tinfoilsh/tinfoil-go v0.15.3 h1:KEpyWCN6YRlXEEFCNM/K2t5MJXZ3IPFTF0ugaTOGT74=
+github.com/tinfoilsh/tinfoil-go v0.15.3/go.mod h1:wylSJUke2bS5+M7vOCBLrdmU8QEuW/DHnNqbLLMvVLk=
 github.com/tinfoilsh/usage-reporting-go v0.1.3 h1:q3WJK1auo65BFDxQ+hkSRXF6B+jKhii3RUxeU18hvkA=
 github.com/tinfoilsh/usage-reporting-go v0.1.3/go.mod h1:1lXVGmDbEmlAdUo+0YPsUYuFVtr74xycCs0K4fSnwYs=
 github.com/tink-crypto/tink-go-awskms/v3 v3.0.0 h1:XSohRhCkXAVI0iaCnWB/GS05TEmpnKurQmzaY1jzt3Y=
