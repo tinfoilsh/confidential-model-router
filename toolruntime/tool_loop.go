@@ -125,9 +125,9 @@ func runToolLoop(
 	eventFlags tinfoilEventFlags,
 	harmony bool,
 	dl *devLog,
+	usageTotals *usageAccumulator,
 ) (*upstreamJSONResponse, error) {
 	reqBody := adapter.buildInitialRequest()
-	usageTotals := usageAccumulator{}
 	citeState := citations.State{NextIndex: 1, Harmony: harmony}
 	toolCalls := toolCallLog{}
 	opts := adapter.options()

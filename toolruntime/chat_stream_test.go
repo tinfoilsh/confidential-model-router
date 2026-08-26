@@ -88,6 +88,46 @@ func TestChatStreamerPumpEmitsContentAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestChatStreamerPumpFoldsUsageOnTruncatedStream(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	// Continuous usage stats put a usage block on mid-stream chunks; the
+	// stream then ends without [DONE], as happens when the upstream
+	// request is cancelled mid-turn.
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":"partial"}}],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17}}`,
+		"",
+	}, "\n\n")
+
+	_, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err == nil {
+		t.Fatal("expected error for stream without terminal [DONE] marker")
+	}
+
+	usage := streamer.finalUsage()
+	if usage == nil {
+		t.Fatal("expected usage from truncated stream to be accumulated")
+	}
+	if usage["prompt_tokens"].(int) != 10 || usage["completion_tokens"].(int) != 7 {
+		t.Fatalf("unexpected accumulated usage: %#v", usage)
+	}
+}
+
+func TestBuildChatStreamRequestEnablesContinuousUsage(t *testing.T) {
+	req, _ := buildChatStreamRequest(
+		map[string]any{"model": "m", "messages": []any{}}, nil, nil)
+	opts, _ := req["stream_options"].(map[string]any)
+	if opts == nil {
+		t.Fatal("stream request missing stream_options")
+	}
+	if opts["include_usage"] != true {
+		t.Error("stream_options missing include_usage")
+	}
+	if opts["continuous_usage_stats"] != true {
+		t.Error("stream_options missing continuous_usage_stats")
+	}
+}
+
 func TestChatStreamerPumpForwardsClientToolCallDeltasLive(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}

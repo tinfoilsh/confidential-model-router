@@ -192,8 +192,10 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		usageTotals := &usageAccumulator{}
+		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl, usageTotals)
 		if err != nil {
+			emitAccumulatedBillingEvent(em, r, modelName, usageTotals, false)
 			return writeUpstreamError(w, err)
 		}
 		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
@@ -206,8 +208,10 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		usageTotals := &usageAccumulator{}
+		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl, usageTotals)
 		if err != nil {
+			emitAccumulatedBillingEvent(em, r, modelName, usageTotals, false)
 			return writeUpstreamError(w, err)
 		}
 		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
@@ -303,14 +307,14 @@ func toolSessionHeaders(r *http.Request, requestID, rootRequestID, modelName str
 // Loop wrappers
 // ---------------------------------------------------------------------------
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog, usageTotals *usageAccumulator) (*upstreamJSONResponse, error) {
 	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders, routerOpts)
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl, usageTotals)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog, usageTotals *usageAccumulator) (*upstreamJSONResponse, error) {
 	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), routerOpts)
-	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
+	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl, usageTotals)
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +522,21 @@ func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *ups
 		RequestPath:        r.URL.Path,
 		Streaming:          streaming,
 	})
+}
+
+// emitAccumulatedBillingEvent records usage collected from completed
+// tool-loop turns when the loop exits without a final response. No event
+// is emitted when nothing was accumulated.
+func emitAccumulatedBillingEvent(em *manager.EnclaveManager, r *http.Request, modelName string, totals *usageAccumulator, streaming bool) {
+	usage := totals.Usage()
+	if usage == nil {
+		return
+	}
+	response := &upstreamJSONResponse{
+		header: http.Header{},
+		body:   map[string]any{"usage": chatUsageMap(usage)},
+	}
+	emitBillingEvent(em, r, response, modelName, streaming)
 }
 
 func responseRequestID(headers ...http.Header) string {
