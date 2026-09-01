@@ -199,6 +199,18 @@ func TestCircuitBreaker_OpensAfterThreshold(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_TransportFailureOpensImmediately(t *testing.T) {
+	cb := newCircuitBreaker()
+	cb.RecordUnavailable()
+
+	if cb.State() != cbOpen {
+		t.Fatalf("expected open after transport failure, got %d", cb.State())
+	}
+	if cb.ConsecutiveFailures() != cbFailureThreshold {
+		t.Fatalf("expected failure threshold after transport failure, got %d", cb.ConsecutiveFailures())
+	}
+}
+
 func TestCircuitBreaker_SuccessResetsClosed(t *testing.T) {
 	cb := newCircuitBreaker()
 	for i := 0; i < cbFailureThreshold; i++ {

@@ -68,6 +68,15 @@ func (cb *circuitBreaker) RecordFailure() {
 	}
 }
 
+// RecordUnavailable opens the circuit immediately when no backend response
+// was received. Unlike an HTTP 5xx, a transport failure cannot be a healthy
+// application response and retrying the same replica only prolongs an outage.
+func (cb *circuitBreaker) RecordUnavailable() {
+	cb.lastFailureNano.Store(time.Now().UnixNano())
+	cb.consecutiveFailures.Store(cbFailureThreshold)
+	cb.storeState(cbOpen)
+}
+
 // Closed reports whether the circuit breaker is in the closed (healthy) state.
 func (cb *circuitBreaker) Closed() bool {
 	return cb.loadState() == cbClosed

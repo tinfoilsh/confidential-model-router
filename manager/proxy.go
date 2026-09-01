@@ -252,7 +252,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
 			ProbeClaimFromContext(r.Context()).Abort()
 		} else {
-			recordFailure(reason)
+			ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
+			cb.RecordUnavailable()
+			publishBreakerState(modelName, host, cb)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)

@@ -94,8 +94,11 @@ func TestPostToEnclaveInflight(t *testing.T) {
 	if got := e2.inflight.Load(); got != 0 {
 		t.Fatalf("in-flight after error = %d, want 0", got)
 	}
-	if got := e2.cb.ConsecutiveFailures(); got != 1 {
-		t.Fatalf("breaker failures after transport error = %d, want 1", got)
+	if got := e2.cb.State(); got != cbOpen {
+		t.Fatalf("breaker state after transport error = %d, want open", got)
+	}
+	if got := e2.cb.ConsecutiveFailures(); got != cbFailureThreshold {
+		t.Fatalf("breaker failures after transport error = %d, want %d", got, cbFailureThreshold)
 	}
 }
 

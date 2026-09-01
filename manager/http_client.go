@@ -183,7 +183,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		} else {
 			ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, reason).Inc()
 			if enclave.cb != nil {
-				enclave.cb.RecordFailure()
+				enclave.cb.RecordUnavailable()
 				publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
 			}
 		}
