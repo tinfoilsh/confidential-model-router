@@ -29,6 +29,9 @@ models:
   glm-5-3:
     repo: tinfoilsh/confidential-glm5-3-nvfp4
 
+  glm-5-3-flash:
+    repo: tinfoilsh/confidential-glm5-3-flash
+
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
 
