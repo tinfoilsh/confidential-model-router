@@ -78,7 +78,7 @@ func TestObserveClassification(t *testing.T) {
 	cfg := defaultSettings() // W = 10 min
 	req := keyedRequest(t, "one", 100)
 
-	reuse := func(outcome string) float64 { return counterValue(t, ReuseTotal, model, outcome) }
+	reuse := func(outcome string) float64 { return counterValue(t, ReuseTotal, model, "none", outcome) }
 	base := [3]float64{reuse(ReuseFirstSeen), reuse(ReuseRepeatWarm), reuse(ReuseRepeatCold)}
 	keyed := counterDelta(t, RequestsTotal, model, string(OutcomeKeyed))
 
@@ -112,6 +112,41 @@ func TestObserveClassification(t *testing.T) {
 	// All four keyed requests counted in the funnel.
 	if got := keyed(); got != 4 {
 		t.Fatalf("keyed = %v, want 4", got)
+	}
+}
+
+// TestReusePriorityLabel pins the caller-priority split on the reuse
+// metrics: a configured-priority request lands in the configured series
+// with its prompt bytes, and an unset Priority is recorded as "none".
+func TestReusePriorityLabel(t *testing.T) {
+	s, clock, _ := newTestShadow(t)
+	model := "prio-" + t.Name()
+	cfg := defaultSettings()
+	req := keyedRequest(t, "one", 100)
+
+	configured := counterDelta(t, ReuseTotal, model, "configured", ReuseFirstSeen)
+	configuredBytes := counterDelta(t, ReusePromptBytesTotal, model, "configured", ReuseFirstSeen)
+	noneWarm := counterDelta(t, ReuseTotal, model, "none", ReuseRepeatWarm)
+
+	req.Priority = "configured"
+	s.Observe(model, req, pool2(), "enclave-a", cfg)
+	if got := configured(); got != 1 {
+		t.Fatalf("configured first_seen = %v, want 1", got)
+	}
+	if got := configuredBytes(); got != 100 {
+		t.Fatalf("configured first_seen bytes = %v, want 100", got)
+	}
+
+	// The same key from a caller without a configured priority: the class
+	// is per-request, not per-key.
+	clock.advance(time.Minute)
+	req.Priority = ""
+	s.Observe(model, req, pool2(), "enclave-a", cfg)
+	if got := noneWarm(); got != 1 {
+		t.Fatalf("none repeat_warm = %v, want 1", got)
+	}
+	if got := configured(); got != 1 {
+		t.Fatalf("configured series grew to %v after a none request", got)
 	}
 }
 
@@ -150,8 +185,8 @@ func TestObserveByteWeighting(t *testing.T) {
 	model := "bytes-" + t.Name()
 	cfg := defaultSettings()
 	req := keyedRequest(t, "bw", 5000)
-	firstBytes := counterDelta(t, ReusePromptBytesTotal, model, ReuseFirstSeen)
-	coldBytes := counterDelta(t, ReusePromptBytesTotal, model, ReuseRepeatCold)
+	firstBytes := counterDelta(t, ReusePromptBytesTotal, model, "none", ReuseFirstSeen)
+	coldBytes := counterDelta(t, ReusePromptBytesTotal, model, "none", ReuseRepeatCold)
 
 	s.Observe(model, req, pool2(), "enclave-a", cfg)
 	clock.advance(time.Second)
@@ -205,16 +240,16 @@ func TestCapacityEviction(t *testing.T) {
 
 	// k1 survived (repeat), k2 was evicted (first_seen again) — the
 	// documented capacity bias.
-	warmBefore := counterValue(t, ReuseTotal, model, ReuseRepeatWarm)
+	warmBefore := counterValue(t, ReuseTotal, model, "none", ReuseRepeatWarm)
 	clock.advance(time.Second)
 	s.Observe(model, k1, pool2(), "enclave-a", cfg)
-	if got := counterValue(t, ReuseTotal, model, ReuseRepeatWarm) - warmBefore; got != 1 {
+	if got := counterValue(t, ReuseTotal, model, "none", ReuseRepeatWarm) - warmBefore; got != 1 {
 		t.Fatalf("k1 must still be tracked, warm delta = %v", got)
 	}
-	firstBefore := counterValue(t, ReuseTotal, model, ReuseFirstSeen)
+	firstBefore := counterValue(t, ReuseTotal, model, "none", ReuseFirstSeen)
 	clock.advance(time.Second)
 	s.Observe(model, k2, pool2(), "enclave-a", cfg)
-	if got := counterValue(t, ReuseTotal, model, ReuseFirstSeen) - firstBefore; got != 1 {
+	if got := counterValue(t, ReuseTotal, model, "none", ReuseFirstSeen) - firstBefore; got != 1 {
 		t.Fatalf("evicted k2 must classify first_seen, delta = %v", got)
 	}
 }
@@ -377,7 +412,7 @@ func TestObserveProbeServed(t *testing.T) {
 	}
 
 	// The probe still warmed its replica: a repeat onto it is warm.
-	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+	warm := counterDelta(t, ReuseTotal, model, "none", ReuseRepeatWarm)
 	clock.advance(time.Second)
 	s.Observe(model, req, pool2(), "probe-c", cfg)
 	if got := warm(); got != 1 {
@@ -489,7 +524,7 @@ func TestObserveLanding(t *testing.T) {
 
 	matches := counterDelta(t, RandomMatchTotal, model)
 	landedPicks := counterDelta(t, PicksTotal, model, "enclave-b", "1")
-	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+	warm := counterDelta(t, ReuseTotal, model, "none", ReuseRepeatWarm)
 
 	d := s.Decide(model, req, pool2(), cfg)
 	s.ObserveLanding(model, req, d, "enclave-b", cfg)
@@ -550,7 +585,7 @@ func TestObserveEnforced(t *testing.T) {
 
 	matches := counterDelta(t, RandomMatchTotal, model)
 	landedPicks := counterDelta(t, PicksTotal, model, "enclave-b", "1")
-	warm := counterDelta(t, ReuseTotal, model, ReuseRepeatWarm)
+	warm := counterDelta(t, ReuseTotal, model, "none", ReuseRepeatWarm)
 
 	// Land twice on enclave-b regardless of what the ranking would pick.
 	s.Observe(model, req, pool2(), "enclave-b", cfg)

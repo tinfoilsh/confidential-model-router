@@ -140,6 +140,7 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
+	req.Priority = CallerPriorityFromContext(ctx)
 	primary, _ := model.ReservationPools(CallerOrgFromContext(ctx))
 	return req, settings, model.CacheRoutePoolIn(primary), true
 }

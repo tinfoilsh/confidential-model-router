@@ -164,6 +164,12 @@ type Request struct {
 	// contents): the eligibility-floor input and the weight for the
 	// byte-weighted reuse metrics.
 	PromptBytes int
+	// Priority is the caller's priority class for the reuse metrics:
+	// "configured" when the control plane assigned the caller a vLLM
+	// priority, "none" otherwise. Set by the caller after extraction —
+	// the body alone cannot know it — and an unset value is recorded as
+	// "none".
+	Priority string
 
 	elapsed time.Duration // extraction cost, folded into ComputeSeconds
 }
