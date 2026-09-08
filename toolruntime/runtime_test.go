@@ -239,16 +239,31 @@ func TestApplyUsageMetricsReportsWebSearchCalls(t *testing.T) {
 	}
 	em := newTestEnclaveManager()
 
-	response := newResponse()
-	applyUsageMetrics(response, true, "m", em, &manager.WebSearchUsage{Calls: 2})
-	if got, want := response.header.Get(manager.UsageMetricsResponseHeader), "prompt=10,completion=5,total=15,model=m,web_search_calls=2"; got != want {
-		t.Fatalf("usage header = %q, want %q", got, want)
+	tests := []struct {
+		name      string
+		webSearch *manager.WebSearchUsage
+		want      string
+	}{
+		{
+			name:      "reports call count when web search ran",
+			webSearch: &manager.WebSearchUsage{Calls: 2},
+			want:      "prompt=10,completion=5,total=15,model=m,web_search_calls=2",
+		},
+		{
+			name:      "omits web search fields when no calls ran",
+			webSearch: &manager.WebSearchUsage{},
+			want:      "prompt=10,completion=5,total=15,model=m",
+		},
 	}
 
-	response = newResponse()
-	applyUsageMetrics(response, true, "m", em, &manager.WebSearchUsage{})
-	if got, want := response.header.Get(manager.UsageMetricsResponseHeader), "prompt=10,completion=5,total=15,model=m"; got != want {
-		t.Fatalf("usage header without web search = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := newResponse()
+			applyUsageMetrics(response, true, "m", em, tt.webSearch)
+			if got := response.header.Get(manager.UsageMetricsResponseHeader); got != tt.want {
+				t.Fatalf("usage header = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
