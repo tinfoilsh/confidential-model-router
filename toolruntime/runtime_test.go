@@ -206,6 +206,52 @@ func TestModelRequestHeaders(t *testing.T) {
 	}
 }
 
+func TestToolCallLogWebSearchCallsCountsSearchAndFetchOnly(t *testing.T) {
+	var nilLog *toolCallLog
+	if got := nilLog.webSearchCalls(); got != 0 {
+		t.Fatalf("nil log web search calls = %d, want 0", got)
+	}
+
+	log := &toolCallLog{}
+	log.record(toolCallRecord{name: mcpSearchToolName})
+	log.record(toolCallRecord{name: routerSearchToolName, errorReason: publicToolErrorReasonString})
+	log.record(toolCallRecord{name: routerFetchToolName})
+	log.record(toolCallRecord{name: "bash"})
+	log.record(toolCallRecord{name: mcpPresentToolName})
+
+	if got := log.webSearchCalls(); got != 3 {
+		t.Fatalf("web search calls = %d, want 3 (search, failed search, fetch)", got)
+	}
+}
+
+func TestApplyUsageMetricsReportsWebSearchCalls(t *testing.T) {
+	newResponse := func() *upstreamJSONResponse {
+		return &upstreamJSONResponse{
+			body: map[string]any{
+				"usage": map[string]any{
+					"prompt_tokens":     10,
+					"completion_tokens": 5,
+					"total_tokens":      15,
+				},
+			},
+			header: make(http.Header),
+		}
+	}
+	em := newTestEnclaveManager()
+
+	response := newResponse()
+	applyUsageMetrics(response, true, "m", em, &manager.WebSearchUsage{Calls: 2})
+	if got, want := response.header.Get(manager.UsageMetricsResponseHeader), "prompt=10,completion=5,total=15,model=m,web_search_calls=2"; got != want {
+		t.Fatalf("usage header = %q, want %q", got, want)
+	}
+
+	response = newResponse()
+	applyUsageMetrics(response, true, "m", em, &manager.WebSearchUsage{})
+	if got, want := response.header.Get(manager.UsageMetricsResponseHeader), "prompt=10,completion=5,total=15,model=m"; got != want {
+		t.Fatalf("usage header without web search = %q, want %q", got, want)
+	}
+}
+
 func TestResponsesAdapterApplyUsageReplacesResponsesTotals(t *testing.T) {
 	response := &upstreamJSONResponse{
 		body: map[string]any{

@@ -623,7 +623,7 @@ func (s *chatStreamer) finalize(
 	}
 
 	if s.usageMetricsRequested {
-		if formatted := formatUsageMetrics(em, usageFromRaw(finalUsage), modelName); formatted != "" {
+		if formatted := formatUsageMetrics(em, usageFromRaw(finalUsage), modelName, webSearchUsage(em, s.toolCalls)); formatted != "" {
 			s.w.Header().Set(manager.UsageMetricsResponseHeader, formatted)
 		}
 	}

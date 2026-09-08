@@ -64,6 +64,19 @@ func (l *toolCallLog) list() []toolCallRecord {
 	return l.records
 }
 
+// webSearchCalls counts the recorded search/fetch calls. Failed calls are
+// included because the websearch service reports the session before running
+// the tool, so a failed search is still a billed one.
+func (l *toolCallLog) webSearchCalls() int {
+	count := 0
+	for _, record := range l.list() {
+		if isWebSearchTool(record.name) {
+			count++
+		}
+	}
+	return count
+}
+
 // toolCallRecord captures a tool call the router made on the user's behalf,
 // used to surface web_search_call progress items to clients. errorReason
 // carries the tool-side error message when the call failed so terminal
