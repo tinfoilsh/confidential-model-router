@@ -901,10 +901,14 @@ func runResponsesStreaming(
 	routerOpts *RouterOptions,
 	dl *devLog,
 ) error {
-	flusher, ok := w.(http.Flusher)
+	rawFlusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
+	heartbeat := newHeartbeatWriter(w, rawFlusher)
+	defer heartbeat.Stop()
+	w = heartbeat
+	flusher := heartbeat
 
 	searchOpts := parseResponsesWebSearchOptions(routerOpts, body)
 	tools := registry.allTools()
