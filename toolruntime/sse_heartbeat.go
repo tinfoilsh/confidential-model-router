@@ -1,7 +1,6 @@
 package toolruntime
 
 import (
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,6 +37,7 @@ type heartbeatWriter struct {
 	lastWrite time.Time
 	armed     bool
 	failed    bool
+	failedErr error
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -71,13 +71,20 @@ func (h *heartbeatWriter) WriteHeader(status int) {
 	go h.run()
 }
 
+// Write forwards to the client. Once any write has failed, including a
+// heartbeat, every later write fails immediately so the streamer's own
+// write-error latch trips on its next emit and the tool loop stops
+// spending upstream tokens on a caller that has gone away.
 func (h *heartbeatWriter) Write(p []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.failed {
+		return 0, h.failedErr
+	}
 	n, err := h.ResponseWriter.Write(p)
 	h.lastWrite = time.Now()
 	if err != nil {
-		h.failed = true
+		h.fail(err)
 	}
 	return n, err
 }
@@ -129,11 +136,20 @@ func (h *heartbeatWriter) beat(now time.Time) bool {
 	if now.Sub(h.lastWrite) < sseHeartbeatInterval {
 		return true
 	}
-	if _, err := io.WriteString(h.ResponseWriter, sseHeartbeatFrame); err != nil {
-		h.failed = true
+	if _, err := h.ResponseWriter.Write([]byte(sseHeartbeatFrame)); err != nil {
+		h.fail(err)
 		return false
 	}
 	h.flusher.Flush()
 	h.lastWrite = now
 	return true
+}
+
+// fail records the first write error; callers hold mu.
+func (h *heartbeatWriter) fail(err error) {
+	if h.failed {
+		return
+	}
+	h.failed = true
+	h.failedErr = err
 }

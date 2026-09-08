@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,6 +75,38 @@ func TestHeartbeatStopsAfterWriteFailure(t *testing.T) {
 	if h.beat(time.Now().Add(sseHeartbeatInterval)) {
 		t.Fatal("beat() kept running after the client write failed")
 	}
+}
+
+// A heartbeat that discovers the client is gone must surface on the
+// streamer's next Write so its writeErr latch trips and the tool loop
+// stops, even if the underlying writer would otherwise accept bytes again.
+func TestHeartbeatFailurePropagatesToLaterWrites(t *testing.T) {
+	w := &failOnceWriter{ResponseRecorder: httptest.NewRecorder()}
+	h := newHeartbeatWriter(w, w)
+	h.Header().Set("Content-Type", "text/event-stream")
+	h.WriteHeader(http.StatusOK)
+	defer h.Stop()
+
+	if h.beat(time.Now().Add(sseHeartbeatInterval)) {
+		t.Fatal("beat() did not report the failed heartbeat write")
+	}
+	if _, err := h.Write([]byte("data: {}\n\n")); err == nil {
+		t.Fatal("Write() succeeded after the heartbeat detected a dead client")
+	}
+}
+
+// failOnceWriter fails the first Write and accepts every write after it.
+type failOnceWriter struct {
+	*httptest.ResponseRecorder
+	failed bool
+}
+
+func (w *failOnceWriter) Write(p []byte) (int, error) {
+	if !w.failed {
+		w.failed = true
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseRecorder.Write(p)
 }
 
 // Comment frames must be invisible to the router's own SSE reader so a
