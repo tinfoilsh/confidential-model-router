@@ -95,7 +95,6 @@ func TestHeartbeatFailurePropagatesToLaterWrites(t *testing.T) {
 	}
 }
 
-// failOnceWriter fails the first Write and accepts every write after it.
 type failOnceWriter struct {
 	*httptest.ResponseRecorder
 	failed bool
