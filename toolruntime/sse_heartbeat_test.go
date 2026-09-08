@@ -23,18 +23,47 @@ func TestHeartbeatWritesCommentAfterIdleInterval(t *testing.T) {
 	h, rec := newArmedHeartbeat(t)
 
 	now := time.Now()
-	if !h.beat(now.Add(sseHeartbeatInterval / 2)) {
+	if _, ok := h.beat(now.Add(sseHeartbeatInterval / 2)); !ok {
 		t.Fatal("beat() reported failure on a healthy writer")
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("heartbeat fired before the idle interval elapsed: %q", rec.Body.String())
 	}
 
-	if !h.beat(now.Add(sseHeartbeatInterval)) {
+	if _, ok := h.beat(now.Add(sseHeartbeatInterval)); !ok {
 		t.Fatal("beat() reported failure on a healthy writer")
 	}
 	if got := rec.Body.String(); got != sseHeartbeatFrame {
 		t.Fatalf("heartbeat frame = %q, want %q", got, sseHeartbeatFrame)
+	}
+}
+
+// When a write lands partway through the idle period, the next check must
+// be scheduled for the remainder of that period rather than a full interval
+// later, otherwise a silence that starts right after a check goes unnoticed
+// for almost two intervals.
+func TestHeartbeatReschedulesFromLastWrite(t *testing.T) {
+	h, _ := newArmedHeartbeat(t)
+
+	h.mu.Lock()
+	h.lastWrite = time.Now()
+	h.mu.Unlock()
+
+	elapsed := sseHeartbeatInterval / 3
+	wait, ok := h.beat(h.lastWrite.Add(elapsed))
+	if !ok {
+		t.Fatal("beat() reported failure on a healthy writer")
+	}
+	if want := sseHeartbeatInterval - elapsed; wait != want {
+		t.Fatalf("beat() wait = %v, want remainder of idle period %v", wait, want)
+	}
+
+	wait, ok = h.beat(h.lastWrite.Add(sseHeartbeatInterval))
+	if !ok {
+		t.Fatal("beat() reported failure on a healthy writer")
+	}
+	if wait != sseHeartbeatInterval {
+		t.Fatalf("beat() wait after emitting = %v, want full interval %v", wait, sseHeartbeatInterval)
 	}
 }
 
@@ -45,7 +74,7 @@ func TestHeartbeatIsSuppressedByRecentWrites(t *testing.T) {
 	if _, err := h.Write([]byte(frame)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
-	if !h.beat(time.Now().Add(sseHeartbeatInterval / 2)) {
+	if _, ok := h.beat(time.Now().Add(sseHeartbeatInterval / 2)); !ok {
 		t.Fatal("beat() reported failure on a healthy writer")
 	}
 	if got := rec.Body.String(); got != frame {
@@ -72,7 +101,7 @@ func TestHeartbeatStopsAfterWriteFailure(t *testing.T) {
 	h.WriteHeader(http.StatusOK)
 	defer h.Stop()
 
-	if h.beat(time.Now().Add(sseHeartbeatInterval)) {
+	if _, ok := h.beat(time.Now().Add(sseHeartbeatInterval)); ok {
 		t.Fatal("beat() kept running after the client write failed")
 	}
 }
@@ -87,7 +116,7 @@ func TestHeartbeatFailurePropagatesToLaterWrites(t *testing.T) {
 	h.WriteHeader(http.StatusOK)
 	defer h.Stop()
 
-	if h.beat(time.Now().Add(sseHeartbeatInterval)) {
+	if _, ok := h.beat(time.Now().Add(sseHeartbeatInterval)); ok {
 		t.Fatal("beat() did not report the failed heartbeat write")
 	}
 	if _, err := h.Write([]byte("data: {}\n\n")); err == nil {

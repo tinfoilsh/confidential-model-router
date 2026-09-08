@@ -108,41 +108,50 @@ func (h *heartbeatWriter) Stop() {
 	}
 }
 
+// run wakes exactly when the current idle period reaches
+// sseHeartbeatInterval. A fixed-cadence ticker would be wrong here: its
+// phase is set when the stream arms, but writes land at arbitrary offsets,
+// so a silence that begins just after a tick would not be caught until the
+// following one, stretching the worst case to nearly two intervals.
 func (h *heartbeatWriter) run() {
 	defer close(h.done)
-	ticker := time.NewTicker(sseHeartbeatInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(sseHeartbeatInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-h.stop:
 			return
-		case now := <-ticker.C:
-			if !h.beat(now) {
+		case now := <-timer.C:
+			wait, ok := h.beat(now)
+			if !ok {
 				return
 			}
+			timer.Reset(wait)
 		}
 	}
 }
 
-// beat writes a heartbeat if the stream has been idle for a full interval.
-// It reports false once a write has failed, at which point the client is
-// gone and further heartbeats are pointless.
-func (h *heartbeatWriter) beat(now time.Time) bool {
+// beat writes a heartbeat if the stream has been idle for a full interval
+// and returns how long to wait before checking again: the remainder of the
+// current idle period if a write arrived in the meantime, otherwise a full
+// interval. It reports false once a write has failed, at which point the
+// client is gone and further heartbeats are pointless.
+func (h *heartbeatWriter) beat(now time.Time) (time.Duration, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.failed {
-		return false
+		return 0, false
 	}
-	if now.Sub(h.lastWrite) < sseHeartbeatInterval {
-		return true
+	if idle := now.Sub(h.lastWrite); idle < sseHeartbeatInterval {
+		return sseHeartbeatInterval - idle, true
 	}
 	if _, err := h.ResponseWriter.Write([]byte(sseHeartbeatFrame)); err != nil {
 		h.fail(err)
-		return false
+		return 0, false
 	}
 	h.flusher.Flush()
 	h.lastWrite = now
-	return true
+	return sseHeartbeatInterval, true
 }
 
 // fail records the first write error; callers hold mu.
