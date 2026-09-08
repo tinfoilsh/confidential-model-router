@@ -88,6 +88,56 @@ func TestRequestCostUSD(t *testing.T) {
 	}
 }
 
+func TestFormatUsageWebSearch(t *testing.T) {
+	usage := &tokencount.Usage{PromptTokens: 1_000, CompletionTokens: 500, TotalTokens: 1_500}
+	modelPricing := &ModelPricing{InputTokenPricePer1M: 1, OutputTokenPricePer1M: 2}
+	sessionPricing := &ModelPricing{RequestPrice: 0.05}
+
+	tests := []struct {
+		name      string
+		pricing   *ModelPricing
+		webSearch *WebSearchUsage
+		expected  string
+	}{
+		{
+			name:     "nil web search leaves header unchanged",
+			pricing:  modelPricing,
+			expected: "prompt=1000,completion=500,total=1500,model=m,cost_usd=0.002",
+		},
+		{
+			name:      "zero calls omits web search fields and fee",
+			pricing:   modelPricing,
+			webSearch: &WebSearchUsage{SessionPricing: sessionPricing},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,cost_usd=0.002",
+		},
+		{
+			name:      "session fee is charged once regardless of call count",
+			pricing:   modelPricing,
+			webSearch: &WebSearchUsage{Calls: 3, SessionPricing: sessionPricing},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=3,cost_usd=0.052",
+		},
+		{
+			name:      "unknown session fee omits cost_usd but keeps call count",
+			pricing:   modelPricing,
+			webSearch: &WebSearchUsage{Calls: 1},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
+		},
+		{
+			name:      "unknown model pricing omits cost_usd",
+			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormatUsage(usage, "m", tt.pricing, tt.webSearch); got != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestModelPricingJSONAndLookup(t *testing.T) {
 	var models openAIModelsList
 	err := json.Unmarshal([]byte(`{

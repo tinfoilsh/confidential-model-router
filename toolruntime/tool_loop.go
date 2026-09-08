@@ -125,7 +125,7 @@ func runToolLoop(
 	eventFlags tinfoilEventFlags,
 	harmony bool,
 	dl *devLog,
-) (*upstreamJSONResponse, error) {
+) (*upstreamJSONResponse, *manager.WebSearchUsage, error) {
 	reqBody := adapter.buildInitialRequest()
 	usageTotals := usageAccumulator{}
 	citeState := citations.State{NextIndex: 1, Harmony: harmony}
@@ -151,7 +151,7 @@ func runToolLoop(
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s upstream.error elapsed=%s err=%v", traceID, adapter.tracePhase(i), time.Since(start), err)
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		usageTotals.Add(response)
 
@@ -170,7 +170,7 @@ func runToolLoop(
 			adapter.attachAutoContinueResponseItems(response, autoContinueResponseItems)
 			adapter.applyUsage(response, usageTotals.Usage())
 			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
-			return response, nil
+			return response, webSearchUsage(em, &toolCalls), nil
 		}
 
 		dl.WriteToolCalls(routerToolCalls)
@@ -210,7 +210,7 @@ func runToolLoop(
 			adapter.attachAutoContinueResponseItems(response, append(autoContinueResponseItems, currentAutoContinueItems...))
 			adapter.applyUsage(response, usageTotals.Usage())
 			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
-			return response, nil
+			return response, webSearchUsage(em, &toolCalls), nil
 		}
 
 		autoContinueResponseItems = append(autoContinueResponseItems, adapter.autoContinueResponseItems(state, autoContinueCalls)...)
@@ -222,7 +222,7 @@ func runToolLoop(
 	}
 	finalResponse, err := postJSON(ctx, em, modelName, path, adapter.forcedFinalRequest(reqBody), requestHeaders)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The forced-final turn consumes tokens too; feed them into the
 	// accumulator before finalize overwrites response.body["usage"] with
@@ -232,7 +232,7 @@ func runToolLoop(
 	adapter.attachAutoContinueResponseItems(finalResponse, autoContinueResponseItems)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
 	adapter.attachCitations(finalResponse.body, &citeState, &toolCalls, eventFlags)
-	return finalResponse, nil
+	return finalResponse, webSearchUsage(em, &toolCalls), nil
 }
 
 // executeRouterToolCall runs one router-owned tool call on behalf of

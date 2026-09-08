@@ -192,11 +192,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		response, webSearch, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
+		applyUsageMetrics(response, usageMetricsRequested, modelName, em, webSearch)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
@@ -206,11 +206,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			}
 			return nil
 		}
-		response, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		response, webSearch, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
-		applyUsageMetrics(response, usageMetricsRequested, modelName, em)
+		applyUsageMetrics(response, usageMetricsRequested, modelName, em, webSearch)
 		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	default:
@@ -303,14 +303,27 @@ func toolSessionHeaders(r *http.Request, requestID, rootRequestID, modelName str
 // Loop wrappers
 // ---------------------------------------------------------------------------
 
-func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+func runChatLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, *manager.WebSearchUsage, error) {
 	adapter := newChatLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), modelName, requestHeaders, routerOpts)
 	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
 }
 
-func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, error) {
+func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry *sessionRegistry, body map[string]any, modelName string, requestHeaders http.Header, prompt *mcp.GetPromptResult, routerOpts *RouterOptions, eventFlags tinfoilEventFlags, harmony bool, dl *devLog) (*upstreamJSONResponse, *manager.WebSearchUsage, error) {
 	adapter := newResponsesLoopAdapter(body, prompt, registry.allTools(), registry.ownedTools(), routerOpts)
 	return runToolLoop(ctx, em, registry, modelName, requestHeaders, adapter, eventFlags, harmony, dl)
+}
+
+// webSearchUsage summarizes the router-owned search/fetch calls recorded
+// during a request together with the websearch tool's published session
+// pricing so the usage metrics header can report the fee.
+func webSearchUsage(em *manager.EnclaveManager, toolCalls *toolCallLog) *manager.WebSearchUsage {
+	usage := &manager.WebSearchUsage{Calls: toolCalls.webSearchCalls()}
+	if em != nil {
+		if pricing, ok := em.ModelPricing(WebSearch.ToolServerModel); ok {
+			usage.SessionPricing = &pricing
+		}
+	}
+	return usage
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +467,7 @@ func usageMap(usage *tokencount.Usage, inputTokensKey, outputTokensKey, detailsK
 	return usageMap
 }
 
-func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool, modelName string, em *manager.EnclaveManager) {
+func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested bool, modelName string, em *manager.EnclaveManager, webSearch *manager.WebSearchUsage) {
 	if response == nil {
 		return
 	}
@@ -465,14 +478,14 @@ func applyUsageMetrics(response *upstreamJSONResponse, usageMetricsRequested boo
 	}
 
 	usage := usageFromRaw(response.body["usage"])
-	formatted := formatUsageMetrics(em, usage, modelName)
+	formatted := formatUsageMetrics(em, usage, modelName, webSearch)
 	if formatted == "" {
 		return
 	}
 	response.header.Set(manager.UsageMetricsResponseHeader, formatted)
 }
 
-func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, modelName string) string {
+func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, modelName string, webSearch *manager.WebSearchUsage) string {
 	var pricing *manager.ModelPricing
 	if value, ok := em.ModelPricing(modelName); ok {
 		pricing = &value
@@ -483,7 +496,7 @@ func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, mod
 		}
 		usage = &tokencount.Usage{}
 	}
-	return manager.FormatUsage(usage, modelName, pricing)
+	return manager.FormatUsage(usage, modelName, pricing, webSearch)
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {

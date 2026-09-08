@@ -817,7 +817,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	})
 
 	if s.usageMetricsRequested {
-		if formatted := formatUsageMetrics(em, usageFromRaw(usage), modelName); formatted != "" {
+		if formatted := formatUsageMetrics(em, usageFromRaw(usage), modelName, webSearchUsage(em, s.toolCalls)); formatted != "" {
 			s.w.Header().Set(manager.UsageMetricsResponseHeader, formatted)
 		}
 	}
