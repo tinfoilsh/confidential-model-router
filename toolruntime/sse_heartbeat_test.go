@@ -45,12 +45,13 @@ func TestHeartbeatWritesCommentAfterIdleInterval(t *testing.T) {
 func TestHeartbeatReschedulesFromLastWrite(t *testing.T) {
 	h, _ := newArmedHeartbeat(t)
 
+	last := time.Now()
 	h.mu.Lock()
-	h.lastWrite = time.Now()
+	h.lastWrite = last
 	h.mu.Unlock()
 
 	elapsed := sseHeartbeatInterval / 3
-	wait, ok := h.beat(h.lastWrite.Add(elapsed))
+	wait, ok := h.beat(last.Add(elapsed))
 	if !ok {
 		t.Fatal("beat() reported failure on a healthy writer")
 	}
@@ -58,7 +59,7 @@ func TestHeartbeatReschedulesFromLastWrite(t *testing.T) {
 		t.Fatalf("beat() wait = %v, want remainder of idle period %v", wait, want)
 	}
 
-	wait, ok = h.beat(h.lastWrite.Add(sseHeartbeatInterval))
+	wait, ok = h.beat(last.Add(sseHeartbeatInterval))
 	if !ok {
 		t.Fatal("beat() reported failure on a healthy writer")
 	}
