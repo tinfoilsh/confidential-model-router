@@ -273,6 +273,13 @@ func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
 	return "", nil
 }
 
+// modelHeaderMatches reports whether the optional X-Tinfoil-Model header,
+// when present, names the same model as the request body.
+func modelHeaderMatches(header http.Header, bodyModel string) bool {
+	expected := strings.TrimSpace(header.Get(manager.ModelRequestHeader))
+	return expected == "" || expected == bodyModel
+}
+
 // extractModelFromMultipart extracts the model name from a multipart form request.
 // Returns the model name (empty if not found) and the buffered body bytes for forwarding.
 func extractModelFromMultipart(r *http.Request) (string, []byte, error) {
@@ -717,6 +724,10 @@ func main() {
 				modelName, ok = modelInterface.(string)
 				if !ok {
 					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					return
+				}
+				if !modelHeaderMatches(r.Header, modelName) {
+					jsonError(w, manager.ErrMsgModelMismatch, manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 					return
 				}
 

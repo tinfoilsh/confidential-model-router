@@ -67,6 +67,33 @@ func TestWriteRequestBodyErrorClassifiesChunkedOversize(t *testing.T) {
 	}
 }
 
+func TestModelHeaderMatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		header    string
+		bodyModel string
+		want      bool
+	}{
+		{"absent header skips check", "", "gpt-oss-120b", true},
+		{"matching header", "gpt-oss-120b", "gpt-oss-120b", true},
+		{"surrounding whitespace tolerated", "  gpt-oss-120b ", "gpt-oss-120b", true},
+		{"mismatched header", "gpt-oss-120b", "qwen3-tts", false},
+		{"header compared against literal auto", "auto", "auto", true},
+		{"case sensitive", "GPT-OSS-120B", "gpt-oss-120b", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			if tt.header != "" {
+				h.Set(manager.ModelRequestHeader, tt.header)
+			}
+			if got := modelHeaderMatches(h, tt.bodyModel); got != tt.want {
+				t.Errorf("modelHeaderMatches(%q, %q) = %v, want %v", tt.header, tt.bodyModel, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractModelFromMultipart(t *testing.T) {
 	tests := []struct {
 		name          string

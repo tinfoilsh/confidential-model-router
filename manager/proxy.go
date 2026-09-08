@@ -36,6 +36,9 @@ const (
 	UsageMetricsRequestHeader = "X-Tinfoil-Request-Usage-Metrics"
 	// UsageMetricsResponseHeader is the response header (or trailer) containing usage metrics
 	UsageMetricsResponseHeader = "X-Tinfoil-Usage-Metrics"
+	// ModelRequestHeader optionally names the model the client intends to
+	// call; when set it must match the model field in the request body.
+	ModelRequestHeader = "X-Tinfoil-Model"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
@@ -124,6 +127,7 @@ const (
 	ErrMsgOverloaded    = "The engine is currently overloaded, please try again later."
 	ErrMsgModelNotFound = "The model does not exist."
 	ErrMsgBodyTooLarge  = "Request body is too large."
+	ErrMsgModelMismatch = "The model in the request body does not match the " + ModelRequestHeader + " header."
 )
 
 // billingCloser wraps a response body and emits a zero-token billing event
