@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Usage represents token usage information from inference responses.
@@ -181,10 +183,27 @@ func NewStreamingTokenExtractor(reader io.ReadCloser, writer io.WriteCloser, mod
 	return s
 }
 
-// processStream processes the SSE stream, extracting token usage
+// processStream processes the SSE stream, extracting token usage.
+//
+// An upstream read failure (connection reset, TLS close, oversized line)
+// must not end the client's response as a clean EOF: the reverse proxy
+// would then terminate a 200 body mid-stream with no error frame, which
+// clients cannot distinguish from a short but complete answer. The
+// failure is propagated through the pipe so the proxy aborts the
+// connection and the client observes a real error.
 func (s *StreamingTokenExtractor) processStream() {
-	defer s.writer.Close()
 	defer s.reader.Close()
+	defer func() {
+		if err := s.scanner.Err(); err != nil {
+			if cw, ok := s.writer.(interface{ CloseWithError(error) error }); ok {
+				log.WithError(err).WithField("model", s.model).
+					Warn("upstream stream read failed; aborting client stream")
+				cw.CloseWithError(err)
+				return
+			}
+		}
+		s.writer.Close()
+	}()
 
 	lastLineWasFiltered := false
 	terminalEventPending := false

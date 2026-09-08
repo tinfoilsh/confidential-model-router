@@ -1,7 +1,9 @@
 package tokencount
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -549,6 +551,55 @@ func TestLargeSSELineSurvivesScannerBuffer(t *testing.T) {
 	}
 	if string(output) != input {
 		t.Fatalf("large SSE line was truncated: got %d bytes, want %d", len(output), len(input))
+	}
+}
+
+// failingReader yields its prefix and then fails with err, standing in for
+// an upstream connection that drops mid-stream before [DONE].
+type failingReader struct {
+	prefix io.Reader
+	err    error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	n, err := r.prefix.Read(p)
+	if err == io.EOF {
+		return n, r.err
+	}
+	return n, err
+}
+
+func (r *failingReader) Close() error { return nil }
+
+func TestUpstreamReadErrorAbortsClientStream(t *testing.T) {
+	prefix := "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
+	upstreamErr := errors.New("connection reset by peer")
+	pr, pw := io.Pipe()
+	extractor := NewStreamingTokenExtractor(
+		&failingReader{prefix: strings.NewReader(prefix), err: upstreamErr},
+		pw,
+		"test-model",
+	)
+
+	go extractor.processStream()
+	output, err := io.ReadAll(pr)
+	if !errors.Is(err, upstreamErr) {
+		t.Fatalf("ReadAll() error = %v, want upstream error to propagate", err)
+	}
+	if string(output) != prefix {
+		t.Fatalf("bytes received before the failure were altered:\n%q\nwant:\n%q", output, prefix)
+	}
+}
+
+func TestOversizedSSELineAbortsClientStream(t *testing.T) {
+	input := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("a", maxSSELineBytes+1) + "\"}}]}\n\n"
+	pr, pw := io.Pipe()
+	extractor := NewStreamingTokenExtractor(io.NopCloser(strings.NewReader(input)), pw, "test-model")
+
+	go extractor.processStream()
+	_, err := io.ReadAll(pr)
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("ReadAll() error = %v, want bufio.ErrTooLong", err)
 	}
 }
 
