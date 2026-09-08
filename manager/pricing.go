@@ -14,6 +14,31 @@ const (
 	nanodollarDecimalPlaces = 9
 )
 
+// WebSearchUsage describes the router-owned web search activity behind a
+// request. The websearch service bills one session fee per request the first
+// time the model invokes search or fetch, so the fee applies once when Calls
+// is positive regardless of how many calls followed. SessionPricing is the
+// websearch tool's published pricing; nil means the fee is unknown.
+type WebSearchUsage struct {
+	Calls          int
+	SessionPricing *ModelPricing
+}
+
+func (w *WebSearchUsage) billed() bool {
+	return w != nil && w.Calls > 0
+}
+
+func (w *WebSearchUsage) costKnown() bool {
+	return !w.billed() || w.SessionPricing != nil
+}
+
+func (w *WebSearchUsage) costNanos() int64 {
+	if !w.billed() {
+		return 0
+	}
+	return requestPriceNanos(w.SessionPricing.RequestPrice)
+}
+
 // CostKnownWithoutUsage reports whether request price alone determines cost.
 func (p ModelPricing) CostKnownWithoutUsage() bool {
 	if tokenPriceNanos(p.InputTokenPricePer1M) != 0 || tokenPriceNanos(p.OutputTokenPricePer1M) != 0 {
@@ -47,7 +72,10 @@ func requestCostNanos(usage *tokencount.Usage, pricing ModelPricing) int64 {
 }
 
 func formatRequestCostUSD(usage *tokencount.Usage, pricing ModelPricing) string {
-	costNanos := requestCostNanos(usage, pricing)
+	return formatNanosUSD(requestCostNanos(usage, pricing))
+}
+
+func formatNanosUSD(costNanos int64) string {
 	wholeDollars := costNanos / nanosPerDollar
 	fractionalNanos := costNanos % nanosPerDollar
 	if fractionalNanos == 0 {

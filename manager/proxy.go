@@ -337,7 +337,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		var handlerCalled atomic.Bool
 		if !streaming && usageMetricsRequested && resp.StatusCode == http.StatusOK &&
 			responsePricing != nil && responsePricing.CostKnownWithoutUsage() {
-			resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(&tokencount.Usage{}, modelName, responsePricing))
+			resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(&tokencount.Usage{}, modelName, responsePricing, nil))
 		}
 
 		// Create a usage handler that will be called when usage is extracted
@@ -425,7 +425,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				usageHandler(jsonResp.Usage)
 
 				// Set usage header directly on response
-				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName, responsePricing))
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(jsonResp.Usage, modelName, responsePricing, nil))
 			} else if billingCollector != nil && apiKey != "" {
 				emitZeroTokenEvent()
 			}
@@ -474,7 +474,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 // FormatUsage formats token usage for the response header. It is the single
 // source of truth for the header format so every path that emits usage
 // metrics produces an identical value.
-func FormatUsage(usage *tokencount.Usage, model string, pricing *ModelPricing) string {
+//
+// webSearch is nil for requests that never entered the tool runtime. When the
+// model invoked web search, web_search_calls is emitted and the session fee
+// is folded into cost_usd. cost_usd is omitted whenever any component of the
+// total is unknown so a partial figure is never mistaken for the full cost.
+func FormatUsage(usage *tokencount.Usage, model string, pricing *ModelPricing, webSearch *WebSearchUsage) string {
 	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
 		",total=" + strconv.Itoa(usage.TotalTokens)
@@ -488,8 +493,11 @@ func FormatUsage(usage *tokencount.Usage, model string, pricing *ModelPricing) s
 	if model != "" {
 		formatted += ",model=" + model
 	}
-	if pricing != nil {
-		formatted += ",cost_usd=" + formatRequestCostUSD(usage, *pricing)
+	if webSearch.billed() {
+		formatted += ",web_search_calls=" + strconv.Itoa(webSearch.Calls)
+	}
+	if pricing != nil && webSearch.costKnown() {
+		formatted += ",cost_usd=" + formatNanosUSD(requestCostNanos(usage, *pricing)+webSearch.costNanos())
 	}
 
 	return formatted
