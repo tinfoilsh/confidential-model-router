@@ -156,6 +156,7 @@ type EnclaveManager struct {
 	models                    *sync.Map // model name -> *Model
 	multimodalModels          sync.Map  // sticky set of multimodal chat model names
 	modelPricing              atomic.Pointer[map[string]ModelPricing]
+	modelIntelligence         atomic.Pointer[map[string]ModelIntelligence]
 	initConfigURL             string
 	updateConfigURL           string
 	controlPlaneURL           string
