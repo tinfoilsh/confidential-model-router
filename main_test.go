@@ -850,38 +850,55 @@ func TestResolveAutoModel_EmptyCatalog(t *testing.T) {
 // be what reaches the tokenizer, not the client's.
 func TestHandleInputTokens_AutoUsesRouterEffort(t *testing.T) {
 	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
-	var dispatchedModel string
-	var dispatchedBody map[string]any
-	dispatch := func(_ context.Context, model, _ string, body []byte, _ http.Header) (*http.Response, error) {
-		dispatchedModel = model
-		if err := json.Unmarshal(body, &dispatchedBody); err != nil {
-			t.Fatal(err)
+	countTokens := func(t *testing.T, level string) (string, map[string]any) {
+		t.Helper()
+		var dispatchedModel string
+		var dispatchedBody map[string]any
+		dispatch := func(_ context.Context, model, _ string, body []byte, _ http.Header) (*http.Response, error) {
+			dispatchedModel = model
+			if err := json.Unmarshal(body, &dispatchedBody); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"count":5}`)),
+			}, nil
 		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"count":5}`)),
-		}, nil
+		req := httptest.NewRequest(http.MethodPost, responsesInputTokensPath, strings.NewReader(`{
+			"model":"auto",
+			"reasoning":{"effort":"high"},
+			"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+		}`))
+		req.Header.Set(autoroute.IntelligenceHeader, level)
+		rec := httptest.NewRecorder()
+		handleInputTokens(rec, req, "secret-key", "", func(body map[string]any) (string, error) {
+			return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body)
+		}, dispatch)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return dispatchedModel, dispatchedBody
 	}
 
-	req := httptest.NewRequest(http.MethodPost, responsesInputTokensPath, strings.NewReader(`{
-		"model":"auto",
-		"reasoning":{"effort":"high"},
-		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
-	}`))
-	req.Header.Set(autoroute.IntelligenceHeader, "0")
-	rec := httptest.NewRecorder()
-	handleInputTokens(rec, req, "secret-key", "", func(body map[string]any) (string, error) {
-		return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body)
-	}, dispatch)
+	// Level 50 lands on fast-vision/low; its native "low" must reach the
+	// tokenizer instead of the client's "high".
+	model, body := countTokens(t, "50")
+	if model != "fast-vision" || body["model"] != "fast-vision" {
+		t.Fatalf("expected tokenization against fast-vision, got %q / %v", model, body["model"])
+	}
+	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "low" {
+		t.Fatalf("router effort must reach the tokenizer, got %v", body["chat_template_kwargs"])
+	}
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	// Level 0 lands on tiny-text, which has no reasoning; the client's effort
+	// must not be re-derived into kwargs for it either.
+	model, body = countTokens(t, "0")
+	if model != "tiny-text" {
+		t.Fatalf("expected tokenization against tiny-text, got %q", model)
 	}
-	if dispatchedModel != "tiny-text" || dispatchedBody["model"] != "tiny-text" {
-		t.Fatalf("expected tokenization against tiny-text, got %q / %v", dispatchedModel, dispatchedBody["model"])
-	}
-	if kwargs, ok := dispatchedBody["chat_template_kwargs"]; ok {
+	if kwargs, ok := body["chat_template_kwargs"]; ok {
 		t.Fatalf("client reasoning.effort must not reach the tokenizer for a model without reasoning, got %v", kwargs)
 	}
 }
