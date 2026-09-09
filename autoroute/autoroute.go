@@ -44,6 +44,17 @@ const (
 	// model whose reasoning is always enabled and has no effort knob.
 	effortOff = "off"
 	effortOn  = "on"
+
+	// effortHigh is the strongest client-facing effort key.
+	effortHigh = "high"
+
+	// clientEffortField is the OpenAI chat completions effort parameter and
+	// clientReasoningField/clientEffortKey its Responses API equivalent
+	// (reasoning.effort). Both are stripped so the router's choice governs
+	// every downstream reading of the request, not only the model call.
+	clientEffortField    = "reasoning_effort"
+	clientReasoningField = "reasoning"
+	clientEffortKey      = "effort"
 )
 
 // visualPartTypes are the content part types that carry images or files a
@@ -89,19 +100,6 @@ type Candidate struct {
 	// Level is Score normalized to the MinIntelligence..MaxIntelligence range
 	// against the highest score in the catalog.
 	Level int
-}
-
-// Decision records why a request landed on a given candidate.
-type Decision struct {
-	Candidate Candidate
-	// Target is the requested intelligence level after defaulting.
-	Target int
-	// Visual reports whether the request carried image or file parts, which
-	// restricts routing to multimodal models.
-	Visual bool
-	// Skipped counts higher-ranked candidates passed over because their model
-	// had no healthy backend.
-	Skipped int
 }
 
 // ParseIntelligence extracts the requested intelligence level. The body's
@@ -229,9 +227,18 @@ func Rank(catalog []Model, target int, requireMultimodal bool) []Candidate {
 // ApplyEffort rewrites body so the selected candidate's reasoning setting is
 // in effect for the given endpoint path. The router-chosen setting wins over
 // any reasoning fields the client sent, so a caller asking for "auto" cannot
-// accidentally pin an expensive effort. Models without reasoning params, or
-// endpoints they do not describe, leave the body untouched.
+// accidentally pin an expensive effort: the client's generic effort fields
+// are always removed, and the model's own fragment is merged in when it
+// describes the endpoint.
 func ApplyEffort(body map[string]any, path string, candidate Candidate) {
+	delete(body, clientEffortField)
+	if clientReasoning, ok := body[clientReasoningField].(map[string]any); ok {
+		delete(clientReasoning, clientEffortKey)
+		if len(clientReasoning) == 0 {
+			delete(body, clientReasoningField)
+		}
+	}
+
 	reasoning := candidate.Model.Reasoning
 	if reasoning == nil {
 		return
@@ -246,18 +253,25 @@ func ApplyEffort(body map[string]any, path string, candidate Candidate) {
 	case effortOff:
 		fragment = endpoint.Disable
 	case effortOn:
-		fragment = endpoint.Enable
+		// Always-on models have no effort knob, but their enable fragment
+		// may still carry a placeholder; fill it with the strongest effort.
+		fragment = substituteEffort(endpoint.Enable, nativeEffort(reasoning, effortHigh)).(map[string]any)
 	default:
-		native := candidate.Effort
-		if mapped, ok := reasoning.EffortMap[candidate.Effort]; ok {
-			native = mapped
-		}
-		fragment = substituteEffort(endpoint.Enable, native).(map[string]any)
+		fragment = substituteEffort(endpoint.Enable, nativeEffort(reasoning, candidate.Effort)).(map[string]any)
 	}
 	if fragment == nil {
 		return
 	}
 	mergeInto(body, fragment)
+}
+
+// nativeEffort translates a client-facing effort key to the model's native
+// value, or returns the key unchanged when the model has no mapping for it.
+func nativeEffort(reasoning *Reasoning, effort string) string {
+	if mapped, ok := reasoning.EffortMap[effort]; ok {
+		return mapped
+	}
+	return effort
 }
 
 // substituteEffort returns a deep copy of value with every effortPlaceholder

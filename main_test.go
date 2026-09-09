@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -841,6 +842,47 @@ func TestResolveAutoModel_EmptyCatalog(t *testing.T) {
 	catalog := fakeCatalog{}
 	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", map[string]any{"model": "auto"}); err == nil {
 		t.Fatal("expected error when no model publishes intelligence scores")
+	}
+}
+
+// The Responses input-token route derives chat_template_kwargs from the
+// client's reasoning.effort; for model "auto" the router's chosen effort must
+// be what reaches the tokenizer, not the client's.
+func TestHandleInputTokens_AutoUsesRouterEffort(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	var dispatchedModel string
+	var dispatchedBody map[string]any
+	dispatch := func(_ context.Context, model, _ string, body []byte, _ http.Header) (*http.Response, error) {
+		dispatchedModel = model
+		if err := json.Unmarshal(body, &dispatchedBody); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"count":5}`)),
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, responsesInputTokensPath, strings.NewReader(`{
+		"model":"auto",
+		"reasoning":{"effort":"high"},
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`))
+	req.Header.Set(autoroute.IntelligenceHeader, "0")
+	rec := httptest.NewRecorder()
+	handleInputTokens(rec, req, "secret-key", "", func(body map[string]any) (string, error) {
+		return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body)
+	}, dispatch)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if dispatchedModel != "tiny-text" || dispatchedBody["model"] != "tiny-text" {
+		t.Fatalf("expected tokenization against tiny-text, got %q / %v", dispatchedModel, dispatchedBody["model"])
+	}
+	if kwargs, ok := dispatchedBody["chat_template_kwargs"]; ok {
+		t.Fatalf("client reasoning.effort must not reach the tokenizer for a model without reasoning, got %v", kwargs)
 	}
 }
 

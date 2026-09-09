@@ -263,6 +263,44 @@ func TestApplyEffortTopLevelField(t *testing.T) {
 	}
 }
 
+func TestApplyEffortStripsClientEffortFields(t *testing.T) {
+	// A model that takes effort through chat_template_kwargs must not leave
+	// the client's generic reasoning_effort / reasoning.effort behind, since
+	// downstream readers (input-token counting) would otherwise apply them.
+	body := map[string]any{
+		"reasoning_effort": "high",
+		"reasoning":        map[string]any{"effort": "high", "summary": "auto"},
+	}
+	ApplyEffort(body, "/v1/responses", Candidate{Model: Model{Reasoning: effortReasoning()}, Effort: "low"})
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Fatal("client reasoning_effort must be removed")
+	}
+	if !reflect.DeepEqual(body["reasoning"], map[string]any{"summary": "auto"}) {
+		t.Fatalf("reasoning.effort must be removed while keeping siblings, got %v", body["reasoning"])
+	}
+
+	body = map[string]any{"reasoning": map[string]any{"effort": "high"}}
+	ApplyEffort(body, "/v1/responses", Candidate{Model: Model{Reasoning: effortReasoning()}, Effort: "low"})
+	if _, ok := body["reasoning"]; ok {
+		t.Fatalf("reasoning object left empty must be removed, got %v", body["reasoning"])
+	}
+}
+
+func TestApplyEffortOnSubstitutesPlaceholder(t *testing.T) {
+	reasoning := &Reasoning{
+		EffortMap: map[string]string{"high": "max"},
+		Params: map[string]EndpointParams{
+			"/v1/chat/completions": {Enable: map[string]any{"chat_template_kwargs": map[string]any{"reasoning_effort": effortPlaceholder}}},
+		},
+	}
+	body := map[string]any{}
+	ApplyEffort(body, "/v1/chat/completions", Candidate{Model: Model{Reasoning: reasoning}, Effort: effortOn})
+	kwargs := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "max" {
+		t.Fatalf("always-on model must not leak the placeholder, got %v", kwargs["reasoning_effort"])
+	}
+}
+
 func TestApplyEffortOffUsesDisableFragment(t *testing.T) {
 	reasoning := &Reasoning{Params: map[string]EndpointParams{
 		"/v1/chat/completions": {
@@ -285,15 +323,19 @@ func TestApplyEffortOffUsesDisableFragment(t *testing.T) {
 	}
 }
 
-func TestApplyEffortNoopWithoutParams(t *testing.T) {
-	body := map[string]any{"reasoning_effort": "high"}
+func TestApplyEffortWithoutParamsOnlyStripsClientEffort(t *testing.T) {
+	body := map[string]any{"reasoning_effort": "high", "messages": []any{}}
 	ApplyEffort(body, "/v1/chat/completions", Candidate{Model: Model{Name: "no-reasoning"}, Effort: effortOff})
-	if body["reasoning_effort"] != "high" {
-		t.Fatal("model without reasoning params must not touch the body")
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Fatal("client effort must be stripped even when the model has no reasoning params")
+	}
+	if _, ok := body["messages"]; !ok || len(body) != 1 {
+		t.Fatalf("nothing else may change for a model without reasoning params: %v", body)
 	}
 
+	body = map[string]any{"messages": []any{}}
 	ApplyEffort(body, "/v1/embeddings", Candidate{Model: Model{Reasoning: effortReasoning()}, Effort: "low"})
 	if len(body) != 1 {
-		t.Fatalf("unknown endpoint must not touch the body: %v", body)
+		t.Fatalf("unknown endpoint must not add fragments: %v", body)
 	}
 }
