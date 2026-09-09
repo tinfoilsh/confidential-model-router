@@ -148,6 +148,24 @@ var (
 		[]string{"model"},
 	)
 
+	// AutoRouteDecisionsTotal tracks which model and effort model "auto" resolved to
+	AutoRouteDecisionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_auto_route_decisions_total",
+			Help: "Total number of auto-routed requests by resolved model and reasoning effort",
+		},
+		[]string{"model", "effort"},
+	)
+
+	// AutoRouteFallbacksTotal tracks auto-routed requests that skipped a better-fitting model because it had no healthy enclave
+	AutoRouteFallbacksTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_auto_route_fallbacks_total",
+			Help: "Total number of auto-routed requests served by a lower-ranked model because the best fit was unhealthy",
+		},
+		[]string{"model"},
+	)
+
 	// PriorityAssignmentsTotal tracks requests assigned configured vLLM priority
 	PriorityAssignmentsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

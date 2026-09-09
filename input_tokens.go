@@ -42,6 +42,21 @@ func isInputTokensPath(path string) bool {
 	return path == chatInputTokensPath || path == responsesInputTokensPath
 }
 
+// inputTokensCompletionPath maps an input-token counting route to the
+// completion endpoint whose request shape it counts, so model-specific
+// request parameters (such as reasoning effort) are resolved the same way
+// they would be for the completion itself.
+func inputTokensCompletionPath(path string) string {
+	switch path {
+	case chatInputTokensPath:
+		return "/v1/chat/completions"
+	case responsesInputTokensPath:
+		return "/v1/responses"
+	default:
+		return path
+	}
+}
+
 func handleInputTokens(
 	w http.ResponseWriter,
 	r *http.Request,
