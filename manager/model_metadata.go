@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+
+	"github.com/tinfoilsh/confidential-model-router/autoroute"
 )
 
 const (
@@ -27,37 +30,21 @@ type ModelPricing struct {
 	RequestPrice               float64  `json:"requestPrice"`
 }
 
-// ReasoningEndpointParams holds the request fragments that switch a model's
-// reasoning on or off for one API endpoint. Enable may contain the literal
-// "$EFFORT" placeholder that the caller substitutes with the native effort.
-type ReasoningEndpointParams struct {
-	Enable  map[string]any `json:"enable"`
-	Disable map[string]any `json:"disable"`
-}
-
-// ReasoningParams describes how to apply a reasoning setting to a request for
-// one model, keyed by endpoint path. EffortMap translates the client-facing
-// effort key (low, medium, high) to the model's native effort value.
-type ReasoningParams struct {
-	Params    map[string]ReasoningEndpointParams `json:"params"`
-	EffortMap map[string]string                  `json:"effort_map"`
-}
-
 // ModelIntelligence describes how capable a chat model is under each
 // reasoning setting a client can select (off, on, low, medium, high), and how
 // to apply that setting to a request.
 type ModelIntelligence struct {
 	Scores    map[string]int
-	Reasoning *ReasoningParams
+	Reasoning *autoroute.Reasoning
 }
 
 type openAIModelEntry struct {
-	ID              string           `json:"id"`
-	Multimodal      bool             `json:"multimodal"`
-	Type            string           `json:"type"`
-	Pricing         *ModelPricing    `json:"pricing"`
-	Intelligence    map[string]int   `json:"intelligence"`
-	ReasoningParams *ReasoningParams `json:"reasoning_params"`
+	ID              string               `json:"id"`
+	Multimodal      bool                 `json:"multimodal"`
+	Type            string               `json:"type"`
+	Pricing         *ModelPricing        `json:"pricing"`
+	Intelligence    map[string]int       `json:"intelligence"`
+	ReasoningParams *autoroute.Reasoning `json:"reasoning_params"`
 }
 
 type openAIModelsList struct {
@@ -98,14 +85,32 @@ func (em *EnclaveManager) ModelIntelligence(modelName string) (ModelIntelligence
 	return value, ok
 }
 
-// IntelligenceCatalog returns every model with published intelligence scores.
-// The map is a snapshot and must not be mutated.
-func (em *EnclaveManager) IntelligenceCatalog() map[string]ModelIntelligence {
+// AutoRouteCatalog returns every chat model with published intelligence
+// scores in the shape the auto router ranks over, sorted by name so callers
+// see a stable order.
+func (em *EnclaveManager) AutoRouteCatalog() []autoroute.Model {
 	intelligence := em.modelIntelligence.Load()
 	if intelligence == nil {
 		return nil
 	}
-	return *intelligence
+	catalog := make([]autoroute.Model, 0, len(*intelligence))
+	for name, entry := range *intelligence {
+		catalog = append(catalog, autoroute.Model{
+			Name:       name,
+			Multimodal: em.IsMultimodal(name),
+			Scores:     entry.Scores,
+			Reasoning:  entry.Reasoning,
+		})
+	}
+	sort.Slice(catalog, func(i, j int) bool { return catalog[i].Name < catalog[j].Name })
+	return catalog
+}
+
+// HasHealthyEnclave reports whether the named model is known and has at least
+// one enclave whose circuit breaker is closed.
+func (em *EnclaveManager) HasHealthyEnclave(modelName string) bool {
+	model, found := em.GetModel(modelName)
+	return found && model.HasHealthyEnclave()
 }
 
 // validIntelligence reports whether every published score is inside the

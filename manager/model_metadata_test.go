@@ -42,10 +42,13 @@ func TestModelIntelligenceJSONAndLookup(t *testing.T) {
 	}
 
 	em := &EnclaveManager{}
-	catalog := map[string]ModelIntelligence{
+	intelligence := map[string]ModelIntelligence{
 		"scored-model": {Scores: entry.Intelligence, Reasoning: entry.ReasoningParams},
+		"vision-model": {Scores: map[string]int{"on": 20}},
 	}
-	em.modelIntelligence.Store(&catalog)
+	em.modelIntelligence.Store(&intelligence)
+	em.multimodalModels.Store("vision-model", struct{}{})
+
 	got, ok := em.ModelIntelligence("scored-model")
 	if !ok || got.Scores["low"] != 30 {
 		t.Fatalf("ModelIntelligence lookup = %+v, %v", got, ok)
@@ -53,8 +56,37 @@ func TestModelIntelligenceJSONAndLookup(t *testing.T) {
 	if _, ok := em.ModelIntelligence("missing-model"); ok {
 		t.Fatal("did not expect intelligence for missing model")
 	}
-	if len(em.IntelligenceCatalog()) != 1 {
-		t.Fatalf("catalog size = %d, want 1", len(em.IntelligenceCatalog()))
+
+	catalog := em.AutoRouteCatalog()
+	if len(catalog) != 2 {
+		t.Fatalf("catalog size = %d, want 2", len(catalog))
+	}
+	if catalog[0].Name != "scored-model" || catalog[1].Name != "vision-model" {
+		t.Fatalf("catalog not sorted by name: %q, %q", catalog[0].Name, catalog[1].Name)
+	}
+	if catalog[0].Multimodal || !catalog[1].Multimodal {
+		t.Fatalf("multimodal flags not joined onto catalog: %v, %v", catalog[0].Multimodal, catalog[1].Multimodal)
+	}
+	if catalog[0].Reasoning == nil || catalog[0].Reasoning.EffortMap["high"] != "max" {
+		t.Fatalf("reasoning params not carried into catalog: %+v", catalog[0].Reasoning)
+	}
+}
+
+func TestManagerHasHealthyEnclave(t *testing.T) {
+	down := newTestModel("a")
+	tripBreaker(down.Enclaves["a"])
+	em := newTestManager(map[string]*Model{
+		"down-model": down,
+		"up-model":   newTestModel("b"),
+	})
+	if em.HasHealthyEnclave("down-model") {
+		t.Fatal("tripped model reported healthy")
+	}
+	if !em.HasHealthyEnclave("up-model") {
+		t.Fatal("healthy model reported unhealthy")
+	}
+	if em.HasHealthyEnclave("unknown-model") {
+		t.Fatal("unknown model reported healthy")
 	}
 }
 
