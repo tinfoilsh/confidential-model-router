@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
@@ -352,77 +353,61 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 	}
 }
 
-// autoModelParamReservedKeys lists body fields that a per-candidate param block
-// must never overwrite when merged, so client-supplied auto params cannot
-// clobber the routing model, conversation, streaming, or tool/option blobs.
-var autoModelParamReservedKeys = map[string]bool{
-	"model":                  true,
-	"messages":               true,
-	"input":                  true,
-	"stream":                 true,
-	"stream_options":         true,
-	"tools":                  true,
-	"tool_choice":            true,
-	"web_search_options":     true,
-	"code_execution_options": true,
-	"pii_check_options":      true,
+// autoRouteCatalog supplies the models the auto router may choose between and
+// their current health. Implemented by *manager.EnclaveManager.
+type autoRouteCatalog interface {
+	AutoRouteCatalog() []autoroute.Model
+	HasHealthyEnclave(modelName string) bool
 }
 
-// preferredModelResolver resolves an ordered candidate list to a concrete
-// model name, preferring healthy backends. Implemented by
-// *manager.EnclaveManager.
-type preferredModelResolver interface {
-	ResolvePreferredModel(candidates []string) string
-}
-
-// resolveAutoModel consumes the router-only auto_model_options blob, picks the
-// first candidate whose model currently has a healthy enclave, shallow-merges
-// that candidate's params into body (excluding reserved keys), rewrites
-// body["model"], and strips the blob. It returns the resolved model name.
-func resolveAutoModel(resolver preferredModelResolver, body map[string]any) (string, error) {
-	raw, ok := body["auto_model_options"].([]any)
-	delete(body, "auto_model_options")
-	if !ok || len(raw) == 0 {
-		return "", fmt.Errorf("Missing auto model choices: 'auto_model_options' is required when model is 'auto'.")
+// resolveAutoModel replaces model "auto" with a concrete model and reasoning
+// effort. The caller's requested intelligence level (body auto_model_options,
+// then the X-Tinfoil-Intelligence header, then the default) is matched against
+// the per-effort scores the control plane publishes; candidates are walked in
+// order of fit until one has a healthy enclave, so an outage on the best match
+// degrades to the next-best rather than failing. Requests carrying images or
+// files only consider multimodal models. The chosen effort is written into
+// body using the model's own reasoning parameters, overriding any effort the
+// client sent, and body["model"] is rewritten. When nothing is healthy the
+// best-fit candidate is still returned so normal serving surfaces the error.
+func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any) (string, error) {
+	target, err := autoroute.ParseIntelligence(header, body)
+	if err != nil {
+		return "", err
 	}
 
-	names := make([]string, 0, len(raw))
-	paramsByModel := make(map[string]map[string]any, len(raw))
-	for _, entry := range raw {
-		opt, ok := entry.(map[string]any)
-		if !ok {
-			continue
+	visual := autoroute.HasVisualInput(body)
+	ranked := autoroute.Rank(catalog.AutoRouteCatalog(), target, visual)
+	if len(ranked) == 0 {
+		if visual {
+			return "", fmt.Errorf("Model 'auto' has no multimodal model available for image or file input.")
 		}
-		name, ok := opt["model"].(string)
-		if !ok || name == "" {
-			continue
-		}
-		names = append(names, name)
-		if _, seen := paramsByModel[name]; seen {
-			continue
-		}
-		if params, ok := opt["params"].(map[string]any); ok {
-			paramsByModel[name] = params
+		return "", fmt.Errorf("Model 'auto' is not available: no models publish intelligence scores.")
+	}
+
+	chosen, healthy := ranked[0], false
+	for i, candidate := range ranked {
+		if catalog.HasHealthyEnclave(candidate.Model.Name) {
+			chosen, healthy = candidate, true
+			if i > 0 {
+				manager.AutoRouteFallbacksTotal.WithLabelValues(chosen.Model.Name).Inc()
+			}
+			break
 		}
 	}
 
-	if len(names) == 0 {
-		return "", fmt.Errorf("Missing auto model choices: 'auto_model_options' has no valid model entries.")
-	}
-
-	resolved := resolver.ResolvePreferredModel(names)
-	if resolved == "" {
-		return "", fmt.Errorf("Missing auto model choices: no valid model could be resolved.")
-	}
-
-	for key, value := range paramsByModel[resolved] {
-		if autoModelParamReservedKeys[key] {
-			continue
-		}
-		body[key] = value
-	}
-	body["model"] = resolved
-	return resolved, nil
+	autoroute.ApplyEffort(body, path, chosen)
+	body["model"] = chosen.Model.Name
+	manager.AutoRouteDecisionsTotal.WithLabelValues(chosen.Model.Name, chosen.Effort).Inc()
+	log.WithFields(log.Fields{
+		"target":  target,
+		"visual":  visual,
+		"model":   chosen.Model.Name,
+		"effort":  chosen.Effort,
+		"level":   chosen.Level,
+		"healthy": healthy,
+	}).Debug("resolved auto model")
+	return chosen.Model.Name, nil
 }
 
 func main() {
@@ -537,7 +522,7 @@ func main() {
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
 			handleInputTokens(w, r, apiKey, modelName, func(body map[string]any) (string, error) {
-				return resolveAutoModel(em, body)
+				return resolveAutoModel(em, r.Header, inputTokensCompletionPath(r.URL.Path), body)
 			}, dispatch)
 			return
 		}
@@ -731,15 +716,15 @@ func main() {
 					return
 				}
 
-				// "auto" is a router-side sentinel: the candidate models and
-				// their per-model param blocks travel in the router-only
-				// auto_model_options blob. Resolve it to a concrete, healthy
-				// model and merge that model's params before any downstream
-				// logic (tool detection, rate limiting, serving) runs.
+				// "auto" is a router-side sentinel: the caller states an
+				// intelligence level and the router picks a concrete,
+				// healthy model and reasoning effort for it before any
+				// downstream logic (tool detection, rate limiting, serving)
+				// runs.
 				if modelName == "auto" {
-					resolved, mergeErr := resolveAutoModel(em, body)
-					if mergeErr != nil {
-						jsonError(w, mergeErr.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					resolved, resolveErr := resolveAutoModel(em, r.Header, r.URL.Path, body)
+					if resolveErr != nil {
+						jsonError(w, resolveErr.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
 						return
 					}
 					modelName = resolved

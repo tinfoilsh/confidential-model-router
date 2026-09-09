@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -596,112 +597,250 @@ func TestDetectToolProfiles(t *testing.T) {
 	}
 }
 
-// fakeResolver picks the first candidate present in healthy, else "".
-type fakeResolver struct {
+// fakeCatalog is an autoRouteCatalog backed by fixed models and health.
+type fakeCatalog struct {
+	models  []autoroute.Model
 	healthy map[string]bool
 }
 
-func (f fakeResolver) ResolvePreferredModel(candidates []string) string {
-	var first string
-	for _, c := range candidates {
-		if c == "" {
-			continue
-		}
-		if first == "" {
-			first = c
-		}
-		if f.healthy[c] {
-			return c
-		}
+func (f fakeCatalog) AutoRouteCatalog() []autoroute.Model { return f.models }
+func (f fakeCatalog) HasHealthyEnclave(name string) bool  { return f.healthy[name] }
+
+func autoTestReasoning() *autoroute.Reasoning {
+	return &autoroute.Reasoning{
+		EffortMap: map[string]string{"low": "low", "medium": "high", "high": "max"},
+		Params: map[string]autoroute.EndpointParams{
+			"/v1/chat/completions": {
+				Enable: map[string]any{"chat_template_kwargs": map[string]any{"reasoning_effort": "$EFFORT"}},
+			},
+			"/v1/responses": {
+				Enable: map[string]any{"chat_template_kwargs": map[string]any{"reasoning_effort": "$EFFORT"}},
+			},
+		},
 	}
-	return first
 }
 
-func TestResolveAutoModel(t *testing.T) {
-	resolver := fakeResolver{healthy: map[string]bool{"kimi-k2-6": true}}
+// autoTestCatalog mirrors the shape of the production catalog: a strong
+// text-only model, a strong always-on multimodal model, a mid multimodal model
+// with efforts, and a tiny text-only model with no reasoning.
+func autoTestCatalog() []autoroute.Model {
+	return []autoroute.Model{
+		{Name: "smart-text", Scores: map[string]int{"low": 39, "medium": 42, "high": 45}, Reasoning: autoTestReasoning()},
+		{Name: "smart-vision", Multimodal: true, Scores: map[string]int{"on": 44}},
+		{Name: "fast-vision", Multimodal: true, Scores: map[string]int{"low": 36, "medium": 39, "high": 42}, Reasoning: autoTestReasoning()},
+		{Name: "tiny-text", Scores: map[string]int{"off": 8}},
+	}
+}
 
+func allHealthy(models []autoroute.Model) map[string]bool {
+	healthy := make(map[string]bool, len(models))
+	for _, m := range models {
+		healthy[m.Name] = true
+	}
+	return healthy
+}
+
+func TestResolveAutoModel_HeaderPicksModelAndEffort(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
 	body := map[string]any{
 		"model":    "auto",
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 		"stream":   true,
-		"auto_model_options": []any{
-			map[string]any{
-				"model":  "glm-5-2",
-				"params": map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": true}},
-			},
-			map[string]any{
-				"model": "kimi-k2-6",
-				"params": map[string]any{
-					"reasoning_effort": "high",
-					// Reserved keys must never be overwritten by a candidate.
-					"model":    "evil",
-					"messages": "evil",
-				},
-			},
-		},
 	}
 
-	resolved, err := resolveAutoModel(resolver, body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "kimi-k2-6" {
-		t.Fatalf("resolved = %q, want kimi-k2-6", resolved)
+	if resolved != "smart-text" || body["model"] != "smart-text" {
+		t.Fatalf("resolved = %q, body[model] = %v, want smart-text", resolved, body["model"])
 	}
-	if body["model"] != "kimi-k2-6" {
-		t.Fatalf("body[model] = %v, want kimi-k2-6", body["model"])
+	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "max" {
+		t.Fatalf("expected native effort max for level 100, got %v", kwargs)
 	}
-	if body["reasoning_effort"] != "high" {
-		t.Fatalf("expected merged reasoning_effort=high, got %v", body["reasoning_effort"])
-	}
-	if _, ok := body["auto_model_options"]; ok {
-		t.Fatal("auto_model_options should be stripped from body")
-	}
-	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 1 {
-		t.Fatalf("reserved messages field was clobbered: %v", body["messages"])
-	}
-	// glm-5-2 (skipped) params must not leak into the body.
-	if _, ok := body["chat_template_kwargs"]; ok {
-		t.Fatal("non-selected candidate params leaked into body")
+	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 1 || body["stream"] != true {
+		t.Fatalf("unrelated body fields were clobbered: %v", body)
 	}
 }
 
-func TestResolveAutoModel_DuplicateModelKeepsFirstParams(t *testing.T) {
-	resolver := fakeResolver{}
+func TestResolveAutoModel_BodyOptionsWinOverHeader(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
+	body := map[string]any{
+		"model":              "auto",
+		"auto_model_options": map[string]any{"intelligence": float64(0)},
+	}
+
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "tiny-text" {
+		t.Fatalf("resolved = %q, want tiny-text for level 0", resolved)
+	}
+	if _, ok := body["auto_model_options"]; ok {
+		t.Fatal("auto_model_options must be stripped from the body")
+	}
+}
+
+func TestResolveAutoModel_DefaultLevel(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	body := map[string]any{"model": "auto"}
+
+	resolved, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	// Catalog max is 45, so fast-vision/low normalizes to 80 and tiny-text/off
+	// to 18; the default target of 50 is nearer the former.
+	if resolved != "fast-vision" {
+		t.Fatalf("resolved = %q, want fast-vision for the default level", resolved)
+	}
+	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "low" {
+		t.Fatalf("expected effort low, got %v", kwargs)
+	}
+}
+
+func TestResolveAutoModel_FallsBackWhenBestFitUnhealthy(t *testing.T) {
+	models := autoTestCatalog()
+	healthy := allHealthy(models)
+	healthy["smart-text"] = false
+	catalog := fakeCatalog{models: models, healthy: healthy}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
+	body := map[string]any{"model": "auto"}
+
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "smart-vision" {
+		t.Fatalf("resolved = %q, want smart-vision as next best when smart-text is down", resolved)
+	}
+	if _, ok := body["chat_template_kwargs"]; ok {
+		t.Fatal("model without reasoning params must not receive kwargs")
+	}
+}
+
+func TestResolveAutoModel_NothingHealthyStillResolvesBestFit(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: map[string]bool{}}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
+	body := map[string]any{"model": "auto"}
+
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "smart-text" {
+		t.Fatalf("resolved = %q, want best-fit smart-text so serving surfaces the outage", resolved)
+	}
+}
+
+func TestResolveAutoModel_VisualInputRequiresMultimodal(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
+	body := map[string]any{
+		"model": "auto",
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "what is this?"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AA=="}},
+		}}},
+	}
+
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	if resolved != "smart-vision" {
+		t.Fatalf("resolved = %q, want smart-vision (text-only smart-text must be excluded)", resolved)
+	}
+}
+
+func TestResolveAutoModel_VisualInputWithoutMultimodalModels(t *testing.T) {
+	models := []autoroute.Model{{Name: "text-only", Scores: map[string]int{"off": 20}}}
+	catalog := fakeCatalog{models: models, healthy: allHealthy(models)}
+	body := map[string]any{
+		"model": "auto",
+		"input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_image", "image_url": "https://x/y.png"}}}},
+	}
+
+	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/responses", body); err == nil {
+		t.Fatal("expected error when an image request has no multimodal candidates")
+	}
+}
+
+func TestResolveAutoModel_RouterEffortOverridesClient(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
+	body := map[string]any{
+		"model":                "auto",
+		"chat_template_kwargs": map[string]any{"reasoning_effort": "low", "keep": "me"},
+	}
+
+	if _, err := resolveAutoModel(catalog, header, "/v1/responses", body); err != nil {
+		t.Fatalf("resolveAutoModel: %v", err)
+	}
+	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "max" || kwargs["keep"] != "me" {
+		t.Fatalf("router effort must win and siblings survive, got %v", kwargs)
+	}
+}
+
+func TestResolveAutoModel_InvalidLevel(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "101")
+	if _, err := resolveAutoModel(catalog, header, "/v1/chat/completions", map[string]any{"model": "auto"}); err == nil {
+		t.Fatal("expected error for out-of-range intelligence header")
+	}
+
+	body := map[string]any{"model": "auto", "auto_model_options": map[string]any{"intelligence": "high"}}
+	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body); err == nil {
+		t.Fatal("expected error for non-numeric body intelligence")
+	}
+	if _, ok := body["auto_model_options"]; ok {
+		t.Fatal("auto_model_options must be stripped even on error")
+	}
+}
+
+func TestResolveAutoModel_LegacyArrayIgnored(t *testing.T) {
+	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
+	header := http.Header{}
+	header.Set(autoroute.IntelligenceHeader, "100")
 	body := map[string]any{
 		"model": "auto",
 		"auto_model_options": []any{
-			map[string]any{
-				"model":  "kimi-k2-6",
-				"params": map[string]any{"reasoning_effort": "high"},
-			},
-			map[string]any{
-				"model":  "kimi-k2-6",
-				"params": map[string]any{"reasoning_effort": "low"},
-			},
+			map[string]any{"model": "tiny-text", "params": map[string]any{"reasoning_effort": "high"}},
 		},
 	}
 
-	resolved, err := resolveAutoModel(resolver, body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "kimi-k2-6" {
-		t.Fatalf("resolved = %q, want kimi-k2-6", resolved)
+	if resolved != "smart-text" {
+		t.Fatalf("resolved = %q, want smart-text; legacy candidate list must not steer routing", resolved)
 	}
-	if body["reasoning_effort"] != "high" {
-		t.Fatalf("expected first params (high), got %v", body["reasoning_effort"])
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Fatal("legacy per-candidate params must not be merged into the body")
+	}
+	if _, ok := body["auto_model_options"]; ok {
+		t.Fatal("auto_model_options must be stripped from the body")
 	}
 }
 
-func TestResolveAutoModel_MissingOptions(t *testing.T) {
-	resolver := fakeResolver{}
-	body := map[string]any{"model": "auto"}
-	if _, err := resolveAutoModel(resolver, body); err == nil {
-		t.Fatal("expected error when auto_model_options is missing")
-	}
-	if _, ok := body["auto_model_options"]; ok {
-		t.Fatal("auto_model_options should be stripped even on error")
+func TestResolveAutoModel_EmptyCatalog(t *testing.T) {
+	catalog := fakeCatalog{}
+	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", map[string]any{"model": "auto"}); err == nil {
+		t.Fatal("expected error when no model publishes intelligence scores")
 	}
 }
 
