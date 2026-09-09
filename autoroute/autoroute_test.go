@@ -119,27 +119,63 @@ func testCatalog() []Model {
 
 func TestRankOrdersByDistanceToTarget(t *testing.T) {
 	// Catalog max is 45, so normalized levels are round(score*100/45).
-	ranked := Rank(testCatalog(), 100, false)
+	ranked := Rank(testCatalog(), 0, false)
 	if len(ranked) == 0 {
 		t.Fatal("expected candidates")
 	}
-	if top := ranked[0]; top.Model.Name != "smart-text" || top.Effort != "high" || top.Level != 100 {
-		t.Fatalf("top candidate for target 100 = %s/%s (level %d), want smart-text/high (100)", top.Model.Name, top.Effort, top.Level)
-	}
-
-	ranked = Rank(testCatalog(), 0, false)
 	if top := ranked[0]; top.Model.Name != "tiny-text" || top.Effort != "off" {
 		t.Fatalf("top candidate for target 0 = %s/%s, want tiny-text/off", top.Model.Name, top.Effort)
 	}
 
-	// Every candidate must be no further from target than the one after it.
+	// Candidates inside the fit band all come first; after them every
+	// candidate must be no further from target than the one after it.
 	for target := MinIntelligence; target <= MaxIntelligence; target += 10 {
 		ranked = Rank(testCatalog(), target, false)
-		for i := 1; i < len(ranked); i++ {
-			if abs(ranked[i-1].Level-target) > abs(ranked[i].Level-target) {
+		best := MaxIntelligence
+		for _, c := range ranked {
+			if d := abs(c.Level - target); d < best {
+				best = d
+			}
+		}
+		firstOutside := len(ranked)
+		for i, c := range ranked {
+			if abs(c.Level-target) > best+FitTolerance {
+				firstOutside = i
+				break
+			}
+		}
+		for i := firstOutside; i < len(ranked); i++ {
+			if abs(ranked[i].Level-target) <= best+FitTolerance {
+				t.Fatalf("target %d: in-band candidate %d sorted after an out-of-band one", target, i)
+			}
+			if i > firstOutside && abs(ranked[i-1].Level-target) > abs(ranked[i].Level-target) {
 				t.Fatalf("target %d: candidate %d is further than candidate %d", target, i-1, i)
 			}
 		}
+	}
+}
+
+func TestRankPrefersMultimodalWithinFitTolerance(t *testing.T) {
+	// smart-text/high (45 -> 100) is the exact fit for target 100, but
+	// smart-vision/on (44 -> 98) sits inside FitTolerance and is multimodal,
+	// so it must win; the text model follows as the nearest remaining fit.
+	ranked := Rank(testCatalog(), 100, false)
+	if top := ranked[0]; top.Model.Name != "smart-vision" || top.Effort != "on" {
+		t.Fatalf("top candidate for target 100 = %s/%s, want smart-vision/on", top.Model.Name, top.Effort)
+	}
+	if second := ranked[1]; second.Model.Name != "smart-text" || second.Effort != "high" {
+		t.Fatalf("second candidate for target 100 = %s/%s, want smart-text/high", second.Model.Name, second.Effort)
+	}
+
+	// A multimodal candidate just outside the band must not jump ahead: at
+	// target 87 the band is [84, 90], holding smart-text/low (87) and
+	// fast-vision/medium (87); fast-vision/high (93) is outside it.
+	ranked = Rank(testCatalog(), 87, false)
+	if top := ranked[0]; top.Model.Name != "fast-vision" || top.Effort != "medium" {
+		t.Fatalf("top candidate for target 87 = %s/%s, want fast-vision/medium", top.Model.Name, top.Effort)
+	}
+	if second := ranked[1]; second.Model.Name != "smart-text" || second.Effort != "low" {
+		t.Fatalf("second candidate for target 87 = %s/%s, want smart-text/low", second.Model.Name, second.Effort)
 	}
 }
 

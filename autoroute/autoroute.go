@@ -36,6 +36,13 @@ const (
 	// DefaultIntelligence is used when the caller states no level.
 	DefaultIntelligence = 50
 
+	// FitTolerance is how many normalized levels further from the target a
+	// candidate may sit than the best-fitting one and still count as an
+	// equally good fit. Within that band, capability (multimodal) decides
+	// before distance, so a model one point behind the leader is not shut
+	// out of routing by a rounding-sized score gap.
+	FitTolerance = 3
+
 	// effortPlaceholder is replaced inside a reasoning enable fragment with
 	// the model's native effort value.
 	effortPlaceholder = "$EFFORT"
@@ -173,9 +180,12 @@ func HasVisualInput(body map[string]any) bool {
 }
 
 // Rank expands the catalog into (model, effort) candidates and orders them by
-// how closely their normalized level matches target. Ties prefer multimodal
-// models, then the higher score, then the model name for determinism. When
-// requireMultimodal is set, text-only models are excluded entirely.
+// how closely their normalized level matches target. Candidates within
+// FitTolerance of the best fit form a band that sorts ahead of everything
+// else; inside it multimodal models come first, then the nearer level, then
+// the higher score, then the model name for determinism. Outside the band the
+// same order applies with distance first. When requireMultimodal is set,
+// text-only models are excluded entirely.
 func Rank(catalog []Model, target int, requireMultimodal bool) []Candidate {
 	maxScore := 0
 	for _, model := range catalog {
@@ -204,9 +214,26 @@ func Rank(catalog []Model, target int, requireMultimodal bool) []Candidate {
 		}
 	}
 
+	bestDistance := math.MaxInt
+	for _, c := range candidates {
+		if d := abs(c.Level - target); d < bestDistance {
+			bestDistance = d
+		}
+	}
+	inBand := func(c Candidate) bool {
+		return abs(c.Level-target) <= bestDistance+FitTolerance
+	}
+
 	sort.SliceStable(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
 		da, db := abs(a.Level-target), abs(b.Level-target)
+		ia, ib := inBand(a), inBand(b)
+		if ia != ib {
+			return ia
+		}
+		if ia && a.Model.Multimodal != b.Model.Multimodal {
+			return a.Model.Multimodal
+		}
 		if da != db {
 			return da < db
 		}

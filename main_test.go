@@ -644,7 +644,10 @@ func allHealthy(models []autoroute.Model) map[string]bool {
 func TestResolveAutoModel_HeaderPicksModelAndEffort(t *testing.T) {
 	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
 	header := http.Header{}
-	header.Set(autoroute.IntelligenceHeader, "100")
+	// Level 87 is the exact fit for smart-text/low (39) and fast-vision/medium
+	// (39); nothing else is inside the fit band, so the multimodal fast-vision
+	// wins and its native "medium" effort must be applied.
+	header.Set(autoroute.IntelligenceHeader, "87")
 	body := map[string]any{
 		"model":    "auto",
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
@@ -655,12 +658,12 @@ func TestResolveAutoModel_HeaderPicksModelAndEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "smart-text" || body["model"] != "smart-text" {
-		t.Fatalf("resolved = %q, body[model] = %v, want smart-text", resolved, body["model"])
+	if resolved != "fast-vision" || body["model"] != "fast-vision" {
+		t.Fatalf("resolved = %q, body[model] = %v, want fast-vision", resolved, body["model"])
 	}
 	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
-	if kwargs["reasoning_effort"] != "max" {
-		t.Fatalf("expected native effort max for level 100, got %v", kwargs)
+	if kwargs["reasoning_effort"] != "high" {
+		t.Fatalf("expected native effort high (mapped from medium) for level 87, got %v", kwargs)
 	}
 	if msgs, ok := body["messages"].([]any); !ok || len(msgs) != 1 || body["stream"] != true {
 		t.Fatalf("unrelated body fields were clobbered: %v", body)
@@ -710,7 +713,7 @@ func TestResolveAutoModel_DefaultLevel(t *testing.T) {
 func TestResolveAutoModel_FallsBackWhenBestFitUnhealthy(t *testing.T) {
 	models := autoTestCatalog()
 	healthy := allHealthy(models)
-	healthy["smart-text"] = false
+	healthy["smart-vision"] = false
 	catalog := fakeCatalog{models: models, healthy: healthy}
 	header := http.Header{}
 	header.Set(autoroute.IntelligenceHeader, "100")
@@ -720,11 +723,12 @@ func TestResolveAutoModel_FallsBackWhenBestFitUnhealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "smart-vision" {
-		t.Fatalf("resolved = %q, want smart-vision as next best when smart-text is down", resolved)
+	if resolved != "smart-text" {
+		t.Fatalf("resolved = %q, want smart-text as next best when smart-vision is down", resolved)
 	}
-	if _, ok := body["chat_template_kwargs"]; ok {
-		t.Fatal("model without reasoning params must not receive kwargs")
+	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
+	if kwargs["reasoning_effort"] != "max" {
+		t.Fatalf("expected native effort max for smart-text/high, got %v", kwargs)
 	}
 }
 
@@ -738,8 +742,11 @@ func TestResolveAutoModel_NothingHealthyStillResolvesBestFit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "smart-text" {
-		t.Fatalf("resolved = %q, want best-fit smart-text so serving surfaces the outage", resolved)
+	if resolved != "smart-vision" {
+		t.Fatalf("resolved = %q, want best-fit smart-vision so serving surfaces the outage", resolved)
+	}
+	if _, ok := body["chat_template_kwargs"]; ok {
+		t.Fatal("model without reasoning params must not receive kwargs")
 	}
 }
 
@@ -780,7 +787,8 @@ func TestResolveAutoModel_VisualInputWithoutMultimodalModels(t *testing.T) {
 func TestResolveAutoModel_RouterEffortOverridesClient(t *testing.T) {
 	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
 	header := http.Header{}
-	header.Set(autoroute.IntelligenceHeader, "100")
+	// Level 87 resolves to fast-vision/medium, whose native effort is "high".
+	header.Set(autoroute.IntelligenceHeader, "87")
 	body := map[string]any{
 		"model":                "auto",
 		"chat_template_kwargs": map[string]any{"reasoning_effort": "low", "keep": "me"},
@@ -790,7 +798,7 @@ func TestResolveAutoModel_RouterEffortOverridesClient(t *testing.T) {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
 	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
-	if kwargs["reasoning_effort"] != "max" || kwargs["keep"] != "me" {
+	if kwargs["reasoning_effort"] != "high" || kwargs["keep"] != "me" {
 		t.Fatalf("router effort must win and siblings survive, got %v", kwargs)
 	}
 }
@@ -827,8 +835,8 @@ func TestResolveAutoModel_LegacyArrayIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
-	if resolved != "smart-text" {
-		t.Fatalf("resolved = %q, want smart-text; legacy candidate list must not steer routing", resolved)
+	if resolved != "smart-vision" {
+		t.Fatalf("resolved = %q, want smart-vision; legacy candidate list must not steer routing", resolved)
 	}
 	if _, ok := body["reasoning_effort"]; ok {
 		t.Fatal("legacy per-candidate params must not be merged into the body")
