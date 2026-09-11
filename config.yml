@@ -44,6 +44,9 @@ models:
   deepseek-v4-flash:
     repo: tinfoilsh/confidential-deepseek-v4-flash
 
+  deepseek-v4-1-flash:
+    repo: tinfoilsh/confidential-deepseek-v4-1-flash
+
   kimi-k3:
     repo: tinfoilsh/confidential-kimi-k3
 
