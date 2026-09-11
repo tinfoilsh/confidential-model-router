@@ -162,6 +162,7 @@ type EnclaveManager struct {
 	controlPlaneURL           string
 	sigstoreClient            *sigstore.Client
 	billingCollector          *billing.Collector
+	unknownModelReporter      *billing.UnknownModelReporter
 	usageContextSecret        string
 	inferenceDelegationSecret string
 	delegationHTTPClient      *http.Client
@@ -217,6 +218,12 @@ func (em *EnclaveManager) AddBillingEvent(event billing.Event) {
 	if em.billingCollector != nil {
 		em.billingCollector.AddEvent(event)
 	}
+}
+
+// ReportUnknownModel tells the controlplane that an authenticated request
+// was rejected because modelName is not served.
+func (em *EnclaveManager) ReportUnknownModel(apiKey, modelName string) {
+	em.unknownModelReporter.Report(apiKey, modelName)
 }
 
 // UsageContextSecret returns the HMAC secret used to sign usage-context
@@ -891,6 +898,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		controlPlaneURL:           controlPlaneURL,
 		sigstoreClient:            sigstoreClient,
 		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		unknownModelReporter:      billing.NewUnknownModelReporter(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret:        usageContextSecret,
 		inferenceDelegationSecret: inferenceDelegationSecret,
 		delegationHTTPClient:      &http.Client{},

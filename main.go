@@ -910,6 +910,7 @@ func main() {
 			// and the authoritative lookup below, forwarding an unsanitized
 			// body to the engine.
 			if _, found := em.GetModel(modelName); !found {
+				em.ReportUnknownModel(apiKey, modelName)
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
@@ -931,6 +932,7 @@ func main() {
 
 		model, found := em.GetModel(modelName)
 		if !found {
+			em.ReportUnknownModel(apiKey, modelName)
 			jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 			return
 		}
