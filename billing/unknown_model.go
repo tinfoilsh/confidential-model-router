@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,7 +112,7 @@ func (r *UnknownModelReporter) send(report UnknownModelReport) {
 		return
 	}
 	nonce := hex.EncodeToString(nonceBytes)
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(usagereporting.HeaderReporterID, r.reporterID)
 	req.Header.Set(usagereporting.HeaderTimestamp, timestamp)
