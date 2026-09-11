@@ -19,7 +19,13 @@ import (
 // requests for model names the router does not serve.
 const UnknownModelPath = "/api/internal/unknown-model-requests"
 
-const unknownModelReportTimeout = 5 * time.Second
+const (
+	unknownModelReportTimeout = 5 * time.Second
+	// unknownModelMaxInflight caps concurrent reports so a flood of unknown
+	// model requests cannot pile up goroutines and connections; excess
+	// reports are dropped, since the controlplane only needs one per owner.
+	unknownModelMaxInflight = 16
+)
 
 // UnknownModelReport is the payload sent to the controlplane.
 type UnknownModelReport struct {
@@ -35,6 +41,7 @@ type UnknownModelReporter struct {
 	reporterID string
 	secret     string
 	client     *http.Client
+	inflight   chan struct{}
 }
 
 // NewUnknownModelReporter returns nil when reporting is not configured.
@@ -47,6 +54,7 @@ func NewUnknownModelReporter(controlPlaneURL, reporterID, secret string) *Unknow
 		reporterID: reporterID,
 		secret:     secret,
 		client:     &http.Client{Timeout: unknownModelReportTimeout},
+		inflight:   make(chan struct{}, unknownModelMaxInflight),
 	}
 }
 
@@ -56,7 +64,15 @@ func (r *UnknownModelReporter) Report(apiKey, model string) {
 	if r == nil || apiKey == "" || model == "" {
 		return
 	}
-	go r.send(UnknownModelReport{APIKey: apiKey, Model: model})
+	select {
+	case r.inflight <- struct{}{}:
+	default:
+		return
+	}
+	go func() {
+		defer func() { <-r.inflight }()
+		r.send(UnknownModelReport{APIKey: apiKey, Model: model})
+	}()
 }
 
 func (r *UnknownModelReporter) send(report UnknownModelReport) {
