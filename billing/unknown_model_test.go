@@ -11,7 +11,7 @@ import (
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
-func TestUnknownModelReporterSignsAndDedupes(t *testing.T) {
+func TestUnknownModelReporterSignsReports(t *testing.T) {
 	const secret = "test-secret"
 	reports := make(chan UnknownModelReport, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,9 +39,7 @@ func TestUnknownModelReporterSignsAndDedupes(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	r := NewUnknownModelReporter(server.URL, "router-test", secret)
-	for range 3 {
-		r.Report("tk_abc", "kimi-k2-5")
-	}
+	r.Report("tk_abc", "kimi-k2-5")
 	r.Report("tk_abc", "kimi-k2-6")
 	r.Report("", "kimi-k2-5")
 	r.Report("tk_abc", "")

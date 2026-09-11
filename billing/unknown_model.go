@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -20,14 +19,7 @@ import (
 // requests for model names the router does not serve.
 const UnknownModelPath = "/api/internal/unknown-model-requests"
 
-const (
-	unknownModelReportTimeout = 5 * time.Second
-	// unknownModelDedupTTL bounds how often one key/model pair is reported.
-	// The controlplane emails once per owner and model; this only keeps a
-	// misconfigured client from producing a request per call.
-	unknownModelDedupTTL = time.Hour
-	unknownModelMaxSeen  = 10000
-)
+const unknownModelReportTimeout = 5 * time.Second
 
 // UnknownModelReport is the payload sent to the controlplane.
 type UnknownModelReport struct {
@@ -37,15 +29,12 @@ type UnknownModelReport struct {
 
 // UnknownModelReporter tells the controlplane when an authenticated request
 // targets a model the router does not serve, so the owner can be told the
-// model is gone.
+// model is gone. The controlplane dedupes per owner and model.
 type UnknownModelReporter struct {
 	endpoint   string
 	reporterID string
 	secret     string
 	client     *http.Client
-
-	mu   sync.Mutex
-	seen map[string]time.Time
 }
 
 // NewUnknownModelReporter returns nil when reporting is not configured.
@@ -58,39 +47,16 @@ func NewUnknownModelReporter(controlPlaneURL, reporterID, secret string) *Unknow
 		reporterID: reporterID,
 		secret:     secret,
 		client:     &http.Client{Timeout: unknownModelReportTimeout},
-		seen:       make(map[string]time.Time),
 	}
 }
 
 // Report sends the rejection asynchronously; the caller has already
 // answered the client and must not wait on the controlplane.
 func (r *UnknownModelReporter) Report(apiKey, model string) {
-	if r == nil || apiKey == "" || model == "" || !r.markSeen(apiKey, model) {
+	if r == nil || apiKey == "" || model == "" {
 		return
 	}
 	go r.send(UnknownModelReport{APIKey: apiKey, Model: model})
-}
-
-func (r *UnknownModelReporter) markSeen(apiKey, model string) bool {
-	now := time.Now()
-	key := apiKey + "\x00" + model
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if at, ok := r.seen[key]; ok && now.Sub(at) < unknownModelDedupTTL {
-		return false
-	}
-	if len(r.seen) >= unknownModelMaxSeen {
-		for k, at := range r.seen {
-			if now.Sub(at) >= unknownModelDedupTTL {
-				delete(r.seen, k)
-			}
-		}
-		if len(r.seen) >= unknownModelMaxSeen {
-			return false
-		}
-	}
-	r.seen[key] = now
-	return true
 }
 
 func (r *UnknownModelReporter) send(report UnknownModelReport) {
