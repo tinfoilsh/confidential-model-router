@@ -23,9 +23,6 @@ models:
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
 
-  glm-5-2:
-    repo: tinfoilsh/confidential-glm5-2-b200
-
   glm-5-3:
     repo: tinfoilsh/confidential-glm5-3-nvfp4
 
