@@ -27,6 +27,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -169,6 +170,10 @@ var (
 	// scrapes. Env resolved after parse, like cache-route-secret, so the
 	// secret never reaches flag output.
 	metricsAPIKey = flag.String("metrics-api-key", "", "admin API key sent as a bearer token when polling enclave /metrics (env: METRICS_API_KEY)")
+	// safeguardsURL points at the safeguards sidecar in this enclave. When
+	// empty, completed first-party chat conversations are not submitted for
+	// acceptable-use classification.
+	safeguardsURL = flag.String("safeguards-url", getEnvOrDefault("SAFEGUARDS_URL", ""), "safeguards sidecar base URL (env: SAFEGUARDS_URL)")
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
@@ -468,6 +473,12 @@ func main() {
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 
+	safeguardsSubmitter := safeguards.NewSubmitter(*safeguardsURL)
+	defer safeguardsSubmitter.Close()
+	if safeguardsSubmitter != nil {
+		log.Infof("Safeguards sidecar: %s", *safeguardsURL)
+	}
+
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
@@ -508,6 +519,11 @@ func main() {
 
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
+
+		// Completed first-party chat turns are submitted to the safeguards
+		// sidecar once the response has been written.
+		w, capture, finishCapture := safeguardsSubmitter.Observe(w, r, manager.IsFirstPartyChatAccessJWT)
+		defer finishCapture()
 
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
 			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
@@ -730,6 +746,8 @@ func main() {
 					modelName = resolved
 				}
 
+				capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
+
 				// Detect which built-in tool profiles this request
 				// activates. The router runs the tool loop locally
 				// against one MCP session per active profile; zero
@@ -928,6 +946,7 @@ func main() {
 			// path-routed ones; this is the only place their body is parsed.
 			isStreaming, _ = body["stream"].(bool)
 			recordCacheSaltInjection(modelName, mode)
+			capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
 		}
 
 		model, found := em.GetModel(modelName)
