@@ -914,7 +914,7 @@ func main() {
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
-			mode, streamRequested, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+			body, mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 			if err != nil {
 				var tooLarge *http.MaxBytesError
 				if errors.As(err, &tooLarge) {
@@ -926,7 +926,7 @@ func main() {
 			}
 			// Subdomain-routed streams must feed the same SLA metrics as
 			// path-routed ones; this is the only place their body is parsed.
-			isStreaming = streamRequested
+			isStreaming, _ = body["stream"].(bool)
 			recordCacheSaltInjection(modelName, mode)
 		}
 
