@@ -309,7 +309,14 @@ func (em *EnclaveManager) addEnclave(
 	model.mu.RUnlock()
 	if exists {
 		realTLSKeyFP, err := tlsPublicKeyFP(host)
-		if err == nil && currentFP == realTLSKeyFP {
+		if err != nil {
+			// A failed probe says nothing about the key. Keep the enclave we
+			// have: the circuit breaker already handles a backend that is
+			// actually down, and re-attesting here would replace a live
+			// enclave on every transient network error.
+			return nil
+		}
+		if currentFP == realTLSKeyFP {
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
 		}
@@ -343,7 +350,7 @@ func (em *EnclaveManager) addEnclave(
 	}
 
 	cb := newCircuitBreaker()
-	model.Enclaves[host] = &Enclave{
+	model.installEnclaveLocked(host, &Enclave{
 		host:      host,
 		modelName: modelName,
 		predicate: verification.Measurement.Type,
@@ -353,10 +360,22 @@ func (em *EnclaveManager) addEnclave(
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 		pricing:   em.ModelPricing,
-	}
+	})
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
+}
+
+// installEnclaveLocked puts e in the pool under host, retiring any enclave
+// already registered there. A replacement happens when the host's TLS key
+// changed (the enclave restarted); the previous entry's metrics poller and
+// breaker must be stopped, or they keep running with nothing referencing
+// them. The caller holds m.mu.
+func (m *Model) installEnclaveLocked(host string, e *Enclave) {
+	if previous, ok := m.Enclaves[host]; ok && previous != e {
+		previous.shutdown()
+	}
+	m.Enclaves[host] = e
 }
 
 // Models returns all models
