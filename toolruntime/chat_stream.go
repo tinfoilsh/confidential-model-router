@@ -185,6 +185,16 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 		clientForwarder: forwarder,
 	}
 	result := chatIterationResult{}
+	// Fold the turn's usage into the running totals on every exit path,
+	// including the early returns below (client disconnect, upstream
+	// error), so an interrupted turn is still billed for the tokens it
+	// streamed. With continuous_usage_stats each chunk carries cumulative
+	// usage, so the latest snapshot is the correct amount to fold.
+	defer func() {
+		if result.usage != nil {
+			s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": result.usage}})
+		}
+	}()
 	doneSeen := false
 	for {
 		if s.writeErr != nil {
@@ -263,9 +273,6 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 
 	result.toolCalls = builder.toolCalls()
 	result.rawToolCalls = builder.raw()
-	if result.usage != nil {
-		s.usageTotals.Add(&upstreamJSONResponse{body: map[string]any{"usage": result.usage}})
-	}
 	if !doneSeen {
 		return result, newUpstreamStreamError("upstream stream ended without a terminal [DONE] marker")
 	}
@@ -965,8 +972,21 @@ func (b *chatToolCallBuilder) raw() []any {
 func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
 	reqBody, autoContinueTools := buildChatUpstreamRequest(body, tools, prompt)
 	reqBody["stream"] = true
-	reqBody["stream_options"] = map[string]any{"include_usage": true}
+	reqBody["stream_options"] = streamUsageOptions()
 	return reqBody, autoContinueTools
+}
+
+// streamUsageOptions returns the stream_options set on every upstream
+// tool-loop turn. continuous_usage_stats makes vLLM attach cumulative
+// usage to every chunk instead of only the final one, so a turn that is
+// interrupted mid-stream still has usage to account for. The router never
+// forwards upstream usage chunks to the client, so this is invisible to
+// callers.
+func streamUsageOptions() map[string]any {
+	return map[string]any{
+		"include_usage":          true,
+		"continuous_usage_stats": true,
+	}
 }
 
 func runChatStreaming(
@@ -1129,7 +1149,7 @@ func runChatStreaming(
 	// and stream it to the client directly.
 	finalBody := forcedFinalChatRequest(reqBody)
 	finalBody["stream"] = true
-	finalBody["stream_options"] = map[string]any{"include_usage": true}
+	finalBody["stream_options"] = streamUsageOptions()
 	result, err := streamer.runIteration(ctx, em, modelName, finalBody, requestHeaders)
 	if err != nil {
 		return streamer.terminateWithError(r, em, modelName, err)
