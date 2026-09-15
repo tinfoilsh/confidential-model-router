@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -127,7 +126,12 @@ func ecdsaCert(t *testing.T) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-func must(b []byte, err error) []byte { return b }
+func must(b []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
 
 var (
 	harnessOnce     sync.Once
@@ -237,7 +241,7 @@ func TestLocalRouter_EndToEnd(t *testing.T) {
 			if !strings.Contains(string(raw), strings.Fields(c.wantReply)[0]) {
 				t.Fatalf("client did not receive the reply: %s", raw)
 			}
-			fmt.Fprintf(os.Stderr, "  %-28s HTTP %d  %5dB  %s\n", c.name, resp.StatusCode, len(raw), time.Since(start).Round(time.Millisecond))
+			t.Logf("HTTP %d  %5dB  %s", resp.StatusCode, len(raw), time.Since(start).Round(time.Millisecond))
 
 			up := (*seen)[seenBefore]
 			if up.Get(safeguards.ConversationIDHeader) != "" {
@@ -271,7 +275,7 @@ func TestLocalRouter_EndToEnd(t *testing.T) {
 				if last["role"] != "assistant" || last["content"] != c.wantReply {
 					t.Fatalf("assistant turn wrong: %v", last)
 				}
-				fmt.Fprintf(os.Stderr, "      -> sidecar got %d msgs, conv=%q, last=%q\n", len(msgs), sub["conversation_id"], last["content"])
+				t.Logf("sidecar got %d msgs, conv=%q, last=%q", len(msgs), sub["conversation_id"], last["content"])
 			}
 		})
 	}
@@ -318,5 +322,5 @@ func TestLocalRouter_SurvivesSidecarOutage(t *testing.T) {
 			t.Fatalf("request %d: status %d", i, resp.StatusCode)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "  300 chat-JWT streaming requests with sidecar down: all 200, worst latency %s\n", worst.Round(time.Millisecond))
+	t.Logf("300 chat-JWT streaming requests with sidecar down: all 200, worst latency %s", worst.Round(time.Millisecond))
 }

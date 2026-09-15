@@ -34,6 +34,10 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 	}
 	cb := newCircuitBreaker()
 	model.mu.Lock()
+	for existing, e := range model.Enclaves {
+		e.shutdown()
+		delete(model.Enclaves, existing)
+	}
 	model.installEnclaveLocked(host, &Enclave{
 		host:      host,
 		modelName: modelName,
