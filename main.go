@@ -746,7 +746,9 @@ func main() {
 					modelName = resolved
 				}
 
-				capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
+				if capture != nil {
+					capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
+				}
 
 				// Detect which built-in tool profiles this request
 				// activates. The router runs the tool loop locally
@@ -946,7 +948,9 @@ func main() {
 			// path-routed ones; this is the only place their body is parsed.
 			isStreaming, _ = body["stream"].(bool)
 			recordCacheSaltInjection(modelName, mode)
-			capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
+			if capture != nil {
+				capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
+			}
 		}
 
 		model, found := em.GetModel(modelName)

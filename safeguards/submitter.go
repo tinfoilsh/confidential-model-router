@@ -20,9 +20,11 @@ import (
 const ConversationIDHeader = "X-Tinfoil-Conversation-Id"
 
 const (
-	ingestPath     = "/ingest"
-	requestTimeout = 5 * time.Second
-	drainTimeout   = 10 * time.Second
+	ingestPath          = "/ingest"
+	requestTimeout      = 5 * time.Second
+	drainTimeout        = 10 * time.Second
+	maxSubmissionBytes  = 1 << 20
+	messageJSONOverhead = len(`{"role":"","content":""},`)
 	// maxPending bounds conversations waiting for a delivery slot; beyond it
 	// new completions are dropped rather than queued without limit.
 	maxPending = 256
@@ -51,7 +53,7 @@ type submission struct {
 type Submitter struct {
 	endpoint string
 	client   *http.Client
-	pending  chan submission
+	pending  chan []byte
 	wg       sync.WaitGroup
 	cancel   context.CancelFunc
 
@@ -69,7 +71,7 @@ func NewSubmitter(baseURL string) *Submitter {
 	s := &Submitter{
 		endpoint: strings.TrimRight(baseURL, "/") + ingestPath,
 		client:   &http.Client{Timeout: requestTimeout},
-		pending:  make(chan submission, maxPending),
+		pending:  make(chan []byte, maxPending),
 		cancel:   cancel,
 	}
 	for i := 0; i < maxInFlight; i++ {
@@ -88,16 +90,50 @@ func (s *Submitter) Submit(credential, conversationID string, messages []Message
 	if len(conversationID) > maxConversationIDLen {
 		conversationID = ""
 	}
+	if !fitsSubmission(credential, conversationID, messages) {
+		submissionsTotal.WithLabelValues("oversized").Inc()
+		return
+	}
+	body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
+	if err != nil || len(body) > maxSubmissionBytes {
+		submissionsTotal.WithLabelValues("oversized").Inc()
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
 	select {
-	case s.pending <- submission{Credential: credential, ConversationID: conversationID, Messages: messages}:
+	case s.pending <- body:
 	default:
 		submissionsTotal.WithLabelValues("dropped").Inc()
 	}
+}
+
+// fitsSubmission bounds the input before JSON encoding; the encoded length is
+// checked separately because escaping can make it larger.
+func fitsSubmission(credential, conversationID string, messages []Message) bool {
+	remaining := maxSubmissionBytes
+	for _, value := range []string{credential, conversationID} {
+		if len(value) > remaining {
+			return false
+		}
+		remaining -= len(value)
+	}
+	for _, message := range messages {
+		if messageJSONOverhead > remaining {
+			return false
+		}
+		remaining -= messageJSONOverhead
+		for _, value := range []string{message.Role, message.Content} {
+			if len(value) > remaining {
+				return false
+			}
+			remaining -= len(value)
+		}
+	}
+	return true
 }
 
 // Close stops accepting work, drains what is already queued, and cancels
@@ -129,12 +165,7 @@ func (s *Submitter) worker(ctx context.Context) {
 	}
 }
 
-func (s *Submitter) deliver(ctx context.Context, sub submission) {
-	body, err := json.Marshal(sub)
-	if err != nil {
-		submissionsTotal.WithLabelValues("error").Inc()
-		return
-	}
+func (s *Submitter) deliver(ctx context.Context, body []byte) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(body))
 	if err != nil {
 		submissionsTotal.WithLabelValues("error").Inc()

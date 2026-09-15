@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,42 @@ func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	defer mu.Unlock()
 	if len(got) != 1 || got[0].Credential != "tok" || got[0].ConversationID != "chat-1" || len(got[0].Messages) != 2 {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSubmitter_RejectsOversizedPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		credential string
+		messages   []Message
+	}{
+		{"history", "token", []Message{{Role: "user", Content: strings.Repeat("x", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
+		{"escaping", "token", []Message{{Role: "assistant", Content: strings.Repeat("\x00", maxSubmissionBytes/2)}}},
+		{"credential", strings.Repeat("x", maxSubmissionBytes), []Message{{Role: "assistant", Content: "reply"}}},
+		{"many messages", "token", append(make([]Message, maxSubmissionBytes/messageJSONOverhead), Message{Role: "assistant", Content: "reply"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Submitter{pending: make(chan []byte, maxPending)}
+			s.Submit(tc.credential, "chat", tc.messages)
+			if len(s.pending) != 0 {
+				t.Fatal("oversized payload must not enter the queue")
+			}
+		})
+	}
+}
+
+func TestSubmitter_QueuedPayloadOwnsItsData(t *testing.T) {
+	s := &Submitter{pending: make(chan []byte, maxPending)}
+	messages := []Message{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "reply"}}
+	s.Submit("token", "chat", messages)
+	messages[0].Content = strings.Repeat("x", maxSubmissionBytes)
+	body := <-s.pending
+	var got submission
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxSubmissionBytes || got.Messages[0].Content != "hello" {
+		t.Fatal("queue must own bounded serialized data rather than retain the caller's slice")
 	}
 }
 
