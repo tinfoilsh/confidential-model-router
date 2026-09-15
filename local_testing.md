@@ -344,6 +344,24 @@ For the `gpt-oss-120b` Responses API path, the most stable local settings were:
 `qwen3-vl-30b` was not added to the recommended local matrix because
 attestation fetches for its current enclave were failing during this test run.
 
+## Safeguards harness (no enclave access needed)
+
+When attested enclaves are unreachable from your network, the
+`localharness` build tag runs the real request path (EnclaveManager,
+key-pinned reverse proxy, streaming, safeguards capture and submission)
+against an in-process fake enclave and a recording fake sidecar:
+
+```bash
+go test -tags localharness -race -run TestLocalRouter -v .
+```
+
+It covers API-key and chat-JWT callers on Chat Completions and Responses,
+streaming and non-streaming, asserts the conversation-id header is stripped
+before reaching the upstream, checks exactly which requests reach the
+sidecar and with what payload, and pushes 300 requests through with the
+sidecar down. The tag also compiles `manager.InstallFakeEnclaveForTest`,
+which is excluded from every production build.
+
 ## Cleanup
 
 If you launched processes in interactive shells, `Ctrl+C` in each is enough.
