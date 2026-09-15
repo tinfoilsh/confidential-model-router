@@ -237,11 +237,12 @@ func executeFetchWithProgress(
 	}
 	output = applyStructuredFormat(call.name, output, structured, state)
 
+	sources := toolCallSourcesForResult(call.name, structured, output)
 	for i := range urls {
 		emitter.phase(handles[i], phases.completedPhase)
-		emitter.close(handles[i], call.name, details[i], toolProgressResult{}, "completed", "")
+		emitter.close(handles[i], call.name, details[i], toolProgressResult{sources: sourcesForURL(sources, urls[i])}, "completed", "")
 	}
-	return output, nil, nil
+	return output, sources, nil
 }
 
 // chatToolProgressEmitter surfaces router-owned tool progress on the

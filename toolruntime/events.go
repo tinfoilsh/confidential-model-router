@@ -198,6 +198,9 @@ func toolCallSourcesForResult(name string, structured any, output string) []tool
 	if sources := structuredSearchToolCallSources(name, structured); len(sources) > 0 {
 		return sources
 	}
+	if sources := structuredFetchToolCallSources(name, structured); len(sources) > 0 {
+		return sources
+	}
 	return toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
 }
 
@@ -341,14 +344,20 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 		return nil
 	}
 	encoded := make([]map[string]any, 0, len(sources))
+	snippetBudget := maxMarkerSnippetBytes
 	for _, source := range sources {
 		if source.url == "" {
 			continue
 		}
-		encoded = append(encoded, map[string]any{
+		entry := map[string]any{
 			"url":   source.url,
 			"title": source.title,
-		})
+		}
+		if snippet := boundedSourceSnippet(source.snippet, snippetBudget); snippet != "" {
+			entry["snippet"] = snippet
+			snippetBudget -= len(snippet)
+		}
+		encoded = append(encoded, entry)
 	}
 	if len(encoded) == 0 {
 		return nil
@@ -392,7 +401,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			}
 			for _, url := range urls {
 				action := map[string]any{"type": "open_page", "url": url}
-				writePair(action, status(record), record.errorReason, nil)
+				writePair(action, status(record), record.errorReason, sourcesForURL(record.resultSources, url))
 			}
 		}
 	}
