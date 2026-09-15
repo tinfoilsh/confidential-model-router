@@ -11,7 +11,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	github.com/tinfoilsh/tinfoil-go v0.15.1-0.20260915190518-55a2d6269577
+	github.com/tinfoilsh/tinfoil-go v0.15.1-0.20260915201110-e617fb84470f
 	github.com/tinfoilsh/usage-reporting-go v0.1.3
 	gopkg.in/yaml.v2 v2.4.0
 )
@@ -98,7 +98,7 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260713224248-f5fc221cf8c4 // indirect
-	google.golang.org/grpc v1.82.1 // indirect
+	google.golang.org/grpc v1.83.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
