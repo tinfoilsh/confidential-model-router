@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -137,14 +138,18 @@ func TestObserve_SkipsCanceledAndPanickingRequests(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
 			req.Header.Set("Authorization", "Bearer chat-jwt")
 			var recovered any
+			var stack []byte
 			func() {
-				defer func() { recovered = recover() }()
+				defer func() {
+					recovered = recover()
+					stack = debug.Stack()
+				}()
 				w, capture, finish := s.Observe(httptest.NewRecorder(), req, isChatToken)
 				defer finish()
 				capture.SetMessages([]Message{{Role: "user", Content: "hi"}})
 				w.Write([]byte(`{"choices":[{"message":{"content":"reply"}}]}`))
 				if abort == "panic" {
-					panic(http.ErrAbortHandler)
+					panicFromHandler()
 				}
 				cancel()
 			}()
@@ -152,11 +157,18 @@ func TestObserve_SkipsCanceledAndPanickingRequests(t *testing.T) {
 			if abort == "panic" && recovered != http.ErrAbortHandler {
 				t.Fatalf("panic was not preserved: %v", recovered)
 			}
+			if abort == "panic" && !strings.Contains(string(stack), ".panicFromHandler(") {
+				t.Fatal("original handler frame is missing from the panic stack")
+			}
 			if len(sidecar.subs) != 0 {
 				t.Fatal("aborted request must not produce a submission")
 			}
 		})
 	}
+}
+
+func panicFromHandler() {
+	panic(http.ErrAbortHandler)
 }
 
 func TestObserve_SkipsIneligibleRequests(t *testing.T) {
