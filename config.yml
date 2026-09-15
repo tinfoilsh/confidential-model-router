@@ -38,9 +38,6 @@ models:
   qwen3-tts:
     repo: tinfoilsh/confidential-realtime-models
 
-  deepseek-v4-flash:
-    repo: tinfoilsh/confidential-deepseek-v4-flash
-
   deepseek-v4-1-flash:
     repo: tinfoilsh/confidential-deepseek-v4-1-flash
 
