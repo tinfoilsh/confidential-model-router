@@ -40,7 +40,7 @@ containers:
   # The digest is NOT rewritten by this repo's release workflow. Pin it by
   # hand to a published confidential-safeguards release before deploying.
   - name: "safeguards"
-    image: "ghcr.io/tinfoilsh/confidential-safeguards@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - pin to a confidential-safeguards release digest
+    image: "ghcr.io/tinfoilsh/confidential-safeguards@sha256:200aa8fb814fa52a494d581ff19e7530528aa367281449ea3b1d60d06b4a3eef" # v0.1.0
     restart: always
     networks: [web]
     memory: "4g"
