@@ -31,10 +31,19 @@ containers:
   # only from the proxy over the enclave network; reports confirmed
   # violations to the control plane, which resolves the user's own chat
   # token and applies the warning and ban thresholds.
+  #
+  # Deliberately no healthcheck: a container healthcheck that fails at boot
+  # fails the whole enclave, and the router must never be taken down by the
+  # classifier. restart: always covers crashes; the router tolerates the
+  # sidecar being unreachable.
+  #
+  # The digest is NOT rewritten by this repo's release workflow. Pin it by
+  # hand to a published confidential-safeguards release before deploying.
   - name: "safeguards"
     image: "ghcr.io/tinfoilsh/confidential-safeguards@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - pin to a confidential-safeguards release digest
     restart: always
     networks: [web]
+    memory: "4g"
     env:
       - SAFEGUARD_MODEL: "gpt-oss-safeguard-120b"
       - SAFEGUARD_REVIEW_MODEL: "kimi-k3"
@@ -74,11 +83,6 @@ containers:
           Many conversations will cross NONE of these lines. A mere mention, a refusal, or the user asking without the assistant helping does not count. Only flag clear matches.
     secrets:
       - TINFOIL_API_KEY
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 1m
 
 networks:
   web:
