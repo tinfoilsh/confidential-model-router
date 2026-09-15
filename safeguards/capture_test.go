@@ -214,9 +214,22 @@ func TestCapture_CompletedSnapshotCannotExceedLimit(t *testing.T) {
 
 func TestCapture_ResponsesJSON(t *testing.T) {
 	c := NewCapture(httptest.NewRecorder())
-	writeAll(t, c, "application/json", 200, `{"object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`)
+	writeAll(t, c, "application/json", 200, `{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`)
 	if got := c.Text(); got != "done" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCapture_ResponsesJSONRequiresCompletedStatus(t *testing.T) {
+	for _, status := range []string{"incomplete", "failed", "in_progress", "queued", "cancelled", ""} {
+		t.Run(status, func(t *testing.T) {
+			c := NewCapture(httptest.NewRecorder())
+			body := `{"object":"response","status":"` + status + `","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}`
+			writeAll(t, c, "application/json", http.StatusOK, body)
+			if got := c.Text(); got != "" {
+				t.Fatalf("status %q returned text %q", status, got)
+			}
+		})
 	}
 }
 

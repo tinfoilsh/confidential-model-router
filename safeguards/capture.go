@@ -239,7 +239,8 @@ func (c *Capture) Text() string {
 		return c.text.String()
 	}
 	var body struct {
-		Output  any `json:"output"`
+		Status  string `json:"status"`
+		Output  any    `json:"output"`
 		Choices []struct {
 			Message struct {
 				Content any    `json:"content"`
@@ -251,6 +252,9 @@ func (c *Capture) Text() string {
 		return ""
 	}
 	if body.Output != nil {
+		if body.Status != "completed" {
+			return ""
+		}
 		return ResponsesOutputText(body.Output)
 	}
 	if len(body.Choices) == 0 {
