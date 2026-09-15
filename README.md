@@ -30,6 +30,12 @@ Selection works as follows:
 
 Because only the nearest candidate wins, a model whose level is one point further from the target than another's will never be chosen for text requests except as a health fallback; the tie-breaks only apply between candidates at the same level. If two models should share a level with the multimodal one preferred, the control plane must publish equal scores for them; the router does not apply a tolerance of its own.
 
+## Acceptable use safeguards
+
+When `SAFEGUARDS_URL` is set, the router submits each completed first-party chat turn to the safeguards sidecar declared in `tinfoil-config.yml`. Only requests authenticated with a first-party chat access token on `/v1/chat/completions` or `/v1/responses` are considered; API-key traffic is never submitted. The router reassembles the assistant's reply from the response it wrote to the client, appends it to the request history, and hands the conversation off asynchronously so the inference response is never delayed or failed by the sidecar. The optional `X-Tinfoil-Conversation-Id` header lets the client identify a chat so a continued conversation is only ever counted once; it is stripped before the request reaches the model.
+
+The sidecar classifies the transcript and reports confirmed violations to the control plane, which verifies the user's own token and applies the warning and ban thresholds. See the `confidential-safeguards` repo for the classification pipeline.
+
 ## Tool Calling
 
 Client side tool calling is handled by the client. Server-side tools currently supported: **web search** and **code execution**.
