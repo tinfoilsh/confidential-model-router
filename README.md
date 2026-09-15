@@ -11,7 +11,7 @@ New backends are verified before admission. Healthy backends are then fully re-a
 - Renewing an unchanged key updates its authenticated deadline without resetting the proxy, circuit breaker, metrics or active streams.
 - Temporary attestation fetch failures retain the previous result only until its original freshness deadline. Invalid evidence immediately removes the backend.
 - Expiry is checked during selection and before each new downstream HTTP exchange, including cached MCP clients and file uploads. Recovery probes and health fallbacks cannot override expiry. Already-started streams may finish.
-- Every downstream service connection remains pinned to the V3-endorsed TLS key. Key rotation replaces the backend and retires old clients.
+- In production, every downstream service connection remains pinned to the V3-endorsed TLS key. Debug-only local MCP overrides (`LOCAL_MCP_ENDPOINT_<MODEL>`) bypass this pin. Key rotation replaces the backend and retires old clients.
 
 `/.well-known/tinfoil-proxy` advertises only currently verified endpoints. Release tag, digest, code measurement and `freshness_expires_at` are reported per endpoint, not once per model. `proxyctl list` likewise reports one row per endpoint.
 

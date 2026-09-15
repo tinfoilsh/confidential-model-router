@@ -14,6 +14,8 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const runtimeConfigFetchTimeout = 10 * time.Second
+
 // RateLimitConfig describes optional per-API-key request rate limits for a
 // model. Requests over the soft per-minute budget are sent to vLLM with a
 // lower scheduling priority; requests over the hard budget are rejected with
@@ -126,7 +128,7 @@ func Load(url string, sha256_required bool) (*Config, error) {
 			return nil, fmt.Errorf("failed to read runtime config: %w", err)
 		}
 	} else {
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(cleanURL)
+		resp, err := (&http.Client{Timeout: runtimeConfigFetchTimeout}).Get(cleanURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch runtime config: %w", err)
 		}

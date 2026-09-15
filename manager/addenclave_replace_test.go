@@ -22,6 +22,9 @@ func TestAddEnclaveFetchFailureKeepsExistingEnclave(t *testing.T) {
 
 	existing := newTestEnclave(addr)
 	existing.tlsKeyFP = "previous-fingerprint"
+	existing.nextAttestationAt = time.Now().Add(-time.Minute)
+	deadline := existing.verification.Load().FreshnessExpiresAt
+	scheduled := existing.nextAttestationAt
 	existing.metrics.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1})
 	t.Cleanup(existing.shutdown)
 
@@ -37,6 +40,9 @@ func TestAddEnclaveFetchFailureKeepsExistingEnclave(t *testing.T) {
 	model.mu.RUnlock()
 	if got != existing {
 		t.Fatal("enclave was replaced after a failed attestation fetch")
+	}
+	if !got.verification.Load().FreshnessExpiresAt.Equal(deadline) || !got.nextAttestationAt.Equal(scheduled) {
+		t.Fatal("failed attestation fetch changed freshness deadline or postponed reattestation")
 	}
 	if !pollingActive(existing.metrics) {
 		t.Fatal("existing enclave's poller was stopped")

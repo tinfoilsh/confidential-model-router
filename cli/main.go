@@ -26,6 +26,8 @@ var (
 	}
 )
 
+// ProxyResponse projects the discovery fields used by the human-readable list.
+// It is not a verification result and is never used to authorize an endpoint.
 type ProxyResponse struct {
 	Models map[string]struct {
 		Repo     string `json:"repo"`

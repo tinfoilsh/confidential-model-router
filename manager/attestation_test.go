@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -235,8 +237,41 @@ func TestTLSKeyChangeTriggersEarlyV3Verification(t *testing.T) {
 
 func TestTLSKeyProbeIsBounded(t *testing.T) {
 	shortVerifyTimeout(t, 50*time.Millisecond)
-	if _, err := tlsPublicKeyFP(blackholeListener(t)); err == nil {
-		t.Fatal("unresponsive TLS probe succeeded")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, serverDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-release // Accept TCP but never complete the TLS handshake.
+	}()
+	probeDone := make(chan struct{})
+	var probeErr error
+	go func() {
+		_, probeErr = tlsPublicKeyFP(listener.Addr().String())
+		close(probeDone)
+	}()
+	defer func() {
+		// Unblock the probe even if its production timeout is accidentally removed.
+		close(release)
+		listener.Close()
+		<-serverDone
+		<-probeDone
+	}()
+	select {
+	case <-probeDone:
+		var timeout net.Error
+		if !errors.As(probeErr, &timeout) || !timeout.Timeout() {
+			t.Fatalf("expected TLS probe timeout, got %v", probeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS probe exceeded its 50ms deadline plus scheduling slack")
 	}
 }
 
@@ -279,8 +314,16 @@ func TestTLSKeyProbeDoesNotHoldModelLock(t *testing.T) {
 
 func TestV3AllowsDifferentEndorsedVersionsInOneModel(t *testing.T) {
 	em, model := attestationTestManager(t, "older", "newer")
+	deadline := time.Now().Add(time.Hour)
+	expected := map[string]*tinfoilClient.VerifiedDocumentV3{
+		"older": testVerification("older", "older", deadline),
+		"newer": testVerification("newer", "newer", deadline.Add(time.Hour)),
+	}
+	for host, verified := range expected {
+		verified.CodeMeasurement.Registers = []string{"measurement-" + host}
+	}
 	em.verifyEnclave = func(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error) {
-		return testVerification(host, host, time.Now().Add(time.Hour)), nil
+		return expected[host], nil
 	}
 	em.refreshAttestations()
 	if len(model.Enclaves) != 2 || model.Enclaves["older"].verification.Load().CodeTag != "older" || model.Enclaves["newer"].verification.Load().CodeTag != "newer" {
@@ -296,6 +339,25 @@ func TestV3AllowsDifferentEndorsedVersionsInOneModel(t *testing.T) {
 	}
 	if status["tag"] != nil || status["measurement"] != nil {
 		t.Fatal("status still advertises a single model-wide release")
+	}
+	var endpoints map[string]struct {
+		Tag                string                   `json:"tag"`
+		Digest             string                   `json:"digest"`
+		Measurement        *measurement.Measurement `json:"measurement"`
+		FreshnessExpiresAt time.Time                `json:"freshness_expires_at"`
+	}
+	if err := json.Unmarshal(status["enclaves"], &endpoints); err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != len(expected) {
+		t.Fatalf("serialized %d endpoints, want %d", len(endpoints), len(expected))
+	}
+	for host, want := range expected {
+		got := endpoints[host]
+		if got.Tag != want.CodeTag || got.Digest != want.CodeDigest ||
+			!reflect.DeepEqual(got.Measurement, want.CodeMeasurement) || !got.FreshnessExpiresAt.Equal(want.FreshnessExpiresAt) {
+			t.Errorf("endpoint %s lost its verified release metadata: %+v", host, got)
+		}
 	}
 }
 
@@ -453,24 +515,60 @@ func TestDiscoveryJSONDoesNotRestoreAuthorization(t *testing.T) {
 	}
 }
 
-func TestDiscoveryOmitsExpiredEndpoints(t *testing.T) {
-	model := newTestModel("valid", "expired")
-	for _, e := range model.Enclaves {
-		t.Cleanup(e.shutdown)
-	}
-	setTestAttestation(model.Enclaves["expired"], time.Now().Add(-time.Second))
-	data, err := json.Marshal(model)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var status struct {
-		Enclaves map[string]json.RawMessage `json:"enclaves"`
-	}
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatal(err)
-	}
-	if len(status.Enclaves) != 1 || status.Enclaves["valid"] == nil {
-		t.Fatal("discovery advertised expired endpoint")
+func TestDiscoveryOmitsIneligibleEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hosts []string
+		want  []string
+	}{
+		{"mixed", []string{"valid", "expired", "unverified", "retired"}, []string{"valid"}},
+		{"all ineligible", []string{"expired", "unverified", "retired"}, nil},
+		{"empty", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := newTestModel(tc.hosts...)
+			for host, e := range model.Enclaves {
+				t.Cleanup(e.shutdown)
+				switch host {
+				case "expired":
+					setTestAttestation(e, time.Now().Add(-time.Second))
+				case "unverified":
+					e.verification.Store(nil)
+				case "retired":
+					e.shutdown()
+				}
+			}
+			em := &EnclaveManager{models: &sync.Map{}}
+			em.models.Store("test-model", model)
+			data, err := json.Marshal(model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var status struct {
+				Enclaves map[string]json.RawMessage `json:"enclaves"`
+			}
+			if err := json.Unmarshal(data, &status); err != nil {
+				t.Fatal(err)
+			}
+			if len(status.Enclaves) != len(tc.want) {
+				t.Fatalf("discovery endpoints = %v, want %v", status.Enclaves, tc.want)
+			}
+			for _, host := range tc.want {
+				if status.Enclaves[host] == nil {
+					t.Errorf("discovery omitted eligible endpoint %s", host)
+				}
+			}
+			var wantGroups []PrometheusTargetGroup
+			if len(tc.want) > 0 {
+				wantGroups = []PrometheusTargetGroup{{
+					Targets: tc.want,
+					Labels:  map[string]string{"model_name": "test-model", "__param_model": "test-model"},
+				}}
+			}
+			if got := em.PrometheusTargets(); !reflect.DeepEqual(got, wantGroups) {
+				t.Fatalf("Prometheus discovery = %+v, want %+v", got, wantGroups)
+			}
+		})
 	}
 }
 
@@ -481,6 +579,8 @@ func TestConfigFailureStillReattestsKnownTargetsWithBoundedConcurrency(t *testin
 	}
 	em, model := attestationTestManager(t, hosts...)
 	em.updateConfigURL = filepath.Join(t.TempDir(), "missing-config.yml")
+	entered, release := make(chan struct{}, len(hosts)), make(chan struct{})
+	releaseChecks := sync.OnceFunc(func() { close(release) })
 	var calls, active, maximum atomic.Int32
 	em.verifyEnclave = func(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error) {
 		n := active.Add(1)
@@ -491,16 +591,35 @@ func TestConfigFailureStillReattestsKnownTargetsWithBoundedConcurrency(t *testin
 			}
 		}
 		calls.Add(1)
-		time.Sleep(time.Millisecond)
+		entered <- struct{}{}
+		<-release
 		return testVerification("v1", host, time.Now().Add(time.Hour)), nil
 	}
-	if err := em.sync(); err == nil {
+	done := make(chan struct{})
+	var syncErr error
+	go func() {
+		syncErr = em.sync()
+		close(done)
+	}()
+	defer func() { releaseChecks(); <-done }()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for range attestationConcurrency {
+		select {
+		case <-entered:
+		case <-deadline.C:
+			t.Fatal("verification workers did not overlap")
+		}
+	}
+	releaseChecks()
+	<-done
+	if syncErr == nil {
 		t.Fatal("configuration failure was swallowed")
 	}
 	if calls.Load() != int32(len(hosts)) || len(model.Enclaves) != len(hosts) {
 		t.Fatal("configuration failure suppressed reattestation")
 	}
-	if maximum.Load() > attestationConcurrency {
-		t.Fatalf("unbounded verification concurrency: %d", maximum.Load())
+	if maximum.Load() != attestationConcurrency {
+		t.Fatalf("verification concurrency = %d, want %d", maximum.Load(), attestationConcurrency)
 	}
 }

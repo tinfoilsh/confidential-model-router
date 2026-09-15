@@ -308,13 +308,14 @@ func (em *EnclaveManager) PrometheusTargets() []PrometheusTargetGroup {
 		model.mu.RLock()
 		defer model.mu.RUnlock()
 
-		if len(model.Enclaves) == 0 {
-			return true
-		}
-
 		targets := make([]string, 0, len(model.Enclaves))
-		for host := range model.Enclaves {
-			targets = append(targets, host)
+		for host, enclave := range model.Enclaves {
+			if enclave.attestationValid() {
+				targets = append(targets, host)
+			}
+		}
+		if len(targets) == 0 {
+			return true
 		}
 
 		targetGroups = append(targetGroups, PrometheusTargetGroup{
