@@ -40,7 +40,7 @@ func TestAddEnclaveNetworkIODoesNotHoldModelLock(t *testing.T) {
 	em.models.Store("test-model", model)
 
 	done := make(chan error, 1)
-	go func() { done <- em.addEnclave("test-model", addr, nil) }()
+	go func() { done <- em.addEnclave("test-model", addr) }()
 
 	// Let addEnclave reach its network call, then verify the write lock —
 	// the strictest form of "routing can proceed" — is acquirable.

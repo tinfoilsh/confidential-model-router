@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -125,7 +126,7 @@ func Load(url string, sha256_required bool) (*Config, error) {
 			return nil, fmt.Errorf("failed to read runtime config: %w", err)
 		}
 	} else {
-		resp, err := http.Get(cleanURL)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(cleanURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch runtime config: %w", err)
 		}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
+	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
 // InstallFakeEnclaveForTest registers ts as the only enclave for modelName,
@@ -27,7 +27,7 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 	if err != nil {
 		return err
 	}
-	fp, err := attestation.ConnectionCertFP(conn.ConnectionState())
+	fp, err := tinfoilClient.ConnectionCertFP(conn.ConnectionState())
 	conn.Close()
 	if err != nil {
 		return err
@@ -38,7 +38,7 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 		e.shutdown()
 		delete(model.Enclaves, existing)
 	}
-	model.installEnclaveLocked(host, &Enclave{
+	enclave := &Enclave{
 		host:      host,
 		modelName: modelName,
 		tlsKeyFP:  fp,
@@ -46,7 +46,10 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 		pricing:   em.ModelPricing,
-	})
+	}
+	enclave.verification.Store(&tinfoilClient.VerifiedDocumentV3{FreshnessExpiresAt: time.Now().Add(time.Hour)})
+	enclave.proxy.Transport = &attestationTransport{enclave: enclave, base: enclave.proxy.Transport}
+	model.installEnclaveLocked(host, enclave)
 	model.mu.Unlock()
 	em.stateMu.Lock()
 	em.lastSuccessfulUpdate = time.Now()

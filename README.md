@@ -2,6 +2,25 @@
 
 Tinfoil's confidential inference model router terminates TLS connections (optionally with EHBP), inspects the model name, and directs it to a verified secure inference enclave.
 
+## Downstream V3 attestation
+
+Each backend must pass nonce-bound Go V3 verification against the repository pinned in the initial router configuration. The backend supplies code and platform endorsements, freshness witnesses and CPU evidence. There is no V2 fallback and no GitHub Latest lookup: different freshly endorsed releases may coexist in one model pool. Releases remain eligible only while both their code and platform freshness proofs are valid; accepting an older release does not cause its witnesses to be renewed.
+
+The existing worker re-attests all configured backends at startup and every five minutes by default (`REFRESH_INTERVAL` / `-r`), with at most four verifications in flight. A failed configuration fetch still re-attests the last known targets. Verification runs outside routing locks and does not run on the inference request path.
+
+- Renewing an unchanged key updates its authenticated deadline without resetting the proxy, circuit breaker, metrics or active streams.
+- Temporary attestation fetch failures retain the previous result only until its original freshness deadline. Invalid evidence immediately removes the backend.
+- Expiry is checked during selection and before each new downstream HTTP exchange, including cached MCP clients and file uploads. Recovery probes and health fallbacks cannot override expiry. Already-started streams may finish.
+- Every downstream service connection remains pinned to the V3-endorsed TLS key. Key rotation replaces the backend and retires old clients.
+
+`/.well-known/tinfoil-proxy` advertises only currently verified endpoints. Release tag, digest, code measurement and `freshness_expires_at` are reported per endpoint, not once per model. `proxyctl list` likewise reports one row per endpoint.
+
+For an opt-in read-only live check of router admission plus pinned HTTPS (no inference traffic):
+
+```sh
+TINFOIL_V3_AUDIT_CONFIG=/path/to/model-config.yml go test ./manager -run '^TestLiveV3Backends$' -count=1 -v
+```
+
 ## Request bodies
 
 The router accepts OpenAI-compatible bodies on `/v1/chat/completions` and `/v1/responses`. A few Tinfoil-specific top-level fields are recognized and stripped before the body is forwarded to the model enclave:
