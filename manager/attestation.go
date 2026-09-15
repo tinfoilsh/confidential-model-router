@@ -1,10 +1,12 @@
 package manager
 
 import (
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -17,8 +19,10 @@ import (
 )
 
 const (
-	attestationConcurrency = 4
-	maxAttestationBytes    = 8 << 20
+	attestationConcurrency   = 4
+	maxAttestationBytes      = 8 << 20
+	attestationInterval      = 24 * time.Hour
+	attestationRenewalWindow = time.Hour
 )
 
 // Bound network steps without changing the SDK's process-wide HTTP client.
@@ -27,6 +31,53 @@ var enclaveVerifyTimeout = 10 * time.Second
 // Fetch failures do not invalidate a previously authenticated result, but
 // they never extend its deadline. Invalid evidence does invalidate it.
 type attestationFetchError struct{ error }
+
+// A bounded, normal PKI-validated TLS handshake detects restarts without
+// fetching or verifying a new CPU quote on every worker tick. This probe
+// never authorizes a key: a changed key still requires full V3 verification.
+func tlsPublicKeyFP(host string) (string, error) {
+	u := url.URL{Host: host}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: enclaveVerifyTimeout}, "tcp",
+		net.JoinHostPort(u.Hostname(), port), &tls.Config{})
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return tinfoilClient.ConnectionCertFP(conn.ConnectionState())
+}
+
+func (em *EnclaveManager) refreshEnclave(modelName, host string) error {
+	model, found := em.GetModel(modelName)
+	if !found {
+		return fmt.Errorf("model %s not found", modelName)
+	}
+	model.mu.RLock()
+	current := model.Enclaves[host]
+	due := current == nil || !current.attestationValid() || !time.Now().Before(current.nextAttestationAt)
+	var expectedKey string
+	if current != nil {
+		expectedKey = current.tlsKeyFP
+	}
+	model.mu.RUnlock()
+	if !due {
+		probe := em.probeTLSKey
+		if probe == nil {
+			probe = tlsPublicKeyFP
+		}
+		key, err := probe(host)
+		if err != nil {
+			return fmt.Errorf("probing enclave %s TLS key: %w", host, err)
+		}
+		if key == expectedKey {
+			return nil
+		}
+	}
+	return em.addEnclave(modelName, host)
+}
 
 func verifyEnclaveV3(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error) {
 	nonce, err := envelope.RandomNonce()
@@ -100,17 +151,23 @@ func (em *EnclaveManager) addEnclave(modelName, host string) error {
 	if !slices.Contains(model.hostnames, host) {
 		return fmt.Errorf("enclave %s is no longer configured", host)
 	}
+	nextAttestation := time.Now().Add(attestationInterval)
+	if renewAt := verified.FreshnessExpiresAt.Add(-attestationRenewalWindow); renewAt.Before(nextAttestation) {
+		nextAttestation = renewAt
+	}
 	if previous := model.Enclaves[host]; previous != nil &&
 		previous.tlsKeyFP == tlsKey && previous.hpkeKey == hpkeKey &&
 		previous.predicate == verified.EnclaveMeasurement.Type {
 		// Renewal must not reset load metrics, active streams or breaker state.
 		previous.verification.Store(verified)
+		previous.nextAttestationAt = nextAttestation
 		return nil
 	}
 	cb := newCircuitBreaker()
 	enclave := &Enclave{
 		host: host, modelName: modelName,
-		tlsKeyFP: tlsKey, hpkeKey: hpkeKey, predicate: verified.EnclaveMeasurement.Type,
+		nextAttestationAt: nextAttestation,
+		tlsKeyFP:          tlsKey, hpkeKey: hpkeKey, predicate: verified.EnclaveMeasurement.Type,
 		proxy:   newProxy(host, tlsKey, modelName, em.billingCollector, cb),
 		metrics: newEnclaveMetrics(host, modelName), cb: cb, pricing: em.ModelPricing,
 	}
@@ -122,10 +179,11 @@ func (em *EnclaveManager) addEnclave(modelName, host string) error {
 	return nil
 }
 
-// refreshAttestations runs on the existing configuration cadence (five minutes
-// by default), even if fetching new configuration fails. It includes missing
-// and expired endpoints, so they can recover without a restart. Concurrency
-// is bounded across the whole fleet, not independently for each model.
+// refreshAttestations checks targets on the existing worker cadence (five
+// minutes by default), even if fetching configuration fails. Healthy endpoints
+// get a lightweight key probe; full verification is due daily, before proof
+// expiry, or on key change. Missing endpoints and failed due verifications
+// retry on each tick. Concurrency is bounded across the whole fleet.
 func (em *EnclaveManager) refreshAttestations() {
 	type target struct{ model, host string }
 	jobs := make(chan target)
@@ -135,7 +193,7 @@ func (em *EnclaveManager) refreshAttestations() {
 		go func() {
 			defer workers.Done()
 			for target := range jobs {
-				if err := em.addEnclave(target.model, target.host); err != nil {
+				if err := em.refreshEnclave(target.model, target.host); err != nil {
 					em.stateMu.Lock()
 					em.errors = append(em.errors, err.Error())
 					em.stateMu.Unlock()

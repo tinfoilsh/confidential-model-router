@@ -40,6 +40,8 @@ type Enclave struct {
 	// to sampleStalenessLimit stale when scrapes fail.
 	inflight     atomic.Int64
 	verification atomic.Pointer[tinfoilClient.VerifiedDocumentV3]
+	// Protected by the owning model's mu; only used by the refresh worker.
+	nextAttestationAt time.Time
 }
 
 type Model struct {
@@ -157,6 +159,7 @@ type EnclaveManager struct {
 	updateConfigURL           string
 	controlPlaneURL           string
 	verifyEnclave             func(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error)
+	probeTLSKey               func(host string) (string, error)
 	billingCollector          *billing.Collector
 	unknownModelReporter      *billing.UnknownModelReporter
 	usageContextSecret        string
@@ -851,7 +854,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }
 
-// sync updates configuration and always re-attests the last known targets,
+// sync updates configuration and always checks the last known targets,
 // including when the configuration fetch fails.
 func (em *EnclaveManager) sync() (syncErr error) {
 	defer func() {

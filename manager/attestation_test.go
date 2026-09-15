@@ -91,6 +91,192 @@ func TestV3RenewalPreservesStateAndDoesNotExtendUnchangedProof(t *testing.T) {
 	}
 }
 
+func TestHealthyReattestationIsDaily(t *testing.T) {
+	em, model := attestationTestManager(t, "backend")
+	deadline := time.Now().Add(72 * time.Hour)
+	verifications, probes := 0, 0
+	em.verifyEnclave = func(string, string) (*tinfoilClient.VerifiedDocumentV3, error) {
+		verifications++
+		return testVerification("v1", "key", deadline), nil
+	}
+	em.probeTLSKey = func(string) (string, error) { probes++; return "key", nil }
+	before := time.Now()
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	e := model.Enclaves["backend"]
+	if e.nextAttestationAt.Before(before.Add(24*time.Hour)) || e.nextAttestationAt.After(time.Now().Add(24*time.Hour)) {
+		t.Fatal("healthy backend was not scheduled for daily reattestation")
+	}
+	scheduled := e.nextAttestationAt
+	for range 3 {
+		if err := em.refreshEnclave("test-model", "backend"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if verifications != 1 || probes != 3 || !e.nextAttestationAt.Equal(scheduled) {
+		t.Fatal("healthy ticks re-attested or postponed the daily check")
+	}
+	e.nextAttestationAt = time.Now().Add(-time.Second)
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if verifications != 2 || probes != 3 || model.Enclaves["backend"] != e {
+		t.Fatal("daily check did not reverify the unchanged key in place")
+	}
+}
+
+func TestReattestationRunsBeforeProofExpiry(t *testing.T) {
+	em, model := attestationTestManager(t, "backend")
+	deadline := time.Now().Add(6 * time.Hour)
+	verifications := 0
+	em.verifyEnclave = func(string, string) (*tinfoilClient.VerifiedDocumentV3, error) {
+		verifications++
+		return testVerification("v1", "key", deadline), nil
+	}
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	e := model.Enclaves["backend"]
+	if !e.nextAttestationAt.Equal(deadline.Add(-time.Hour)) {
+		t.Fatal("short-lived proof was not scheduled one hour before expiry")
+	}
+	// Receiving an already-near-expiry proof must retry on subsequent worker
+	// ticks, rather than scheduling another 24-hour wait or extending expiry.
+	deadline = time.Now().Add(30 * time.Minute)
+	if err := em.addEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if verifications != 3 || !e.verification.Load().FreshnessExpiresAt.Equal(deadline) || e.nextAttestationAt.After(time.Now()) {
+		t.Fatal("unchanged near-expiry proof did not remain due for renewal")
+	}
+	deadline = time.Now().Add(72 * time.Hour)
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if !e.nextAttestationAt.After(time.Now()) || !e.verification.Load().FreshnessExpiresAt.Equal(deadline) {
+		t.Fatal("renewed proof did not restore the normal schedule")
+	}
+	// Expiry is also independently due, even if the scheduling timestamp is
+	// unexpectedly still in the future.
+	setTestAttestation(e, time.Now().Add(-time.Second))
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if verifications != 5 || !e.attestationValid() {
+		t.Fatal("expired endpoint was not reverified")
+	}
+}
+
+func TestDueReattestationRetriesAfterFetchFailure(t *testing.T) {
+	em, model := attestationTestManager(t, "backend")
+	verified := testVerification("v1", "key", time.Now().Add(72*time.Hour))
+	var fetchErr error
+	calls := 0
+	em.verifyEnclave = func(string, string) (*tinfoilClient.VerifiedDocumentV3, error) {
+		calls++
+		return verified, fetchErr
+	}
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	e := model.Enclaves["backend"]
+	e.nextAttestationAt = time.Now().Add(-time.Second)
+	fetchErr = attestationFetchError{errors.New("timeout")}
+	for range 2 {
+		if err := em.refreshEnclave("test-model", "backend"); err == nil {
+			t.Fatal("fetch error was swallowed")
+		}
+		if !e.attestationValid() || !e.verification.Load().FreshnessExpiresAt.Equal(verified.FreshnessExpiresAt) || e.nextAttestationAt.After(time.Now()) {
+			t.Fatal("failed check changed validity or postponed the retry")
+		}
+	}
+	fetchErr = nil
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 || !e.nextAttestationAt.After(time.Now()) {
+		t.Fatal("due endpoint did not recover on the next check")
+	}
+}
+
+func TestTLSKeyChangeTriggersEarlyV3Verification(t *testing.T) {
+	em, model := attestationTestManager(t, "backend")
+	key := "old-key"
+	calls := 0
+	em.verifyEnclave = func(string, string) (*tinfoilClient.VerifiedDocumentV3, error) {
+		calls++
+		return testVerification("v1", key, time.Now().Add(72*time.Hour)), nil
+	}
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	original := model.Enclaves["backend"]
+	scheduled := original.nextAttestationAt
+	em.probeTLSKey = func(string) (string, error) { return "", errors.New("temporary TLS failure") }
+	if err := em.refreshEnclave("test-model", "backend"); err == nil {
+		t.Fatal("probe error was swallowed")
+	}
+	if calls != 1 || !original.attestationValid() || !original.nextAttestationAt.Equal(scheduled) {
+		t.Fatal("probe failure altered a valid endpoint's verification")
+	}
+	key = "new-key"
+	em.probeTLSKey = func(string) (string, error) { return key, nil }
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || model.Enclaves["backend"] == original || original.attestationValid() || model.Enclaves["backend"].tlsKeyFP != key {
+		t.Fatal("key change did not trigger early authenticated replacement")
+	}
+}
+
+func TestTLSKeyProbeIsBounded(t *testing.T) {
+	shortVerifyTimeout(t, 50*time.Millisecond)
+	if _, err := tlsPublicKeyFP(blackholeListener(t)); err == nil {
+		t.Fatal("unresponsive TLS probe succeeded")
+	}
+}
+
+func TestTLSKeyProbeDoesNotHoldModelLock(t *testing.T) {
+	em, model := attestationTestManager(t, "backend")
+	em.verifyEnclave = func(string, string) (*tinfoilClient.VerifiedDocumentV3, error) {
+		return testVerification("v1", "key", time.Now().Add(72*time.Hour)), nil
+	}
+	if err := em.refreshEnclave("test-model", "backend"); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	em.probeTLSKey = func(string) (string, error) { close(started); <-release; return "key", nil }
+	done := make(chan error, 1)
+	defer func() {
+		close(release)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(time.Second):
+			t.Error("probe did not finish after release")
+		}
+	}()
+	go func() { done <- em.refreshEnclave("test-model", "backend") }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not start")
+	}
+	locked := make(chan struct{})
+	go func() { model.mu.Lock(); model.mu.Unlock(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("probe held the model lock")
+	}
+}
+
 func TestV3AllowsDifferentEndorsedVersionsInOneModel(t *testing.T) {
 	em, model := attestationTestManager(t, "older", "newer")
 	em.verifyEnclave = func(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error) {

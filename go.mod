@@ -11,7 +11,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	github.com/tinfoilsh/tinfoil-go v0.15.1-0.20260915184016-e766ac7fd2e9
+	github.com/tinfoilsh/tinfoil-go v0.15.1-0.20260915190518-55a2d6269577
 	github.com/tinfoilsh/usage-reporting-go v0.1.3
 	gopkg.in/yaml.v2 v2.4.0
 )

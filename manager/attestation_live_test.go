@@ -44,6 +44,13 @@ func TestLiveV3Backends(t *testing.T) {
 				if enclave == nil || !enclave.attestationValid() {
 					t.Fatal("endpoint did not pass router V3 admission")
 				}
+				key, err := tlsPublicKeyFP(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if key != enclave.tlsKeyFP {
+					t.Fatal("TLS probe did not match the admitted key")
+				}
 				httpClient := &http.Client{Transport: enclave.attestedTransport(), Timeout: 20 * time.Second,
 					CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 				defer httpClient.CloseIdleConnections()
