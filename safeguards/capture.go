@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -35,6 +36,9 @@ type Capture struct {
 	text      strings.Builder
 	completed string
 	overflow  bool
+	failed    bool
+	finished  bool
+	terminal  bool
 }
 
 // Observe decides whether a request is eligible for classification and, if
@@ -52,7 +56,13 @@ func (s *Submitter) Observe(w http.ResponseWriter, r *http.Request, eligible fun
 	}
 	c := &Capture{ResponseWriter: w}
 	return c, c, func() {
-		if reply := c.Text(); c.messages != nil && reply != "" {
+		if failure := recover(); failure != nil {
+			panic(failure)
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		if reply := c.Text(); len(c.messages) > 0 && reply != "" {
 			s.Submit(credential, conversationID, append(c.messages, Message{Role: "assistant", Content: reply}))
 		}
 	}
@@ -62,6 +72,12 @@ func (s *Submitter) Observe(w http.ResponseWriter, r *http.Request, eligible fun
 // nil Capture is a no-op so callers on ineligible requests need no branch.
 func (c *Capture) SetMessages(messages []Message) {
 	if c != nil {
+		if !fitsSubmission("", "", messages) {
+			c.overflow = true
+			c.messages = nil
+			submissionsTotal.WithLabelValues("oversized").Inc()
+			return
+		}
 		c.messages = messages
 	}
 }
@@ -81,21 +97,29 @@ func (c *Capture) WriteHeader(code int) {
 
 func (c *Capture) Write(p []byte) (int, error) {
 	c.start(http.StatusOK)
-	if !c.overflow {
-		c.observe(p)
+	n, err := c.ResponseWriter.Write(p)
+	if err != nil || n != len(p) {
+		c.failed = true
 	}
-	return c.ResponseWriter.Write(p)
+	if !c.overflow && n > 0 {
+		c.observe(p[:n])
+	}
+	return n, err
 }
 
 // start records the status and body shape on the first header or body
 // write, mirroring net/http's implicit 200 on a bare Write.
 func (c *Capture) start(code int) {
+	if code >= http.StatusContinue && code < http.StatusOK && code != http.StatusSwitchingProtocols {
+		return
+	}
 	if c.started {
 		return
 	}
 	c.started = true
 	c.status = code
-	c.streaming = strings.Contains(c.Header().Get("Content-Type"), "text/event-stream")
+	mediaType, _, _ := mime.ParseMediaType(c.Header().Get("Content-Type"))
+	c.streaming = mediaType == "text/event-stream"
 }
 
 func (c *Capture) observe(p []byte) {
@@ -107,7 +131,7 @@ func (c *Capture) observe(p []byte) {
 		c.body.Write(p)
 		return
 	}
-	for len(p) > 0 {
+	for len(p) > 0 && !c.overflow {
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
 			if c.line.Len()+len(p) > maxCaptureBytes {
@@ -115,6 +139,10 @@ func (c *Capture) observe(p []byte) {
 				return
 			}
 			c.line.Write(p)
+			return
+		}
+		if c.line.Len()+i > maxCaptureBytes {
+			c.overflow = true
 			return
 		}
 		c.line.Write(p[:i])
@@ -130,34 +158,59 @@ func (c *Capture) observeLine(line []byte) {
 		return
 	}
 	data = bytes.TrimSpace(data)
-	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+	if bytes.Equal(data, []byte("[DONE]")) {
+		c.terminal = c.finished
+		return
+	}
+	if len(data) == 0 {
 		return
 	}
 	var frame struct {
-		Type     string `json:"type"`
-		Delta    any    `json:"delta"`
+		Type     string          `json:"type"`
+		Delta    any             `json:"delta"`
+		Error    json.RawMessage `json:"error"`
 		Response struct {
 			Output any `json:"output"`
 		} `json:"response"`
 		Choices []struct {
-			Delta struct {
+			FinishReason string `json:"finish_reason"`
+			Delta        struct {
 				Content string `json:"content"`
+				Refusal string `json:"refusal"`
 			} `json:"delta"`
 		} `json:"choices"`
 	}
 	if json.Unmarshal(data, &frame) != nil {
+		c.failed = true
+		return
+	}
+	if len(frame.Error) > 0 && string(frame.Error) != "null" {
+		c.failed = true
 		return
 	}
 	switch frame.Type {
+	case "error", "response.failed", "response.incomplete":
+		c.failed = true
 	case "response.output_text.delta", "response.refusal.delta":
 		if s, ok := frame.Delta.(string); ok {
 			c.append(s)
 		}
 	case "response.completed":
-		c.completed = ResponsesOutputText(frame.Response.Output)
+		text := ResponsesOutputText(frame.Response.Output)
+		if len(text) > maxCaptureBytes {
+			c.overflow = true
+			return
+		}
+		c.completed = text
+		c.finished = true
+		c.terminal = true
 	case "":
 		for _, choice := range frame.Choices {
 			c.append(choice.Delta.Content)
+			c.append(choice.Delta.Refusal)
+			if choice.FinishReason != "" {
+				c.finished = true
+			}
 		}
 	}
 }
@@ -173,10 +226,13 @@ func (c *Capture) append(s string) {
 // Text returns the assistant's reply, or "" when the response was not a
 // successful completion or the capture was abandoned.
 func (c *Capture) Text() string {
-	if c.overflow || c.status != http.StatusOK {
+	if c.overflow || c.failed || c.status != http.StatusOK {
 		return ""
 	}
 	if c.streaming {
+		if !c.terminal {
+			return ""
+		}
 		if c.completed != "" {
 			return c.completed
 		}
@@ -208,6 +264,7 @@ func (c *Capture) Text() string {
 
 func (c *Capture) Flush() {
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		c.start(http.StatusOK)
 		f.Flush()
 	}
 }

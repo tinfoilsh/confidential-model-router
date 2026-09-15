@@ -1,6 +1,8 @@
 package safeguards
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,14 +78,137 @@ func TestCapture_ResponsesSSE_PrefersCompleted(t *testing.T) {
 	}
 }
 
-func TestCapture_ResponsesSSE_DeltasWhenNoCompleted(t *testing.T) {
+func TestCapture_ResponsesSSE_RejectsIncompleteStream(t *testing.T) {
 	c := NewCapture(httptest.NewRecorder())
 	writeAll(t, c, "text/event-stream", 200,
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
 		"event: response.refusal.delta\ndata: {\"type\":\"response.refusal.delta\",\"delta\":\"b\"}\n\n",
 	)
-	if got := c.Text(); got != "ab" {
+	if got := c.Text(); got != "" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCapture_MediaType(t *testing.T) {
+	for _, contentType := range []string{"text/event-stream", "TEXT/EVENT-STREAM; charset=utf-8", "application/text/event-stream"} {
+		t.Run(contentType, func(t *testing.T) {
+			c := NewCapture(httptest.NewRecorder())
+			writeAll(t, c, contentType, http.StatusOK,
+				"data: {\"choices\":[{\"delta\":{\"content\":\"reply\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			want := "reply"
+			if contentType == "application/text/event-stream" {
+				want = ""
+			}
+			if got := c.Text(); got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCapture_InformationalHeaders(t *testing.T) {
+	captured := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := NewCapture(w)
+		c.WriteHeader(http.StatusEarlyHints)
+		c.WriteHeader(http.StatusContinue)
+		c.Header().Set("Content-Type", "application/json")
+		c.WriteHeader(http.StatusOK)
+		c.Write([]byte(`{"choices":[{"message":{"content":"reply"}}]}`))
+		captured <- c.Text()
+	}))
+	defer server.Close()
+	resp, err := server.Client().Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client received %d", resp.StatusCode)
+	}
+	if got := <-captured; got != "reply" {
+		t.Fatalf("informational status latched: %q", got)
+	}
+	c := NewCapture(httptest.NewRecorder())
+	c.WriteHeader(http.StatusSwitchingProtocols)
+	c.WriteHeader(http.StatusOK)
+	if c.status != http.StatusSwitchingProtocols {
+		t.Fatal("101 must remain terminal")
+	}
+}
+
+func TestCapture_FlushCommitsStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewCapture(rec)
+	c.Header().Set("Content-Type", "application/json")
+	c.Flush()
+	c.WriteHeader(http.StatusInternalServerError)
+	c.Write([]byte(`{"choices":[{"message":{"content":"reply"}}]}`))
+	if !rec.Flushed || rec.Code != http.StatusOK || c.Text() != "reply" {
+		t.Fatal("flush must commit the implicit 200 for both writer and capture")
+	}
+}
+
+type shortWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w shortWriter) Write(p []byte) (int, error) {
+	n, _ := w.ResponseRecorder.Write(p[:len(p)/2])
+	return n, w.err
+}
+
+func TestCapture_RecordsOnlyDeliveredBytes(t *testing.T) {
+	for _, writeErr := range []error{nil, io.ErrClosedPipe} {
+		c := NewCapture(shortWriter{httptest.NewRecorder(), writeErr})
+		payload := []byte(`{"choices":[{"message":{"content":"reply"}}]}`)
+		n, err := c.Write(payload)
+		if n != len(payload)/2 || err != writeErr || c.body.String() != string(payload[:n]) {
+			t.Fatal("capture must preserve write results and only record delivered bytes")
+		}
+		if c.Text() != "" {
+			t.Fatal("short or failed writes must not be submitted")
+		}
+	}
+}
+
+func TestCapture_ChatStreamCompletionAndRefusal(t *testing.T) {
+	const content = "data: {\"choices\":[{\"delta\":{\"refusal\":\"No.\"}}]}\n\n"
+	for _, tc := range []struct{ name, ending, want string }{
+		{"stop", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "No."},
+		{"length", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n", "No."},
+		{"truncated", "", ""},
+		{"done without finish", "data: [DONE]\n\n", ""},
+		{"error", "data: {\"error\":{\"message\":\"failed\"}}\n\ndata: [DONE]\n\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewCapture(httptest.NewRecorder())
+			writeAll(t, c, "text/event-stream", http.StatusOK, content, tc.ending)
+			if got := c.Text(); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCapture_CompletedSnapshotCannotExceedLimit(t *testing.T) {
+	frame, err := json.Marshal(map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{"output": []any{map[string]any{
+			"type": "message", "content": []any{map[string]any{"type": "output_text", "text": strings.Repeat("x", maxCaptureBytes+1)}},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := "data: " + string(frame) + "\n\n"
+	for _, chunks := range [][]string{{wire}, {wire[:len(wire)/2], wire[len(wire)/2:]}} {
+		c := NewCapture(httptest.NewRecorder())
+		rec := writeAll(t, c, "text/event-stream", http.StatusOK, chunks...)
+		if !c.overflow || c.Text() != "" || rec.Body.String() != wire {
+			t.Fatal("oversized snapshot must be skipped without changing the response")
+		}
 	}
 }
 

@@ -1,9 +1,11 @@
 package safeguards
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -51,7 +53,9 @@ func handle(t *testing.T, s *Submitter, path, auth, conversationID, reqBody, con
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	capture.SetMessages(RequestMessages(path, body))
+	if capture != nil {
+		capture.SetMessages(RequestMessages(path, body))
+	}
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(reply))
@@ -84,7 +88,7 @@ func TestObserve_SubmitsChatConversationWithReply(t *testing.T) {
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "hello"},
 	}}
-	if got.Credential != want.Credential || got.ConversationID != want.ConversationID || len(got.Messages) != 2 || got.Messages[1] != want.Messages[1] {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 }
@@ -97,7 +101,8 @@ func TestObserve_ResponsesStreaming(t *testing.T) {
 		`{"model":"m","instructions":"be brief","input":"question"}`,
 		"text/event-stream",
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ans\"}\n\n"+
-			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"wer\"}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"wer\"}\n\n"+
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n",
 	)
 	s.Close()
 
@@ -105,8 +110,52 @@ func TestObserve_ResponsesStreaming(t *testing.T) {
 		t.Fatalf("submissions = %d, want 1", len(sidecar.subs))
 	}
 	msgs := sidecar.subs[0].Messages
-	if len(msgs) != 3 || msgs[0].Role != "system" || msgs[1].Content != "question" || msgs[2] != (Message{Role: "assistant", Content: "answer"}) {
+	want := []Message{{Role: "system", Content: "be brief"}, {Role: "user", Content: "question"}, {Role: "assistant", Content: "answer"}}
+	if !reflect.DeepEqual(msgs, want) {
 		t.Fatalf("got %+v", msgs)
+	}
+}
+
+func TestObserve_SkipsEmptyHistory(t *testing.T) {
+	sidecar := newFakeSidecar(t)
+	s := NewSubmitter(sidecar.URL)
+	handle(t, s, "/v1/chat/completions", "Bearer chat-jwt", "chat-1",
+		`{"messages":[]}`, "application/json", `{"choices":[{"message":{"content":"reply"}}]}`)
+	s.Close()
+	if len(sidecar.subs) != 0 {
+		t.Fatal("empty history must not produce a submission")
+	}
+}
+
+func TestObserve_SkipsCanceledAndPanickingRequests(t *testing.T) {
+	for _, abort := range []string{"cancel", "panic"} {
+		t.Run(abort, func(t *testing.T) {
+			sidecar := newFakeSidecar(t)
+			s := NewSubmitter(sidecar.URL)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer chat-jwt")
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				w, capture, finish := s.Observe(httptest.NewRecorder(), req, isChatToken)
+				defer finish()
+				capture.SetMessages([]Message{{Role: "user", Content: "hi"}})
+				w.Write([]byte(`{"choices":[{"message":{"content":"reply"}}]}`))
+				if abort == "panic" {
+					panic(http.ErrAbortHandler)
+				}
+				cancel()
+			}()
+			s.Close()
+			if abort == "panic" && recovered != http.ErrAbortHandler {
+				t.Fatalf("panic was not preserved: %v", recovered)
+			}
+			if len(sidecar.subs) != 0 {
+				t.Fatal("aborted request must not produce a submission")
+			}
+		})
 	}
 }
 
