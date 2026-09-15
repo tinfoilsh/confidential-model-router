@@ -88,6 +88,113 @@ func TestChatStreamerPumpEmitsContentAndToolCalls(t *testing.T) {
 	}
 }
 
+// failAfterWriter is an http.ResponseWriter whose Write starts failing
+// after a fixed number of successful writes, simulating a client that
+// disconnects part-way through a streamed turn.
+type failAfterWriter struct {
+	*httptest.ResponseRecorder
+	okWrites int
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.okWrites <= 0 {
+		return 0, errors.New("client disconnected")
+	}
+	w.okWrites--
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestChatStreamerPumpFoldsUsageWhenClientDisconnectsMidTurn(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	// The role delta write succeeds; the first content write fails and
+	// latches writeErr, so the next loop iteration takes the early
+	// client-disconnect return before the turn reaches its end.
+	streamer.w = &failAfterWriter{ResponseRecorder: rec, okWrites: 1}
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":"partial"}}],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17}}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":" never seen"}}],"usage":{"prompt_tokens":10,"completion_tokens":9,"total_tokens":19}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	_, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err == nil {
+		t.Fatal("expected client write error to abort the turn")
+	}
+
+	usage := streamer.finalUsage()
+	if usage == nil {
+		t.Fatal("expected usage from the interrupted turn to be accumulated")
+	}
+	if usage["prompt_tokens"].(int) != 10 || usage["completion_tokens"].(int) != 7 {
+		t.Fatalf("unexpected accumulated usage: %#v", usage)
+	}
+}
+
+func TestChatStreamerPumpFoldsUsageOnMidStreamUpstreamError(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":"partial"}}],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17}}`,
+		`data: {"error":{"message":"context length exceeded","type":"invalid_request_error"}}`,
+		"",
+	}, "\n\n")
+
+	_, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)))
+	if err == nil {
+		t.Fatal("expected mid-stream upstream error to abort the turn")
+	}
+
+	usage := streamer.finalUsage()
+	if usage == nil {
+		t.Fatal("expected usage from the interrupted turn to be accumulated")
+	}
+	if usage["prompt_tokens"].(int) != 10 || usage["completion_tokens"].(int) != 7 {
+		t.Fatalf("unexpected accumulated usage: %#v", usage)
+	}
+}
+
+func TestChatStreamerPumpFoldsCompletedTurnUsageExactlyOnce(t *testing.T) {
+	streamer, _ := newTestChatStreamer(t)
+	// With continuous usage every chunk carries a cumulative snapshot;
+	// only the final snapshot must be folded, exactly once.
+	upstream := strings.Join([]string{
+		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{"content":"a"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}`,
+		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
+		t.Fatalf("pumpUpstream: %v", err)
+	}
+
+	usage := streamer.finalUsage()
+	if usage == nil {
+		t.Fatal("expected usage to be accumulated")
+	}
+	if usage["prompt_tokens"].(int) != 10 || usage["completion_tokens"].(int) != 2 || usage["total_tokens"].(int) != 12 {
+		t.Fatalf("expected only the final cumulative snapshot to be folded once, got %#v", usage)
+	}
+}
+
+func TestBuildChatStreamRequestEnablesContinuousUsage(t *testing.T) {
+	req, _ := buildChatStreamRequest(
+		map[string]any{"model": "m", "messages": []any{}}, nil, nil)
+	opts, _ := req["stream_options"].(map[string]any)
+	if opts == nil {
+		t.Fatal("stream request missing stream_options")
+	}
+	if opts["include_usage"] != true {
+		t.Error("stream_options missing include_usage")
+	}
+	if opts["continuous_usage_stats"] != true {
+		t.Error("stream_options missing continuous_usage_stats")
+	}
+}
+
 func TestChatStreamerPumpForwardsClientToolCallDeltasLive(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}
