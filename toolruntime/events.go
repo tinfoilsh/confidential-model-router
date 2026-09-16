@@ -353,7 +353,8 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 			"title": source.title,
 		}
 		if source.snippet != "" {
-			// TODO: Evaluate boilerplate removal or model summaries for saved-source compression.
+			// Full source text is forwarded as returned by the tool. If history
+			// budget becomes a concern, model summarization is the likely lever.
 			entry["snippet"] = source.snippet
 		}
 		encoded = append(encoded, entry)
