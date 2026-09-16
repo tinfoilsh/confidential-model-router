@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestMarkerSourceExcerptsAreBoundedAndPreserveURLs(t *testing.T) {
+func TestMarkerSourcesPreserveFullContentAndURLs(t *testing.T) {
 	const sourceCount = 10
-	text := strings.Repeat("🔎", maxSourceSnippetBytes)
+	const repetitions = 2000
+	text := "\n  " + strings.Repeat("Full source text 🔎. ", repetitions) + "Important conclusion at the end.\n"
 	var sources []toolCallSource
 	for range sourceCount {
 		sources = append(sources, toolCallSource{url: "https://example.com/page?q=exact#section", title: "Evidence", snippet: text})
@@ -24,16 +24,13 @@ func TestMarkerSourceExcerptsAreBoundedAndPreserveURLs(t *testing.T) {
 			t.Fatal("source URL was altered")
 		}
 		snippet, _ := source["snippet"].(string)
-		if !utf8.ValidString(snippet) || len(snippet) > maxSourceSnippetBytes {
-			t.Fatal("invalid or oversized excerpt")
-		}
-		if snippet != "" && !strings.HasSuffix(snippet, snippetTruncationNotice) {
-			t.Fatal("truncation must be explicit")
+		if snippet != text {
+			t.Fatal("source content was altered or truncated")
 		}
 		total += len(snippet)
 	}
-	if total == 0 || total > maxMarkerSnippetBytes || len(encoded) != sourceCount {
-		t.Fatalf("unexpected excerpt budget or source count: %d, %d", total, len(encoded))
+	if total != len(text)*sourceCount || len(encoded) != sourceCount {
+		t.Fatalf("source content or sources were dropped: %d, %d", total, len(encoded))
 	}
 	if _, err := json.Marshal(encoded); err != nil {
 		t.Fatal(err)
@@ -145,8 +142,5 @@ func TestMarkerWithoutExcerptsRemainsCompatible(t *testing.T) {
 	encoded := encodeMarkerSources([]toolCallSource{{url: "https://example.com", title: "Title"}})
 	if len(encoded) != 1 || len(encoded[0]) != 2 {
 		t.Fatalf("unexpected legacy source: %#v", encoded)
-	}
-	if got := boundedSourceSnippet("short excerpt", maxSourceSnippetBytes); got != "short excerpt" {
-		t.Fatal(got)
 	}
 }

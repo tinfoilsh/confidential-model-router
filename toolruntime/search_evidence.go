@@ -1,30 +1,6 @@
 package toolruntime
 
-import (
-	"strings"
-	"unicode/utf8"
-)
-
-const (
-	maxSourceSnippetBytes   = 1500
-	maxMarkerSnippetBytes   = 6000
-	snippetTruncationNotice = "\n[Excerpt truncated]"
-)
-
-func boundedSourceSnippet(text string, budget int) string {
-	limit := min(maxSourceSnippetBytes, budget)
-	if len(text) <= limit {
-		return text
-	}
-	if limit <= len(snippetTruncationNotice) {
-		return ""
-	}
-	end := limit - len(snippetTruncationNotice)
-	for end > 0 && !utf8.RuneStart(text[end]) {
-		end--
-	}
-	return text[:end] + snippetTruncationNotice
-}
+import "strings"
 
 func structuredFetchToolCallSources(name string, structured any) []toolCallSource {
 	if !isRouterFetchToolName(name) {
@@ -42,7 +18,7 @@ func structuredFetchToolCallSources(name string, structured any) []toolCallSourc
 		sources = append(sources, toolCallSource{
 			url:     url,
 			title:   "Fetched page",
-			snippet: strings.TrimSpace(stringValue(page["content"])),
+			snippet: stringValue(page["content"]),
 		})
 	}
 	return sources

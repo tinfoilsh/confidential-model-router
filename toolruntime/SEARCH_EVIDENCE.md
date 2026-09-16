@@ -5,28 +5,30 @@ Chat clients opting into `X-Tinfoil-Events: web_search` receive an optional
 and page-fetch markers. URLs and titles retain their existing format. A page
 fetch carries only sources matching that page's URL. Older clients can ignore
 the additional field; older responses without snippets remain valid.
-Older clients may discard excerpts when rewriting a synced chat; replay then
-falls back to the existing no-excerpt behavior until a new search runs.
+Older clients may discard source text when rewriting a synced chat; replay then
+falls back to the existing URL-only behavior until a new search runs.
 
-Excerpts come from tool output, not the model's answer. Each snippet is at most
-1,500 UTF-8 bytes, and each marker has at most 6,000 snippet bytes. Truncation
-is marked with `[Excerpt truncated]`. These are saved excerpts, not complete
-pages; the live model still receives the original tool output.
+The `snippet` field contains the full source content returned by the search or
+fetch tool, not a summary or the model's answer. The router and clients do not
+truncate it or select a subset of sources. Any limits already applied by the
+underlying search/fetch service still apply.
 
-Clients persist excerpts on search and fetch timeline entries. On subsequent
+Clients persist source text on search and fetch timeline entries. On subsequent
 turns they reconstruct paired assistant tool calls and tool-role results from
-completed actions with excerpts. They never reconstruct evidence from prose,
+completed actions with source text. They never reconstruct evidence from prose,
 citation annotations, failed actions, or URL-only legacy events. Request-local
 call IDs pair each replayed call with its result; the replay does not execute
 another search. Saved results contain exact source URLs and no generated
 Harmony cursor numbers, which are local to a single router request.
 
-Each assistant turn's replay is limited to 12,000 serialized UTF-16 code units,
-with up to eight sources per action and 1,500 code units per excerpt. Recent
-actions take precedence when the limit is reached. Replay is included in each
-client's history-token estimate so archiving drops an entire assistant turn
+Actions and sources retain their original order. Replay is included in each
+client's existing history-token estimate so archiving drops an entire assistant turn
 and its paired evidence together. Source content remains tool-role data, never
 a system instruction.
+
+Full source text can consume the history budget sooner. Source compression,
+such as boilerplate removal or model summaries, is a future optimization rather
+than part of this change.
 
 This change does not enforce search on every answer, add live tool-loop
 compaction, or prove that a model's claims follow from its citations. Live-model

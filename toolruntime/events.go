@@ -183,7 +183,7 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 		sources = append(sources, toolCallSource{
 			url:           url,
 			title:         strings.TrimSpace(stringValue(result["title"])),
-			snippet:       strings.TrimSpace(stringValue(result["content"])),
+			snippet:       stringValue(result["content"]),
 			publishedDate: strings.TrimSpace(stringValue(result["published_date"])),
 			author:        strings.TrimSpace(stringValue(result["author"])),
 		})
@@ -344,7 +344,6 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 		return nil
 	}
 	encoded := make([]map[string]any, 0, len(sources))
-	snippetBudget := maxMarkerSnippetBytes
 	for _, source := range sources {
 		if source.url == "" {
 			continue
@@ -353,9 +352,9 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 			"url":   source.url,
 			"title": source.title,
 		}
-		if snippet := boundedSourceSnippet(source.snippet, snippetBudget); snippet != "" {
-			entry["snippet"] = snippet
-			snippetBudget -= len(snippet)
+		if source.snippet != "" {
+			// TODO: Evaluate boilerplate removal or model summaries for saved-source compression.
+			entry["snippet"] = source.snippet
 		}
 		encoded = append(encoded, entry)
 	}
