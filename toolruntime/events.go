@@ -183,7 +183,7 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 		sources = append(sources, toolCallSource{
 			url:           url,
 			title:         strings.TrimSpace(stringValue(result["title"])),
-			snippet:       strings.TrimSpace(stringValue(result["content"])),
+			snippet:       stringValue(result["content"]),
 			publishedDate: strings.TrimSpace(stringValue(result["published_date"])),
 			author:        strings.TrimSpace(stringValue(result["author"])),
 		})
@@ -196,6 +196,9 @@ func structuredSearchToolCallSources(name string, structured any) []toolCallSour
 
 func toolCallSourcesForResult(name string, structured any, output string) []toolCallSource {
 	if sources := structuredSearchToolCallSources(name, structured); len(sources) > 0 {
+		return sources
+	}
+	if sources := structuredFetchToolCallSources(name, structured); len(sources) > 0 {
 		return sources
 	}
 	return toolOutputSourcesToToolCallSources(citations.ExtractToolOutputSources(output))
@@ -345,10 +348,16 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 		if source.url == "" {
 			continue
 		}
-		encoded = append(encoded, map[string]any{
+		entry := map[string]any{
 			"url":   source.url,
 			"title": source.title,
-		})
+		}
+		if source.snippet != "" {
+			// Full source text is forwarded as returned by the tool. If history
+			// budget becomes a concern, model summarization is the likely lever.
+			entry["snippet"] = source.snippet
+		}
+		encoded = append(encoded, entry)
 	}
 	if len(encoded) == 0 {
 		return nil
@@ -392,7 +401,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			}
 			for _, url := range urls {
 				action := map[string]any{"type": "open_page", "url": url}
-				writePair(action, status(record), record.errorReason, nil)
+				writePair(action, status(record), record.errorReason, sourcesForURL(record.resultSources, url))
 			}
 		}
 	}
