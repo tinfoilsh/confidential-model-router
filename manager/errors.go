@@ -11,9 +11,10 @@ import (
 // they classify upstream ones. See
 // https://platform.openai.com/docs/guides/error-codes
 const (
-	ErrTypeInvalidRequest = "invalid_request_error"
-	ErrTypeRateLimit      = "rate_limit_error"
-	ErrTypeServer         = "server_error"
+	ErrTypeInvalidRequest     = "invalid_request_error"
+	ErrTypeRateLimit          = "rate_limit_error"
+	ErrTypeServiceUnavailable = "service_unavailable_error"
+	ErrTypeServer             = "server_error"
 )
 
 // Machine-readable error codes carried in the `code` field of API error
@@ -25,7 +26,9 @@ const (
 	ErrCodeMethodNotAllowed   = "method_not_allowed"
 	ErrCodeModelNotFound      = "model_not_found"
 	ErrCodeModelMismatch      = "model_mismatch"
+	ErrCodeModelUnavailable   = "model_unavailable"
 	ErrCodeRateLimitExceeded  = "rate_limit_exceeded"
+	ErrCodeServerOverloaded   = "server_is_overloaded"
 	ErrCodeUpstreamError      = "upstream_error"
 	ErrCodeDocumentProcessing = "document_processing_failed"
 )
@@ -35,6 +38,8 @@ const (
 const (
 	ErrMsgServerError      = "The server had an error while processing your request."
 	ErrMsgModelNotFound    = "The model '%s' does not exist or you do not have access to it."
+	ErrMsgModelUnavailable = "The model '%s' is temporarily unavailable. Please try again later."
+	ErrMsgOverloaded       = "The model '%s' is currently overloaded. Retry after %d seconds."
 	ErrMsgRateLimited      = "Rate limit reached for requests. Retry after %d seconds."
 	ErrMsgBodyTooLarge     = "Request body is too large."
 	ErrMsgInvalidJSON      = "Invalid request body: %v."
@@ -89,6 +94,16 @@ var (
 		Type:    ErrTypeServer,
 		Code:    ErrCodeUpstreamError,
 		Message: ErrMsgServerError,
+	}
+	ErrServerOverloaded = APIError{
+		Status: http.StatusServiceUnavailable,
+		Type:   ErrTypeServiceUnavailable,
+		Code:   ErrCodeServerOverloaded,
+	}
+	ErrModelUnavailable = APIError{
+		Status: http.StatusServiceUnavailable,
+		Type:   ErrTypeServiceUnavailable,
+		Code:   ErrCodeModelUnavailable,
 	}
 	ErrModelNotFound = APIError{
 		Status: http.StatusNotFound,

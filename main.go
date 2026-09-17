@@ -39,6 +39,17 @@ var version = "dev"
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
 
+// Retry-After hints, in seconds, for capacity rejections.
+const (
+	// modelUnavailableRetryAfterSeconds is sent when no enclave is serving
+	// the model at all. Recovery depends on attestation or breaker timing,
+	// so this is a floor for clients that honor the header.
+	modelUnavailableRetryAfterSeconds = 30
+	// defaultOverloadRetryAfterSeconds is used when the backend's queue
+	// depth does not yield a retry estimate.
+	defaultOverloadRetryAfterSeconds = 60
+)
+
 // rateLimitIdentity returns the identity used to key rate limiting. For OAuth
 // JWT access tokens it is the token's `sub` claim, so a user's bucket stays
 // stable across the short-lived token's ~15m refreshes (and across multiple
@@ -194,12 +205,6 @@ func writeError(w http.ResponseWriter, e *manager.APIError) {
 		log.Debugf("api error: %s", e.Message)
 	}
 	manager.WriteAPIError(w, e)
-}
-
-// jsonError writes an ad-hoc error with the given message, type, and status.
-// Prefer writeError with a predeclared manager.APIError.
-func jsonError(w http.ResponseWriter, message string, errType string, code int) {
-	writeError(w, &manager.APIError{Status: code, Type: errType, Message: message})
 }
 
 func sendJSON(w http.ResponseWriter, data any) {
@@ -845,7 +850,7 @@ func main() {
 							"model":               rateLimitModel,
 							"retry_after_seconds": secs,
 						}).Warn("rejecting request over hard per-key rate limit")
-						jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+						writeError(w, manager.ErrRateLimited.WithMessage(manager.ErrMsgRateLimited, secs))
 						return
 					}
 					if soft := rlCfg.MaxRequestsPerMinute; soft > 0 && count >= soft {
@@ -1022,11 +1027,8 @@ func main() {
 			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
 		if enclave == nil {
-			writeError(w, &manager.APIError{
-				Status:  http.StatusServiceUnavailable,
-				Type:    manager.ErrTypeServer,
-				Message: "The engine is currently overloaded, please try again later.",
-			})
+			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
+			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
 			return
 		}
 
@@ -1053,7 +1055,7 @@ func main() {
 		if overloaded {
 			secs := int(retryAfter.Seconds())
 			if secs <= 0 {
-				secs = 60
+				secs = defaultOverloadRetryAfterSeconds
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 			fields := log.Fields{
@@ -1075,7 +1077,7 @@ func main() {
 			manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
 			manager.RetryAfterSeconds.WithLabelValues(modelName).Observe(float64(secs))
 
-			jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+			writeError(w, manager.ErrServerOverloaded.WithMessage(manager.ErrMsgOverloaded, modelName, secs))
 			return
 		}
 
