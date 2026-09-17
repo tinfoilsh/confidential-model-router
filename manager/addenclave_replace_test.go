@@ -14,15 +14,17 @@ func pollingActive(m *enclaveMetrics) bool {
 	return m.cancel != nil
 }
 
-// A failed fingerprint probe must not replace a registered enclave. Before
-// this was enforced, every transient probe error re-attested the host and
-// installed a fresh Enclave over the old one, leaking the old poller.
-func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
+// A transient attestation fetch failure preserves the still-valid enclave
+// and its poller, but must report the error and must not extend validity.
+func TestAddEnclaveFetchFailureKeepsExistingEnclave(t *testing.T) {
 	shortVerifyTimeout(t, 500*time.Millisecond)
 	addr := blackholeListener(t)
 
 	existing := newTestEnclave(addr)
 	existing.tlsKeyFP = "previous-fingerprint"
+	existing.nextAttestationAt = time.Now().Add(-time.Minute)
+	deadline := existing.verification.Load().FreshnessExpiresAt
+	scheduled := existing.nextAttestationAt
 	existing.metrics.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1})
 	t.Cleanup(existing.shutdown)
 
@@ -30,14 +32,17 @@ func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
 	em := &EnclaveManager{models: &sync.Map{}}
 	em.models.Store("test-model", model)
 
-	if err := em.addEnclave("test-model", addr, nil); err != nil {
-		t.Fatalf("expected the existing enclave to be kept, got error: %v", err)
+	if err := em.addEnclave("test-model", addr); err == nil {
+		t.Fatal("expected the attestation fetch failure to be reported")
 	}
 	model.mu.RLock()
 	got := model.Enclaves[addr]
 	model.mu.RUnlock()
 	if got != existing {
-		t.Fatal("enclave was replaced after a failed fingerprint probe")
+		t.Fatal("enclave was replaced after a failed attestation fetch")
+	}
+	if !got.verification.Load().FreshnessExpiresAt.Equal(deadline) || !got.nextAttestationAt.Equal(scheduled) {
+		t.Fatal("failed attestation fetch changed freshness deadline or postponed reattestation")
 	}
 	if !pollingActive(existing.metrics) {
 		t.Fatal("existing enclave's poller was stopped")

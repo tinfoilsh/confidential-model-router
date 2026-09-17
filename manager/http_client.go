@@ -10,8 +10,6 @@ import (
 	"os"
 	"sync/atomic"
 
-	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
-
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 )
 
@@ -53,9 +51,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 	// reverse proxy path.
 	client := &http.Client{
 		Transport: &slowHeaderTripper{
-			base: &tinfoilClient.TLSBoundRoundTripper{
-				ExpectedPublicKey: enclave.tlsKeyFP,
-			},
+			base:    enclave.attestedTransport(),
 			timeout: responseHeaderTimeout,
 			onSlow: func() {
 				SlowHeadersTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()

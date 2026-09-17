@@ -2,24 +2,20 @@ package manager
 
 import (
 	"context"
-	"crypto/tls"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
-	"github.com/tinfoilsh/tinfoil-go/verifier/github"
-	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
+	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
+	"github.com/tinfoilsh/tinfoil-go/verifier/measurement"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
@@ -33,7 +29,7 @@ type Enclave struct {
 	modelName string
 	tlsKeyFP  string
 	hpkeKey   string
-	predicate attestation.PredicateType
+	predicate measurement.PredicateType
 	proxy     *httputil.ReverseProxy
 	metrics   *enclaveMetrics
 	cb        *circuitBreaker
@@ -42,23 +38,25 @@ type Enclave struct {
 	// inflight counts requests currently proxied through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
 	// to sampleStalenessLimit stale when scrapes fail.
-	inflight atomic.Int64
+	inflight     atomic.Int64
+	verification atomic.Pointer[tinfoilClient.VerifiedDocumentV3]
+	// Protected by the owning model's mu; only used by the refresh worker.
+	nextAttestationAt time.Time
 }
 
 type Model struct {
-	Repo              string                   `json:"repo"`
-	Tag               string                   `json:"tag"`
-	SourceMeasurement *attestation.Measurement `json:"measurement"`
-	Enclaves          map[string]*Enclave      `json:"enclaves"`
-	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
-	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
-	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
+	Repo       string                   `json:"repo"`
+	Enclaves   map[string]*Enclave      `json:"enclaves"`
+	Overload   *config.OverloadConfig   `json:"overload,omitempty"`
+	RateLimit  *config.RateLimitConfig  `json:"rate_limit,omitempty"`
+	CacheRoute *config.CacheRouteConfig `json:"cache_route,omitempty"`
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
 	// exposed there.
 	Reservations []config.ReservationConfig `json:"-"`
 
-	expectedHosts int // number of configured hostnames; 0 means no backends expected
+	hostnames     []string // latest configured targets, including unverified hosts
+	expectedHosts int      // number of configured hostnames; 0 means no backends expected
 
 	// Derived from Reservations (see applyReservations); replaced wholesale
 	// and never mutated after publish, so safe to return under RLock.
@@ -160,7 +158,8 @@ type EnclaveManager struct {
 	initConfigURL             string
 	updateConfigURL           string
 	controlPlaneURL           string
-	sigstoreClient            *sigstore.Client
+	verifyEnclave             func(host, repo string) (*tinfoilClient.VerifiedDocumentV3, error)
+	probeTLSKey               func(host string) (string, error)
 	billingCollector          *billing.Collector
 	unknownModelReporter      *billing.UnknownModelReporter
 	usageContextSecret        string
@@ -244,128 +243,6 @@ func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimit
 	return model.RateLimit
 }
 
-// Bound network steps of enclave verification. Var for tests
-var enclaveVerifyTimeout = 10 * time.Second
-
-// attestation.TLSPublicKey, but dial & handshake are bounded w/ a timeout.
-func tlsPublicKeyFP(host string) (string, error) {
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: enclaveVerifyTimeout}, "tcp", host+":443", &tls.Config{})
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	return attestation.ConnectionCertFP(conn.ConnectionState())
-}
-
-// attestationFetch retrieves the attestation document from a given enclave hostname.
-// This is a local implementation that disables HTTP connection pooling to prevent
-// certificate validation errors when multiple hostnames (e.g., router.inf4.tinfoil.sh
-// and large.inf4.tinfoil.sh) resolve to the same IP address (127.0.0.1:443).
-// Without DisableKeepAlives, Go's HTTP/2 client reuses connections, causing SNI mismatches.
-func attestationFetch(host string) (*attestation.Document, error) {
-	var u url.URL
-	u.Host = host
-	u.Scheme = "https"
-	u.Path = "/.well-known/tinfoil-attestation"
-
-	httpClient := &http.Client{
-		Timeout: enclaveVerifyTimeout,
-		Transport: &http.Transport{
-			DisableKeepAlives: true, // Prevents connection reuse across different hostnames
-		},
-	}
-	resp, err := httpClient.Get(u.String())
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var doc attestation.Document
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, err
-	}
-	return &doc, nil
-}
-
-// addEnclave verifies and adds an enclave to the model enclave pool.
-// If the enclave already exists, replace it if the TLS key fingerprint is different.
-func (em *EnclaveManager) addEnclave(
-	modelName, host string,
-	hwMeasurements []*attestation.HardwareMeasurement,
-) error {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return fmt.Errorf("model %s not found", modelName)
-	}
-
-	// If the enclave already exists and the TLS key fingerprint is the same, do nothing
-	// Take read lock only for this short check, don't hold it during network I/O below
-	model.mu.RLock()
-	currentEnclave, exists := model.Enclaves[host]
-	var currentFP string
-	if exists {
-		currentFP = currentEnclave.tlsKeyFP
-	}
-	model.mu.RUnlock()
-	if exists {
-		realTLSKeyFP, err := tlsPublicKeyFP(host)
-		if err != nil {
-			// A failed probe says nothing about the key. Keep the enclave we
-			// have: the circuit breaker already handles a backend that is
-			// actually down, and re-attesting here would replace a live
-			// enclave on every transient network error.
-			return nil
-		}
-		if currentFP == realTLSKeyFP {
-			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
-			return nil
-		}
-	}
-
-	remoteAttestation, err := attestationFetch(host)
-	if err != nil {
-		return fmt.Errorf("failed to fetch remote attestation: %v", err)
-	}
-	verification, err := remoteAttestation.Verify()
-	if err != nil {
-		return fmt.Errorf("failed to verify remote attestation: %v", err)
-	}
-	if verification.Measurement.Type == attestation.TdxGuestV2 {
-		_, err = attestation.VerifyHardware(hwMeasurements, verification.Measurement)
-		if err != nil {
-			return fmt.Errorf("failed to verify hardware measurements: %v", err)
-		}
-	}
-
-	model.mu.Lock()
-	defer model.mu.Unlock()
-
-	// Validate that the enclave's attested measurement matches the model's source measurement
-	// SECURITY: This check is critical - it ensures the enclave runs the expected code
-	if model.SourceMeasurement == nil {
-		return fmt.Errorf("cannot add enclave %s: source measurement not available", host)
-	}
-	if err := verification.Measurement.Equals(model.SourceMeasurement); err != nil {
-		return fmt.Errorf("measurement mismatch for enclave %s: %v", host, err)
-	}
-
-	cb := newCircuitBreaker()
-	model.installEnclaveLocked(host, &Enclave{
-		host:      host,
-		modelName: modelName,
-		predicate: verification.Measurement.Type,
-		tlsKeyFP:  verification.TLSPublicKeyFP,
-		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
-		metrics:   newEnclaveMetrics(host, modelName),
-		cb:        cb,
-		pricing:   em.ModelPricing,
-	})
-	model.Enclaves[host].updateOverloadConfig(model.Overload)
-	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
-	return nil
-}
-
 // installEnclaveLocked puts e in the pool under host, retiring any enclave
 // already registered there. A replacement happens when the host's TLS key
 // changed (the enclave restarted); the previous entry's metrics poller and
@@ -431,13 +308,14 @@ func (em *EnclaveManager) PrometheusTargets() []PrometheusTargetGroup {
 		model.mu.RLock()
 		defer model.mu.RUnlock()
 
-		if len(model.Enclaves) == 0 {
-			return true
-		}
-
 		targets := make([]string, 0, len(model.Enclaves))
-		for host := range model.Enclaves {
-			targets = append(targets, host)
+		for host, enclave := range model.Enclaves {
+			if enclave.attestationValid() {
+				targets = append(targets, host)
+			}
+		}
+		if len(targets) == 0 {
+			return true
 		}
 
 		targetGroups = append(targetGroups, PrometheusTargetGroup{
@@ -506,7 +384,7 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool, allowed map[
 	all := make([]*Enclave, 0, len(m.Enclaves))
 	var closed, preferred []*Enclave
 	for _, enclave := range m.Enclaves {
-		if allowed != nil && !allowed[enclave.host] {
+		if !enclave.attestationValid() || (allowed != nil && !allowed[enclave.host]) {
 			continue
 		}
 		all = append(all, enclave)
@@ -558,7 +436,7 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 	if claimProbes {
 		m.mu.RLock()
 		for _, enclave := range m.Enclaves {
-			if allowed != nil && !allowed[enclave.host] {
+			if !enclave.attestationValid() || (allowed != nil && !allowed[enclave.host]) {
 				continue
 			}
 			if enclave.cb != nil && !enclave.cb.Closed() {
@@ -576,7 +454,7 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 			continue
 		}
 		enclave := m.Enclaves[host]
-		if enclave == nil || skip[host] {
+		if enclave == nil || !enclave.attestationValid() || skip[host] {
 			continue
 		}
 		if enclave.cb != nil && !enclave.cb.Closed() {
@@ -751,18 +629,16 @@ func (m *Model) CacheRoutePoolIn(allowed map[string]bool) cacheroute.Pool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Size comes from the config, not the live enclave map: during a
-	// release the map is cleared and re-attested one host at a time, and a
-	// multi-replica pool must not reclassify as pool_too_small (skipping
-	// warmth tracking) for that window. A restricted pool's size is the
-	// configured size of that pool for the same reason.
+	// Size comes from the config, not the verified endpoint set: temporarily
+	// unavailable attestations must not reclassify a multi-replica pool as
+	// pool_too_small. A restricted pool uses its configured size too.
 	size := m.expectedHosts
 	if allowed != nil {
 		size = len(allowed)
 	}
 	pool := cacheroute.Pool{Size: size}
 	for _, enclave := range m.Enclaves {
-		if allowed != nil && !allowed[enclave.host] {
+		if !enclave.attestationValid() || (allowed != nil && !allowed[enclave.host]) {
 			continue
 		}
 		if enclave.cb != nil && !enclave.cb.Closed() {
@@ -775,7 +651,7 @@ func (m *Model) CacheRoutePoolIn(allowed map[string]bool) cacheroute.Pool {
 	}
 	if len(pool.Candidates) == 0 {
 		for _, enclave := range m.Enclaves {
-			if allowed != nil && !allowed[enclave.host] {
+			if !enclave.attestationValid() || (allowed != nil && !allowed[enclave.host]) {
 				continue
 			}
 			pool.Candidates = append(pool.Candidates, cacheroute.Candidate{
@@ -801,7 +677,7 @@ func (m *Model) HasHealthyEnclave() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, enclave := range m.Enclaves {
-		if enclave.cb == nil || enclave.cb.Closed() {
+		if enclave.attestationValid() && (enclave.cb == nil || enclave.cb.Closed()) {
 			return true
 		}
 	}
@@ -819,6 +695,10 @@ func (e *Enclave) breakerClosed() bool {
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !e.attestationValid() {
+		http.Error(w, "enclave attestation is unavailable or expired", http.StatusServiceUnavailable)
+		return
+	}
 	e.inflight.Add(1)
 	BackendInflight.WithLabelValues(e.modelName, e.host).Inc()
 	defer func() {
@@ -860,25 +740,54 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Enclave) MarshalJSON() ([]byte, error) {
-	fields := map[string]string{
+	fields := map[string]any{
 		"predicate":  string(e.predicate),
 		"tls_key_fp": e.tlsKeyFP,
 	}
 	if e.hpkeKey != "" {
 		fields["hpke_key"] = e.hpkeKey
 	}
+	if verified := e.verification.Load(); verified != nil {
+		fields["tag"] = verified.CodeTag
+		fields["digest"] = verified.CodeDigest
+		fields["measurement"] = verified.CodeMeasurement
+		fields["freshness_expires_at"] = verified.FreshnessExpiresAt
+	}
+	fields["attestation_valid"] = e.attestationValid()
 	return json.Marshal(fields)
 }
 
+// UnmarshalJSON reads discovery metadata only; it never restores verification.
 func (e *Enclave) UnmarshalJSON(data []byte) error {
-	var m map[string]string
-	if err := json.Unmarshal(data, &m); err != nil {
+	var status struct {
+		Predicate measurement.PredicateType `json:"predicate"`
+		TLSKeyFP  string                    `json:"tls_key_fp"`
+		HPKEKey   string                    `json:"hpke_key"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
 		return err
 	}
-	e.predicate = attestation.PredicateType(m["predicate"])
-	e.tlsKeyFP = m["tls_key_fp"]
-	e.hpkeKey = m["hpke_key"]
+	e.predicate, e.tlsKeyFP, e.hpkeKey = status.Predicate, status.TLSKeyFP, status.HPKEKey
+	e.verification.Store(nil)
 	return nil
+}
+
+func (m *Model) MarshalJSON() ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	type modelJSON Model
+	eligible := make(map[string]*Enclave)
+	for host, enclave := range m.Enclaves {
+		if enclave.attestationValid() {
+			eligible[host] = enclave
+		}
+	}
+	// Discovery consumers must not receive expired endpoints, including older
+	// clients that do not understand the per-endpoint freshness deadline.
+	return json.Marshal(struct {
+		*modelJSON
+		Enclaves map[string]*Enclave `json:"enclaves"`
+	}{(*modelJSON)(m), eligible})
 }
 
 func (e *Enclave) String() string {
@@ -905,17 +814,11 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
-	sigstoreClient, err := sigstore.NewClient()
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch trust root: %v", err)
-	}
-
 	em := &EnclaveManager{
 		models:                    &sync.Map{},
 		initConfigURL:             initConfigURL,
 		updateConfigURL:           updateConfigURL,
 		controlPlaneURL:           controlPlaneURL,
-		sigstoreClient:            sigstoreClient,
 		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		unknownModelReporter:      billing.NewUnknownModelReporter(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret:        usageContextSecret,
@@ -938,14 +841,13 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 
 func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	model := &Model{
-		Repo:              modelConfig.Repo,
-		Tag:               "",
-		SourceMeasurement: nil,
-		Enclaves:          make(map[string]*Enclave),
-		Overload:          modelConfig.Overload,
-		RateLimit:         modelConfig.RateLimit,
-		CacheRoute:        modelConfig.CacheRoute,
-		expectedHosts:     len(modelConfig.Hostnames),
+		Repo:          modelConfig.Repo,
+		Enclaves:      make(map[string]*Enclave),
+		Overload:      modelConfig.Overload,
+		RateLimit:     modelConfig.RateLimit,
+		CacheRoute:    modelConfig.CacheRoute,
+		expectedHosts: len(modelConfig.Hostnames),
+		hostnames:     slices.Clone(modelConfig.Hostnames),
 	}
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
 	em.models.Store(modelName, model)
@@ -953,52 +855,17 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }
 
-// updateModelMeasurements checks if there's a new tag, and if so, updates the model's tag and measurement
-func (em *EnclaveManager) updateModelMeasurements(modelName string) (bool, error) {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return false, fmt.Errorf("model %s not found", modelName)
-	}
-
-	log.Tracef("updating model measurements for %s", modelName)
-
-	latestTag, err := github.FetchLatestTag(model.Repo)
-	if err != nil {
-		return false, fmt.Errorf("failed to fetch latest tag: %v", err)
-	}
-
-	if model.Tag == latestTag {
-		return false, nil
-	}
-
-	digest, err := github.FetchDigest(model.Repo, latestTag)
-	if err != nil {
-		return false, fmt.Errorf("failed to fetch latest release for %s@%s: %v", model.Repo, latestTag, err)
-	}
-	sigstoreBundle, err := github.FetchAttestationBundle(model.Repo, digest)
-	if err != nil {
-		return false, fmt.Errorf("failed to fetch attestation bundle: %v", err)
-	}
-	measurement, err := em.sigstoreClient.VerifyAttestation(sigstoreBundle, model.Repo, digest)
-	if err != nil {
-		return false, fmt.Errorf("failed to verify attestation: %v", err)
-	}
-
-	model.mu.Lock()
-	defer model.mu.Unlock()
-
-	model.Tag = latestTag
-	model.SourceMeasurement = measurement
-	for _, enclave := range model.Enclaves {
-		enclave.shutdown()
-	}
-	model.Enclaves = make(map[string]*Enclave) // Clear all enclaves, their measurements are now invalid
-
-	return true, nil
-}
-
-// sync updates all model's tags and measurements, then matches them to the enclave config
-func (em *EnclaveManager) sync() error {
+// sync updates configuration and always checks the last known targets,
+// including when the configuration fetch fails.
+func (em *EnclaveManager) sync() (syncErr error) {
+	defer func() {
+		em.refreshAttestations()
+		if syncErr == nil {
+			em.stateMu.Lock()
+			em.lastSuccessfulUpdate = time.Now()
+			em.stateMu.Unlock()
+		}
+	}()
 	log.Debug("Updating all models")
 	em.stateMu.Lock()
 	em.lastAttemptedUpdate = time.Now()
@@ -1010,12 +877,6 @@ func (em *EnclaveManager) sync() error {
 	}
 
 	em.refreshModelMetadata()
-
-	// Fetch hardware measurements
-	hwMeasurements, err := em.sigstoreClient.LatestHardwareMeasurements()
-	if err != nil {
-		return fmt.Errorf("failed to fetch hardware measurements: %v", err)
-	}
 
 	var wg sync.WaitGroup
 	em.models.Range(func(key, value any) bool {
@@ -1030,6 +891,7 @@ func (em *EnclaveManager) sync() error {
 				log.Warnf("model %s no longer in config", modelName)
 				model.mu.Lock()
 				model.expectedHosts = 0
+				model.hostnames = nil
 				model.applyReservations(modelName, nil, nil)
 				for _, enclave := range model.Enclaves {
 					enclave.shutdown()
@@ -1046,14 +908,10 @@ func (em *EnclaveManager) sync() error {
 				return
 			}
 
-			_, err := em.updateModelMeasurements(modelName)
-			if err != nil {
-				log.Errorf("failed to update model measurements for %s: %v", modelName, err)
-			}
-
 			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()
 			model.expectedHosts = len(configModel.Hostnames)
+			model.hostnames = slices.Clone(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
@@ -1078,24 +936,10 @@ func (em *EnclaveManager) sync() error {
 			}
 			model.mu.Unlock()
 
-			// Add new enclave from the config and update attestation if needed
-			for _, host := range hostnames {
-				log.Tracef("  + host %s", host)
-				if err := em.addEnclave(modelName, host, hwMeasurements); err != nil {
-					em.stateMu.Lock()
-					em.errors = append(em.errors, err.Error())
-					em.stateMu.Unlock()
-					log.Errorf("failed to add enclave %s for model %s: %v", host, modelName, err)
-				}
-			}
 		}()
 		return true
 	})
 	wg.Wait()
-
-	em.stateMu.Lock()
-	em.lastSuccessfulUpdate = time.Now()
-	em.stateMu.Unlock()
 
 	return nil
 }
@@ -1136,6 +980,7 @@ func (e *Enclave) shutdown() {
 	if e == nil {
 		return
 	}
+	e.verification.Store(nil)
 	if e.metrics != nil {
 		e.metrics.shutdown()
 	}

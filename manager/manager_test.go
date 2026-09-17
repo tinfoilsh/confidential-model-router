@@ -18,11 +18,13 @@ import (
 )
 
 func newTestEnclave(host string) *Enclave {
-	return &Enclave{
+	enclave := &Enclave{
 		host:    host,
 		cb:      newCircuitBreaker(),
 		metrics: newEnclaveMetrics(host, "test-model"),
 	}
+	setTestAttestation(enclave, time.Now().Add(time.Hour))
+	return enclave
 }
 
 func newTestModel(hosts ...string) *Model {

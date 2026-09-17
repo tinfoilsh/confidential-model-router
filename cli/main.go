@@ -6,10 +6,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 var (
@@ -26,9 +26,16 @@ var (
 	}
 )
 
+// ProxyResponse projects the discovery fields used by the human-readable list.
+// It is not a verification result and is never used to authorize an endpoint.
 type ProxyResponse struct {
-	Models map[string]*manager.Model `json:"models"`
-	Errors []string                  `json:"errors"`
+	Models map[string]struct {
+		Repo     string `json:"repo"`
+		Enclaves map[string]struct {
+			Tag string `json:"tag"`
+		} `json:"enclaves"`
+	} `json:"models"`
+	Errors []string `json:"errors"`
 }
 
 func listModels() (*ProxyResponse, error) {
@@ -84,31 +91,25 @@ func init() {
 
 			// Create a new tabwriter for formatted output
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "MODEL\tREPOSITORY\tTAG\tENCLAVES")
-
-			for name, model := range response.Models {
-				enclaves := "-"
-				if len(model.Enclaves) > 0 {
-					enclaveHosts := make([]string, 0, len(model.Enclaves))
-					for host := range model.Enclaves {
-						enclaveHosts = append(enclaveHosts, host)
-					}
-					if len(enclaveHosts) > 0 {
-						enclaves = ""
-						for i, host := range enclaveHosts {
-							if i > 0 {
-								enclaves += ", "
-							}
-							enclaves += host
-						}
-					}
+			fmt.Fprintln(w, "MODEL\tREPOSITORY\tTAG\tENCLAVE")
+			names := make([]string, 0, len(response.Models))
+			for name := range response.Models {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			for _, name := range names {
+				model := response.Models[name]
+				hosts := make([]string, 0, len(model.Enclaves))
+				for host := range model.Enclaves {
+					hosts = append(hosts, host)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-					name,
-					model.Repo,
-					model.Tag,
-					enclaves,
-				)
+				slices.Sort(hosts)
+				if len(hosts) == 0 {
+					fmt.Fprintf(w, "%s\t%s\t-\t-\n", name, model.Repo)
+				}
+				for _, host := range hosts {
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, model.Repo, model.Enclaves[host].Tag, host)
+				}
 			}
 			w.Flush()
 		},

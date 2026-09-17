@@ -161,6 +161,7 @@ func TestProxyUsageMetrics_IncludesRequestPriceInTrailerWithoutUsage(t *testing.
 	req.Header.Set(UsageMetricsRequestHeader, "true")
 	rec := httptest.NewRecorder()
 
+	setTestAttestation(enclave, time.Now().Add(time.Hour))
 	enclave.ServeHTTP(rec, req)
 
 	got := rec.Header().Get(UsageMetricsResponseHeader)
