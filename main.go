@@ -95,7 +95,7 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if r.ContentLength > maxRequestBodySize {
-		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		writeError(w, &manager.ErrBodyTooLarge)
 		return false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
@@ -105,10 +105,16 @@ func limitRequestBody(w http.ResponseWriter, r *http.Request) bool {
 func writeRequestBodyError(w http.ResponseWriter, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		jsonError(w, manager.ErrMsgBodyTooLarge, manager.ErrTypeInvalidRequest, http.StatusRequestEntityTooLarge)
+		writeError(w, &manager.ErrBodyTooLarge)
 		return
 	}
-	jsonError(w, fmt.Sprintf("Could not read request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+	writeError(w, manager.ErrBodyReadFailed.WithMessage("Could not read request body: %v.", err))
+}
+
+// invalidJSONError builds the error for a request body that failed JSON
+// decoding.
+func invalidJSONError(err error) *manager.APIError {
+	return manager.ErrInvalidJSON.WithMessage(manager.ErrMsgInvalidJSON, err)
 }
 
 // getEnvOrDefault returns the environment variable value if set, otherwise returns the default
@@ -176,30 +182,30 @@ var (
 	safeguardsURL = flag.String("safeguards-url", getEnvOrDefault("SAFEGUARDS_URL", ""), "safeguards sidecar base URL (env: SAFEGUARDS_URL)")
 )
 
-func jsonError(w http.ResponseWriter, message string, errType string, code int) {
+// writeError logs the error at a level matching its status and writes it in
+// the OpenAI error format.
+func writeError(w http.ResponseWriter, e *manager.APIError) {
 	switch {
-	case code >= 500:
-		log.Errorf("jsonError: %s", message)
-	case code >= 400:
-		log.Warnf("jsonError: %s", message)
+	case e.Status >= 500:
+		log.Errorf("api error: %s", e.Message)
+	case e.Status >= 400:
+		log.Warnf("api error: %s", e.Message)
 	default:
-		log.Debugf("jsonError: %s", message)
+		log.Debugf("api error: %s", e.Message)
 	}
+	manager.WriteAPIError(w, e)
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{
-			"message": message,
-			"type":    errType,
-		},
-	})
+// jsonError writes an ad-hoc error with the given message, type, and status.
+// Prefer writeError with a predeclared manager.APIError.
+func jsonError(w http.ResponseWriter, message string, errType string, code int) {
+	writeError(w, &manager.APIError{Status: code, Type: errType, Message: message})
 }
 
 func sendJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+		writeError(w, &manager.ErrServer)
 	}
 }
 
@@ -526,7 +532,7 @@ func main() {
 		defer finishCapture()
 
 		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
-			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+			writeError(w, manager.ErrInvalidRequest.WithMessage("Invalid request: %v.", err))
 			return
 		}
 
@@ -555,7 +561,7 @@ func main() {
 				modelName = "voxtral-mini-4b-realtime"
 			}
 			if modelName == "" {
-				jsonError(w, "Missing required parameter: 'model' (use ?model=<name> query parameter for WebSocket requests).", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Missing required parameter: 'model' (use ?model=<name> query parameter for WebSocket requests)."))
 				return
 			}
 
@@ -621,18 +627,18 @@ func main() {
 				defer cancel()
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, *controlPlaneURL+"/v1/models", nil)
 				if err != nil {
-					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					writeError(w, &manager.ErrServer)
 					return
 				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
-					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					writeError(w, &manager.ErrUpstream)
 					return
 				}
 				defer resp.Body.Close()
 				body, err := io.ReadAll(resp.Body)
 				if err != nil {
-					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					writeError(w, &manager.ErrUpstream)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -649,7 +655,7 @@ func main() {
 				filtered, err := filterModelsToServed(body, em.Models())
 				if err != nil {
 					log.Errorf("filtering /v1/models response: %v", err)
-					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					writeError(w, &manager.ErrUpstream)
 					return
 				}
 				w.WriteHeader(http.StatusOK)
@@ -665,7 +671,7 @@ func main() {
 				}
 				r.Body.Close()
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, invalidJSONError(err))
 					return
 				}
 				if m, ok := body["model"].(string); ok && m != "" {
@@ -684,7 +690,7 @@ func main() {
 						writeRequestBodyError(w, err)
 						return
 					}
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, invalidJSONError(err))
 					return
 				}
 				if modelName == "" {
@@ -702,7 +708,7 @@ func main() {
 					return
 				}
 				if err := json.Unmarshal(bodyBytes, &body); err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, invalidJSONError(err))
 					return
 				}
 
@@ -712,23 +718,23 @@ func main() {
 				// router-only.
 				routerOpts, err := toolruntime.ExtractRouterOptions(body)
 				if err != nil {
-					jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, invalidJSONError(err))
 					return
 				}
 
 				// Extract model name from request body
 				modelInterface, ok := body["model"]
 				if !ok {
-					jsonError(w, "Missing required parameter: 'model'.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgMissingParam, "model"))
 					return
 				}
 				modelName, ok = modelInterface.(string)
 				if !ok {
-					jsonError(w, "Invalid parameter: 'model' must be a string.", manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgInvalidParam, "model", "must be a string"))
 					return
 				}
 				if !modelHeaderMatches(r.Header, modelName) {
-					jsonError(w, manager.ErrMsgModelMismatch, manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+					writeError(w, &manager.ErrModelMismatch)
 					return
 				}
 
@@ -740,7 +746,7 @@ func main() {
 				if modelName == "auto" {
 					resolved, resolveErr := resolveAutoModel(em, r.Header, r.URL.Path, body)
 					if resolveErr != nil {
-						jsonError(w, resolveErr.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+						writeError(w, manager.ErrInvalidRequest.WithMessage("%s", resolveErr.Error()))
 						return
 					}
 					modelName = resolved
@@ -790,7 +796,7 @@ func main() {
 					if err != nil {
 						var inputErr *fileInputError
 						if errors.As(err, &inputErr) {
-							jsonError(w, inputErr.Message, manager.ErrTypeInvalidRequest, inputErr.StatusCode)
+							writeError(w, manager.ErrInvalidRequest.WithStatus(inputErr.StatusCode).WithMessage("%s", inputErr.Message))
 							return
 						}
 
@@ -800,11 +806,16 @@ func main() {
 							if conversionErr.StatusCode >= 400 && conversionErr.StatusCode < 500 {
 								errType = manager.ErrTypeInvalidRequest
 							}
-							jsonError(w, conversionErr.Message, errType, conversionErr.StatusCode)
+							writeError(w, &manager.APIError{
+								Status:  conversionErr.StatusCode,
+								Type:    errType,
+								Code:    manager.ErrCodeDocumentProcessing,
+								Message: conversionErr.Message,
+							})
 							return
 						}
 
-						jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+						writeError(w, &manager.ErrUpstream)
 						return
 					}
 				}
@@ -857,7 +868,7 @@ func main() {
 				// Always re-marshal in case there were any changes
 				bodyBytes, err = json.Marshal(body)
 				if err != nil {
-					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+					writeError(w, &manager.ErrServer)
 					return
 				}
 				r.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
@@ -893,7 +904,7 @@ func main() {
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
-						jsonError(tw, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+						writeError(tw, &manager.ErrUpstream)
 					}
 					toolServed = true
 					return
@@ -931,7 +942,7 @@ func main() {
 			// body to the engine.
 			if _, found := em.GetModel(modelName); !found {
 				em.ReportUnknownModel(apiKey, modelName)
-				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
 				return
 			}
 			body, mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
@@ -941,7 +952,7 @@ func main() {
 					writeRequestBodyError(w, err)
 					return
 				}
-				jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+				writeError(w, invalidJSONError(err))
 				return
 			}
 			// Subdomain-routed streams must feed the same SLA metrics as
@@ -956,7 +967,7 @@ func main() {
 		model, found := em.GetModel(modelName)
 		if !found {
 			em.ReportUnknownModel(apiKey, modelName)
-			jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
+			writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
 			return
 		}
 
@@ -1011,7 +1022,11 @@ func main() {
 			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
 		if enclave == nil {
-			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
+			writeError(w, &manager.APIError{
+				Status:  http.StatusServiceUnavailable,
+				Type:    manager.ErrTypeServer,
+				Message: "The engine is currently overloaded, please try again later.",
+			})
 			return
 		}
 

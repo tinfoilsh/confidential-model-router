@@ -113,23 +113,6 @@ func httpFailureReason(statusCode int) string {
 	return fmt.Sprintf("http_%d", statusCode)
 }
 
-// OpenAI-compatible error type strings returned in API error responses.
-const (
-	ErrTypeInvalidRequest    = "invalid_request_error"
-	ErrTypeInsufficientQuota = "insufficient_quota"
-	ErrTypeServer            = "server_error"
-)
-
-// Client-facing error messages, aligned with OpenAI's standard error messages
-// where applicable. See https://platform.openai.com/docs/guides/error-codes
-const (
-	ErrMsgServerError   = "The server had an error while processing your request."
-	ErrMsgOverloaded    = "The engine is currently overloaded, please try again later."
-	ErrMsgModelNotFound = "The model does not exist."
-	ErrMsgBodyTooLarge  = "Request body is too large."
-	ErrMsgModelMismatch = "The model in the request body does not match the " + ModelRequestHeader + " header."
-)
-
 // billingCloser wraps a response body and emits a zero-token billing event
 // on Close() if the usageHandler was never called. This ensures per-request
 // models (e.g. docling, whisper) that don't return usage fields still
@@ -230,14 +213,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"enclave": host,
 			}).Warn("request body exceeded limit while proxying")
 			ProbeClaimFromContext(r.Context()).Abort()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			json.NewEncoder(w).Encode(map[string]any{
-				"error": map[string]string{
-					"message": ErrMsgBodyTooLarge,
-					"type":    ErrTypeInvalidRequest,
-				},
-			})
+			WriteAPIError(w, &ErrBodyTooLarge)
 			return
 		}
 
@@ -258,14 +234,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		} else {
 			recordFailure(reason)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]string{
-				"message": ErrMsgServerError,
-				"type":    ErrTypeServer,
-			},
-		})
+		WriteAPIError(w, &ErrUpstream)
 	}
 
 	// Add token extraction and billing via ModifyResponse

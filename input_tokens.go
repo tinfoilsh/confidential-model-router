@@ -67,11 +67,15 @@ func handleInputTokens(
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		jsonError(w, "Method not allowed.", manager.ErrTypeInvalidRequest, http.StatusMethodNotAllowed)
+		writeError(w, &manager.ErrMethodNotAllowed)
 		return
 	}
 	if apiKey == "" {
-		jsonError(w, "Missing bearer API key.", inputTokensAuthErrorType, http.StatusUnauthorized)
+		writeError(w, &manager.APIError{
+			Status:  http.StatusUnauthorized,
+			Type:    inputTokensAuthErrorType,
+			Message: "Missing bearer API key.",
+		})
 		return
 	}
 
@@ -84,13 +88,13 @@ func handleInputTokens(
 
 	var body map[string]any
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, invalidJSONError(err))
 		return
 	}
 
 	modelName, err := inputTokensModel(body, routedModel, resolveModel)
 	if err != nil {
-		jsonError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("%s", err.Error()))
 		return
 	}
 
@@ -104,13 +108,13 @@ func handleInputTokens(
 		err = fmt.Errorf("unsupported input-token route: %s", r.URL.Path)
 	}
 	if err != nil {
-		jsonError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, manager.ErrInvalidRequest.WithMessage("%s", err.Error()))
 		return
 	}
 
 	tokenizeBytes, err := json.Marshal(tokenizeBody)
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+		writeError(w, &manager.ErrServer)
 		return
 	}
 	headers := make(http.Header)
@@ -118,7 +122,7 @@ func handleInputTokens(
 	headers.Set("Content-Type", "application/json")
 	resp, err := dispatch(r.Context(), modelName, tokenizePath, tokenizeBytes, headers)
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	defer resp.Body.Close()
@@ -132,11 +136,11 @@ func handleInputTokens(
 		Count *int `json:"count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenized); err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	if tokenized.Count == nil || *tokenized.Count < 0 {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 
@@ -481,11 +485,11 @@ func responsesTools(tools any) ([]any, error) {
 func forwardInputTokensError(w http.ResponseWriter, resp *http.Response) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxInputTokensErrorBytes+1))
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	if len(body) > maxInputTokensErrorBytes {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	contentType := resp.Header.Get("Content-Type")
