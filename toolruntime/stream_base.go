@@ -146,7 +146,7 @@ func (s *streamBase) openUpstreamSSE(
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, manager.MaxUpstreamErrorBodyBytes))
 		resp.Body.Close()
 		return nil, &upstreamError{
 			statusCode: resp.StatusCode,
@@ -192,7 +192,7 @@ func upstreamErrorPayload(err error) map[string]any {
 		if !recognized {
 			log.WithFields(log.Fields{
 				"status": upErr.statusCode,
-				"body":   string(upErr.body),
+				"body":   manager.LogPreview(upErr.body),
 			}).Warn("upstream error body is not an OpenAI error object")
 		}
 	} else {

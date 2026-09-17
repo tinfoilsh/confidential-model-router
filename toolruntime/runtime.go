@@ -390,12 +390,17 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 	if err != nil {
 		return err
 	}
+	return writeJSONBytes(w, response.header, response.statusCode, data)
+}
 
-	copyResponseHeaders(w.Header(), response.header)
+// writeJSONBytes writes an already-encoded JSON body with the given upstream
+// headers and status.
+func writeJSONBytes(w http.ResponseWriter, header http.Header, status int, data []byte) error {
+	copyResponseHeaders(w.Header(), header)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(response.statusCode)
-	_, err = w.Write(data)
+	w.WriteHeader(status)
+	_, err := w.Write(data)
 	return err
 }
 
@@ -417,20 +422,10 @@ func writeUpstreamError(w http.ResponseWriter, err error) error {
 	if !recognized {
 		log.WithFields(log.Fields{
 			"status": upstreamErr.statusCode,
-			"body":   string(upstreamErr.body),
+			"body":   manager.LogPreview(upstreamErr.body),
 		}).Warn("upstream error body is not an OpenAI error object")
 	}
-	data, marshalErr := json.Marshal(apiErr.Envelope())
-	if marshalErr != nil {
-		return marshalErr
-	}
-
-	copyResponseHeaders(w.Header(), upstreamErr.header)
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(apiErr.Status)
-	_, writeErr := w.Write(data)
-	return writeErr
+	return writeJSONBytes(w, upstreamErr.header, apiErr.Status, mustMarshal(apiErr.Envelope()))
 }
 
 // ---------------------------------------------------------------------------

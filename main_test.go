@@ -72,12 +72,20 @@ func TestWriteRequestBodyErrorClassifiesChunkedOversize(t *testing.T) {
 
 func TestWriteRequestBodyErrorHidesTransportDetail(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeRequestBodyError(rec, errors.New("read tcp 10.0.0.1:443: connection reset by peer"))
+	transportErr := errors.New("read tcp 10.0.0.1:443: connection reset by peer")
+	writeRequestBodyError(rec, transportErr)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if body := rec.Body.String(); strings.Contains(body, "tcp") {
-		t.Fatalf("transport detail leaked: %s", body)
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %s", rec.Body.String())
+	}
+	if envelope.Error.Message != manager.ErrMsgBodyReadFailed {
+		t.Fatalf("message = %q, want the fixed %q", envelope.Error.Message, manager.ErrMsgBodyReadFailed)
+	}
+	if strings.Contains(rec.Body.String(), transportErr.Error()) {
+		t.Fatalf("transport detail leaked: %s", rec.Body.String())
 	}
 }
 

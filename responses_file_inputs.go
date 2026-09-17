@@ -17,11 +17,13 @@ const tinfoilModeFieldName = "tinfoil_mode"
 
 // Parameter paths reported in file-input validation errors.
 const (
-	paramResponsesFileData = "input_file.file_data"
-	paramResponsesFileID   = "input_file.file_id"
-	paramChatFile          = "file"
-	paramChatFileData      = "file.file_data"
-	paramChatFileID        = "file.file_id"
+	paramResponsesFileData    = "input_file.file_data"
+	paramResponsesFileID      = "input_file.file_id"
+	paramChatFile             = "file"
+	paramChatFileData         = "file.file_data"
+	paramChatFileID           = "file.file_id"
+	paramResponsesTinfoilMode = "input_file." + tinfoilModeFieldName
+	paramChatTinfoilMode      = "file." + tinfoilModeFieldName
 )
 
 // Client-facing messages for file-input validation failures.
@@ -217,7 +219,7 @@ func decodeResponsesInputFilePart(part map[string]any) (*decodedFileInput, manag
 	if fileData == "" {
 		return nil, "", fileInputError(paramResponsesFileData, manager.ErrMsgMissingParam, paramResponsesFileData)
 	}
-	mode, err := readTinfoilModeOverride(part)
+	mode, err := readTinfoilModeOverride(part, paramResponsesTinfoilMode)
 	if err != nil {
 		return nil, "", err
 	}
@@ -241,7 +243,7 @@ func decodeChatCompletionsFilePart(part map[string]any) (*decodedFileInput, mana
 	if fileData == "" {
 		return nil, "", fileInputError(paramChatFileData, manager.ErrMsgMissingParam, paramChatFileData)
 	}
-	mode, err := readTinfoilModeOverride(fileObj)
+	mode, err := readTinfoilModeOverride(fileObj, paramChatTinfoilMode)
 	if err != nil {
 		return nil, "", err
 	}
@@ -254,7 +256,7 @@ func decodeChatCompletionsFilePart(part map[string]any) (*decodedFileInput, mana
 
 // readTinfoilModeOverride consumes the per-file tinfoil_mode field if
 // present so it never leaks upstream to OpenAI-shaped backends.
-func readTinfoilModeOverride(holder map[string]any) (manager.FileConversionMode, error) {
+func readTinfoilModeOverride(holder map[string]any, param string) (manager.FileConversionMode, error) {
 	raw, ok := holder[tinfoilModeFieldName]
 	if !ok {
 		return "", nil
@@ -270,11 +272,11 @@ func readTinfoilModeOverride(holder map[string]any) (manager.FileConversionMode,
 			return "", nil
 		}
 		if !mode.IsValid() {
-			return "", fileInputError(tinfoilModeFieldName, errMsgTinfoilModeInvalid, tinfoilModeFieldName, v)
+			return "", fileInputError(param, errMsgTinfoilModeInvalid, tinfoilModeFieldName, v)
 		}
 		return mode, nil
 	default:
-		return "", fileInputError(tinfoilModeFieldName, errMsgTinfoilModeNotStr, tinfoilModeFieldName)
+		return "", fileInputError(param, errMsgTinfoilModeNotStr, tinfoilModeFieldName)
 	}
 }
 

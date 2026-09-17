@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestEscapeMultipartFilename(t *testing.T) {
@@ -227,16 +228,33 @@ func TestUpstreamDocumentErrorBoundsAndClassifiesEnclaveBody(t *testing.T) {
 		{"enclave 5xx becomes 502", http.StatusInternalServerError, "boom", http.StatusBadGateway, ErrTypeServer, "Document processing failed: boom"},
 		{"empty body uses fixed message", http.StatusBadRequest, "  ", http.StatusBadRequest, ErrTypeInvalidRequest, errMsgDocumentFailed},
 		{"oversized body is truncated", http.StatusBadRequest, long, http.StatusBadRequest, ErrTypeInvalidRequest, "Document processing failed: " + long[:maxDocumentErrorDetailBytes] + "..."},
+		{"rate limit is a rate_limit_error", http.StatusTooManyRequests, "slow down", http.StatusTooManyRequests, ErrTypeRateLimit, errMsgDocumentRateLimited},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := upstreamDocumentError(tc.status, []byte(tc.body))
-			if got.Status != tc.wantStatus || got.Type != tc.wantType || got.Code != ErrCodeDocumentProcessing {
+			wantCode := ErrCodeDocumentProcessing
+			if tc.wantType == ErrTypeRateLimit {
+				wantCode = ErrCodeRateLimitExceeded
+			}
+			if got.Status != tc.wantStatus || got.Type != tc.wantType || got.Code != wantCode {
 				t.Fatalf("status/type/code = %d/%s/%s", got.Status, got.Type, got.Code)
 			}
 			if got.Message != tc.wantMsg {
 				t.Fatalf("message = %q, want %q", got.Message, tc.wantMsg)
 			}
 		})
+	}
+}
+
+func TestUpstreamDocumentErrorTruncatesOnUTF8Boundary(t *testing.T) {
+	// Fill to one byte short of the limit, then a 3-byte rune that straddles it.
+	body := strings.Repeat("a", maxDocumentErrorDetailBytes-1) + "€" + "tail"
+	got := upstreamDocumentError(http.StatusBadRequest, []byte(body))
+	if !utf8.ValidString(got.Message) {
+		t.Fatalf("message is not valid UTF-8: %q", got.Message)
+	}
+	if !strings.HasSuffix(got.Message, "...") {
+		t.Fatalf("message not truncated: %q", got.Message)
 	}
 }

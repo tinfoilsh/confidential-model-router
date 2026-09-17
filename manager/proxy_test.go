@@ -597,6 +597,31 @@ func TestProxyNormalizesBackendErrorBodies(t *testing.T) {
 		}
 	})
 
+	t.Run("streaming error body is untouched", func(t *testing.T) {
+		original := `data: {"error":{"message":"mid-stream"}}` + "\n\n"
+		resp := mkResp(http.StatusInternalServerError, "text/event-stream", original)
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != original {
+			t.Fatalf("streaming body changed: %s", body)
+		}
+	})
+
+	t.Run("encoded error body is untouched", func(t *testing.T) {
+		original := "\x1f\x8b-not-really-gzip"
+		resp := mkResp(http.StatusBadRequest, "application/json", original)
+		resp.Header.Set("Content-Encoding", "gzip")
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != original || resp.Header.Get("Content-Encoding") != "gzip" {
+			t.Fatalf("encoded body or header changed: %q %q", body, resp.Header.Get("Content-Encoding"))
+		}
+	})
+
 	t.Run("success body is untouched", func(t *testing.T) {
 		original := `{"id":"x","choices":[]}`
 		resp := mkResp(http.StatusOK, "application/json", original)

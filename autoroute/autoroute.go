@@ -128,7 +128,6 @@ func ParseIntelligence(header http.Header, body map[string]any) (int, error) {
 	return DefaultIntelligence, nil
 }
 
-// Client-facing messages for intelligence validation failures.
 const (
 	errMsgInvalidHeader = "Invalid %s header: must be an integer between %d and %d."
 	errMsgInvalidParam  = "Invalid parameter: '%s' must be an integer between %d and %d."

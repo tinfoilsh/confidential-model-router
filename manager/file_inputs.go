@@ -52,6 +52,7 @@ const (
 	errMsgDocumentRequestFailed   = "Document processing request failed."
 	errMsgDocumentReadResponse    = "Could not read the document processing response."
 	errMsgDocumentFailed          = "Document processing failed."
+	errMsgDocumentRateLimited     = "Rate limit reached for document processing. Please retry later."
 	errMsgDocumentFailedDetail    = "Document processing failed: %s"
 )
 
@@ -136,7 +137,7 @@ func (em *EnclaveManager) ConvertFile(
 	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
 	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
 	if enclave == nil {
-		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentUnavailable)
+		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)
 	}
 
 	var body bytes.Buffer
@@ -210,9 +211,12 @@ func (em *EnclaveManager) ConvertFile(
 // statuses other than client faults are reported as 502: the enclave's own
 // 5xx codes describe its internals, not the router's.
 func upstreamDocumentError(status int, respBody []byte) *APIError {
+	if status == http.StatusTooManyRequests {
+		return ErrRateLimited.WithMessage(errMsgDocumentRateLimited)
+	}
 	detail := strings.TrimSpace(string(respBody))
 	if len(detail) > maxDocumentErrorDetailBytes {
-		detail = detail[:maxDocumentErrorDetailBytes] + "..."
+		detail = strings.ToValidUTF8(detail[:maxDocumentErrorDetailBytes], "") + "..."
 	}
 	if status < 400 || status >= 500 {
 		status = http.StatusBadGateway

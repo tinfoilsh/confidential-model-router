@@ -159,17 +159,17 @@ func inputTokensModel(body map[string]any, routedModel string, resolveModel inpu
 	}
 	modelValue, ok := body["model"]
 	if !ok {
-		return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgMissingParam, "model")
+		return "", inputTokensParamError("model", manager.ErrMsgMissingParam, "model")
 	}
 	modelName, ok := modelValue.(string)
 	if !ok || modelName == "" {
-		return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgInvalidParam, "model", "must be a non-empty string")
+		return "", inputTokensParamError("model", manager.ErrMsgInvalidParam, "model", "must be a non-empty string")
 	}
 	if modelName != "auto" {
 		return modelName, nil
 	}
 	if resolveModel == nil {
-		return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgAutoUnavailable)
+		return "", inputTokensParamError("model", manager.ErrMsgAutoUnavailable)
 	}
 	return resolveModel(body)
 }
