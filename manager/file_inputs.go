@@ -37,6 +37,24 @@ func (m FileConversionMode) IsValid() bool {
 	return false
 }
 
+// maxDocumentErrorDetailBytes bounds how much of the doc-upload enclave's
+// error body is echoed to the client.
+const maxDocumentErrorDetailBytes = 512
+
+// Client-facing messages for document processing failures.
+const (
+	errMsgDocumentInvalidResponse = "Document processing returned an invalid response."
+	errMsgDocumentNoPages         = "Document processing returned no pages."
+	errMsgDocumentEmpty           = "Document processing returned no text content."
+	errMsgDocumentNotConfigured   = "Document processing is not available on this deployment."
+	errMsgDocumentUnavailable     = "Document processing is temporarily unavailable. Please try again later."
+	errMsgDocumentBuildRequest    = "Could not prepare the document for processing."
+	errMsgDocumentRequestFailed   = "Document processing request failed."
+	errMsgDocumentReadResponse    = "Could not read the document processing response."
+	errMsgDocumentFailed          = "Document processing failed."
+	errMsgDocumentFailedDetail    = "Document processing failed: %s"
+)
+
 // fileConversionError returns a document-processing APIError. 4xx statuses
 // are the client's fault (invalid_request_error); everything else is a
 // server_error.
@@ -75,7 +93,7 @@ type docUploadResponse struct {
 func parseDocUploadResponse(respBody []byte, mode FileConversionMode) (*ConvertedFile, error) {
 	var parsed docUploadResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fileConversionError(http.StatusBadGateway, "invalid document processing response")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentInvalidResponse)
 	}
 
 	out := &ConvertedFile{
@@ -85,13 +103,13 @@ func parseDocUploadResponse(respBody []byte, mode FileConversionMode) (*Converte
 
 	if mode == FileConversionModeImages {
 		if len(out.Pages) == 0 {
-			return nil, fileConversionError(http.StatusBadGateway, "document processing returned no pages")
+			return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentNoPages)
 		}
 		return out, nil
 	}
 
 	if strings.TrimSpace(out.MDContent) == "" {
-		return nil, fileConversionError(http.StatusBadGateway, "document processing returned empty content")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentEmpty)
 	}
 	return out, nil
 }
@@ -108,7 +126,7 @@ func (em *EnclaveManager) ConvertFile(
 ) (*ConvertedFile, error) {
 	model, found := em.GetModel("doc-upload")
 	if !found {
-		return nil, fileConversionError(http.StatusBadGateway, "document processing backend is not configured")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentNotConfigured)
 	}
 
 	// This path uses its own client and records no breaker outcomes, so it
@@ -118,7 +136,7 @@ func (em *EnclaveManager) ConvertFile(
 	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
 	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
 	if enclave == nil {
-		return nil, fileConversionError(http.StatusBadGateway, "document processing backend is unavailable")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentUnavailable)
 	}
 
 	var body bytes.Buffer
@@ -131,16 +149,16 @@ func (em *EnclaveManager) ConvertFile(
 	}
 	part, err := writer.CreatePart(headers)
 	if err != nil {
-		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
+		return nil, fileConversionError(http.StatusInternalServerError, errMsgDocumentBuildRequest)
 	}
 	if _, err := part.Write(data); err != nil {
-		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
+		return nil, fileConversionError(http.StatusInternalServerError, errMsgDocumentBuildRequest)
 	}
 	if err := writer.WriteField("to_format", "md"); err != nil {
-		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
+		return nil, fileConversionError(http.StatusInternalServerError, errMsgDocumentBuildRequest)
 	}
 	if err := writer.Close(); err != nil {
-		return nil, fileConversionError(http.StatusInternalServerError, "failed to finalize document upload request")
+		return nil, fileConversionError(http.StatusInternalServerError, errMsgDocumentBuildRequest)
 	}
 
 	url := "https://" + enclave.host + "/v1/convert/file"
@@ -150,7 +168,7 @@ func (em *EnclaveManager) ConvertFile(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return nil, fileConversionError(http.StatusInternalServerError, "failed to create document upload request")
+		return nil, fileConversionError(http.StatusInternalServerError, errMsgDocumentBuildRequest)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", body.Len()))
@@ -171,23 +189,38 @@ func (em *EnclaveManager) ConvertFile(
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fileConversionError(http.StatusBadGateway, "document processing request failed")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentRequestFailed)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fileConversionError(http.StatusBadGateway, "failed to read document processing response")
+		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentReadResponse)
 	}
 	if resp.StatusCode != http.StatusOK {
-		message := strings.TrimSpace(string(respBody))
-		if message == "" {
-			message = "document processing failed"
-		}
-		return nil, fileConversionError(resp.StatusCode, message)
+		return nil, upstreamDocumentError(resp.StatusCode, respBody)
 	}
 
 	return parseDocUploadResponse(respBody, mode)
+}
+
+// upstreamDocumentError surfaces a doc-upload enclave failure. The enclave's
+// response text is included so clients see why their document was rejected,
+// bounded so an unexpected body cannot balloon the error response. Non-2xx
+// statuses other than client faults are reported as 502: the enclave's own
+// 5xx codes describe its internals, not the router's.
+func upstreamDocumentError(status int, respBody []byte) *APIError {
+	detail := strings.TrimSpace(string(respBody))
+	if len(detail) > maxDocumentErrorDetailBytes {
+		detail = detail[:maxDocumentErrorDetailBytes] + "..."
+	}
+	if status < 400 || status >= 500 {
+		status = http.StatusBadGateway
+	}
+	if detail == "" {
+		return fileConversionError(status, errMsgDocumentFailed)
+	}
+	return fileConversionError(status, fmt.Sprintf(errMsgDocumentFailedDetail, detail))
 }
 
 func escapeMultipartFilename(filename string) string {

@@ -3,6 +3,7 @@ package manager
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -98,7 +99,7 @@ func TestParseDocUploadResponseImagesMode(t *testing.T) {
 		{
 			name:          "missing_pages_in_images_mode",
 			body:          `{"document":{"md_content":"only text"}}`,
-			expectedError: "document processing returned no pages",
+			expectedError: errMsgDocumentNoPages,
 		},
 	}
 
@@ -164,19 +165,19 @@ func TestParseDocUploadResponseTextMode(t *testing.T) {
 		{
 			name:          "invalid_json",
 			body:          `{`,
-			expectedError: "invalid document processing response",
+			expectedError: errMsgDocumentInvalidResponse,
 			expectedCode:  http.StatusBadGateway,
 		},
 		{
 			name:          "empty_markdown",
 			body:          `{"document":{"md_content":""}}`,
-			expectedError: "document processing returned empty content",
+			expectedError: errMsgDocumentEmpty,
 			expectedCode:  http.StatusBadGateway,
 		},
 		{
 			name:          "whitespace_only_markdown",
 			body:          `{"document":{"md_content":" \n\t "}}`,
-			expectedError: "document processing returned empty content",
+			expectedError: errMsgDocumentEmpty,
 			expectedCode:  http.StatusBadGateway,
 		},
 	}
@@ -207,6 +208,34 @@ func TestParseDocUploadResponseTextMode(t *testing.T) {
 			}
 			if conversionErr.Status != tt.expectedCode {
 				t.Fatalf("expected status %d, got %d", tt.expectedCode, conversionErr.Status)
+			}
+		})
+	}
+}
+
+func TestUpstreamDocumentErrorBoundsAndClassifiesEnclaveBody(t *testing.T) {
+	long := strings.Repeat("x", maxDocumentErrorDetailBytes+100)
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus int
+		wantType   string
+		wantMsg    string
+	}{
+		{"client fault keeps status and body", http.StatusUnprocessableEntity, "unsupported file type\n", http.StatusUnprocessableEntity, ErrTypeInvalidRequest, "Document processing failed: unsupported file type"},
+		{"enclave 5xx becomes 502", http.StatusInternalServerError, "boom", http.StatusBadGateway, ErrTypeServer, "Document processing failed: boom"},
+		{"empty body uses fixed message", http.StatusBadRequest, "  ", http.StatusBadRequest, ErrTypeInvalidRequest, errMsgDocumentFailed},
+		{"oversized body is truncated", http.StatusBadRequest, long, http.StatusBadRequest, ErrTypeInvalidRequest, "Document processing failed: " + long[:maxDocumentErrorDetailBytes] + "..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := upstreamDocumentError(tc.status, []byte(tc.body))
+			if got.Status != tc.wantStatus || got.Type != tc.wantType || got.Code != ErrCodeDocumentProcessing {
+				t.Fatalf("status/type/code = %d/%s/%s", got.Status, got.Type, got.Code)
+			}
+			if got.Message != tc.wantMsg {
+				t.Fatalf("message = %q, want %q", got.Message, tc.wantMsg)
 			}
 		})
 	}

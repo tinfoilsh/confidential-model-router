@@ -70,6 +70,48 @@ func TestWriteRequestBodyErrorClassifiesChunkedOversize(t *testing.T) {
 	}
 }
 
+func TestWriteRequestBodyErrorHidesTransportDetail(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeRequestBodyError(rec, errors.New("read tcp 10.0.0.1:443: connection reset by peer"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "tcp") {
+		t.Fatalf("transport detail leaked: %s", body)
+	}
+}
+
+func TestInvalidJSONErrorKeepsDecoderDetailOnly(t *testing.T) {
+	var decoded map[string]any
+	syntaxErr := json.Unmarshal([]byte(`{"model":`), &decoded)
+	typeErr := json.Unmarshal([]byte(`"str"`), &decoded)
+
+	cases := []struct {
+		name       string
+		err        error
+		wantDetail bool
+		wantStatus int
+	}{
+		{"syntax error is shown", syntaxErr, true, http.StatusBadRequest},
+		{"type error is shown", typeErr, true, http.StatusBadRequest},
+		{"not-an-object sentinel is shown", errBodyNotObject, true, http.StatusBadRequest},
+		{"transport error is hidden", errors.New("read: connection reset"), false, http.StatusBadRequest},
+		{"size limit maps to 413", &http.MaxBytesError{Limit: 1}, false, http.StatusRequestEntityTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := invalidJSONError(tc.err)
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", got.Status, tc.wantStatus)
+			}
+			hasDetail := strings.Contains(got.Message, tc.err.Error())
+			if hasDetail != tc.wantDetail {
+				t.Fatalf("message = %q, detail shown = %v, want %v", got.Message, hasDetail, tc.wantDetail)
+			}
+		})
+	}
+}
+
 func TestModelHeaderMatches(t *testing.T) {
 	tests := []struct {
 		name      string

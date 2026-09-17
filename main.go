@@ -119,13 +119,28 @@ func writeRequestBodyError(w http.ResponseWriter, err error) {
 		writeError(w, &manager.ErrBodyTooLarge)
 		return
 	}
-	writeError(w, manager.ErrBodyReadFailed.WithMessage("Could not read request body: %v.", err))
+	log.WithError(err).Warn("failed to read request body")
+	writeError(w, &manager.ErrBodyReadFailed)
 }
 
 // invalidJSONError builds the error for a request body that failed JSON
-// decoding.
+// decoding. Decoder errors describe what the client sent and are passed on;
+// any other failure (transport, size limit tripping mid-decode) is logged and
+// reported with a fixed message.
 func invalidJSONError(err error) *manager.APIError {
-	return manager.ErrInvalidJSON.WithMessage(manager.ErrMsgInvalidJSON, err)
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		return &manager.ErrBodyTooLarge
+	case errors.As(err, &syntaxErr), errors.As(err, &typeErr),
+		errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF),
+		errors.Is(err, errBodyNotObject):
+		return manager.ErrInvalidJSON.WithMessage(manager.ErrMsgInvalidJSON, err)
+	}
+	log.WithError(err).Warn("failed to decode request body")
+	return &manager.ErrInvalidJSON
 }
 
 // asAPIError returns err if it is already an APIError, otherwise wraps its

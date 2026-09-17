@@ -43,7 +43,9 @@ const (
 	ErrMsgOverloaded       = "The model '%s' is currently overloaded. Retry after %d seconds."
 	ErrMsgRateLimited      = "Rate limit reached for requests. Retry after %d seconds."
 	ErrMsgBodyTooLarge     = "Request body is too large."
+	ErrMsgBodyReadFailed   = "Could not read request body."
 	ErrMsgInvalidJSON      = "Invalid request body: %v."
+	ErrMsgInvalidBody      = "Invalid request body."
 	ErrMsgMissingAPIKey    = "You didn't provide an API key."
 	ErrMsgMethodNotAllowed = "Method not allowed."
 	ErrMsgModelMismatch    = "The model in the request body does not match the " + ModelRequestHeader + " header."
@@ -135,14 +137,16 @@ var (
 		Message: ErrMsgBodyTooLarge,
 	}
 	ErrBodyReadFailed = APIError{
-		Status: http.StatusBadRequest,
-		Type:   ErrTypeInvalidRequest,
-		Code:   ErrCodeBodyReadFailed,
+		Status:  http.StatusBadRequest,
+		Type:    ErrTypeInvalidRequest,
+		Code:    ErrCodeBodyReadFailed,
+		Message: ErrMsgBodyReadFailed,
 	}
 	ErrInvalidJSON = APIError{
-		Status: http.StatusBadRequest,
-		Type:   ErrTypeInvalidRequest,
-		Code:   ErrCodeInvalidJSON,
+		Status:  http.StatusBadRequest,
+		Type:    ErrTypeInvalidRequest,
+		Code:    ErrCodeInvalidJSON,
+		Message: ErrMsgInvalidBody,
 	}
 	ErrMissingAPIKey = APIError{
 		Status:  http.StatusUnauthorized,
