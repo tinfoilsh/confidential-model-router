@@ -80,6 +80,16 @@ func (s *streamBase) writeSSEHeaders(upstreamHeaders http.Header) {
 	s.headersWritten = true
 }
 
+// streamAborted wraps a terminal stream error so Handle's caller knows the
+// response headers are already on the wire and no further response may be
+// written. A nil err passes through unchanged.
+func (s *streamBase) streamAborted(err error) error {
+	if err == nil || !s.headersWritten {
+		return err
+	}
+	return &StreamAbortedError{Err: err}
+}
+
 // validateStreamModel latches a writeErr if upstream never surfaced a
 // model name by the time the streamer is about to emit a
 // model-stamped frame. The field-path argument (e.g. "chunk.model" or

@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,22 @@ type upstreamError struct {
 
 func (e *upstreamError) Error() string {
 	return fmt.Sprintf("upstream returned status %d: %s", e.statusCode, strings.TrimSpace(string(e.body)))
+}
+
+// StreamAbortedError reports a failure after the SSE response headers were
+// already sent. The client has an HTTP 200 and an open (or closed) event
+// stream, so callers must not write another response; whatever could be
+// said to the client was already said in-band.
+type StreamAbortedError struct {
+	Err error
+}
+
+func (e *StreamAbortedError) Error() string {
+	return "stream aborted after headers: " + e.Err.Error()
+}
+
+func (e *StreamAbortedError) Unwrap() error {
+	return e.Err
 }
 
 type usageAccumulator struct {
@@ -384,7 +401,13 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 
 // writeUpstreamError surfaces a backend error to the client in the OpenAI
 // envelope, preserving the backend's status and non-hop-by-hop headers.
+// Errors that are not backend errors, or that arrived after the response
+// headers were sent, are returned to the caller untouched.
 func writeUpstreamError(w http.ResponseWriter, err error) error {
+	var aborted *StreamAbortedError
+	if errors.As(err, &aborted) {
+		return err
+	}
 	upstreamErr, ok := err.(*upstreamError)
 	if !ok {
 		return err

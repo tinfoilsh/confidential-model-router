@@ -936,7 +936,13 @@ func main() {
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
-						writeError(tw, &manager.ErrUpstream)
+						// Once SSE headers are on the wire the client already
+						// holds a 200; the failure was reported in-band and a
+						// JSON error here would corrupt the event stream.
+						var aborted *toolruntime.StreamAbortedError
+						if !errors.As(err, &aborted) {
+							writeError(tw, &manager.ErrUpstream)
+						}
 					}
 					toolServed = true
 					return
