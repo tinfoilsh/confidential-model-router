@@ -128,6 +128,17 @@ func invalidJSONError(err error) *manager.APIError {
 	return manager.ErrInvalidJSON.WithMessage(manager.ErrMsgInvalidJSON, err)
 }
 
+// asAPIError returns err if it is already an APIError, otherwise wraps its
+// text as a 400 invalid_request_error. Validation helpers that predate the
+// APIError type still return plain errors with client-ready messages.
+func asAPIError(err error) *manager.APIError {
+	var apiErr *manager.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr
+	}
+	return manager.ErrInvalidRequest.WithMessage("%s", err.Error())
+}
+
 // getEnvOrDefault returns the environment variable value if set, otherwise returns the default
 func getEnvOrDefault(envKey, defaultVal string) string {
 	if val := os.Getenv(envKey); val != "" {
@@ -389,6 +400,10 @@ type autoRouteCatalog interface {
 func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any) (string, error) {
 	target, err := autoroute.ParseIntelligence(header, body)
 	if err != nil {
+		var validationErr *autoroute.ValidationError
+		if errors.As(err, &validationErr) {
+			return "", manager.ErrInvalidRequest.WithParam(validationErr.Param).WithMessage("%s", validationErr.Message)
+		}
 		return "", err
 	}
 
@@ -396,9 +411,9 @@ func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string,
 	ranked := autoroute.Rank(catalog.AutoRouteCatalog(), target, visual)
 	if len(ranked) == 0 {
 		if visual {
-			return "", fmt.Errorf("Model 'auto' has no multimodal model available for image or file input.")
+			return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgAutoNoMultimodal)
 		}
-		return "", fmt.Errorf("Model 'auto' is not available: no models publish intelligence scores.")
+		return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgAutoNoScores)
 	}
 
 	chosen, healthy := ranked[0], false
@@ -723,7 +738,7 @@ func main() {
 				// router-only.
 				routerOpts, err := toolruntime.ExtractRouterOptions(body)
 				if err != nil {
-					writeError(w, invalidJSONError(err))
+					writeError(w, asAPIError(err))
 					return
 				}
 
@@ -751,7 +766,7 @@ func main() {
 				if modelName == "auto" {
 					resolved, resolveErr := resolveAutoModel(em, r.Header, r.URL.Path, body)
 					if resolveErr != nil {
-						writeError(w, manager.ErrInvalidRequest.WithMessage("%s", resolveErr.Error()))
+						writeError(w, asAPIError(resolveErr))
 						return
 					}
 					modelName = resolved
@@ -799,24 +814,9 @@ func main() {
 						_, err = rewriteChatCompletionsBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
 					}
 					if err != nil {
-						var inputErr *fileInputError
-						if errors.As(err, &inputErr) {
-							writeError(w, manager.ErrInvalidRequest.WithStatus(inputErr.StatusCode).WithMessage("%s", inputErr.Message))
-							return
-						}
-
-						var conversionErr *manager.FileConversionError
-						if errors.As(err, &conversionErr) {
-							errType := manager.ErrTypeServer
-							if conversionErr.StatusCode >= 400 && conversionErr.StatusCode < 500 {
-								errType = manager.ErrTypeInvalidRequest
-							}
-							writeError(w, &manager.APIError{
-								Status:  conversionErr.StatusCode,
-								Type:    errType,
-								Code:    manager.ErrCodeDocumentProcessing,
-								Message: conversionErr.Message,
-							})
+						var apiErr *manager.APIError
+						if errors.As(err, &apiErr) {
+							writeError(w, apiErr)
 							return
 						}
 

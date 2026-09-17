@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 func TestHandleInputTokensChatRequest(t *testing.T) {
@@ -250,6 +252,13 @@ func TestHandleInputTokensRequiresBearerKey(t *testing.T) {
 	}
 	if dispatched {
 		t.Fatal("unauthenticated request was dispatched")
+	}
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %v", err)
+	}
+	if envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeMissingAPIKey {
+		t.Fatalf("code = %v, want %q", envelope.Error.Code, manager.ErrCodeMissingAPIKey)
 	}
 }
 

@@ -201,12 +201,12 @@ func TestParseDocUploadResponseTextMode(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			var conversionErr *FileConversionError
+			var conversionErr *APIError
 			if !errors.As(err, &conversionErr) {
-				t.Fatalf("expected FileConversionError, got %T", err)
+				t.Fatalf("expected APIError, got %T", err)
 			}
-			if conversionErr.StatusCode != tt.expectedCode {
-				t.Fatalf("expected status %d, got %d", tt.expectedCode, conversionErr.StatusCode)
+			if conversionErr.Status != tt.expectedCode {
+				t.Fatalf("expected status %d, got %d", tt.expectedCode, conversionErr.Status)
 			}
 		})
 	}

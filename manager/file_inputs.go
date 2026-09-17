@@ -37,13 +37,20 @@ func (m FileConversionMode) IsValid() bool {
 	return false
 }
 
-type FileConversionError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *FileConversionError) Error() string {
-	return e.Message
+// fileConversionError returns a document-processing APIError. 4xx statuses
+// are the client's fault (invalid_request_error); everything else is a
+// server_error.
+func fileConversionError(status int, message string) *APIError {
+	errType := ErrTypeServer
+	if status >= 400 && status < 500 {
+		errType = ErrTypeInvalidRequest
+	}
+	return &APIError{
+		Status:  status,
+		Type:    errType,
+		Code:    ErrCodeDocumentProcessing,
+		Message: message,
+	}
 }
 
 type ConvertedPage struct {
@@ -68,10 +75,7 @@ type docUploadResponse struct {
 func parseDocUploadResponse(respBody []byte, mode FileConversionMode) (*ConvertedFile, error) {
 	var parsed docUploadResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "invalid document processing response",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "invalid document processing response")
 	}
 
 	out := &ConvertedFile{
@@ -81,19 +85,13 @@ func parseDocUploadResponse(respBody []byte, mode FileConversionMode) (*Converte
 
 	if mode == FileConversionModeImages {
 		if len(out.Pages) == 0 {
-			return nil, &FileConversionError{
-				StatusCode: http.StatusBadGateway,
-				Message:    "document processing returned no pages",
-			}
+			return nil, fileConversionError(http.StatusBadGateway, "document processing returned no pages")
 		}
 		return out, nil
 	}
 
 	if strings.TrimSpace(out.MDContent) == "" {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "document processing returned empty content",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "document processing returned empty content")
 	}
 	return out, nil
 }
@@ -110,10 +108,7 @@ func (em *EnclaveManager) ConvertFile(
 ) (*ConvertedFile, error) {
 	model, found := em.GetModel("doc-upload")
 	if !found {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "document processing backend is not configured",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "document processing backend is not configured")
 	}
 
 	// This path uses its own client and records no breaker outcomes, so it
@@ -123,10 +118,7 @@ func (em *EnclaveManager) ConvertFile(
 	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
 	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
 	if enclave == nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "document processing backend is unavailable",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "document processing backend is unavailable")
 	}
 
 	var body bytes.Buffer
@@ -139,28 +131,16 @@ func (em *EnclaveManager) ConvertFile(
 	}
 	part, err := writer.CreatePart(headers)
 	if err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusInternalServerError,
-			Message:    "failed to build document upload request",
-		}
+		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
 	}
 	if _, err := part.Write(data); err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusInternalServerError,
-			Message:    "failed to build document upload request",
-		}
+		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
 	}
 	if err := writer.WriteField("to_format", "md"); err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusInternalServerError,
-			Message:    "failed to build document upload request",
-		}
+		return nil, fileConversionError(http.StatusInternalServerError, "failed to build document upload request")
 	}
 	if err := writer.Close(); err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusInternalServerError,
-			Message:    "failed to finalize document upload request",
-		}
+		return nil, fileConversionError(http.StatusInternalServerError, "failed to finalize document upload request")
 	}
 
 	url := "https://" + enclave.host + "/v1/convert/file"
@@ -170,10 +150,7 @@ func (em *EnclaveManager) ConvertFile(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusInternalServerError,
-			Message:    "failed to create document upload request",
-		}
+		return nil, fileConversionError(http.StatusInternalServerError, "failed to create document upload request")
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", body.Len()))
@@ -194,29 +171,20 @@ func (em *EnclaveManager) ConvertFile(
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "document processing request failed",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "document processing request failed")
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, &FileConversionError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "failed to read document processing response",
-		}
+		return nil, fileConversionError(http.StatusBadGateway, "failed to read document processing response")
 	}
 	if resp.StatusCode != http.StatusOK {
 		message := strings.TrimSpace(string(respBody))
 		if message == "" {
 			message = "document processing failed"
 		}
-		return nil, &FileConversionError{
-			StatusCode: resp.StatusCode,
-			Message:    message,
-		}
+		return nil, fileConversionError(resp.StatusCode, message)
 	}
 
 	return parseDocUploadResponse(respBody, mode)

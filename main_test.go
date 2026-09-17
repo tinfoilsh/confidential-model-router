@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -804,11 +805,30 @@ func TestResolveAutoModel_InvalidLevel(t *testing.T) {
 	}
 
 	body := map[string]any{"model": "auto", "auto_model_options": map[string]any{"intelligence": "high"}}
-	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body); err == nil {
+	_, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body)
+	if err == nil {
 		t.Fatal("expected error for non-numeric body intelligence")
 	}
 	if _, ok := body["auto_model_options"]; ok {
 		t.Fatal("auto_model_options must be stripped even on error")
+	}
+	var apiErr *manager.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T", err)
+	}
+	if apiErr.Status != http.StatusBadRequest || apiErr.Type != manager.ErrTypeInvalidRequest || apiErr.Param != "auto_model_options.intelligence" {
+		t.Fatalf("status/type/param = %d/%s/%q", apiErr.Status, apiErr.Type, apiErr.Param)
+	}
+}
+
+func TestAsAPIErrorPreservesTypedErrorsAndWrapsPlainOnes(t *testing.T) {
+	typed := manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, "x")
+	if got := asAPIError(typed); got != typed {
+		t.Fatalf("typed error was re-wrapped: %+v", got)
+	}
+	plain := asAPIError(errors.New("Something specific."))
+	if plain.Status != http.StatusBadRequest || plain.Type != manager.ErrTypeInvalidRequest || plain.Message != "Something specific." {
+		t.Fatalf("plain wrap = %+v", plain)
 	}
 }
 

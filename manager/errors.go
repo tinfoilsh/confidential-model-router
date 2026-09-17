@@ -23,6 +23,7 @@ const (
 	ErrCodeInvalidJSON        = "invalid_json"
 	ErrCodeBodyReadFailed     = "body_read_failed"
 	ErrCodeRequestTooLarge    = "request_too_large"
+	ErrCodeMissingAPIKey      = "missing_api_key"
 	ErrCodeMethodNotAllowed   = "method_not_allowed"
 	ErrCodeModelNotFound      = "model_not_found"
 	ErrCodeModelMismatch      = "model_mismatch"
@@ -43,10 +44,14 @@ const (
 	ErrMsgRateLimited      = "Rate limit reached for requests. Retry after %d seconds."
 	ErrMsgBodyTooLarge     = "Request body is too large."
 	ErrMsgInvalidJSON      = "Invalid request body: %v."
+	ErrMsgMissingAPIKey    = "You didn't provide an API key."
 	ErrMsgMethodNotAllowed = "Method not allowed."
 	ErrMsgModelMismatch    = "The model in the request body does not match the " + ModelRequestHeader + " header."
 	ErrMsgMissingParam     = "Missing required parameter: '%s'."
 	ErrMsgInvalidParam     = "Invalid parameter: '%s' %s."
+	ErrMsgAutoNoMultimodal = "Model 'auto' has no multimodal model available for image or file input."
+	ErrMsgAutoNoScores     = "Model 'auto' is not available: no models publish intelligence scores."
+	ErrMsgAutoUnavailable  = "Model 'auto' is not available for this request."
 )
 
 // APIError is an error response in OpenAI's format. Param and Code are
@@ -138,6 +143,12 @@ var (
 		Status: http.StatusBadRequest,
 		Type:   ErrTypeInvalidRequest,
 		Code:   ErrCodeInvalidJSON,
+	}
+	ErrMissingAPIKey = APIError{
+		Status:  http.StatusUnauthorized,
+		Type:    ErrTypeInvalidRequest,
+		Code:    ErrCodeMissingAPIKey,
+		Message: ErrMsgMissingAPIKey,
 	}
 	ErrMethodNotAllowed = APIError{
 		Status:  http.StatusMethodNotAllowed,

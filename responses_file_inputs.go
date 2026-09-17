@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"mime"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -16,6 +15,32 @@ import (
 
 const tinfoilModeFieldName = "tinfoil_mode"
 
+// Parameter paths reported in file-input validation errors.
+const (
+	paramResponsesFileData = "input_file.file_data"
+	paramResponsesFileID   = "input_file.file_id"
+	paramChatFile          = "file"
+	paramChatFileData      = "file.file_data"
+	paramChatFileID        = "file.file_id"
+)
+
+// Client-facing messages for file-input validation failures.
+const (
+	errMsgFileIDUnsupported  = "Only %s is supported on this endpoint."
+	errMsgTinfoilModeInvalid = "Invalid %s value: %q. Valid values are auto, text, vision, images, raw, vlm."
+	errMsgTinfoilModeNotStr  = "%s must be a string."
+	errMsgImagesModeTextOnly = "%s=images requires a vision-capable model; %q is text-only."
+	errMsgInvalidDataURL     = "Invalid data URL in %s."
+	errMsgNotBase64          = "%s must be base64-encoded."
+	errMsgInvalidBase64      = "Invalid base64 payload in %s."
+	errMsgMissingChatFile    = "Missing required parameter: 'file' on file content part."
+)
+
+// fileInputError returns a 400 invalid_request_error for the given parameter.
+func fileInputError(param string, format string, args ...any) *manager.APIError {
+	return manager.ErrInvalidRequest.WithParam(param).WithMessage(format, args...)
+}
+
 type fileInputProcessor func(
 	ctx context.Context,
 	authHeader string,
@@ -24,15 +49,6 @@ type fileInputProcessor func(
 	data []byte,
 	mode manager.FileConversionMode,
 ) (*manager.ConvertedFile, error)
-
-type fileInputError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *fileInputError) Error() string {
-	return e.Message
-}
 
 type rewriteContext struct {
 	isMultimodal func(modelName string) bool
@@ -195,23 +211,17 @@ type decodedFileInput struct {
 func decodeResponsesInputFilePart(part map[string]any) (*decodedFileInput, manager.FileConversionMode, error) {
 	filename, _ := part["filename"].(string)
 	if _, hasFileID := part["file_id"]; hasFileID {
-		return nil, "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Only input_file.file_data is supported on this endpoint.",
-		}
+		return nil, "", fileInputError(paramResponsesFileID, errMsgFileIDUnsupported, paramResponsesFileData)
 	}
 	fileData, _ := part["file_data"].(string)
 	if fileData == "" {
-		return nil, "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Missing required parameter: 'file_data' on input_file.",
-		}
+		return nil, "", fileInputError(paramResponsesFileData, manager.ErrMsgMissingParam, paramResponsesFileData)
 	}
 	mode, err := readTinfoilModeOverride(part)
 	if err != nil {
 		return nil, "", err
 	}
-	decoded, err := decodeFileInput(filename, fileData, "input_file.file_data")
+	decoded, err := decodeFileInput(filename, fileData, paramResponsesFileData)
 	if err != nil {
 		return nil, "", err
 	}
@@ -221,30 +231,21 @@ func decodeResponsesInputFilePart(part map[string]any) (*decodedFileInput, manag
 func decodeChatCompletionsFilePart(part map[string]any) (*decodedFileInput, manager.FileConversionMode, error) {
 	fileObj, _ := part["file"].(map[string]any)
 	if fileObj == nil {
-		return nil, "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Missing required parameter: 'file' on file content part.",
-		}
+		return nil, "", fileInputError(paramChatFile, errMsgMissingChatFile)
 	}
 	filename, _ := fileObj["filename"].(string)
 	if _, hasFileID := fileObj["file_id"]; hasFileID {
-		return nil, "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Only file.file_data is supported on this endpoint.",
-		}
+		return nil, "", fileInputError(paramChatFileID, errMsgFileIDUnsupported, paramChatFileData)
 	}
 	fileData, _ := fileObj["file_data"].(string)
 	if fileData == "" {
-		return nil, "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Missing required parameter: 'file.file_data'.",
-		}
+		return nil, "", fileInputError(paramChatFileData, manager.ErrMsgMissingParam, paramChatFileData)
 	}
 	mode, err := readTinfoilModeOverride(fileObj)
 	if err != nil {
 		return nil, "", err
 	}
-	decoded, err := decodeFileInput(filename, fileData, "file.file_data")
+	decoded, err := decodeFileInput(filename, fileData, paramChatFileData)
 	if err != nil {
 		return nil, "", err
 	}
@@ -269,17 +270,11 @@ func readTinfoilModeOverride(holder map[string]any) (manager.FileConversionMode,
 			return "", nil
 		}
 		if !mode.IsValid() {
-			return "", &fileInputError{
-				StatusCode: http.StatusBadRequest,
-				Message:    fmt.Sprintf("Invalid %s value: %q. Valid values are auto, text, vision, images, raw, vlm.", tinfoilModeFieldName, v),
-			}
+			return "", fileInputError(tinfoilModeFieldName, errMsgTinfoilModeInvalid, tinfoilModeFieldName, v)
 		}
 		return mode, nil
 	default:
-		return "", &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    fmt.Sprintf("%s must be a string.", tinfoilModeFieldName),
-		}
+		return "", fileInputError(tinfoilModeFieldName, errMsgTinfoilModeNotStr, tinfoilModeFieldName)
 	}
 }
 
@@ -299,10 +294,7 @@ func resolveFileMode(
 
 	if override != "" {
 		if override == manager.FileConversionModeImages && !visionCapable {
-			return "", false, &fileInputError{
-				StatusCode: http.StatusBadRequest,
-				Message:    fmt.Sprintf("%s=images requires a vision-capable model; %q is text-only.", tinfoilModeFieldName, rc.model),
-			}
+			return "", false, fileInputError(tinfoilModeFieldName, errMsgImagesModeTextOnly, tinfoilModeFieldName, rc.model)
 		}
 		return override, false, nil
 	}
@@ -404,16 +396,10 @@ func decodeFileInput(filename string, fileData string, paramName string) (*decod
 	if strings.HasPrefix(fileData, "data:") {
 		mediaType, payload, ok := strings.Cut(fileData, ",")
 		if !ok {
-			return nil, &fileInputError{
-				StatusCode: http.StatusBadRequest,
-				Message:    fmt.Sprintf("Invalid data URL in %s.", paramName),
-			}
+			return nil, fileInputError(paramName, errMsgInvalidDataURL, paramName)
 		}
 		if !strings.HasSuffix(mediaType, ";base64") {
-			return nil, &fileInputError{
-				StatusCode: http.StatusBadRequest,
-				Message:    fmt.Sprintf("%s must be base64-encoded.", paramName),
-			}
+			return nil, fileInputError(paramName, errMsgNotBase64, paramName)
 		}
 		contentType = strings.TrimPrefix(strings.TrimSuffix(mediaType, ";base64"), "data:")
 		rawBase64 = payload
@@ -421,10 +407,7 @@ func decodeFileInput(filename string, fileData string, paramName string) (*decod
 
 	decoded, err := decodeBase64Payload(rawBase64)
 	if err != nil {
-		return nil, &fileInputError{
-			StatusCode: http.StatusBadRequest,
-			Message:    fmt.Sprintf("Invalid base64 payload in %s.", paramName),
-		}
+		return nil, fileInputError(paramName, errMsgInvalidBase64, paramName)
 	}
 	if filename == "" {
 		filename = "uploaded-file"
