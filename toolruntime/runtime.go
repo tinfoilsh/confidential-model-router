@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -381,19 +382,31 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 	return err
 }
 
+// writeUpstreamError surfaces a backend error to the client in the OpenAI
+// envelope, preserving the backend's status and non-hop-by-hop headers.
 func writeUpstreamError(w http.ResponseWriter, err error) error {
 	upstreamErr, ok := err.(*upstreamError)
 	if !ok {
 		return err
 	}
 
-	copyResponseHeaders(w.Header(), upstreamErr.header)
-	if contentType := upstreamErr.header.Get("Content-Type"); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
+	apiErr, recognized := manager.NormalizeUpstreamError(upstreamErr.statusCode, upstreamErr.body)
+	if !recognized {
+		log.WithFields(log.Fields{
+			"status": upstreamErr.statusCode,
+			"body":   string(upstreamErr.body),
+		}).Warn("upstream error body is not an OpenAI error object")
 	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(upstreamErr.body)))
-	w.WriteHeader(upstreamErr.statusCode)
-	_, writeErr := w.Write(upstreamErr.body)
+	data, marshalErr := json.Marshal(apiErr.Envelope())
+	if marshalErr != nil {
+		return marshalErr
+	}
+
+	copyResponseHeaders(w.Header(), upstreamErr.header)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(apiErr.Status)
+	_, writeErr := w.Write(data)
 	return writeErr
 }
 

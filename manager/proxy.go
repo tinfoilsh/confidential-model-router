@@ -290,6 +290,15 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			return nil
 		}
 
+		// Backend errors carry no usage to bill and are never streams, so
+		// rewrite them into the OpenAI error envelope and stop here. An
+		// encoded body cannot be inspected without decoding it first;
+		// those are forwarded as-is.
+		if resp.StatusCode >= http.StatusBadRequest && !streaming && resp.Header.Get("Content-Encoding") == "" {
+			normalizeUpstreamErrorResponse(resp, modelName, host)
+			return nil
+		}
+
 		// Check if client requested usage metrics in response header/trailer
 		usageMetricsRequested := req.Header.Get(UsageMetricsRequestHeader) == "true"
 		var responsePricing *ModelPricing
@@ -438,6 +447,49 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 
 	return proxy
+}
+
+// normalizeUpstreamErrorResponse replaces a backend error response body with
+// the OpenAI error envelope in place. The original body is logged when it
+// cannot be normalized so operators still see what the backend said.
+func normalizeUpstreamErrorResponse(resp *http.Response, modelName, host string) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxUpstreamErrorBodyBytes+1))
+	resp.Body.Close()
+
+	var apiErr *APIError
+	switch {
+	case err != nil:
+		log.WithError(err).WithFields(log.Fields{
+			"model":   modelName,
+			"enclave": host,
+			"status":  resp.StatusCode,
+		}).Warn("failed to read backend error body")
+		apiErr = ErrUpstream.WithStatus(resp.StatusCode)
+	case len(body) > MaxUpstreamErrorBodyBytes:
+		log.WithFields(log.Fields{
+			"model":   modelName,
+			"enclave": host,
+			"status":  resp.StatusCode,
+		}).Warn("backend error body exceeds normalization limit")
+		apiErr = ErrUpstream.WithStatus(resp.StatusCode)
+	default:
+		var recognized bool
+		apiErr, recognized = NormalizeUpstreamError(resp.StatusCode, body)
+		if !recognized {
+			log.WithFields(log.Fields{
+				"model":   modelName,
+				"enclave": host,
+				"status":  resp.StatusCode,
+				"body":    string(body),
+			}).Warn("backend error body is not an OpenAI error object")
+		}
+	}
+
+	encoded, _ := json.Marshal(apiErr.Envelope())
+	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
+	resp.ContentLength = int64(len(encoded))
+	resp.Body = io.NopCloser(bytes.NewReader(encoded))
 }
 
 // FormatUsage formats token usage for the response header. It is the single

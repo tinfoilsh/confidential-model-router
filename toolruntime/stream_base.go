@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime/citations"
 )
@@ -104,14 +106,13 @@ func newUpstreamJSONError(errObj map[string]any) *upstreamError {
 	}
 }
 
-// newUpstreamStreamError is newUpstreamJSONError specialized to the
-// {message, type:"upstream_error"} shape produced for protocol-level
-// stream failures (malformed JSON, missing terminal marker).
-func newUpstreamStreamError(message string) *upstreamError {
-	return newUpstreamJSONError(map[string]any{
-		"message": message,
-		"type":    "upstream_error",
-	})
+// newUpstreamStreamError reports a protocol-level stream failure (malformed
+// JSON, missing terminal marker). The detail is logged for operators; the
+// client sees the generic upstream error since the failure is not theirs
+// to fix.
+func newUpstreamStreamError(detail string) *upstreamError {
+	log.WithField("detail", detail).Warn("upstream stream protocol failure")
+	return newUpstreamJSONError(manager.ErrUpstream.Envelope().Error.Map())
 }
 
 // openUpstreamSSE posts the JSON-encoded reqBody to the enclave path and
@@ -170,32 +171,25 @@ func (s *streamBase) emitBillingEvent(r *http.Request, em *manager.EnclaveManage
 }
 
 // upstreamErrorPayload extracts a structured error object to show the
-// client. If the underlying error is an *upstreamError whose body is
-// JSON with an `error` field, we allowlist the standard OpenAI error
-// fields rather than forwarding the object verbatim.
+// client in-band once the SSE stream is open. Backend bodies go through the
+// same normalization as pre-stream errors; anything else is reported with
+// the generic upstream message so internal error text stays in the logs.
 func upstreamErrorPayload(err error) map[string]any {
-	if upErr, ok := err.(*upstreamError); ok && len(upErr.body) > 0 {
-		var parsed map[string]any
-		if json.Unmarshal(upErr.body, &parsed) == nil {
-			if inner, ok := parsed["error"].(map[string]any); ok {
-				safe := map[string]any{
-					"message": stringValue(inner["message"]),
-					"type":    stringValue(inner["type"]),
-				}
-				if code, ok := inner["code"]; ok {
-					safe["code"] = code
-				}
-				if param, ok := inner["param"]; ok {
-					safe["param"] = param
-				}
-				return safe
-			}
+	var apiErr *manager.APIError
+	if upErr, ok := err.(*upstreamError); ok {
+		var recognized bool
+		apiErr, recognized = manager.NormalizeUpstreamError(upErr.statusCode, upErr.body)
+		if !recognized {
+			log.WithFields(log.Fields{
+				"status": upErr.statusCode,
+				"body":   string(upErr.body),
+			}).Warn("upstream error body is not an OpenAI error object")
 		}
+	} else {
+		log.WithError(err).Warn("stream terminated by non-upstream error")
+		apiErr = &manager.ErrUpstream
 	}
-	return map[string]any{
-		"message": err.Error(),
-		"type":    "upstream_error",
-	}
+	return apiErr.Envelope().Error.Map()
 }
 
 // mustMarshal serializes the given value to JSON, returning an empty byte

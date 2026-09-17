@@ -13,7 +13,6 @@ const (
 	chatInputTokensPath      = "/v1/chat/completions/input_tokens"
 	responsesInputTokensPath = "/v1/responses/input_tokens"
 	tokenizePath             = "/tokenize"
-	maxInputTokensErrorBytes = 1 << 20
 )
 
 var tokenizeChatFields = []string{
@@ -483,20 +482,14 @@ func responsesTools(tools any) ([]any, error) {
 }
 
 func forwardInputTokensError(w http.ResponseWriter, resp *http.Response) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxInputTokensErrorBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, manager.MaxUpstreamErrorBodyBytes+1))
 	if err != nil {
 		writeError(w, &manager.ErrUpstream)
 		return
 	}
-	if len(body) > maxInputTokensErrorBytes {
+	if len(body) > manager.MaxUpstreamErrorBodyBytes {
 		writeError(w, &manager.ErrUpstream)
 		return
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/json"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	writeUpstreamError(w, resp.StatusCode, body)
 }

@@ -68,3 +68,83 @@ func TestAPIErrorWithHelpersDoNotMutateBase(t *testing.T) {
 		t.Fatalf("derived = %+v", derived)
 	}
 }
+
+func TestNormalizeUpstreamError(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		recognized bool
+		wantType   string
+		wantMsg    string
+		wantCode   string
+		wantParam  string
+	}{
+		{
+			name:       "vllm nested envelope with python type name",
+			status:     http.StatusBadRequest,
+			body:       `{"error":{"message":"This model's maximum context length is 8192 tokens.","type":"BadRequestError","param":null,"code":400}}`,
+			recognized: true,
+			wantType:   ErrTypeInvalidRequest,
+			wantMsg:    "This model's maximum context length is 8192 tokens.",
+		},
+		{
+			name:       "vllm flat object shape",
+			status:     http.StatusNotFound,
+			body:       `{"object":"error","message":"The model x does not exist.","type":"NotFoundError","param":null,"code":404}`,
+			recognized: true,
+			wantType:   ErrTypeInvalidRequest,
+			wantMsg:    "The model x does not exist.",
+		},
+		{
+			name:       "openai types and string codes pass through",
+			status:     http.StatusTooManyRequests,
+			body:       `{"error":{"message":"slow down","type":"rate_limit_error","param":"messages","code":"slow_down"}}`,
+			recognized: true,
+			wantType:   ErrTypeRateLimit,
+			wantMsg:    "slow down",
+			wantCode:   "slow_down",
+			wantParam:  "messages",
+		},
+		{
+			name:       "missing type is inferred from status",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":{"message":"engine crashed"}}`,
+			recognized: true,
+			wantType:   ErrTypeServer,
+			wantMsg:    "engine crashed",
+		},
+		{
+			name:       "non-json body is replaced",
+			status:     http.StatusBadGateway,
+			body:       `<html>nginx 502</html>`,
+			recognized: false,
+			wantType:   ErrTypeServer,
+			wantMsg:    ErrMsgServerError,
+			wantCode:   ErrCodeUpstreamError,
+		},
+		{
+			name:       "json without error object is replaced",
+			status:     http.StatusServiceUnavailable,
+			body:       `{"detail":"loading"}`,
+			recognized: false,
+			wantType:   ErrTypeServer,
+			wantMsg:    ErrMsgServerError,
+			wantCode:   ErrCodeUpstreamError,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, recognized := NormalizeUpstreamError(tc.status, []byte(tc.body))
+			if recognized != tc.recognized {
+				t.Fatalf("recognized = %v, want %v", recognized, tc.recognized)
+			}
+			if got.Status != tc.status {
+				t.Fatalf("status = %d, want %d", got.Status, tc.status)
+			}
+			if got.Type != tc.wantType || got.Message != tc.wantMsg || got.Code != tc.wantCode || got.Param != tc.wantParam {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}

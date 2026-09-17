@@ -143,6 +143,20 @@ func invalidJSONError(err error) *manager.APIError {
 	return &manager.ErrInvalidJSON
 }
 
+// writeUpstreamError normalizes a backend error response body into the
+// OpenAI envelope and writes it with the backend's status. Unrecognized
+// bodies are logged and replaced with the generic upstream error.
+func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
+	apiErr, recognized := manager.NormalizeUpstreamError(status, body)
+	if !recognized {
+		log.WithFields(log.Fields{
+			"status": status,
+			"body":   string(body),
+		}).Warn("upstream error body is not an OpenAI error object")
+	}
+	writeError(w, apiErr)
+}
+
 // asAPIError returns err if it is already an APIError, otherwise wraps its
 // text as a 400 invalid_request_error. Validation helpers that predate the
 // APIError type still return plain errors with client-ready messages.
@@ -677,11 +691,9 @@ func main() {
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				// Forward upstream errors as-is; only a 200 is a models list
-				// we should rewrite.
+				// Only a 200 is a models list we should rewrite.
 				if resp.StatusCode != http.StatusOK {
-					w.WriteHeader(resp.StatusCode)
-					w.Write(body)
+					writeUpstreamError(w, resp.StatusCode, body)
 					return
 				}
 				// A 200 we can't parse means the control plane returned

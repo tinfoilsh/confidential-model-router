@@ -189,6 +189,24 @@ func nullableString(s string) *string {
 	return &s
 }
 
+// Map returns the error object as a generic map, for embedding in SSE
+// frames built from map[string]any.
+func (b ErrorBody) Map() map[string]any {
+	m := map[string]any{
+		"message": b.Message,
+		"type":    b.Type,
+		"param":   nil,
+		"code":    nil,
+	}
+	if b.Param != nil {
+		m["param"] = *b.Param
+	}
+	if b.Code != nil {
+		m["code"] = *b.Code
+	}
+	return m
+}
+
 // Envelope returns the JSON-serializable body for the error.
 func (e *APIError) Envelope() ErrorEnvelope {
 	return ErrorEnvelope{Error: ErrorBody{
@@ -204,4 +222,81 @@ func WriteAPIError(w http.ResponseWriter, e *APIError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Status)
 	json.NewEncoder(w).Encode(e.Envelope())
+}
+
+// MaxUpstreamErrorBodyBytes bounds how much of a backend error response is
+// buffered for normalization. Larger bodies are replaced by ErrUpstream.
+const MaxUpstreamErrorBodyBytes = 64 << 10
+
+// upstreamErrorTypes maps the error type names emitted by inference backends
+// (vLLM uses Python exception class names) to OpenAI's error taxonomy.
+// Types already in OpenAI's vocabulary pass through unchanged.
+var upstreamErrorTypes = map[string]string{
+	"BadRequestError":          ErrTypeInvalidRequest,
+	"NotFoundError":            ErrTypeInvalidRequest,
+	"ValidationError":          ErrTypeInvalidRequest,
+	"UnprocessableEntityError": ErrTypeInvalidRequest,
+	"InternalServerError":      ErrTypeServer,
+	"ServiceUnavailableError":  ErrTypeServiceUnavailable,
+	"RateLimitError":           ErrTypeRateLimit,
+}
+
+// NormalizeUpstreamError converts a backend's non-2xx response body into
+// the OpenAI error envelope. It accepts both the nested
+// {"error":{...}} shape and the flat {"object":"error",...} shape that
+// older vLLM releases emit, keeps only the standard fields, maps backend
+// type names onto OpenAI's, and drops numeric codes (the HTTP status
+// already carries that). Bodies that are not recognizable JSON errors are
+// logged by the caller and replaced with ErrUpstream at the given status,
+// so backend internals never reach the client verbatim.
+func NormalizeUpstreamError(status int, body []byte) (*APIError, bool) {
+	var parsed map[string]any
+	if json.Unmarshal(body, &parsed) != nil {
+		return ErrUpstream.WithStatus(status), false
+	}
+
+	fields := parsed
+	if inner, ok := parsed["error"].(map[string]any); ok {
+		fields = inner
+	} else if obj, _ := parsed["object"].(string); obj != "error" {
+		return ErrUpstream.WithStatus(status), false
+	}
+
+	message, _ := fields["message"].(string)
+	if message == "" {
+		return ErrUpstream.WithStatus(status), false
+	}
+
+	errType, _ := fields["type"].(string)
+	if mapped, ok := upstreamErrorTypes[errType]; ok {
+		errType = mapped
+	} else if errType == "" {
+		errType = errTypeForStatus(status)
+	}
+
+	code, _ := fields["code"].(string)
+	param, _ := fields["param"].(string)
+
+	return &APIError{
+		Status:  status,
+		Type:    errType,
+		Code:    code,
+		Param:   param,
+		Message: message,
+	}, true
+}
+
+// errTypeForStatus picks the OpenAI error type implied by an HTTP status
+// when the backend did not name one.
+func errTypeForStatus(status int) string {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return ErrTypeRateLimit
+	case status == http.StatusServiceUnavailable:
+		return ErrTypeServiceUnavailable
+	case status >= 500:
+		return ErrTypeServer
+	default:
+		return ErrTypeInvalidRequest
+	}
 }

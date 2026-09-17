@@ -305,7 +305,11 @@ func TestHandleInputTokensForwardsTokenizeError(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d", rec.Code)
 	}
-	if rec.Body.String() != `{"error":{"message":"invalid messages"}}` {
-		t.Fatalf("unexpected forwarded body: %s", rec.Body.String())
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %v", err)
+	}
+	if envelope.Error.Message != "invalid messages" || envelope.Error.Type != manager.ErrTypeInvalidRequest {
+		t.Fatalf("normalized body = %s", rec.Body.String())
 	}
 }
