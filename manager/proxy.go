@@ -215,8 +215,11 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			SlowHeadersTotal.WithLabelValues(modelName, host).Inc()
 		},
 		// Hung replica: headers never arrived, then the request ended as a
-		// cancel (client give-up / disconnect). ErrorHandler still treats
-		// cancel as non-failure so this is the only breaker increment.
+		// cancel (client give-up / disconnect). Same class as a client
+		// deadline (reason=timeout), which already trips the breaker —
+		// not a new client-controlled signal. ErrorHandler still treats
+		// cancel as non-failure so this is the only increment for this
+		// request. Consecutive-failure + success reset still apply.
 		onHang: func() {
 			recordFailure("canceled_after_slow")
 		},
