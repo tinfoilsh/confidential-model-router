@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -66,6 +67,56 @@ func TestWriteRequestBodyErrorClassifiesChunkedOversize(t *testing.T) {
 	writeRequestBodyError(rec, &http.MaxBytesError{Limit: maxRequestBodySize})
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestWriteRequestBodyErrorHidesTransportDetail(t *testing.T) {
+	rec := httptest.NewRecorder()
+	transportErr := errors.New("read tcp 10.0.0.1:443: connection reset by peer")
+	writeRequestBodyError(rec, transportErr)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %s", rec.Body.String())
+	}
+	if envelope.Error.Message != manager.ErrMsgBodyReadFailed {
+		t.Fatalf("message = %q, want the fixed %q", envelope.Error.Message, manager.ErrMsgBodyReadFailed)
+	}
+	if strings.Contains(rec.Body.String(), transportErr.Error()) {
+		t.Fatalf("transport detail leaked: %s", rec.Body.String())
+	}
+}
+
+func TestInvalidJSONErrorKeepsDecoderDetailOnly(t *testing.T) {
+	var decoded map[string]any
+	syntaxErr := json.Unmarshal([]byte(`{"model":`), &decoded)
+	typeErr := json.Unmarshal([]byte(`"str"`), &decoded)
+
+	cases := []struct {
+		name       string
+		err        error
+		wantDetail bool
+		wantStatus int
+	}{
+		{"syntax error is shown", syntaxErr, true, http.StatusBadRequest},
+		{"type error is shown", typeErr, true, http.StatusBadRequest},
+		{"not-an-object sentinel is shown", errBodyNotObject, true, http.StatusBadRequest},
+		{"transport error is hidden", errors.New("read: connection reset"), false, http.StatusBadRequest},
+		{"size limit maps to 413", &http.MaxBytesError{Limit: 1}, false, http.StatusRequestEntityTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := invalidJSONError(tc.err)
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", got.Status, tc.wantStatus)
+			}
+			hasDetail := strings.Contains(got.Message, tc.err.Error())
+			if hasDetail != tc.wantDetail {
+				t.Fatalf("message = %q, detail shown = %v, want %v", got.Message, hasDetail, tc.wantDetail)
+			}
+		})
 	}
 }
 
@@ -804,11 +855,30 @@ func TestResolveAutoModel_InvalidLevel(t *testing.T) {
 	}
 
 	body := map[string]any{"model": "auto", "auto_model_options": map[string]any{"intelligence": "high"}}
-	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body); err == nil {
+	_, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body)
+	if err == nil {
 		t.Fatal("expected error for non-numeric body intelligence")
 	}
 	if _, ok := body["auto_model_options"]; ok {
 		t.Fatal("auto_model_options must be stripped even on error")
+	}
+	var apiErr *manager.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T", err)
+	}
+	if apiErr.Status != http.StatusBadRequest || apiErr.Type != manager.ErrTypeInvalidRequest || apiErr.Param != "auto_model_options.intelligence" {
+		t.Fatalf("status/type/param = %d/%s/%q", apiErr.Status, apiErr.Type, apiErr.Param)
+	}
+}
+
+func TestAsAPIErrorPreservesTypedErrorsAndWrapsPlainOnes(t *testing.T) {
+	typed := manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, "x")
+	if got := asAPIError(typed); got != typed {
+		t.Fatalf("typed error was re-wrapped: %+v", got)
+	}
+	plain := asAPIError(errors.New("Something specific."))
+	if plain.Status != http.StatusBadRequest || plain.Type != manager.ErrTypeInvalidRequest || plain.Message != "Something specific." {
+		t.Fatalf("plain wrap = %+v", plain)
 	}
 }
 

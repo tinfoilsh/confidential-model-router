@@ -21,6 +21,10 @@ var cacheSaltPaths = map[string]bool{
 	"/v1/responses":        true,
 }
 
+// errBodyNotObject is returned when a proxied body decodes but is not a
+// single JSON object. Its text is shown to the client.
+var errBodyNotObject = errors.New("request body must be one JSON object")
+
 // applyCacheSalt owns the two cache-salt request fields on a parsed body. It
 // always pops user_cache_secret (router-only input to salt derivation; never
 // sent to the engine) and strips any client-supplied cache_salt — the salt
@@ -87,7 +91,7 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (map[string]a
 		if err != nil {
 			return nil, cachesalt.ModeNone, err
 		}
-		return nil, cachesalt.ModeNone, errors.New("request body must be one JSON object")
+		return nil, cachesalt.ModeNone, errBodyNotObject
 	}
 	streaming, _ := body["stream"].(bool)
 

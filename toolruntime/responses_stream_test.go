@@ -335,9 +335,7 @@ func TestResponsesStreamerPumpSurfacesAbruptDisconnect(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *upstreamError, got %T", err)
 	}
-	if !strings.Contains(string(upErr.body), "terminal response event") {
-		t.Fatalf("expected disconnect-specific error body, got %s", upErr.body)
-	}
+	assertUpstreamErrorEnvelope(t, upErr)
 }
 
 // TestResponsesStreamerTerminateBillingUsesMultiTurnTotals pins that a
@@ -652,9 +650,7 @@ func TestResponsesStreamerMalformedJSONFailsStream(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected upstreamError, got %T", err)
 	}
-	if !strings.Contains(string(upErr.body), "malformed SSE JSON") {
-		t.Fatalf("expected malformed-JSON message in body, got %s", string(upErr.body))
-	}
+	assertUpstreamErrorEnvelope(t, upErr)
 }
 
 // TestResponsesStreamerPumpAbortsOnClientDisconnect pins that once the

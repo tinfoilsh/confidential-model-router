@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 func TestHandleInputTokensChatRequest(t *testing.T) {
@@ -251,6 +253,13 @@ func TestHandleInputTokensRequiresBearerKey(t *testing.T) {
 	if dispatched {
 		t.Fatal("unauthenticated request was dispatched")
 	}
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %v", err)
+	}
+	if envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeMissingAPIKey {
+		t.Fatalf("code = %v, want %q", envelope.Error.Code, manager.ErrCodeMissingAPIKey)
+	}
 }
 
 func TestHandleInputTokensUsesSubdomainModel(t *testing.T) {
@@ -296,7 +305,11 @@ func TestHandleInputTokensForwardsTokenizeError(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d", rec.Code)
 	}
-	if rec.Body.String() != `{"error":{"message":"invalid messages"}}` {
-		t.Fatalf("unexpected forwarded body: %s", rec.Body.String())
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not an error envelope: %v", err)
+	}
+	if envelope.Error.Message != "invalid messages" || envelope.Error.Type != manager.ErrTypeInvalidRequest {
+		t.Fatalf("normalized body = %s", rec.Body.String())
 	}
 }

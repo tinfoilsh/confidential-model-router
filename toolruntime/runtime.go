@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -39,6 +41,22 @@ type upstreamError struct {
 
 func (e *upstreamError) Error() string {
 	return fmt.Sprintf("upstream returned status %d: %s", e.statusCode, strings.TrimSpace(string(e.body)))
+}
+
+// StreamAbortedError reports a failure after the SSE response headers were
+// already sent. The client has an HTTP 200 and an open (or closed) event
+// stream, so callers must not write another response; whatever could be
+// said to the client was already said in-band.
+type StreamAbortedError struct {
+	Err error
+}
+
+func (e *StreamAbortedError) Error() string {
+	return "stream aborted after headers: " + e.Err.Error()
+}
+
+func (e *StreamAbortedError) Unwrap() error {
+	return e.Err
 }
 
 type usageAccumulator struct {
@@ -372,29 +390,42 @@ func writeJSONResponse(w http.ResponseWriter, response *upstreamJSONResponse) er
 	if err != nil {
 		return err
 	}
+	return writeJSONBytes(w, response.header, response.statusCode, data)
+}
 
-	copyResponseHeaders(w.Header(), response.header)
+// writeJSONBytes writes an already-encoded JSON body with the given upstream
+// headers and status.
+func writeJSONBytes(w http.ResponseWriter, header http.Header, status int, data []byte) error {
+	copyResponseHeaders(w.Header(), header)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(response.statusCode)
-	_, err = w.Write(data)
+	w.WriteHeader(status)
+	_, err := w.Write(data)
 	return err
 }
 
+// writeUpstreamError surfaces a backend error to the client in the OpenAI
+// envelope, preserving the backend's status and non-hop-by-hop headers.
+// Errors that are not backend errors, or that arrived after the response
+// headers were sent, are returned to the caller untouched.
 func writeUpstreamError(w http.ResponseWriter, err error) error {
+	var aborted *StreamAbortedError
+	if errors.As(err, &aborted) {
+		return err
+	}
 	upstreamErr, ok := err.(*upstreamError)
 	if !ok {
 		return err
 	}
 
-	copyResponseHeaders(w.Header(), upstreamErr.header)
-	if contentType := upstreamErr.header.Get("Content-Type"); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
+	apiErr, recognized := manager.NormalizeUpstreamError(upstreamErr.statusCode, upstreamErr.body)
+	if !recognized {
+		log.WithFields(log.Fields{
+			"status": upstreamErr.statusCode,
+			"bytes":  len(upstreamErr.body),
+		}).Warn("upstream error body is not an OpenAI error object")
 	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(upstreamErr.body)))
-	w.WriteHeader(upstreamErr.statusCode)
-	_, writeErr := w.Write(upstreamErr.body)
-	return writeErr
+	return writeJSONBytes(w, upstreamErr.header, apiErr.Status, mustMarshal(apiErr.Envelope()))
 }
 
 // ---------------------------------------------------------------------------

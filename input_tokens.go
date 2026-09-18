@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -14,8 +13,6 @@ const (
 	chatInputTokensPath      = "/v1/chat/completions/input_tokens"
 	responsesInputTokensPath = "/v1/responses/input_tokens"
 	tokenizePath             = "/tokenize"
-	inputTokensAuthErrorType = "authentication_error"
-	maxInputTokensErrorBytes = 1 << 20
 )
 
 var tokenizeChatFields = []string{
@@ -37,6 +34,12 @@ var unsupportedResponsesCountFields = []string{
 type inputTokenDispatch func(context.Context, string, string, []byte, http.Header) (*http.Response, error)
 
 type inputTokenModelResolver func(map[string]any) (string, error)
+
+// inputTokensParamError returns a 400 invalid_request_error naming the
+// request parameter that failed validation.
+func inputTokensParamError(param string, format string, args ...any) *manager.APIError {
+	return manager.ErrInvalidRequest.WithParam(param).WithMessage(format, args...)
+}
 
 func isInputTokensPath(path string) bool {
 	return path == chatInputTokensPath || path == responsesInputTokensPath
@@ -67,11 +70,11 @@ func handleInputTokens(
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		jsonError(w, "Method not allowed.", manager.ErrTypeInvalidRequest, http.StatusMethodNotAllowed)
+		writeError(w, &manager.ErrMethodNotAllowed)
 		return
 	}
 	if apiKey == "" {
-		jsonError(w, "Missing bearer API key.", inputTokensAuthErrorType, http.StatusUnauthorized)
+		writeError(w, &manager.ErrMissingAPIKey)
 		return
 	}
 
@@ -84,13 +87,13 @@ func handleInputTokens(
 
 	var body map[string]any
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		jsonError(w, fmt.Sprintf("Invalid request body: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, invalidJSONError(err))
 		return
 	}
 
 	modelName, err := inputTokensModel(body, routedModel, resolveModel)
 	if err != nil {
-		jsonError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, asAPIError(err))
 		return
 	}
 
@@ -101,16 +104,16 @@ func handleInputTokens(
 	case responsesInputTokensPath:
 		tokenizeBody, err = responsesTokenizeBody(body, modelName)
 	default:
-		err = fmt.Errorf("unsupported input-token route: %s", r.URL.Path)
+		err = manager.ErrInvalidRequest.WithMessage("Unsupported input-token route: %s.", r.URL.Path)
 	}
 	if err != nil {
-		jsonError(w, err.Error(), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		writeError(w, asAPIError(err))
 		return
 	}
 
 	tokenizeBytes, err := json.Marshal(tokenizeBody)
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusInternalServerError)
+		writeError(w, &manager.ErrServer)
 		return
 	}
 	headers := make(http.Header)
@@ -118,7 +121,7 @@ func handleInputTokens(
 	headers.Set("Content-Type", "application/json")
 	resp, err := dispatch(r.Context(), modelName, tokenizePath, tokenizeBytes, headers)
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	defer resp.Body.Close()
@@ -132,11 +135,11 @@ func handleInputTokens(
 		Count *int `json:"count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenized); err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 	if tokenized.Count == nil || *tokenized.Count < 0 {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
 
@@ -156,17 +159,17 @@ func inputTokensModel(body map[string]any, routedModel string, resolveModel inpu
 	}
 	modelValue, ok := body["model"]
 	if !ok {
-		return "", fmt.Errorf("Missing required parameter: 'model'.")
+		return "", inputTokensParamError("model", manager.ErrMsgMissingParam, "model")
 	}
 	modelName, ok := modelValue.(string)
 	if !ok || modelName == "" {
-		return "", fmt.Errorf("Invalid parameter: 'model' must be a non-empty string.")
+		return "", inputTokensParamError("model", manager.ErrMsgInvalidParam, "model", "must be a non-empty string")
 	}
 	if modelName != "auto" {
 		return modelName, nil
 	}
 	if resolveModel == nil {
-		return "", fmt.Errorf("Model 'auto' is not available for this request.")
+		return "", inputTokensParamError("model", manager.ErrMsgAutoUnavailable)
 	}
 	return resolveModel(body)
 }
@@ -174,7 +177,7 @@ func inputTokensModel(body map[string]any, routedModel string, resolveModel inpu
 func chatTokenizeBody(body map[string]any, modelName string) (map[string]any, error) {
 	messages, ok := body["messages"].([]any)
 	if !ok {
-		return nil, fmt.Errorf("Missing or invalid required parameter: 'messages'.")
+		return nil, inputTokensParamError("messages", "Missing or invalid required parameter: 'messages'.")
 	}
 
 	tokenizeBody := map[string]any{
@@ -191,7 +194,7 @@ func chatTokenizeBody(body map[string]any, modelName string) (map[string]any, er
 func responsesTokenizeBody(body map[string]any, modelName string) (map[string]any, error) {
 	for _, field := range unsupportedResponsesCountFields {
 		if value, ok := body[field]; ok && value != nil {
-			return nil, fmt.Errorf("Input-token counting does not support Responses parameter %q.", field)
+			return nil, inputTokensParamError(field, "Input-token counting does not support Responses parameter %q.", field)
 		}
 	}
 	messages, err := responsesMessages(body)
@@ -274,7 +277,7 @@ func responsesMessages(body map[string]any) ([]any, error) {
 		}
 		text, ok := instructions.(string)
 		if !ok {
-			return nil, fmt.Errorf("Invalid parameter: 'instructions' must be a string.")
+			return nil, inputTokensParamError("instructions", manager.ErrMsgInvalidParam, "instructions", "must be a string")
 		}
 		if text != "" {
 			messages = append(messages, map[string]any{"role": "system", "content": text})
@@ -283,20 +286,20 @@ func responsesMessages(body map[string]any) ([]any, error) {
 
 	input, ok := body["input"]
 	if !ok {
-		return nil, fmt.Errorf("Missing required parameter: 'input'.")
+		return nil, inputTokensParamError("input", manager.ErrMsgMissingParam, "input")
 	}
 	if text, ok := input.(string); ok {
 		return append(messages, map[string]any{"role": "user", "content": text}), nil
 	}
 	items, ok := input.([]any)
 	if !ok {
-		return nil, fmt.Errorf("Invalid parameter: 'input' must be a string or array.")
+		return nil, inputTokensParamError("input", manager.ErrMsgInvalidParam, "input", "must be a string or array")
 	}
 
 	for _, rawItem := range items {
 		item, ok := rawItem.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("Invalid item in 'input': expected an object.")
+			return nil, inputTokensParamError("input", "Invalid item in 'input': expected an object.")
 		}
 		itemType, _ := item["type"].(string)
 		switch itemType {
@@ -319,7 +322,7 @@ func responsesMessages(body map[string]any) ([]any, error) {
 			}
 			messages = append(messages, message)
 		default:
-			return nil, fmt.Errorf("Unsupported Responses input item type %q.", itemType)
+			return nil, inputTokensParamError("input", "Unsupported Responses input item type %q.", itemType)
 		}
 	}
 	return messages, nil
@@ -328,11 +331,11 @@ func responsesMessages(body map[string]any) ([]any, error) {
 func responsesMessage(item map[string]any) (map[string]any, error) {
 	role, ok := item["role"].(string)
 	if !ok || role == "" {
-		return nil, fmt.Errorf("Responses message items require a non-empty 'role'.")
+		return nil, inputTokensParamError("input", "Responses message items require a non-empty 'role'.")
 	}
 	content, ok := item["content"]
 	if !ok {
-		return nil, fmt.Errorf("Responses message items require 'content'.")
+		return nil, inputTokensParamError("input", "Responses message items require 'content'.")
 	}
 	converted, err := responsesContent(content)
 	if err != nil {
@@ -347,27 +350,27 @@ func responsesContent(content any) (any, error) {
 	}
 	parts, ok := content.([]any)
 	if !ok {
-		return nil, fmt.Errorf("Responses message 'content' must be a string or array.")
+		return nil, inputTokensParamError("input", "Responses message 'content' must be a string or array.")
 	}
 
 	converted := make([]any, 0, len(parts))
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("Invalid Responses content part: expected an object.")
+			return nil, inputTokensParamError("input", "Invalid Responses content part: expected an object.")
 		}
 		partType, _ := part["type"].(string)
 		switch partType {
 		case "input_text", "output_text":
 			text, ok := part["text"].(string)
 			if !ok {
-				return nil, fmt.Errorf("Responses %s content requires string 'text'.", partType)
+				return nil, inputTokensParamError("input", "Responses %s content requires string 'text'.", partType)
 			}
 			converted = append(converted, map[string]any{"type": "text", "text": text})
 		case "input_image":
 			imageURL, ok := part["image_url"].(string)
 			if !ok || imageURL == "" {
-				return nil, fmt.Errorf("Responses input_image content requires string 'image_url'.")
+				return nil, inputTokensParamError("input", "Responses input_image content requires string 'image_url'.")
 			}
 			image := map[string]any{"url": imageURL}
 			if detail, ok := part["detail"].(string); ok && detail != "" {
@@ -377,11 +380,11 @@ func responsesContent(content any) (any, error) {
 		case "refusal":
 			refusal, ok := part["refusal"].(string)
 			if !ok {
-				return nil, fmt.Errorf("Responses refusal content requires string 'refusal'.")
+				return nil, inputTokensParamError("input", "Responses refusal content requires string 'refusal'.")
 			}
 			converted = append(converted, map[string]any{"type": "text", "text": refusal})
 		default:
-			return nil, fmt.Errorf("Unsupported Responses content part type %q.", partType)
+			return nil, inputTokensParamError("input", "Unsupported Responses content part type %q.", partType)
 		}
 	}
 	return converted, nil
@@ -392,7 +395,7 @@ func responsesFunctionCall(item map[string]any) (map[string]any, error) {
 	name, nameOK := item["name"].(string)
 	arguments, argumentsOK := item["arguments"].(string)
 	if !callIDOK || callID == "" || !nameOK || name == "" || !argumentsOK {
-		return nil, fmt.Errorf("Responses function_call items require string 'call_id', 'name', and 'arguments'.")
+		return nil, inputTokensParamError("input", "Responses function_call items require string 'call_id', 'name', and 'arguments'.")
 	}
 	return map[string]any{
 		"role":    "assistant",
@@ -428,15 +431,15 @@ func appendFunctionCall(messages []any, message map[string]any) []any {
 func responsesFunctionCallOutput(item map[string]any) (map[string]any, error) {
 	callID, ok := item["call_id"].(string)
 	if !ok || callID == "" {
-		return nil, fmt.Errorf("Responses function_call_output items require string 'call_id'.")
+		return nil, inputTokensParamError("input", "Responses function_call_output items require string 'call_id'.")
 	}
 	output, ok := item["output"]
 	if !ok {
-		return nil, fmt.Errorf("Responses function_call_output items require 'output'.")
+		return nil, inputTokensParamError("input", "Responses function_call_output items require 'output'.")
 	}
 	converted, err := responsesContent(output)
 	if err != nil {
-		return nil, fmt.Errorf("Invalid function_call_output output: %w", err)
+		return nil, inputTokensParamError("input", "Invalid function_call_output output: %s", err.Error())
 	}
 	return map[string]any{
 		"role":         "tool",
@@ -448,21 +451,21 @@ func responsesFunctionCallOutput(item map[string]any) (map[string]any, error) {
 func responsesTools(tools any) ([]any, error) {
 	items, ok := tools.([]any)
 	if !ok {
-		return nil, fmt.Errorf("Invalid parameter: 'tools' must be an array.")
+		return nil, inputTokensParamError("tools", manager.ErrMsgInvalidParam, "tools", "must be an array")
 	}
 	converted := make([]any, 0, len(items))
 	for _, rawTool := range items {
 		tool, ok := rawTool.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("Invalid tool: expected an object.")
+			return nil, inputTokensParamError("tools", "Invalid tool: expected an object.")
 		}
 		toolType, _ := tool["type"].(string)
 		if toolType != "function" {
-			return nil, fmt.Errorf("Unsupported Responses tool type %q.", toolType)
+			return nil, inputTokensParamError("tools", "Unsupported Responses tool type %q.", toolType)
 		}
 		name, ok := tool["name"].(string)
 		if !ok || name == "" {
-			return nil, fmt.Errorf("Responses function tools require a non-empty string 'name'.")
+			return nil, inputTokensParamError("tools", "Responses function tools require a non-empty string 'name'.")
 		}
 		function := map[string]any{"name": name}
 		for _, key := range []string{"description", "parameters", "strict"} {
@@ -479,20 +482,14 @@ func responsesTools(tools any) ([]any, error) {
 }
 
 func forwardInputTokensError(w http.ResponseWriter, resp *http.Response) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxInputTokensErrorBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, manager.MaxUpstreamErrorBodyBytes+1))
 	if err != nil {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
-	if len(body) > maxInputTokensErrorBytes {
-		jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+	if len(body) > manager.MaxUpstreamErrorBodyBytes {
+		writeError(w, &manager.ErrUpstream)
 		return
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/json"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	writeUpstreamError(w, resp.StatusCode, body)
 }

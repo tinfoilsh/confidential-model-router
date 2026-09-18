@@ -119,24 +119,53 @@ func ParseIntelligence(header http.Header, body map[string]any) (int, error) {
 	if value := strings.TrimSpace(header.Get(IntelligenceHeader)); value != "" {
 		level, err := strconv.Atoi(value)
 		if err != nil {
-			return 0, fmt.Errorf("Invalid %s header: must be an integer between %d and %d.", IntelligenceHeader, MinIntelligence, MaxIntelligence)
+			return 0, &ValidationError{
+				Message: fmt.Sprintf(errMsgInvalidHeader, IntelligenceHeader, MinIntelligence, MaxIntelligence),
+			}
 		}
-		return validateIntelligence(level)
+		return validateIntelligence(level, "")
 	}
 	return DefaultIntelligence, nil
+}
+
+const (
+	errMsgInvalidHeader = "Invalid %s header: must be an integer between %d and %d."
+	errMsgInvalidParam  = "Invalid parameter: '%s' must be an integer between %d and %d."
+	errMsgOutOfRange    = "Invalid intelligence level %d: must be between %d and %d."
+)
+
+// intelligenceParam is the JSON path reported when the body's intelligence
+// value is rejected.
+var intelligenceParam = OptionsField + "." + IntelligenceKey
+
+// ValidationError reports a rejected intelligence level. Param names the
+// body field at fault, or is empty when the value came from the header.
+type ValidationError struct {
+	Param   string
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	return e.Message
 }
 
 func intelligenceFromJSON(value any) (int, error) {
 	number, ok := value.(float64)
 	if !ok || number != math.Trunc(number) {
-		return 0, fmt.Errorf("Invalid parameter: '%s.%s' must be an integer between %d and %d.", OptionsField, IntelligenceKey, MinIntelligence, MaxIntelligence)
+		return 0, &ValidationError{
+			Param:   intelligenceParam,
+			Message: fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence),
+		}
 	}
-	return validateIntelligence(int(number))
+	return validateIntelligence(int(number), intelligenceParam)
 }
 
-func validateIntelligence(level int) (int, error) {
+func validateIntelligence(level int, param string) (int, error) {
 	if level < MinIntelligence || level > MaxIntelligence {
-		return 0, fmt.Errorf("Invalid intelligence level %d: must be between %d and %d.", level, MinIntelligence, MaxIntelligence)
+		return 0, &ValidationError{
+			Param:   param,
+			Message: fmt.Sprintf(errMsgOutOfRange, level, MinIntelligence, MaxIntelligence),
+		}
 	}
 	return level, nil
 }

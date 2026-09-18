@@ -822,7 +822,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 		}
 	}
 	s.emitBillingEvent(r, em, modelName, usage)
-	return s.writeErr
+	return s.streamAborted(s.writeErr)
 }
 
 // terminateWithError surfaces a mid-stream upstream failure to the client.
@@ -850,7 +850,7 @@ func (s *responsesStreamer) terminateWithError(r *http.Request, em *manager.Encl
 		},
 	})
 	s.emitBillingEvent(r, em, modelName, s.totalsBillingUsage())
-	return nil
+	return s.streamAborted(s.writeErr)
 }
 
 // totalsBillingUsage returns the aggregated Responses-shaped usage block
