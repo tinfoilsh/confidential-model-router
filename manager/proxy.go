@@ -136,18 +136,28 @@ func (b *billingCloser) Close() error {
 
 // slowHeaderTripper wraps an http.RoundTripper and passively detects when a
 // backend takes longer than the configured timeout to send response headers.
-// Unlike a hard timeout, the request is never killed — the onSlow callback is
-// invoked for circuit breaker / metrics bookkeeping while the request continues.
+// Unlike a hard timeout, the request is never killed — onSlow is observational
+// (metrics / logs) while the request continues. If the request is later
+// canceled without headers, onHang feeds the breaker. Impatient cancels
+// before the timeout do not.
 type slowHeaderTripper struct {
 	base    http.RoundTripper
 	timeout time.Duration
 	onSlow  func()
+	onHang  func()
 }
 
 func (t *slowHeaderTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	timer := time.AfterFunc(t.timeout, t.onSlow)
+	onSlow := t.onSlow
+	if onSlow == nil {
+		onSlow = func() {}
+	}
+	timer := time.AfterFunc(t.timeout, onSlow)
 	resp, err := t.base.RoundTrip(req)
-	timer.Stop()
+	fired := !timer.Stop()
+	if t.onHang != nil && err != nil && fired && classifyProxyError(err) == "canceled" {
+		t.onHang()
+	}
 	return resp, err
 }
 
@@ -183,10 +193,18 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				"enclave": host,
 				"timeout": responseHeaderTimeout,
 			}).Warn("backend slow: response headers not received within timeout")
-			// Purely observational: the request is still in flight; its
-			// terminal outcome will be counted in ProxySuccessTotal or
-			// ProxyFailureTotal. Does not feed the breaker.
+			// Observational: thinking models routinely exceed this timeout
+			// and still succeed. Does not feed the breaker by itself.
 			SlowHeadersTotal.WithLabelValues(modelName, host).Inc()
+		},
+		// Hung replica: headers never arrived, then the request ended as a
+		// cancel (client give-up / disconnect). Same class as a client
+		// deadline (reason=timeout), which already trips the breaker —
+		// not a new client-controlled signal. ErrorHandler still treats
+		// cancel as non-failure so this is the only increment for this
+		// request. Consecutive-failure + success reset still apply.
+		onHang: func() {
+			recordFailure("canceled_after_slow")
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{

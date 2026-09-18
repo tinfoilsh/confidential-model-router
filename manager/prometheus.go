@@ -245,19 +245,24 @@ var (
 
 	// ProxyFailureTotal tracks failed proxy responses and transport errors per enclave.
 	// The "reason" label classifies the failure: timeout, tls_mismatch, connection_refused,
-	// connection_reset, dns_error, tls_error, transport_error, or http_<status>. These are
-	// all inputs to the circuit breaker. Client cancellations and slow-header observations
-	// are tracked separately in ClientCancellationsTotal and SlowHeadersTotal.
+	// connection_reset, dns_error, tls_error, transport_error, http_<status>, or
+	// canceled_after_slow. These are all inputs to the circuit breaker.
+	// canceled_after_slow is the one cancellation that counts: headers never
+	// arrived within responseHeaderTimeout, then the client gave up. Ordinary
+	// cancellations stay on ClientCancellationsTotal only; slow-header
+	// observations stay on SlowHeadersTotal and do not trip by themselves.
 	ProxyFailureTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_proxy_failure_total",
-			Help: "Total number of failed proxy responses (status >= 500 or transport error)",
+			Help: "Total number of failed proxy responses (status >= 500, transport error, or cancel after slow headers)",
 		},
 		[]string{"model", "enclave", "reason"},
 	)
 
 	// ClientCancellationsTotal tracks requests that ended because the client
-	// disconnected or aborted. Not a backend fault; does not trip the breaker.
+	// disconnected or aborted. Incremented for every cancel, including those
+	// that also record canceled_after_slow on ProxyFailureTotal. Impatient
+	// cancels (headers timeout not yet fired) do not trip the breaker.
 	ClientCancellationsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_client_cancellations_total",
@@ -269,7 +274,8 @@ var (
 	// SlowHeadersTotal tracks requests where response headers took longer than
 	// responseHeaderTimeout to arrive. Observed passively while the request is
 	// still in flight; its terminal outcome is counted separately in
-	// ProxySuccessTotal or ProxyFailureTotal. Does not trip the breaker.
+	// ProxySuccessTotal or ProxyFailureTotal. Does not trip the breaker
+	// by itself — only a later canceled_after_slow does.
 	SlowHeadersTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_slow_headers_total",
