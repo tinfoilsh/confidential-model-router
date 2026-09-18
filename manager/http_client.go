@@ -60,6 +60,16 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 			onSlow: func() {
 				SlowHeadersTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 			},
+			onHang: func() {
+				if !claimProbes {
+					return
+				}
+				ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, "canceled_after_slow").Inc()
+				if enclave.cb != nil {
+					enclave.cb.RecordFailure()
+					publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
+				}
+			},
 		},
 	}
 

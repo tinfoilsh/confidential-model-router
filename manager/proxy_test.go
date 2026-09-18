@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -468,6 +469,160 @@ func TestSlowHeaderTripper_SlowResponse_RequestNotKilled(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSlowHeaderTripper_CancelAfterSlow_CallsOnHang(t *testing.T) {
+	var hung atomic.Bool
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 40 * time.Millisecond,
+		onSlow:  func() {},
+		onHang:  func() { hung.Store(true) },
+	}
+
+	started := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer backend.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, rtErr := tripper.RoundTrip(req)
+		errCh <- rtErr
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received request")
+	}
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected cancel error")
+		}
+		if classifyProxyError(err) != "canceled" {
+			t.Fatalf("classify = %q, want canceled", classifyProxyError(err))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RoundTrip did not return")
+	}
+	if !hung.Load() {
+		t.Fatal("onHang should fire when canceled after the header timeout")
+	}
+}
+
+func TestSlowHeaderTripper_CancelBeforeSlow_NoOnHang(t *testing.T) {
+	var hung atomic.Bool
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 2 * time.Second,
+		onSlow:  func() {},
+		onHang:  func() { hung.Store(true) },
+	}
+
+	started := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer backend.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, rtErr := tripper.RoundTrip(req)
+		errCh <- rtErr
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received request")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected cancel error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RoundTrip did not return")
+	}
+	if hung.Load() {
+		t.Fatal("onHang should not fire for an impatient cancel")
+	}
+}
+
+func TestSlowHeaderTripper_SlowSuccess_NoOnHang(t *testing.T) {
+	var hung atomic.Bool
+	tripper := &slowHeaderTripper{
+		base:    http.DefaultTransport,
+		timeout: 40 * time.Millisecond,
+		onSlow:  func() {},
+		onHang:  func() { hung.Store(true) },
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	req, _ := http.NewRequest("GET", backend.URL, nil)
+	resp, err := tripper.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if hung.Load() {
+		t.Fatal("onHang should not fire when headers eventually arrive")
+	}
+}
+
+func TestSlowHeaderTripper_NonCancelErrorAfterSlow_NoOnHang(t *testing.T) {
+	var hung atomic.Bool
+	tripper := &slowHeaderTripper{
+		base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			time.Sleep(80 * time.Millisecond)
+			return nil, fmt.Errorf("connection reset")
+		}),
+		timeout: 40 * time.Millisecond,
+		onSlow:  func() {},
+		onHang:  func() { hung.Store(true) },
+	}
+
+	req, _ := http.NewRequest("GET", "http://example.invalid", nil)
+	_, err := tripper.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if hung.Load() {
+		t.Fatal("onHang is only for canceled-after-slow; other errors are counted by ErrorHandler")
 	}
 }
 
