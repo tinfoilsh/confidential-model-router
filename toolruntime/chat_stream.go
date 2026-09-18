@@ -635,7 +635,7 @@ func (s *chatStreamer) finalize(
 		}
 	}
 	s.emitBillingEvent(r, em, modelName, finalUsage)
-	return s.writeErr
+	return s.streamAborted(s.writeErr)
 }
 
 // finalUsage assembles the aggregated usage block across every upstream
@@ -670,7 +670,7 @@ func (s *chatStreamer) terminateWithError(r *http.Request, em *manager.EnclaveMa
 		}
 	}
 	s.emitBillingEvent(r, em, modelName, s.finalUsage())
-	return nil
+	return s.streamAborted(s.writeErr)
 }
 
 // ---------------------------------------------------------------------------

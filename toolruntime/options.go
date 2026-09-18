@@ -2,6 +2,8 @@ package toolruntime
 
 import (
 	"fmt"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 // Router-only body fields. Each is an OpenAI-compatible-but-Tinfoil-specific
@@ -88,10 +90,16 @@ func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 	return opts, nil
 }
 
+// optionsParamError returns a 400 invalid_request_error for a router-only
+// options field, with param set to the field's JSON path.
+func optionsParamError(param string, detail string) *manager.APIError {
+	return manager.ErrInvalidRequest.WithParam(param).WithMessage(manager.ErrMsgInvalidParam, param, detail)
+}
+
 func parseCodeExecutionOptions(raw any) (*CodeExecutionOptions, error) {
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("code_execution_options must be an object")
+		return nil, optionsParamError(fieldCodeExecutionOptions, "must be an object")
 	}
 	ce := &CodeExecutionOptions{
 		AccessToken:        stringField(m, "accessToken"),
@@ -99,13 +107,13 @@ func parseCodeExecutionOptions(raw any) (*CodeExecutionOptions, error) {
 		ContainerAuthToken: stringField(m, "containerAuthToken"),
 	}
 	if ce.AccessToken == "" {
-		return nil, fmt.Errorf("code_execution_options.accessToken is required")
+		return nil, optionsParamError(fieldCodeExecutionOptions+".accessToken", "is required")
 	}
 	if ce.EncryptionKey == "" {
-		return nil, fmt.Errorf("code_execution_options.encryptionKey is required")
+		return nil, optionsParamError(fieldCodeExecutionOptions+".encryptionKey", "is required")
 	}
 	if ce.ContainerAuthToken == "" {
-		return nil, fmt.Errorf("code_execution_options.containerAuthToken is required")
+		return nil, optionsParamError(fieldCodeExecutionOptions+".containerAuthToken", "is required")
 	}
 	if rawUploads, ok := m["uploads"]; ok {
 		uploads, err := parseUploads(rawUploads)
@@ -120,13 +128,13 @@ func parseCodeExecutionOptions(raw any) (*CodeExecutionOptions, error) {
 func parseUploads(raw any) ([]UploadedFile, error) {
 	arr, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("code_execution_options.uploads must be an array")
+		return nil, optionsParamError(fieldCodeExecutionOptions+".uploads", "must be an array")
 	}
 	out := make([]UploadedFile, len(arr))
 	for i, item := range arr {
 		entry, ok := item.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("code_execution_options.uploads[%d] must be an object", i)
+			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d]", fieldCodeExecutionOptions, i), "must be an object")
 		}
 		u := UploadedFile{
 			FileAccessToken: stringField(entry, "fileAccessToken"),
@@ -134,13 +142,13 @@ func parseUploads(raw any) ([]UploadedFile, error) {
 			Sha256:          stringField(entry, "sha256"),
 		}
 		if u.FileAccessToken == "" {
-			return nil, fmt.Errorf("code_execution_options.uploads[%d].fileAccessToken is required", i)
+			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].fileAccessToken", fieldCodeExecutionOptions, i), "is required")
 		}
 		if u.Filename == "" {
-			return nil, fmt.Errorf("code_execution_options.uploads[%d].filename is required", i)
+			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].filename", fieldCodeExecutionOptions, i), "is required")
 		}
 		if u.Sha256 == "" {
-			return nil, fmt.Errorf("code_execution_options.uploads[%d].sha256 is required", i)
+			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].sha256", fieldCodeExecutionOptions, i), "is required")
 		}
 		out[i] = u
 	}

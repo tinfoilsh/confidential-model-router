@@ -346,12 +346,12 @@ func TestRewriteBase64FilesRejectsImagesModeOnTextOnlyModel(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected images-on-text-only to error")
 			}
-			var inputErr *fileInputError
+			var inputErr *manager.APIError
 			if !errors.As(err, &inputErr) {
-				t.Fatalf("expected fileInputError, got %T", err)
+				t.Fatalf("expected APIError, got %T", err)
 			}
-			if inputErr.StatusCode != 400 {
-				t.Fatalf("expected status 400, got %d", inputErr.StatusCode)
+			if inputErr.Status != 400 {
+				t.Fatalf("expected status 400, got %d", inputErr.Status)
 			}
 		})
 	}
@@ -369,12 +369,12 @@ func TestRewriteBase64FilesRejectsUnknownTinfoilMode(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected unknown tinfoil_mode to error")
 			}
-			var inputErr *fileInputError
+			var inputErr *manager.APIError
 			if !errors.As(err, &inputErr) {
-				t.Fatalf("expected fileInputError, got %T", err)
+				t.Fatalf("expected APIError, got %T", err)
 			}
-			if inputErr.StatusCode != 400 {
-				t.Fatalf("expected status 400, got %d", inputErr.StatusCode)
+			if inputErr.Status != 400 {
+				t.Fatalf("expected status 400, got %d", inputErr.Status)
 			}
 		})
 	}

@@ -2,11 +2,15 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -687,4 +691,101 @@ func TestObserveTokenUsage(t *testing.T) {
 	if count != 1 {
 		t.Errorf("unlabeled context observed: count=%d, want 1", count)
 	}
+}
+
+// TestProxyNormalizesBackendErrorBodies pins that a non-2xx backend
+// response is rewritten into the OpenAI error envelope with its status
+// preserved, while successful and streaming responses are left alone.
+func TestProxyNormalizesBackendErrorBodies(t *testing.T) {
+	cb := newCircuitBreaker()
+	collector := billing.NewCollector("", "", "")
+	t.Cleanup(collector.Stop)
+	proxy := newProxy("err-host.test", "", "err-model", collector, cb)
+
+	mkResp := func(status int, contentType, body string) *http.Response {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		header := http.Header{}
+		header.Set("Content-Type", contentType)
+		return &http.Response{
+			StatusCode:    status,
+			Header:        header,
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Request:       req,
+		}
+	}
+
+	t.Run("vllm error is normalized", func(t *testing.T) {
+		resp := mkResp(http.StatusBadRequest, "application/json",
+			`{"object":"error","message":"maximum context length exceeded","type":"BadRequestError","param":null,"code":400}`)
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		var envelope ErrorEnvelope
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("body is not an envelope: %s", body)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		if envelope.Error.Message != "maximum context length exceeded" || envelope.Error.Type != ErrTypeInvalidRequest {
+			t.Fatalf("envelope = %+v", envelope.Error)
+		}
+		if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(body)) {
+			t.Fatalf("Content-Length = %q, body len %d", got, len(body))
+		}
+	})
+
+	t.Run("unrecognized error body is replaced", func(t *testing.T) {
+		resp := mkResp(http.StatusInternalServerError, "text/plain", "Internal Server Error")
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "Internal Server Error") {
+			t.Fatalf("raw backend body leaked: %s", body)
+		}
+		var envelope ErrorEnvelope
+		if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == nil || *envelope.Error.Code != ErrCodeUpstreamError {
+			t.Fatalf("envelope = %s", body)
+		}
+	})
+
+	t.Run("streaming error body is untouched", func(t *testing.T) {
+		original := `data: {"error":{"message":"mid-stream"}}` + "\n\n"
+		resp := mkResp(http.StatusInternalServerError, "text/event-stream", original)
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != original {
+			t.Fatalf("streaming body changed: %s", body)
+		}
+	})
+
+	t.Run("encoded error body is untouched", func(t *testing.T) {
+		original := "\x1f\x8b-not-really-gzip"
+		resp := mkResp(http.StatusBadRequest, "application/json", original)
+		resp.Header.Set("Content-Encoding", "gzip")
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != original || resp.Header.Get("Content-Encoding") != "gzip" {
+			t.Fatalf("encoded body or header changed: %q %q", body, resp.Header.Get("Content-Encoding"))
+		}
+	})
+
+	t.Run("success body is untouched", func(t *testing.T) {
+		original := `{"id":"x","choices":[]}`
+		resp := mkResp(http.StatusOK, "application/json", original)
+		if err := proxy.ModifyResponse(resp); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != original {
+			t.Fatalf("success body changed: %s", body)
+		}
+	})
 }

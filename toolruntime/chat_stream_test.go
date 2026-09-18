@@ -806,9 +806,7 @@ func TestChatStreamerPumpSurfacesAbruptDisconnect(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *upstreamError, got %T", err)
 	}
-	if !strings.Contains(string(upErr.body), "terminal [DONE] marker") {
-		t.Fatalf("expected disconnect-specific error body, got %s", upErr.body)
-	}
+	assertUpstreamErrorEnvelope(t, upErr)
 }
 
 func TestChatToolCallBuilderAssemblesFragments(t *testing.T) {
@@ -895,9 +893,7 @@ func TestChatStreamerMalformedJSONFailsStream(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *upstreamError, got %T", err)
 	}
-	if !strings.Contains(string(upErr.body), "malformed SSE JSON") {
-		t.Fatalf("expected malformed-JSON body, got %s", string(upErr.body))
-	}
+	assertUpstreamErrorEnvelope(t, upErr)
 }
 
 // failingFlushWriter is an http.ResponseWriter+Flusher whose Write fails
