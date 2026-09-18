@@ -151,7 +151,7 @@ func writeUpstreamError(w http.ResponseWriter, status int, body []byte) {
 	if !recognized {
 		log.WithFields(log.Fields{
 			"status": status,
-			"body":   manager.LogPreview(body),
+			"bytes":  len(body),
 		}).Warn("upstream error body is not an OpenAI error object")
 	}
 	writeError(w, apiErr)
@@ -234,15 +234,23 @@ var (
 )
 
 // writeError logs the error at a level matching its status and writes it in
-// the OpenAI error format.
+// the OpenAI error format. Only the stable identifiers are logged: messages
+// may embed backend or document-processing text derived from request
+// content, which must not leave the enclave via logs.
 func writeError(w http.ResponseWriter, e *manager.APIError) {
+	entry := log.WithFields(log.Fields{
+		"status": e.Status,
+		"type":   e.Type,
+		"code":   e.Code,
+		"param":  e.Param,
+	})
 	switch {
 	case e.Status >= 500:
-		log.Errorf("api error: %s", e.Message)
+		entry.Error("api error")
 	case e.Status >= 400:
-		log.Warnf("api error: %s", e.Message)
+		entry.Warn("api error")
 	default:
-		log.Debugf("api error: %s", e.Message)
+		entry.Debug("api error")
 	}
 	manager.WriteAPIError(w, e)
 }

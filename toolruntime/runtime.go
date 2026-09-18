@@ -422,7 +422,7 @@ func writeUpstreamError(w http.ResponseWriter, err error) error {
 	if !recognized {
 		log.WithFields(log.Fields{
 			"status": upstreamErr.statusCode,
-			"body":   manager.LogPreview(upstreamErr.body),
+			"bytes":  len(upstreamErr.body),
 		}).Warn("upstream error body is not an OpenAI error object")
 	}
 	return writeJSONBytes(w, upstreamErr.header, apiErr.Status, mustMarshal(apiErr.Envelope()))

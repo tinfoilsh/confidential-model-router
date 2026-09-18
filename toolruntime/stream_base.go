@@ -192,7 +192,7 @@ func upstreamErrorPayload(err error) map[string]any {
 		if !recognized {
 			log.WithFields(log.Fields{
 				"status": upErr.statusCode,
-				"body":   manager.LogPreview(upErr.body),
+				"bytes":  len(upErr.body),
 			}).Warn("upstream error body is not an OpenAI error object")
 		}
 	} else {

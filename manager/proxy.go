@@ -480,7 +480,7 @@ func normalizeUpstreamErrorResponse(resp *http.Response, modelName, host string)
 				"model":   modelName,
 				"enclave": host,
 				"status":  resp.StatusCode,
-				"body":    LogPreview(body),
+				"bytes":   len(body),
 			}).Warn("backend error body is not an OpenAI error object")
 		}
 	}

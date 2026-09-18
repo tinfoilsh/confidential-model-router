@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // Error type strings returned in API error responses. These follow the
@@ -299,23 +298,6 @@ var openAIErrorTypes = map[string]bool{
 	"authentication_error":    true,
 	"permission_error":        true,
 	"not_found_error":         true,
-}
-
-// LogPreview returns a bounded, single-line rendering of a response body for
-// diagnostic logs. Bodies are user-influenced, so the preview is capped and
-// stripped of line breaks to keep log entries from being padded or forged.
-func LogPreview(body []byte) string {
-	const maxPreview = 256
-	preview := body
-	if len(preview) > maxPreview {
-		preview = preview[:maxPreview]
-	}
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' {
-			return ' '
-		}
-		return r
-	}, string(preview))
 }
 
 // errTypeForStatus picks the OpenAI error type implied by an HTTP status
