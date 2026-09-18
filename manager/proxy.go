@@ -450,8 +450,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 }
 
 // normalizeUpstreamErrorResponse replaces a backend error response body with
-// the OpenAI error envelope in place. The original body is logged when it
-// cannot be normalized so operators still see what the backend said.
+// the OpenAI error envelope in place. Bodies that cannot be normalized are
+// reported by status and size only; their content may be derived from the
+// request and must not leave the enclave via logs.
 func normalizeUpstreamErrorResponse(resp *http.Response, modelName, host string) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxUpstreamErrorBodyBytes+1))
 	resp.Body.Close()
