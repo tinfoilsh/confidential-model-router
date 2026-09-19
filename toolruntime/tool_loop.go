@@ -134,6 +134,18 @@ func runToolLoop(
 	toolSchemas := adapter.schemas()
 	path := adapter.upstreamPath()
 	var autoContinueResponseItems []any
+	var completedHeaders http.Header
+	// Error exits carry billing-only usage from fully consumed successful turns;
+	// the caller must still surface the original error, not this partial result.
+	completedUsageResponse := func() *upstreamJSONResponse {
+		usage := usageTotals.Usage()
+		if usage == nil {
+			return nil
+		}
+		response := &upstreamJSONResponse{body: map[string]any{}, header: completedHeaders}
+		adapter.applyUsage(response, usage)
+		return response
+	}
 
 	for i := 0; i < maxToolIterations; i++ {
 		adapter.preIteration(reqBody, i)
@@ -151,9 +163,10 @@ func runToolLoop(
 			if traceID := adapter.traceID(); traceID != "" {
 				debugLogf("toolruntime:%s %s upstream.error elapsed=%s err=%v", traceID, adapter.tracePhase(i), time.Since(start), err)
 			}
-			return nil, nil, err
+			return completedUsageResponse(), nil, err
 		}
 		usageTotals.Add(response)
+		completedHeaders = response.header
 
 		routerToolCalls, autoContinueCalls, hasExternalClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
 
@@ -222,7 +235,7 @@ func runToolLoop(
 	}
 	finalResponse, err := postJSON(ctx, em, modelName, path, adapter.forcedFinalRequest(reqBody), requestHeaders)
 	if err != nil {
-		return nil, nil, err
+		return completedUsageResponse(), nil, err
 	}
 	// The forced-final turn consumes tokens too; feed them into the
 	// accumulator before finalize overwrites response.body["usage"] with

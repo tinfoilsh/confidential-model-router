@@ -39,7 +39,7 @@ var errBodyNotObject = errors.New("request body must be one JSON object")
 // re-marshal.
 //
 // apiKey is the raw bearer token; identity anchoring (JWT subject, else the
-// opaque key) happens here via rateLimitIdentity so the call site cannot
+// opaque key) happens here via cacheSaltIdentity so the call site cannot
 // wire the wrong value.
 func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cachesalt.Mode, bool) {
 	// A JSON `null` body unmarshals to a nil map (with no error). It carries
@@ -58,7 +58,7 @@ func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cac
 	if !enabled || !cacheSaltPaths[path] {
 		return cachesalt.ModeNone, changed
 	}
-	salt, mode := cachesalt.Derive(rateLimitIdentity(apiKey), secret)
+	salt, mode := cachesalt.Derive(cacheSaltIdentity(apiKey), secret)
 	if salt == "" {
 		return cachesalt.ModeNone, changed
 	}
@@ -96,7 +96,7 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (map[string]a
 	streaming, _ := body["stream"].(bool)
 
 	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
-	if streaming {
+	if streaming && cacheSaltPaths[r.URL.Path] {
 		ensureStreamingUsageOptions(body, r.Header)
 		changed = true
 	}
@@ -137,4 +137,16 @@ func recordCacheSaltInjection(modelName string, mode cachesalt.Mode) {
 func decodeConsumedAll(dec *json.Decoder) bool {
 	_, err := dec.Token()
 	return err == io.EOF
+}
+
+func replaceJSONBody(r *http.Request, body map[string]any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	r.ContentLength = int64(len(data))
+	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	return nil
 }

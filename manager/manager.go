@@ -24,7 +24,6 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/config"
-	"github.com/tinfoilsh/confidential-model-router/ratelimit"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
@@ -51,7 +50,6 @@ type Model struct {
 	SourceMeasurement *attestation.Measurement `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
-	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
@@ -166,7 +164,6 @@ type EnclaveManager struct {
 	usageContextSecret        string
 	inferenceDelegationSecret string
 	delegationHTTPClient      *http.Client
-	requestTracker            *ratelimit.RequestTracker
 	cacheRouteShadow          *cacheroute.Shadow
 	refreshInterval           time.Duration
 	stateMu                   sync.Mutex
@@ -204,11 +201,6 @@ func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	return model.(*Model), true
 }
 
-// RequestTracker returns the shared request tracker for rate limiting.
-func (em *EnclaveManager) RequestTracker() *ratelimit.RequestTracker {
-	return em.requestTracker
-}
-
 // CacheRouteShadow returns the cache-aware routing shadow tracker.
 func (em *EnclaveManager) CacheRouteShadow() *cacheroute.Shadow {
 	return em.cacheRouteShadow
@@ -231,17 +223,6 @@ func (em *EnclaveManager) ReportUnknownModel(apiKey, modelName string) {
 // signing should be attempted.
 func (em *EnclaveManager) UsageContextSecret() string {
 	return em.usageContextSecret
-}
-
-// GetRateLimitConfig returns the rate limit config for a model, or nil if not configured.
-func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimitConfig {
-	model, found := em.GetModel(modelName)
-	if !found {
-		return nil
-	}
-	model.mu.RLock()
-	defer model.mu.RUnlock()
-	return model.RateLimit
 }
 
 // Bound network steps of enclave verification. Var for tests
@@ -921,7 +902,6 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		usageContextSecret:        usageContextSecret,
 		inferenceDelegationSecret: inferenceDelegationSecret,
 		delegationHTTPClient:      &http.Client{},
-		requestTracker:            ratelimit.NewRequestTracker(),
 		cacheRouteShadow:          cacheroute.NewShadow(nil),
 		refreshInterval:           refreshInterval,
 		debug:                     debug,
@@ -943,7 +923,6 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		SourceMeasurement: nil,
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
-		RateLimit:         modelConfig.RateLimit,
 		CacheRoute:        modelConfig.CacheRoute,
 		expectedHosts:     len(modelConfig.Hostnames),
 	}
@@ -1055,7 +1034,6 @@ func (em *EnclaveManager) sync() error {
 			model.mu.Lock()
 			model.expectedHosts = len(configModel.Hostnames)
 			model.Overload = configModel.Overload
-			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {

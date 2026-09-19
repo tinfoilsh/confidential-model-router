@@ -148,6 +148,14 @@ var (
 		[]string{"model"},
 	)
 
+	RateLimitRejectionsByReasonTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_ratelimit_rejections_by_reason_total",
+			Help: "Control-plane quota rejections by model and validated reason (requests or tokens)",
+		},
+		[]string{"model", "reason"},
+	)
+
 	// AutoRouteDecisionsTotal tracks which model and effort model "auto" resolved to
 	AutoRouteDecisionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

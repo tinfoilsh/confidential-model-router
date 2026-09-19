@@ -18,9 +18,9 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
-func TestRateLimitIdentity(t *testing.T) {
+func TestCacheSaltIdentity(t *testing.T) {
 	// mkJWT builds a compact-JWS-shaped token (header.payload.sig) with the
-	// given JSON payload; the signature is irrelevant here since rateLimitIdentity
+	// given JSON payload; the signature is irrelevant here since cacheSaltIdentity
 	// reads the payload without verifying.
 	mkJWT := func(payload string) string {
 		enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
@@ -43,8 +43,8 @@ func TestRateLimitIdentity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rateLimitIdentity(tt.apiKey); got != tt.want {
-				t.Errorf("rateLimitIdentity(%q) = %q, want %q", tt.apiKey, got, tt.want)
+			if got := cacheSaltIdentity(tt.apiKey); got != tt.want {
+				t.Errorf("cacheSaltIdentity(%q) = %q, want %q", tt.apiKey, got, tt.want)
 			}
 		})
 	}

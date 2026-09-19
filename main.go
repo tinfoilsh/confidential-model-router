@@ -50,18 +50,13 @@ const (
 	defaultOverloadRetryAfterSeconds = 60
 )
 
-// rateLimitIdentity returns the identity used to key rate limiting. For OAuth
-// JWT access tokens it is the token's `sub` claim, so a user's bucket stays
-// stable across the short-lived token's ~15m refreshes (and across multiple
-// tokens minted for the same user); opaque API keys, and anything that is not a
-// well-formed JWT, fall back to the bearer itself.
+// cacheSaltIdentity anchors cache partitioning to an access token's claimed
+// subject across token refreshes; opaque keys use the bearer itself.
 //
-// The signature is intentionally NOT verified here. The shim authenticates
-// every inference request and the router is reachable only over the closed
-// shim-net hop, so a token that reaches this point has already been verified
-// upstream; re-verifying would re-introduce the per-request round trip the
-// stateless JWT design exists to avoid.
-func rateLimitIdentity(apiKey string) string {
+// This is not authentication. The router's ingress shim authenticates only
+// /metrics; downstream model and tool shims verify inference credentials
+// before serving. A claimed subject here must not authorize inference.
+func cacheSaltIdentity(apiKey string) string {
 	if sub := jwtSubject(apiKey); sub != "" {
 		return sub
 	}
@@ -70,11 +65,14 @@ func rateLimitIdentity(apiKey string) string {
 
 // jwtSubject returns the `sub` claim of an explicitly typed compact-JWS access
 // token, or "" if s is not an at+jwt token or carries no string subject. It
-// inspects the payload only; the outer shim verifies the same token type before
-// the request can reach this handler (see rateLimitIdentity).
+// classifies only; downstream model and tool shims verify the token before
+// serving inference (see cacheSaltIdentity).
 func jwtSubject(s string) string {
 	parts := strings.Split(s, ".")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	if signature, err := base64.RawURLEncoding.DecodeString(parts[2]); err != nil || len(signature) == 0 {
 		return ""
 	}
 	header, err := base64.RawURLEncoding.DecodeString(parts[0])
@@ -542,13 +540,18 @@ func main() {
 		log.Infof("Safeguards sidecar: %s", *safeguardsURL)
 	}
 
+	http.Handle("/", newRouterHandler(em, routeContextClient, safeguardsSubmitter))
+	runRouterServer()
+}
+
+func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient, safeguardsSubmitter *safeguards.Submitter) http.Handler {
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
 	// internal dispatches are observed too.
 	cacheRouteShadow := em.CacheRouteShadow()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Timestamp arrival before any parsing or routing: the first-token
 		// SLA is measured from the edge of the router, so time spent on
 		// body handling, route-context lookups, and replica selection is
@@ -578,10 +581,32 @@ func main() {
 		// The caller's org from route-context; only consulted for models
 		// with enclave reservations.
 		callerOrgID := ""
-		callerOrgResolved := false
+		var resolvedRouteContext routeContext
+		admissionResolved := false
 
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
+		admit := func() bool {
+			if admissionResolved {
+				return true
+			}
+			if _, found := em.GetModel(modelName); !found {
+				em.ReportUnknownModel(apiKey, modelName)
+				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
+				return false
+			}
+			var admissionErr *routeContextError
+			resolvedRouteContext, admissionErr = routeContextClient.Lookup(r.Context(), apiKey, modelName)
+			if admissionErr != nil {
+				admissionErr.write(w)
+				return false
+			}
+			admissionResolved = true
+			callerOrgID = resolvedRouteContext.OrgID
+			hasConfiguredPriority = resolvedRouteContext.overloadExempt()
+			r = r.WithContext(manager.WithCallerOrg(r.Context(), callerOrgID))
+			return true
+		}
 
 		// Completed first-party chat turns are submitted to the safeguards
 		// sidecar once the response has been written.
@@ -595,8 +620,13 @@ func main() {
 
 		if isInputTokensPath(r.URL.Path) {
 			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
-				if routeCtx, ok := routeContextClient.Lookup(ctx, apiKey, modelName); ok {
+				if _, found := em.GetModel(modelName); !found {
+					return nil, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName)
+				}
+				if routeCtx, lookupErr := routeContextClient.Metadata(ctx, apiKey); lookupErr == nil {
 					ctx = manager.WithCallerOrg(ctx, routeCtx.OrgID)
+				} else {
+					return nil, lookupErr
 				}
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
@@ -784,7 +814,7 @@ func main() {
 					return
 				}
 				modelName, ok = modelInterface.(string)
-				if !ok {
+				if !ok || strings.TrimSpace(modelName) == "" {
 					writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgInvalidParam, "model", "must be a string"))
 					return
 				}
@@ -818,7 +848,6 @@ func main() {
 				// work, so the request falls through to the plain proxy path.
 				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
 				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
-				rateLimitModel := modelName
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
@@ -827,19 +856,10 @@ func main() {
 				// Resolved before any internal dispatch (file conversion,
 				// tool loop) so they all select from the caller's
 				// reservation pools.
-				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
-					callerOrgID = routeCtx.OrgID
-					callerOrgResolved = true
-					r = r.WithContext(manager.WithCallerOrg(r.Context(), routeCtx.OrgID))
-					if routeCtx.Priority != nil {
-						body["priority"] = *routeCtx.Priority
-						hasConfiguredPriority = true
-						manager.PriorityAssignmentsTotal.WithLabelValues(modelName).Inc()
-						log.WithFields(log.Fields{
-							"model": modelName,
-						}).Debug("injecting configured vLLM priority")
-					}
+				if !admit() {
+					return
 				}
+				resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
 
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
@@ -860,42 +880,12 @@ func main() {
 					}
 				}
 
-				// Identify the caller for rate limiting (see rateLimitIdentity).
-				rateLimitID := rateLimitIdentity(apiKey)
-
 				// Own the cache-salt fields: pop the router-only
 				// user_cache_secret, strip any client-supplied cache_salt,
 				// and (when enabled) inject the derived per-principal salt
 				// on endpoints that support it.
 				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
-
-				// Check per-key rate limits: reject with 429 over the hard
-				// budget, inject lower vLLM priority over the soft budget.
-				// Org-priority callers bypass both.
-				if rlCfg := em.GetRateLimitConfig(rateLimitModel); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
-					count, resetIn := em.RequestTracker().Record(rateLimitID, rateLimitModel)
-					if hard := rlCfg.HardMaxRequestsPerMinute; hard > 0 && count >= hard {
-						// Round up: rounding down would point the client back
-						// inside the window it was just rejected in.
-						secs := int((resetIn + time.Second - 1) / time.Second)
-						w.Header().Set("Retry-After", strconv.Itoa(secs))
-						manager.RateLimitRejectionsTotal.WithLabelValues(rateLimitModel).Inc()
-						log.WithFields(log.Fields{
-							"model":               rateLimitModel,
-							"retry_after_seconds": secs,
-						}).Warn("rejecting request over hard per-key rate limit")
-						writeError(w, manager.ErrRateLimited.WithMessage(manager.ErrMsgRateLimited, secs))
-						return
-					}
-					if soft := rlCfg.MaxRequestsPerMinute; soft > 0 && count >= soft {
-						body["priority"] = 1
-						manager.RateLimitDemotionsTotal.WithLabelValues(rateLimitModel).Inc()
-						log.WithFields(log.Fields{
-							"model": rateLimitModel,
-						}).Debug("rate limited: injecting lower vLLM priority")
-					}
-				}
 
 				// If streaming request, ensure upstream usage is available for billing.
 				if stream, ok := body["stream"].(bool); ok && stream {
@@ -1008,6 +998,14 @@ func main() {
 			if capture != nil {
 				capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
 			}
+			if !admit() {
+				return
+			}
+			resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
+			if err := replaceJSONBody(r, body); err != nil {
+				writeError(w, &manager.ErrServer)
+				return
+			}
 		}
 
 		model, found := em.GetModel(modelName)
@@ -1017,16 +1015,29 @@ func main() {
 			return
 		}
 
-		// Resolve the caller's reservation pools. Only reserved models pay
-		// for org resolution; a failed lookup fails closed to shared.
-		var poolPrimary, poolSpill map[string]bool
-		if model.HasReservations() {
-			if !callerOrgResolved {
-				if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
-					callerOrgID = routeCtx.OrgID
-					callerOrgResolved = true
+		if !admissionResolved {
+			if !admit() {
+				return
+			}
+			// Only known inference schemas are rewritten. Other endpoints may
+			// carry JSON-RPC batches, compressed payloads, or opaque file data.
+			if !isWebSocketUpgrade(r) && (r.URL.Path == "/v1/embeddings" || r.URL.Path == "/v1/audio/speech") {
+				body, _, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+				if err != nil {
+					writeError(w, invalidJSONError(err))
+					return
+				}
+				resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
+				if err := replaceJSONBody(r, body); err != nil {
+					writeError(w, &manager.ErrServer)
+					return
 				}
 			}
+		}
+
+		// Reuse the admission context for reservation selection.
+		var poolPrimary, poolSpill map[string]bool
+		if model.HasReservations() {
 			poolPrimary, poolSpill = model.ReservationPools(callerOrgID)
 		}
 
@@ -1179,7 +1190,9 @@ func main() {
 		enclave.ServeHTTP(w, r)
 		served = true
 	})
+}
 
+func runRouterServer() {
 	// Setup graceful shutdown
 	server := &http.Server{
 		Addr:         ":" + *port,

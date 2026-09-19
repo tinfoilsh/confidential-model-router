@@ -15,7 +15,7 @@ import (
 )
 
 // jwtWithSubject builds an unsigned at+jwt-shaped token carrying the given
-// subject, matching the token type the outer shim verifies.
+// subject, matching the token type the downstream shims verify.
 func jwtWithSubject(sub string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"at+jwt"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `"}`))
@@ -183,7 +183,7 @@ func TestApplyCacheSaltAnchorsToJWTSubject(t *testing.T) {
 }
 
 // TestApplyCacheSaltOpaqueKeyIdentity covers callers without a JWT: they are
-// identified by the opaque API key (rateLimitIdentity's fallback), and the
+// identified by the opaque API key (cacheSaltIdentity's fallback), and the
 // salt must anchor to it.
 func TestApplyCacheSaltOpaqueKeyIdentity(t *testing.T) {
 	key := "tk_live_9f8e7d6c5b4a3210"

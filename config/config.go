@@ -13,18 +13,6 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key request rate limits for a
-// model. Requests over the soft per-minute budget are sent to vLLM with a
-// lower scheduling priority; requests over the hard budget are rejected with
-// HTTP 429. Zero disables a budget. The hard check runs first, so when both
-// are set the hard budget must sit above the soft one — a hard budget at or
-// below the soft budget rejects requests before they can be demoted, turning
-// the soft tier off entirely.
-type RateLimitConfig struct {
-	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
-	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
-}
-
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
 // rollout control: "off" (default), "shadow" (compute and meter the would-be
 // routing decision without acting), or "enforced" (route keyed requests to
@@ -56,9 +44,22 @@ type Model struct {
 	Repo         string              `yaml:"repo"`
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
-	RateLimit    *RateLimitConfig    `yaml:"rate_limit,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
+}
+
+// UnmarshalYAML rejects obsolete local admission policy without making
+// unrelated unknown fields incompatible with older config producers.
+func (m *Model) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var fields map[string]interface{}
+	if err := unmarshal(&fields); err != nil {
+		return err
+	}
+	if _, exists := fields["rate_limit"]; exists {
+		return fmt.Errorf("model rate_limit is not supported: admission policy belongs in the control plane")
+	}
+	type modelConfig Model
+	return unmarshal((*modelConfig)(m))
 }
 
 // OverloadConfig describes optional overload thresholds for a model.

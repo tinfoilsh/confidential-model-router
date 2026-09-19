@@ -1,6 +1,48 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestRejectLegacyRateLimit(t *testing.T) {
+	for _, value := range []string{"", "null", "~", "0", "false", "{}", "[]", "malformed", "{max_requests_per_minute: 0}", "{max_requests_per_minute: 10, hard_max_requests_per_minute: 20}"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    rate_limit: " + value + "\n"))
+			if err == nil || !strings.Contains(err.Error(), "rate_limit") {
+				t.Fatalf("legacy policy %q: expected explicit rate_limit error, got %v", value, err)
+			}
+		})
+	}
+}
+
+func TestRejectMergedLegacyRateLimit(t *testing.T) {
+	_, err := FromBytes([]byte("defaults: &defaults {rate_limit: null}\nmodels:\n  gpt-oss-120b:\n    <<: *defaults\n    repo: org/repo\n"))
+	if err == nil || !strings.Contains(err.Error(), "rate_limit") {
+		t.Fatalf("merged legacy policy accepted: %v", err)
+	}
+}
+
+func TestRuntimeConfigFeaturesRemainCompatible(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+future_runtime_setting: true
+models:
+  gpt-oss-120b:
+    repo: org/repo
+    enclaves: [a.example, b.example]
+    future_model_setting: true
+    overload: {max_requests_waiting: 10, clear_requests_waiting: 3, retry_after_minutes: 2}
+    cache_route: {mode: enforced, max_inflight_delta: 0}
+    reservations: [{org_ids: [org_test], enclaves: [a.example]}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := cfg.Models["gpt-oss-120b"]
+	if m.Repo != "org/repo" || len(m.Hostnames) != 2 || m.Overload == nil || m.Overload.ClearRequestsWaiting != 3 || m.CacheRoute == nil || m.CacheRoute.Mode != "enforced" || m.CacheRoute.MaxInflightDelta == nil || *m.CacheRoute.MaxInflightDelta != 0 || len(m.Reservations) != 1 || m.Reservations[0].OrgIDs[0] != "org_test" {
+		t.Fatalf("runtime features lost: %+v", m)
+	}
+}
 
 func TestOverloadConfigMarks(t *testing.T) {
 	tests := []struct {
