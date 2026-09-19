@@ -148,7 +148,8 @@ func harness(t *testing.T) (*manager.EnclaveManager, *httptest.Server, *[]http.H
 	harnessOnce.Do(func() {
 		harnessUpstream, harnessSeen = fakeUpstream(t)
 		cfg := []byte("models:\n  gpt-oss-120b:\n    repo: tinfoilsh/confidential-gpt-oss-120b\n")
-		harnessManager, harnessErr = manager.NewEnclaveManager(cfg, "https://api.tinfoil.sh", "model-router", "s", "c", "d", "", "", time.Minute, true)
+		// Sidecar tests must not leave a usage worker sending to the real control plane.
+		harnessManager, harnessErr = manager.NewEnclaveManager(cfg, "https://api.tinfoil.sh", "model-router", "", "c", "d", "", "", time.Minute, true)
 		if harnessErr != nil {
 			return
 		}

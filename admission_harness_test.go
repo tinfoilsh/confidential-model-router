@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
@@ -35,6 +37,17 @@ type admissionBackendRequest struct {
 
 func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, overloaded bool) (*manager.EnclaveManager, http.Handler) {
 	t.Helper()
+	models := []string{admissionTestModel, "nomic-embed-text", "qwen3-tts", "voxtral-small-24b", "voxtral-mini-4b-realtime", "doc-upload", "websearch"}
+	var cfg strings.Builder
+	cfg.WriteString("models:\n")
+	for _, name := range models {
+		fmt.Fprintf(&cfg, "  %s: {repo: org/test}\n", name)
+	}
+	return newAdmissionHarnessWithConfig(t, cp, backend, org, overloaded, []byte(cfg.String()))
+}
+
+func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org string, overloaded bool, cfg []byte) (*manager.EnclaveManager, http.Handler) {
+	t.Helper()
 	control := httptest.NewServer(cp)
 	t.Cleanup(control.Close)
 	upstream := httptest.NewUnstartedServer(backend)
@@ -48,25 +61,133 @@ func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, ove
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
 	http.DefaultTransport = transport
 	t.Cleanup(func() { transport.CloseIdleConnections(); http.DefaultTransport = base })
-	models := []string{admissionTestModel, "nomic-embed-text", "qwen3-tts", "voxtral-small-24b", "voxtral-mini-4b-realtime", "doc-upload", "websearch"}
-	var cfg strings.Builder
-	cfg.WriteString("models:\n")
-	for _, name := range models {
-		fmt.Fprintf(&cfg, "  %s: {repo: org/test}\n", name)
-	}
-	em, err := manager.NewAdmissionManagerForTest([]byte(cfg.String()), control.URL)
+	em, err := manager.NewAdmissionManagerForTest(cfg, control.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(em.Shutdown)
-	for _, name := range models {
+	for name := range em.Models() {
 		if err := manager.InstallFakeEnclaveForTest(em, name, upstream); err != nil {
 			t.Fatal(err)
 		}
-		manager.ConfigureAdmissionModelForTest(em, name, org, overloaded)
+		if err := manager.ConfigureAdmissionModelForTest(em, name, org, overloaded); err != nil {
+			t.Fatal(err)
+		}
 	}
-	manager.ConfigureAdmissionModelForTest(em, admissionTestModel, org, overloaded)
+	if err := manager.ConfigureAdmissionModelForTest(em, admissionTestModel, org, overloaded); err != nil {
+		t.Fatal(err)
+	}
 	return em, newRouterHandler(em, newRouteContextClient(control.URL), nil)
+}
+
+func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
+	var backends atomic.Int64
+	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backends.Add(1)
+		io.WriteString(w, `{}`)
+	}), "", false)
+	const unknownModel = "unknown-model"
+	if err := manager.ConfigureAdmissionModelForTest(em, unknownModel, "", false); err == nil || !strings.Contains(err.Error(), unknownModel) {
+		t.Fatalf("unconfigured model error = %v", err)
+	}
+	for _, overloaded := range []bool{true, false, true, false} {
+		if err := manager.ConfigureAdmissionModelForTest(em, admissionTestModel, "", overloaded); err != nil {
+			t.Fatal(err)
+		}
+		before := backends.Load()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+		wantStatus, wantBackends := http.StatusOK, int64(1)
+		if overloaded {
+			wantStatus, wantBackends = http.StatusServiceUnavailable, 0
+		}
+		if rec.Code != wantStatus || backends.Load()-before != wantBackends {
+			t.Fatalf("overloaded=%v: HTTP=%d backend calls=%d: %s", overloaded, rec.Code, backends.Load()-before, rec.Body.String())
+		}
+		model, _ := em.GetModel(admissionTestModel)
+		for host, enclave := range model.Enclaves {
+			if _, _, configured := enclave.OverloadMarks(); configured != overloaded {
+				t.Fatalf("overloaded=%v: thresholds configured=%v", overloaded, configured)
+			}
+			if !overloaded && testutil.ToFloat64(manager.BackendOverloaded.WithLabelValues(admissionTestModel, host)) != 0 {
+				t.Fatal("healthy enclave still reports overload")
+			}
+		}
+	}
+}
+
+func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
+	previous := *cacheSaltEnabled
+	*cacheSaltEnabled = true
+	t.Cleanup(func() { *cacheSaltEnabled = previous })
+	for _, mode := range []cacheroute.Mode{cacheroute.ModeShadow, cacheroute.ModeEnforced} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := fmt.Sprintf("models:\n  %s:\n    repo: org/test\n    enclaves: [replica-a, replica-b]\n    cache_route: {mode: %s, min_prompt_bytes: 1}\n", admissionTestModel, mode)
+			var admissions, backends atomic.Int64
+			_, handler := newAdmissionHarnessWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				admissions.Add(1)
+				io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backends.Add(1)
+				io.WriteString(w, `{}`)
+			}), "", false, []byte(cfg))
+			keyed := cacheroute.RequestsTotal.WithLabelValues(admissionTestModel, string(cacheroute.OutcomeKeyed))
+			failed := cacheroute.RequestsTotal.WithLabelValues(admissionTestModel, string(cacheroute.OutcomeError))
+			warm := cacheroute.ReuseTotal.WithLabelValues(admissionTestModel, cacheroute.ReuseRepeatWarm)
+			beforeKeyed, beforeFailed, beforeWarm := testutil.ToFloat64(keyed), testutil.ToFloat64(failed), testutil.ToFloat64(warm)
+			const requests = 2
+			for range requests {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":"hello"}]}`, "tk_test", ""))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("cache-route dispatch: HTTP %d: %s", rec.Code, rec.Body.String())
+				}
+			}
+			if admissions.Load() != requests || backends.Load() != requests {
+				t.Fatalf("admissions=%d backends=%d", admissions.Load(), backends.Load())
+			}
+			if got := testutil.ToFloat64(keyed) - beforeKeyed; got != requests {
+				t.Errorf("keyed dispatches=%v, want %d", got, requests)
+			}
+			if got := testutil.ToFloat64(failed) - beforeFailed; got != 0 {
+				t.Errorf("recovered cache-route errors=%v", got)
+			}
+			if got := testutil.ToFloat64(warm) - beforeWarm; got != requests-1 {
+				t.Errorf("warm repeats=%v, want %d", got, requests-1)
+			}
+		})
+	}
+}
+
+func TestAdmissionHandlerUnknownModel(t *testing.T) {
+	const unknownModel = "unknown-model"
+	var admissions, backends atomic.Int64
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admissions.Add(1)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backends.Add(1)
+	}), "", false)
+	for _, tc := range []struct{ path, subdomain string }{
+		{"/v1/chat/completions", ""},
+		{"/v1/chat/completions", unknownModel},
+		{"/custom", unknownModel},
+	} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"model":%q,"messages":[]}`, unknownModel)
+		handler.ServeHTTP(rec, admissionRequest(tc.path, body, "tk_test", tc.subdomain))
+		var envelope manager.ErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusNotFound || envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeModelNotFound {
+			t.Fatalf("unknown model: HTTP %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	if admissions.Load() != 0 || backends.Load() != 0 {
+		t.Fatalf("unknown model reached admission/backend: %d/%d", admissions.Load(), backends.Load())
+	}
 }
 
 func admissionRequest(path, body, key, subdomain string) *http.Request {

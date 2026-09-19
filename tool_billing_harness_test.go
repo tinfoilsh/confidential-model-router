@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -60,6 +61,8 @@ func billingLoopResponse(path string, turn int, terminal bool, usageMode string)
 		if !terminal {
 			output = map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call-%d", turn), "name": billingTestToolName, "arguments": "{}"}
 		}
+		response["status"] = "completed"
+		output["status"] = "completed"
 		response["output"] = []any{output}
 		usage = map[string]any{"input_tokens": billingTestPromptTokens, "output_tokens": billingTestOutputTokens, "input_tokens_details": map[string]any{"cached_tokens": billingTestCachedTokens}}
 	}
@@ -171,19 +174,23 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				r := admissionRequest(path, string(encoded), "tk_test", "").WithContext(ctx)
 				r.Header.Set("X-Request-Id", "original-request")
 				rec := httptest.NewRecorder()
+				capture := &safeguards.Capture{ResponseWriter: rec}
 				if tc.router {
-					handler.ServeHTTP(rec, r)
+					handler.ServeHTTP(capture, r)
 					if admissions.Load() != 1 {
 						t.Fatalf("admissions = %d", admissions.Load())
 					}
 				} else {
-					err = toolruntime.Handle(rec, r, em, nil, body, admissionTestModel, &toolruntime.RouterOptions{})
+					err = toolruntime.Handle(capture, r, em, nil, body, admissionTestModel, &toolruntime.RouterOptions{})
 				}
 				stopBilling()
 				switch tc.outcome {
 				case "success":
 					if err != nil || rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
 						t.Fatalf("success changed: %v HTTP %d %s", err, rec.Code, rec.Body.String())
+					}
+					if got := capture.Text(); got != "final answer" {
+						t.Fatalf("completed reply not captured: %q", got)
 					}
 				case "error":
 					if err != nil || rec.Code != 502 || !strings.Contains(rec.Body.String(), "fixture_failure") || rec.Header().Get("Retry-After") != "17" {
