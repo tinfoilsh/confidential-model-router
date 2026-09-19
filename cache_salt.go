@@ -94,6 +94,7 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (map[string]a
 		return nil, cachesalt.ModeNone, errBodyNotObject
 	}
 	streaming, _ := body["stream"].(bool)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
 	if streaming && cacheSaltPaths[r.URL.Path] {
@@ -101,17 +102,12 @@ func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (map[string]a
 		changed = true
 	}
 	if !changed {
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		return body, mode, nil
 	}
 
-	newBytes, err := json.Marshal(body)
-	if err != nil {
+	if err := replaceJSONBody(r, body); err != nil {
 		return nil, cachesalt.ModeNone, err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(newBytes))
-	r.ContentLength = int64(len(newBytes))
-	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBytes)))
 	return body, mode, nil
 }
 
