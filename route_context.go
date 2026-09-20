@@ -61,6 +61,8 @@ func (q *routeQuota) valid() bool {
 	return q == nil || (q.Limit != nil && q.Used != nil && *q.Limit >= 0 && *q.Used >= 0)
 }
 
+// valid enforces the decision contract documented in the control plane's
+// docs/model-rate-limits.md. Anything else fails closed.
 func (r *routeRateLimit) valid() bool {
 	if r == nil || r.RetryAfterSeconds == nil || *r.RetryAfterSeconds < 0 || !r.Requests.valid() || !r.Tokens.valid() {
 		return false
@@ -131,7 +133,15 @@ func (c *routeContextClient) Lookup(ctx context.Context, apiKey, model string) (
 	if model == "" {
 		return routeContext{}, routeContextUnavailable(model, "missing_model")
 	}
-	return c.fetch(ctx, apiKey, model)
+	resolved, err := c.fetch(ctx, apiKey, model)
+	if err != nil {
+		return routeContext{}, err
+	}
+	if resolved.RateLimit == nil {
+		// JWT bearers skip the lookup and carry no decision.
+		return resolved, nil
+	}
+	return resolved, applyRateDecision(model, resolved.RateLimit)
 }
 
 // Metadata deliberately omits model: token counting must never consume an
@@ -140,6 +150,8 @@ func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (route
 	return c.fetch(ctx, apiKey, "")
 }
 
+// fetch performs one uncached, non-replayable call and validates the response
+// shape. It does not act on the decision; Lookup does.
 func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
 	if jwtSubject(apiKey) != "" {
 		return routeContext{}, nil
@@ -171,59 +183,87 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, routeContextResponseLimit+1))
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests {
-		apiErr := manager.ErrInvalidRequest.WithStatus(resp.StatusCode).WithMessage("%s", http.StatusText(resp.StatusCode))
-		if resp.StatusCode == http.StatusTooManyRequests {
-			apiErr = manager.ErrRateLimited.WithMessage("%s", http.StatusText(resp.StatusCode))
-		}
-		if readErr == nil && len(data) <= routeContextResponseLimit {
-			if normalized, ok := manager.NormalizeUpstreamError(resp.StatusCode, data); ok {
-				apiErr = normalized
-			} else if resp.StatusCode != http.StatusTooManyRequests {
-				var payload struct {
-					Error string `json:"error"`
-				}
-				if json.Unmarshal(data, &payload) == nil && payload.Error != "" {
-					apiErr = apiErr.WithMessage("%s", payload.Error)
-				}
-			}
-		}
-		denial := &routeContextError{apiError: apiErr}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			denial.retryAfter = quotaRetryAfter(resp.Header)
-		}
+	if readErr != nil || len(data) > routeContextResponseLimit {
+		data = nil
+	}
+	if denial := credentialDenial(resp, data); denial != nil {
 		return routeContext{}, denial
 	}
 	if resp.StatusCode != http.StatusOK {
 		return routeContext{}, routeContextUnavailable(model, fmt.Sprintf("http_%d", resp.StatusCode))
 	}
 	var resolved routeContext
-	if readErr != nil || len(data) > routeContextResponseLimit || json.Unmarshal(data, &resolved) != nil {
+	if data == nil || json.Unmarshal(data, &resolved) != nil {
 		return routeContext{}, routeContextUnavailable(model, "decode")
 	}
 	if model != "" && !resolved.RateLimit.valid() {
 		return routeContext{}, routeContextUnavailable(model, "decision")
 	}
-	if model != "" && resolved.RateLimit.Decision == decisionRejected {
-		retry := *resolved.RateLimit.RetryAfterSeconds
-		message := manager.ErrMsgRateLimited
-		if resolved.RateLimit.Reason == rateReasonTokens {
-			message = manager.ErrMsgTokenRateLimited
-		}
-		manager.RateLimitRejectionsTotal.WithLabelValues(model).Inc()
-		manager.RateLimitRejectionsByReasonTotal.WithLabelValues(model, resolved.RateLimit.Reason).Inc()
-		return routeContext{}, &routeContextError{
-			apiError:   manager.ErrRateLimited.WithMessage(message, retry),
-			retryAfter: strconv.FormatInt(retry, 10),
+	return resolved, nil
+}
+
+// credentialDenial translates the control plane's credential, payment, and
+// per-key quota verdicts. These are answers about the caller, not outages, so
+// they keep their status. Only recognized OpenAI-shaped bodies are forwarded;
+// the control plane's private error text is otherwise replaced with the
+// status text. Per-key quota exhaustion carries Retry-After only when the
+// control plane sent a well-formed one, since a lifetime cap has no reset.
+func credentialDenial(resp *http.Response, data []byte) *routeContextError {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusTooManyRequests:
+	default:
+		return nil
+	}
+	quota := resp.StatusCode == http.StatusTooManyRequests
+	apiErr := manager.ErrInvalidRequest.WithStatus(resp.StatusCode).WithMessage("%s", http.StatusText(resp.StatusCode))
+	if quota {
+		apiErr = manager.ErrRateLimited.WithMessage("%s", http.StatusText(resp.StatusCode))
+	}
+	if data != nil {
+		if normalized, ok := manager.NormalizeUpstreamError(resp.StatusCode, data); ok {
+			apiErr = normalized
+		} else if !quota {
+			var payload struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(data, &payload) == nil && payload.Error != "" {
+				apiErr = apiErr.WithMessage("%s", payload.Error)
+			}
 		}
 	}
-	return resolved, nil
+	denial := &routeContextError{apiError: apiErr}
+	if quota {
+		denial.retryAfter = quotaRetryAfter(resp.Header)
+	}
+	return denial
+}
+
+// applyRateDecision turns a validated shared-quota rejection into the client
+// response. Demote and exempt are applied later, when the body is rewritten.
+func applyRateDecision(model string, decision *routeRateLimit) *routeContextError {
+	if decision.Decision != decisionRejected {
+		return nil
+	}
+	retry := *decision.RetryAfterSeconds
+	message := manager.ErrMsgRateLimited
+	if decision.Reason == rateReasonTokens {
+		message = manager.ErrMsgTokenRateLimited
+	}
+	manager.RateLimitRejectionsTotal.WithLabelValues(model).Inc()
+	manager.RateLimitRejectionsByReasonTotal.WithLabelValues(model, decision.Reason).Inc()
+	return &routeContextError{
+		apiError:   manager.ErrRateLimited.WithMessage(message, retry),
+		retryAfter: strconv.FormatInt(retry, 10),
+	}
 }
 
 func (r routeContext) overloadExempt() bool {
 	return r.Priority != nil || (r.RateLimit != nil && r.RateLimit.Decision == decisionExempt)
 }
 
+// applyPriority owns the body's vLLM priority field on endpoints whose schema
+// accepts it: client-supplied values are always stripped, then a demotion or a
+// configured organization priority is injected.
 func (r routeContext) applyPriority(body map[string]any, path, model string) {
 	delete(body, "priority")
 	if !cacheSaltPaths[path] || body == nil {
