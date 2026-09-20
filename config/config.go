@@ -39,27 +39,16 @@ type ReservationConfig struct {
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 }
 
-// Model represents the configuration for a single model
+// Model represents the configuration for a single model. Admission policy
+// (`rate_limit`) is owned by the control plane; a legacy field in runtime
+// YAML is ignored like any other unknown key so old and new routers can share
+// one configuration during a rolling deploy.
 type Model struct {
 	Repo         string              `yaml:"repo"`
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
-}
-
-// UnmarshalYAML rejects obsolete local admission policy without making
-// unrelated unknown fields incompatible with older config producers.
-func (m *Model) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var fields map[string]interface{}
-	if err := unmarshal(&fields); err != nil {
-		return err
-	}
-	if _, exists := fields["rate_limit"]; exists {
-		return fmt.Errorf("model rate_limit is not supported: admission policy belongs in the control plane")
-	}
-	type modelConfig Model
-	return unmarshal((*modelConfig)(m))
 }
 
 // OverloadConfig describes optional overload thresholds for a model.

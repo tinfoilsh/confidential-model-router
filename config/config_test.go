@@ -1,25 +1,22 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
-func TestRejectLegacyRateLimit(t *testing.T) {
-	for _, value := range []string{"", "null", "~", "0", "false", "{}", "[]", "malformed", "{max_requests_per_minute: 0}", "{max_requests_per_minute: 10, hard_max_requests_per_minute: 20}"} {
+// A legacy rate_limit block must load like any other unknown field so a new
+// router can serve from the same runtime YAML as the old fleet it replaces.
+func TestLegacyRateLimitIgnored(t *testing.T) {
+	for _, value := range []string{"null", "0", "{}", "{max_requests_per_minute: 0}", "{max_requests_per_minute: 10, hard_max_requests_per_minute: 20}"} {
 		t.Run(value, func(t *testing.T) {
-			_, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    rate_limit: " + value + "\n"))
-			if err == nil || !strings.Contains(err.Error(), "rate_limit") {
-				t.Fatalf("legacy policy %q: expected explicit rate_limit error, got %v", value, err)
+			cfg, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    enclaves: [a.example]\n    rate_limit: " + value + "\n"))
+			if err != nil {
+				t.Fatalf("legacy policy %q rejected: %v", value, err)
+			}
+			if m := cfg.Models["gpt-oss-120b"]; m.Repo != "org/repo" || len(m.Hostnames) != 1 {
+				t.Fatalf("model fields lost alongside legacy policy: %+v", m)
 			}
 		})
-	}
-}
-
-func TestRejectMergedLegacyRateLimit(t *testing.T) {
-	_, err := FromBytes([]byte("defaults: &defaults {rate_limit: null}\nmodels:\n  gpt-oss-120b:\n    <<: *defaults\n    repo: org/repo\n"))
-	if err == nil || !strings.Contains(err.Error(), "rate_limit") {
-		t.Fatalf("merged legacy policy accepted: %v", err)
 	}
 }
 
