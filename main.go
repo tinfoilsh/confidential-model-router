@@ -578,33 +578,25 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// the TTFT / inter-token SLA observation at dispatch.
 		isStreaming := false
 
-		// The caller's org from route-context; only consulted for models
-		// with enclave reservations.
-		callerOrgID := ""
-		var resolvedRouteContext routeContext
-		admissionResolved := false
-
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
+
+		// Every external inference request is admitted exactly once, after
+		// the served model is known and before any body rewriting or internal
+		// dispatch. The lookup shares RPM/TPM counters across the fleet, so it
+		// must not be repeated within one request; branches that parse the body
+		// admit before rewriting it, everything else admits after the model
+		// lookup below. The admission result is applied in one place.
+		var admission *routeContext
 		admit := func() bool {
-			if admissionResolved {
-				return true
-			}
-			if _, found := em.GetModel(modelName); !found {
-				em.ReportUnknownModel(apiKey, modelName)
-				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
-				return false
-			}
-			var admissionErr *routeContextError
-			resolvedRouteContext, admissionErr = routeContextClient.Lookup(r.Context(), apiKey, modelName)
+			resolved, admissionErr := routeContextClient.Lookup(r.Context(), apiKey, modelName)
 			if admissionErr != nil {
 				admissionErr.write(w)
 				return false
 			}
-			admissionResolved = true
-			callerOrgID = resolvedRouteContext.OrgID
-			hasConfiguredPriority = resolvedRouteContext.overloadExempt()
-			r = r.WithContext(manager.WithCallerOrg(r.Context(), callerOrgID))
+			admission = &resolved
+			hasConfiguredPriority = resolved.overloadExempt()
+			r = r.WithContext(manager.WithCallerOrg(r.Context(), resolved.OrgID))
 			return true
 		}
 
@@ -853,13 +845,19 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// or jumping ahead of other users.
 				delete(body, "priority")
 
-				// Resolved before any internal dispatch (file conversion,
-				// tool loop) so they all select from the caller's
-				// reservation pools.
+				// Admit before any internal dispatch (file conversion, tool
+				// loop) so they all reuse this request's context and
+				// reservation pools. Unknown models must 404 without being
+				// counted against anyone's quota.
+				if _, found := em.GetModel(modelName); !found {
+					em.ReportUnknownModel(apiKey, modelName)
+					writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
+					return
+				}
 				if !admit() {
 					return
 				}
-				resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
+				admission.applyPriority(body, r.URL.Path, modelName)
 
 				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
 					switch r.URL.Path {
@@ -1001,7 +999,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			if !admit() {
 				return
 			}
-			resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
+			admission.applyPriority(body, r.URL.Path, modelName)
 			if err := replaceJSONBody(r, body); err != nil {
 				writeError(w, &manager.ErrServer)
 				return
@@ -1015,19 +1013,25 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
-		if !admissionResolved {
+		// Requests whose body was not parsed above (audio, file conversion,
+		// realtime, embeddings, MCP, and opaque subdomain paths) are admitted
+		// here, after the authoritative model lookup.
+		if admission == nil {
 			if !admit() {
 				return
 			}
-			// Only known inference schemas are rewritten. Other endpoints may
-			// carry JSON-RPC batches, compressed payloads, or opaque file data.
+			// Embeddings and speech carry a JSON object the engine accepts a
+			// priority field on, so a client-supplied value must be stripped
+			// like on the parsed paths. Other endpoints may carry JSON-RPC
+			// batches, compressed payloads, or opaque file data and are
+			// proxied verbatim.
 			if !isWebSocketUpgrade(r) && (r.URL.Path == "/v1/embeddings" || r.URL.Path == "/v1/audio/speech") {
 				body, _, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 				if err != nil {
 					writeError(w, invalidJSONError(err))
 					return
 				}
-				resolvedRouteContext.applyPriority(body, r.URL.Path, modelName)
+				admission.applyPriority(body, r.URL.Path, modelName)
 				if err := replaceJSONBody(r, body); err != nil {
 					writeError(w, &manager.ErrServer)
 					return
@@ -1038,7 +1042,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// Reuse the admission context for reservation selection.
 		var poolPrimary, poolSpill map[string]bool
 		if model.HasReservations() {
-			poolPrimary, poolSpill = model.ReservationPools(callerOrgID)
+			poolPrimary, poolSpill = model.ReservationPools(admission.OrgID)
 		}
 
 		// On enforced pools, keyed requests are served in cache-aware
