@@ -582,11 +582,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
 		// Every external inference request is admitted exactly once, after
-		// the served model is known and before any body rewriting or internal
-		// dispatch. The lookup shares RPM/TPM counters across the fleet, so it
-		// must not be repeated within one request; branches that parse the body
-		// admit before rewriting it, everything else admits after the model
-		// lookup below. The admission result is applied in one place.
+		// the served model is known and before priority injection, forwarding,
+		// or any internal dispatch. The lookup shares RPM/TPM counters across
+		// the fleet, so it must not be repeated within one request. Branches
+		// that read the body to learn or sanitize it do so first, then admit;
+		// everything else admits after the model lookup below.
 		var admission *routeContext
 		admit := func() bool {
 			resolved, admissionErr := routeContextClient.Lookup(r.Context(), apiKey, modelName)
