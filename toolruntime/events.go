@@ -95,6 +95,80 @@ type toolCallRecord struct {
 	resultSources []toolCallSource
 	errorReason   string
 	output        string // raw tool output text; used by code-exec events
+	pii           *piiCheckResult
+}
+
+// piiCheckResult mirrors the PII metadata the websearch server attaches to
+// a successful `search` result. It is only populated when the server
+// reports that the check ran, so nil means "no PII signal for this call".
+type piiCheckResult struct {
+	masked        bool
+	redactedQuery string
+	redactions    []piiRedaction
+}
+
+// piiRedaction identifies a span the websearch server removed from the
+// query, as a category plus zero-based Unicode code point offsets into the
+// original query (end exclusive). The removed text itself is never sent.
+type piiRedaction struct {
+	kind  string
+	start int
+	end   int
+}
+
+// piiCheckResultFromStructured reads the websearch server's PII metadata
+// off a `search` tool's structured content. Returns nil when the check did
+// not run (or the server predates the fields) so callers can omit the
+// signal entirely instead of guessing.
+func piiCheckResultFromStructured(name string, structured any) *piiCheckResult {
+	if !isRouterSearchToolName(name) {
+		return nil
+	}
+	content, _ := structured.(map[string]any)
+	checked, _ := content["pii_checked"].(bool)
+	if !checked {
+		return nil
+	}
+	result := &piiCheckResult{
+		redactedQuery: stringValue(content["redacted_query"]),
+	}
+	result.masked, _ = content["pii_masked"].(bool)
+	rawRedactions, _ := content["pii_redactions"].([]any)
+	for _, raw := range rawRedactions {
+		span, _ := raw.(map[string]any)
+		start, startOK := intValue(span["start"])
+		end, endOK := intValue(span["end"])
+		if !startOK || !endOK {
+			continue
+		}
+		result.redactions = append(result.redactions, piiRedaction{
+			kind:  stringValue(span["type"]),
+			start: start,
+			end:   end,
+		})
+	}
+	return result
+}
+
+// encodePIICheckResult renders the PII metadata in the shape carried on
+// the `_tinfoil` sidecar and the tinfoil-event marker payload.
+func encodePIICheckResult(pii *piiCheckResult) map[string]any {
+	if pii == nil {
+		return nil
+	}
+	redactions := make([]map[string]any, 0, len(pii.redactions))
+	for _, span := range pii.redactions {
+		redactions = append(redactions, map[string]any{
+			"type":  span.kind,
+			"start": span.start,
+			"end":   span.end,
+		})
+	}
+	return map[string]any{
+		"masked":         pii.masked,
+		"redacted_query": pii.redactedQuery,
+		"redactions":     redactions,
+	}
 }
 
 // toolCallSource is a single search result produced by a router tool
@@ -110,39 +184,16 @@ type toolCallSource struct {
 }
 
 // publicToolErrorReason returns a short, opaque status string safe to
-// ship to clients via `web_search_call.reason`.
-const (
-	publicToolErrorReasonString = "tool_error"
-	blockedToolErrorReason      = "blocked_by_safety_filter"
-)
+// ship to clients via `web_search_call.reason`. Tool-side error text is
+// never forwarded; every failure collapses onto the same code.
+const publicToolErrorReasonString = "tool_error"
 
 func publicToolErrorReason(toolName string, err error) string {
 	if err == nil {
 		return ""
 	}
 	debugLogf("toolruntime: %s tool call failed: %v", toolName, err)
-	if isToolCallBlocked(err) {
-		return blockedToolErrorReason
-	}
 	return publicToolErrorReasonString
-}
-
-// isToolCallBlocked reports whether the MCP tool error came from a PII or
-// prompt-injection safeguard.
-func isToolCallBlocked(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "blocked by safety filter")
-}
-
-// failureStatusFor picks the web_search_call status string to surface for
-// a non-nil MCP error.
-func failureStatusFor(err error) string {
-	if isToolCallBlocked(err) {
-		return "blocked"
-	}
-	return "failed"
 }
 
 // toolOutputSourcesToToolCallSources converts citations.ToolOutputSource
@@ -221,15 +272,10 @@ func toolCallSourceURLs(sources []toolCallSource) []string {
 }
 
 // statusForRecord maps a recorded router tool call to the web_search_call
-// status surfaced to clients. "blocked" is reserved for PII or prompt
-// injection safeguards so client UIs can surface a distinct affordance for
-// the user; any other error becomes "failed".
+// status surfaced to clients.
 func statusForRecord(record toolCallRecord) string {
 	if record.errorReason == "" {
 		return "completed"
-	}
-	if record.errorReason == blockedToolErrorReason {
-		return "blocked"
 	}
 	return "failed"
 }
@@ -310,7 +356,11 @@ func tinfoilEventsEnabled(h http.Header) bool {
 // the citations produced by this specific tool call (e.g. one search
 // among several in a multi-step turn) rather than having to merge all
 // sources into one bucket per turn. Older clients ignore unknown keys.
-func tinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource) string {
+//
+// When pii is non-nil the payload gains a `pii` object describing the
+// websearch server's masking of the query for this call (see
+// piiCheckResult). It is only present on terminal search markers.
+func tinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource, pii *piiCheckResult) string {
 	payload := map[string]any{
 		"type":    tinfoilEventPayloadType,
 		"item_id": id,
@@ -322,6 +372,9 @@ func tinfoilEventMarker(id, status string, action map[string]any, reason string,
 	}
 	if encoded := encodeMarkerSources(sources); len(encoded) > 0 {
 		payload["sources"] = encoded
+	}
+	if encoded := encodePIICheckResult(pii); encoded != nil {
+		payload["pii"] = encoded
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -366,25 +419,21 @@ func encodeMarkerSources(sources []toolCallSource) []map[string]any {
 }
 
 // tinfoilEventMarkersForRecords renders a sequence of in_progress then
-// terminal markers (completed / failed / blocked) for the non-streaming
-// paths, which only see recorded tool calls after they have already run.
-// Each recorded `search` call yields one marker pair; each recorded
-// `fetch` call yields one marker pair per URL so clients see the same
-// progression as the streaming paths. The non-streaming carrier keeps
-// the distinct `blocked` status inside the marker JSON even though the
-// spec-conformant `web_search_call` output item collapses it onto
-// `failed` — the whole point of the marker is to surface details the
-// spec has no slot for.
+// terminal markers (completed / failed) for the non-streaming paths,
+// which only see recorded tool calls after they have already run. Each
+// recorded `search` call yields one marker pair; each recorded `fetch`
+// call yields one marker pair per URL so clients see the same
+// progression as the streaming paths.
 func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 	if len(records) == 0 {
 		return ""
 	}
 	var builder strings.Builder
 	status := func(record toolCallRecord) string { return statusForRecord(record) }
-	writePair := func(action map[string]any, s, reason string, sources []toolCallSource) {
+	writePair := func(action map[string]any, s, reason string, sources []toolCallSource, pii *piiCheckResult) {
 		id := "ws_" + uuid.NewString()
-		builder.WriteString(tinfoilEventMarker(id, "in_progress", action, "", nil))
-		builder.WriteString(tinfoilEventMarker(id, s, action, reason, sources))
+		builder.WriteString(tinfoilEventMarker(id, "in_progress", action, "", nil, nil))
+		builder.WriteString(tinfoilEventMarker(id, s, action, reason, sources, pii))
 	}
 	for _, record := range records {
 		switch {
@@ -393,7 +442,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			if query := stringValue(record.arguments["query"]); query != "" {
 				action["query"] = query
 			}
-			writePair(action, status(record), record.errorReason, record.resultSources)
+			writePair(action, status(record), record.errorReason, record.resultSources, record.pii)
 		case isRouterFetchToolName(record.name):
 			urls := fetchArgumentURLs(record.arguments)
 			if len(urls) == 0 {
@@ -401,7 +450,7 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 			}
 			for _, url := range urls {
 				action := map[string]any{"type": "open_page", "url": url}
-				writePair(action, status(record), record.errorReason, sourcesForURL(record.resultSources, url))
+				writePair(action, status(record), record.errorReason, sourcesForURL(record.resultSources, url), nil)
 			}
 		}
 	}
@@ -543,48 +592,43 @@ func toActionSources(results []toolCallSource) []any {
 // consume it directly off `item._tinfoil` with no additional opt-in.
 //
 // The sidecar carries ONLY information the spec cannot express:
-//   - `status`: the unfiltered router status, which may be `blocked`
-//     (distinct from the spec-valid `failed` that rides on the envelope
-//     `status` field). Present only when the router status differs from
-//     the envelope status, i.e., only on `blocked` today.
-//   - `error.code`: an opaque router error code (e.g.
-//     `blocked_by_safety_filter`) for clients that want to branch UI on
-//     the specific reason. Present only when the tool call errored.
+//   - `error.code`: an opaque router error code for clients that want
+//     to branch UI on the specific reason. Present only when the tool
+//     call errored.
+//   - `pii`: the websearch server's PII masking report for a search
+//     call: whether spans were masked, the sanitized query that was
+//     actually searched, and the removed spans as offsets into the
+//     original query. Present only when the server reports the check
+//     ran, so its absence means "no signal", not "no PII".
 //
 // Returns nil when there is nothing worth surfacing (the default, happy
 // path) so the `_tinfoil` field is simply omitted from the item and the
 // serialized JSON stays minimal for successful searches.
-func tinfoilSidecar(rawStatus, errorCode string) map[string]any {
-	if rawStatus != "blocked" && errorCode == "" {
+func tinfoilSidecar(errorCode string, pii *piiCheckResult) map[string]any {
+	if errorCode == "" && pii == nil {
 		return nil
 	}
 	sidecar := map[string]any{}
-	if rawStatus == "blocked" {
-		sidecar["status"] = rawStatus
-	}
 	if errorCode != "" {
 		sidecar["error"] = map[string]any{"code": errorCode}
+	}
+	if encoded := encodePIICheckResult(pii); encoded != nil {
+		sidecar["pii"] = encoded
 	}
 	return sidecar
 }
 
 // webSearchCallEvent builds a single web_search_call output item for the
-// non-streaming `output[]` array. The `blocked` status is collapsed to
-// the spec-valid `failed` because OpenAI's web_search_call.status enum
-// has no `blocked` slot; the unfiltered status still rides on the
-// `_tinfoil` sidecar for clients that want to distinguish a safety
-// block from a generic failure.
-func webSearchCallEvent(id, status, errorCode string, action map[string]any) map[string]any {
+// non-streaming `output[]` array. Anything the spec has no slot for
+// (error codes, PII masking) rides on the `_tinfoil` sidecar.
+func webSearchCallEvent(id, status, errorCode string, action map[string]any, pii *piiCheckResult) map[string]any {
 	item := map[string]any{
 		"type":   "web_search_call",
 		"id":     id,
 		"status": status,
 		"action": action,
 	}
-	if status == "blocked" {
-		item["status"] = "failed"
-	}
-	if sidecar := tinfoilSidecar(status, errorCode); sidecar != nil {
+	if sidecar := tinfoilSidecar(errorCode, pii); sidecar != nil {
 		item["_tinfoil"] = sidecar
 	}
 	return item
@@ -620,11 +664,11 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 					action["sources"] = sources
 				}
 			}
-			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
+			events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action, record.pii))
 		case isRouterFetchToolName(record.name):
 			for _, url := range fetchArgumentURLs(record.arguments) {
 				action := map[string]any{"type": "open_page", "url": url}
-				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action))
+				events = append(events, webSearchCallEvent("ws_"+uuid.NewString(), status, record.errorReason, action, nil))
 			}
 		}
 	}
@@ -653,15 +697,12 @@ func codeInterpreterCallEvent(id, status, toolName string, arguments map[string]
 		"code":         code,
 		"container_id": tinfoilContainerID,
 	}
-	if status == "blocked" {
-		item["status"] = "failed"
-	}
 	if output != "" {
 		item["outputs"] = []map[string]any{
 			{"type": "logs", "logs": output},
 		}
 	}
-	if sidecar := tinfoilSidecar(status, errorCode); sidecar != nil {
+	if sidecar := tinfoilSidecar(errorCode, nil); sidecar != nil {
 		item["_tinfoil"] = sidecar
 	}
 	return item

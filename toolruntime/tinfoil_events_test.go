@@ -47,7 +47,7 @@ func TestTinfoilEventsEnabledHeaderParsing(t *testing.T) {
 // callers depend on (id, status, action) plus the tinfoil-specific
 // reason when present.
 func TestTinfoilEventMarkerShape(t *testing.T) {
-	marker := tinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil)
+	marker := tinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil, nil)
 	if !strings.HasPrefix(marker, "\n"+tinfoilEventOpenTag) {
 		t.Fatalf("marker must start on its own line with %q: got %q", tinfoilEventOpenTag, marker)
 	}
@@ -80,10 +80,10 @@ func TestTinfoilEventMarkerShape(t *testing.T) {
 
 // TestTinfoilEventMarkerIncludesReason pins that the optional reason
 // field rides on the marker only when non-empty, so opt-in clients can
-// surface safety-block text or upstream error context without the field
-// polluting every success marker.
+// surface upstream error context without the field polluting every
+// success marker.
 func TestTinfoilEventMarkerIncludesReason(t *testing.T) {
-	marker := tinfoilEventMarker("ws_1", "blocked", map[string]any{"type": "search"}, "safety policy rejected this query", nil)
+	marker := tinfoilEventMarker("ws_1", "failed", map[string]any{"type": "search"}, "upstream_timeout", nil, nil)
 	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
@@ -91,10 +91,49 @@ func TestTinfoilEventMarkerIncludesReason(t *testing.T) {
 	}
 	errMap, _ := decoded["error"].(map[string]any)
 	if errMap == nil {
-		t.Fatalf("payload.error must be present for blocked status, got %#v", decoded)
+		t.Fatalf("payload.error must be present for failed status, got %#v", decoded)
 	}
-	if errMap["code"] != "safety policy rejected this query" {
-		t.Fatalf("payload.error.code = %v, want blocked detail", errMap["code"])
+	if errMap["code"] != "upstream_timeout" {
+		t.Fatalf("payload.error.code = %v, want upstream_timeout", errMap["code"])
+	}
+	if _, present := decoded["pii"]; present {
+		t.Fatalf("payload must not include pii when no report was given")
+	}
+}
+
+// TestTinfoilEventMarkerIncludesPII pins that a terminal search marker
+// carries the websearch server's masking report under `pii` so opt-in
+// chat clients get the same signal the Responses sidecar exposes.
+func TestTinfoilEventMarkerIncludesPII(t *testing.T) {
+	pii := &piiCheckResult{
+		masked:        true,
+		redactedQuery: "hiking trails",
+		redactions:    []piiRedaction{{kind: "private_email", start: 0, end: 16}},
+	}
+	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "john@example.com hiking trails"}, "", nil, pii)
+	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v", err)
+	}
+	if decoded["status"] != "completed" {
+		t.Fatalf("masking must not change the terminal status, got %v", decoded["status"])
+	}
+	report, _ := decoded["pii"].(map[string]any)
+	if report == nil || report["masked"] != true || report["redacted_query"] != "hiking trails" {
+		t.Fatalf("payload.pii mismatch: %#v", decoded["pii"])
+	}
+	redactions, _ := report["redactions"].([]any)
+	if len(redactions) != 1 {
+		t.Fatalf("expected one redaction, got %#v", report["redactions"])
+	}
+	span := redactions[0].(map[string]any)
+	if span["type"] != "private_email" || span["start"] != float64(0) || span["end"] != float64(16) {
+		t.Fatalf("redaction span mismatch: %#v", span)
+	}
+	reportJSON, _ := json.Marshal(report)
+	if strings.Contains(string(reportJSON), "john@example.com") {
+		t.Fatalf("pii report must never repeat the removed text: %s", reportJSON)
 	}
 }
 
@@ -162,7 +201,7 @@ func TestTinfoilEventMarkerEmbedsSources(t *testing.T) {
 		{url: "https://one.example", title: "One"},
 		{url: "https://two.example", title: "Two"},
 	}
-	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources)
+	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources, nil)
 	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
@@ -186,7 +225,7 @@ func TestTinfoilEventMarkerEmbedsSources(t *testing.T) {
 // happy-path marker bytes stay minimal and existing snapshots continue
 // to round-trip.
 func TestTinfoilEventMarkerOmitsSourcesWhenEmpty(t *testing.T) {
-	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search"}, "", nil)
+	marker := tinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search"}, "", nil, nil)
 	payload := strings.TrimSuffix(strings.TrimPrefix(marker, "\n"+tinfoilEventOpenTag), tinfoilEventCloseTag+"\n")
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
@@ -259,25 +298,31 @@ func TestTinfoilEventMarkersForRecordsMapsFetch(t *testing.T) {
 	}
 }
 
-// TestTinfoilEventMarkersForRecordsMapsBlocked pins that a recorded
-// search whose errorReason is the safety-block constant surfaces as
-// status:"blocked" on the marker (preserving the full status vocabulary
-// for opt-in clients), even though the companion spec-conformant
-// web_search_call output item collapses blocked onto failed.
-func TestTinfoilEventMarkersForRecordsMapsBlocked(t *testing.T) {
+// TestTinfoilEventMarkersForRecordsMapsPII pins that a recorded search
+// whose query was masked carries the PII report only on its terminal
+// marker, never on the in_progress marker, and that fetch records never
+// carry one.
+func TestTinfoilEventMarkersForRecordsMapsPII(t *testing.T) {
 	records := []toolCallRecord{
 		{
-			name:        "search",
-			arguments:   map[string]any{"query": "sensitive"},
-			errorReason: blockedToolErrorReason,
+			name:      "search",
+			arguments: map[string]any{"query": "john@example.com hiking trails"},
+			pii:       &piiCheckResult{masked: true, redactedQuery: "hiking trails", redactions: []piiRedaction{{kind: "private_email", start: 0, end: 16}}},
+		},
+		{
+			name:      "fetch",
+			arguments: map[string]any{"urls": []any{"https://example.com/a"}},
 		},
 	}
 	combined := tinfoilEventMarkersForRecords(records)
-	if !strings.Contains(combined, `"status":"blocked"`) {
-		t.Fatalf("expected blocked marker for safety-block record: %q", combined)
+	if got := strings.Count(combined, `"pii":{`); got != 1 {
+		t.Fatalf("expected exactly one pii report (search terminal marker), got %d in %q", got, combined)
 	}
-	if !strings.Contains(combined, blockedToolErrorReason) {
-		t.Fatalf("expected marker reason to carry safety-block constant: %q", combined)
+	if !strings.Contains(combined, `"pii":{"masked":true,"redacted_query":"hiking trails","redactions":[{"end":16,"start":0,"type":"private_email"}]}`) {
+		t.Fatalf("pii report shape mismatch: %q", combined)
+	}
+	if !strings.Contains(combined, `"status":"completed"`) {
+		t.Fatalf("masked search must still complete: %q", combined)
 	}
 }
 
@@ -419,17 +464,16 @@ func TestAttachResponsesCitationsNeverInjectsMarkers(t *testing.T) {
 // TestAttachResponsesCitationsPrependsWebSearchCallItem pins the spec
 // carrier for router-owned tool-call progress on the Responses path: a
 // web_search_call output item is prepended for every recorded call, no
-// synthetic tinfoil-event marker message is produced, and a blocked
-// tool call surfaces the unfiltered router status on the `_tinfoil`
-// vendor-extension sidecar so Tinfoil-aware clients can distinguish a
-// safety-filter block from a generic failure.
+// synthetic tinfoil-event marker message is produced, and a failed tool
+// call surfaces its error code on the `_tinfoil` vendor-extension
+// sidecar so Tinfoil-aware clients can branch on the reason.
 func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 	state := &citations.State{NextIndex: 1}
 	tc := &toolCallLog{}
 	tc.record(toolCallRecord{
 		name:        "search",
-		arguments:   map[string]any{"query": "sensitive"},
-		errorReason: blockedToolErrorReason,
+		arguments:   map[string]any{"query": "failing"},
+		errorReason: publicToolErrorReasonString,
 	})
 
 	body := map[string]any{
@@ -446,23 +490,18 @@ func TestAttachResponsesCitationsPrependsWebSearchCallItem(t *testing.T) {
 	if first["type"] != "web_search_call" {
 		t.Fatalf("expected first item to be web_search_call, got %v", first["type"])
 	}
-	// OpenAI's spec has no `blocked` slot on the web_search_call.status
-	// enum, so the envelope collapses onto the spec-valid `failed`.
 	if first["status"] != "failed" {
-		t.Fatalf("expected blocked tool call to collapse onto status=failed, got %v", first["status"])
+		t.Fatalf("expected failed tool call to surface status=failed, got %v", first["status"])
 	}
-	// _tinfoil sidecar preserves the unfiltered router signal for
-	// Tinfoil-aware clients. Strict OpenAI SDKs ignore this field.
+	// _tinfoil sidecar carries the error code for Tinfoil-aware
+	// clients. Strict OpenAI SDKs ignore this field.
 	sidecar, ok := first["_tinfoil"].(map[string]any)
 	if !ok {
-		t.Fatalf("blocked item must carry _tinfoil sidecar, got %#v", first["_tinfoil"])
-	}
-	if sidecar["status"] != "blocked" {
-		t.Fatalf("_tinfoil.status = %v, want blocked", sidecar["status"])
+		t.Fatalf("failed item must carry _tinfoil sidecar, got %#v", first["_tinfoil"])
 	}
 	errObj, _ := sidecar["error"].(map[string]any)
-	if errObj == nil || errObj["code"] != blockedToolErrorReason {
-		t.Fatalf("_tinfoil.error.code = %v, want %q", errObj, blockedToolErrorReason)
+	if errObj == nil || errObj["code"] != publicToolErrorReasonString {
+		t.Fatalf("_tinfoil.error.code = %v, want %q", errObj, publicToolErrorReasonString)
 	}
 	// No synthetic tinfoil-event marker message should be injected.
 	for _, raw := range items {
@@ -699,16 +738,17 @@ func TestCodeInterpreterCallEventShape(t *testing.T) {
 	}
 }
 
-// TestCodeInterpreterCallEventBlocked pins that a blocked code-exec call
-// collapses status onto failed (matching web_search_call behavior).
-func TestCodeInterpreterCallEventBlocked(t *testing.T) {
-	item := codeInterpreterCallEvent("ci_1", "blocked", "bash", nil, "", blockedToolErrorReason)
+// TestCodeInterpreterCallEventFailed pins that a failed code-exec call
+// carries its error code on the sidecar (matching web_search_call).
+func TestCodeInterpreterCallEventFailed(t *testing.T) {
+	item := codeInterpreterCallEvent("ci_1", "failed", "bash", nil, "", publicToolErrorReasonString)
 	if item["status"] != "failed" {
-		t.Fatalf("blocked status must collapse to failed, got %v", item["status"])
+		t.Fatalf("status = %v, want failed", item["status"])
 	}
 	sidecar, ok := item["_tinfoil"].(map[string]any)
-	if !ok || sidecar["status"] != "blocked" {
-		t.Fatalf("_tinfoil sidecar must preserve blocked status: %#v", item["_tinfoil"])
+	errObj, _ := sidecar["error"].(map[string]any)
+	if !ok || errObj == nil || errObj["code"] != publicToolErrorReasonString {
+		t.Fatalf("_tinfoil sidecar must carry the error code: %#v", item["_tinfoil"])
 	}
 }
 

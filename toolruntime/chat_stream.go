@@ -489,7 +489,7 @@ func (s *chatStreamer) flushCitations() {
 // Failures are still returned to the caller so the tool output carries
 // the raw error text (matching the non-streaming path that serializes
 // err.Error() into the tool-result message).
-func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, []toolCallSource, error) {
+func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (toolExecution, error) {
 	return executeToolWithProgress(ctx, registry, s.citations, &chatToolProgressEmitter{streamer: s}, call)
 }
 
@@ -497,11 +497,11 @@ func (s *chatStreamer) executeTool(ctx context.Context, registry *sessionRegistr
 // `delta.content` of a chat.completion.chunk frame. When the caller did
 // not opt into the marker stream, this is a no-op so strict SDKs see a
 // pristine spec-conformant stream.
-func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource) {
+func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[string]any, reason string, sources []toolCallSource, pii *piiCheckResult) {
 	if !s.eventFlags.webSearch {
 		return
 	}
-	marker := tinfoilEventMarker(id, status, action, reason, sources)
+	marker := tinfoilEventMarker(id, status, action, reason, sources, pii)
 	s.writeChunk(map[string]any{
 		"choices": []any{
 			map[string]any{
@@ -1110,7 +1110,7 @@ func runChatStreaming(
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
-				func(ctx context.Context, call toolCall) (string, []toolCallSource, error) {
+				func(ctx context.Context, call toolCall) (toolExecution, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
 				tracePhase, tid,

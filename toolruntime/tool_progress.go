@@ -51,11 +51,21 @@ type toolProgressEmitter interface {
 }
 
 // toolProgressResult carries the terminal metadata for a tool call.
-// Web search populates sources; code exec populates output. Each
-// emitter implementation reads the fields relevant to its tool type.
+// Web search populates sources and pii; code exec populates output.
+// Each emitter implementation reads the fields relevant to its tool type.
 type toolProgressResult struct {
 	output  string           // code exec: the tool's text output
 	sources []toolCallSource // web search: source metadata
+	pii     *piiCheckResult  // search: the server's PII masking report
+}
+
+// toolExecution is what a successful router-owned tool call hands back
+// to the loop: the text the upstream model sees plus the metadata the
+// loop records on the toolCallRecord for client-facing progress items.
+type toolExecution struct {
+	output  string
+	sources []toolCallSource
+	pii     *piiCheckResult
 }
 
 // toolProgressHandle is the opaque per-call handle returned by
@@ -123,10 +133,10 @@ func executeToolWithProgress(
 	state *citations.State,
 	emitter toolProgressEmitter,
 	call toolCall,
-) (string, []toolCallSource, error) {
+) (toolExecution, error) {
 	session, ok := registry.sessionFor(call.name)
 	if !ok {
-		return "", nil, fmt.Errorf("no MCP session registered for tool %q", call.name)
+		return toolExecution{}, fmt.Errorf("no MCP session registered for tool %q", call.name)
 	}
 	dispatchName := registry.dispatchName(call.name)
 	meta := registry.metaFor(call.name)
@@ -159,7 +169,7 @@ func executeSingleToolWithProgress(
 	meta mcp.Meta,
 	phases toolPhaseConfig,
 	details map[string]any,
-) (string, []toolCallSource, error) {
+) (toolExecution, error) {
 	id := phases.idPrefix + uuid.NewString()
 	handle := emitter.open(id, call.name, details)
 	for _, phase := range phases.preCallPhases {
@@ -172,26 +182,30 @@ func executeSingleToolWithProgress(
 		if !isWebSearchTool(call.name) {
 			result.output = err.Error()
 		}
-		emitter.close(handle, call.name, details, result, failureStatusFor(err), publicToolErrorReason(call.name, err))
-		return "", nil, err
+		emitter.close(handle, call.name, details, result, "failed", publicToolErrorReason(call.name, err))
+		return toolExecution{}, err
 	}
-	output = applyStructuredFormat(call.name, output, structured, state)
-	sources := toolCallSourcesForResult(call.name, structured, output)
+	execution := toolExecution{
+		output: applyStructuredFormat(call.name, output, structured, state),
+		pii:    piiCheckResultFromStructured(call.name, structured),
+	}
+	execution.sources = toolCallSourcesForResult(call.name, structured, execution.output)
 
 	// The present tool's output is a fenced markdown code block. Surface it
 	// as inline assistant content so the user sees the file rendered in the
 	// chat alongside the regular tool-call indicator.
 	if isPresentTool(call.name) {
-		emitter.emitInlineContent("\n\n" + output + "\n\n")
+		emitter.emitInlineContent("\n\n" + execution.output + "\n\n")
 	}
 
 	emitter.phase(handle, phases.completedPhase)
 	result := toolProgressResult{
-		output:  output,
-		sources: sources,
+		output:  execution.output,
+		sources: execution.sources,
+		pii:     execution.pii,
 	}
 	emitter.close(handle, call.name, details, result, "completed", "")
-	return output, sources, nil
+	return execution, nil
 }
 
 // executeFetchWithProgress handles the fetch-specific multi-handle
@@ -205,14 +219,14 @@ func executeFetchWithProgress(
 	dispatchName string,
 	meta mcp.Meta,
 	phases toolPhaseConfig,
-) (string, []toolCallSource, error) {
+) (toolExecution, error) {
 	urls := fetchArgumentURLs(call.arguments)
 	if len(urls) == 0 {
 		output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
 		if err != nil {
-			return "", nil, err
+			return toolExecution{}, err
 		}
-		return applyStructuredFormat(call.name, output, structured, state), nil, nil
+		return toolExecution{output: applyStructuredFormat(call.name, output, structured, state)}, nil
 	}
 
 	handles := make([]toolProgressHandle, len(urls))
@@ -229,20 +243,18 @@ func executeFetchWithProgress(
 	output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
 	if err != nil {
 		reason := publicToolErrorReason(call.name, err)
-		status := failureStatusFor(err)
 		for i := range urls {
-			emitter.close(handles[i], call.name, details[i], toolProgressResult{}, status, reason)
+			emitter.close(handles[i], call.name, details[i], toolProgressResult{}, "failed", reason)
 		}
-		return "", nil, err
+		return toolExecution{}, err
 	}
-	output = applyStructuredFormat(call.name, output, structured, state)
-
-	sources := toolCallSourcesForResult(call.name, structured, output)
+	execution := toolExecution{output: applyStructuredFormat(call.name, output, structured, state)}
+	execution.sources = toolCallSourcesForResult(call.name, structured, execution.output)
 	for i := range urls {
 		emitter.phase(handles[i], phases.completedPhase)
-		emitter.close(handles[i], call.name, details[i], toolProgressResult{sources: sourcesForURL(sources, urls[i])}, "completed", "")
+		emitter.close(handles[i], call.name, details[i], toolProgressResult{sources: sourcesForURL(execution.sources, urls[i])}, "completed", "")
 	}
-	return output, sources, nil
+	return execution, nil
 }
 
 // chatToolProgressEmitter surfaces router-owned tool progress on the
@@ -257,7 +269,7 @@ type chatToolProgressEmitter struct {
 
 func (c *chatToolProgressEmitter) open(id, toolName string, details map[string]any) toolProgressHandle {
 	if isWebSearchTool(toolName) {
-		c.streamer.emitTinfoilEventMarker(id, "in_progress", details, "", nil)
+		c.streamer.emitTinfoilEventMarker(id, "in_progress", details, "", nil, nil)
 	} else {
 		c.streamer.emitTinfoilToolCallMarker(id, "in_progress", toolName, details, "")
 	}
@@ -275,7 +287,7 @@ func (c *chatToolProgressEmitter) emitInlineContent(text string) {
 
 func (c *chatToolProgressEmitter) close(handle toolProgressHandle, toolName string, details map[string]any, result toolProgressResult, status, reason string) {
 	if isWebSearchTool(toolName) {
-		c.streamer.emitTinfoilEventMarker(handle.id, status, details, reason, result.sources)
+		c.streamer.emitTinfoilEventMarker(handle.id, status, details, reason, result.sources, result.pii)
 	} else {
 		c.streamer.emitTinfoilToolCallMarker(handle.id, status, toolName, nil, result.output)
 	}
@@ -319,7 +331,7 @@ func (r *responsesToolProgressEmitter) close(handle toolProgressHandle, toolName
 				action["sources"] = sources
 			}
 		}
-		r.streamer.closeWebSearchCallItem(handle.id, handle.outputIndex, action, status, reason)
+		r.streamer.closeWebSearchCallItem(handle.id, handle.outputIndex, action, status, reason, result.pii)
 	} else {
 		r.streamer.closeCodeInterpreterCallItem(handle.id, handle.outputIndex, toolName, result.output, status, reason)
 	}
@@ -347,7 +359,7 @@ func resolveStreamingRouterToolCall(
 	opts webSearchOptions,
 	toolSchemas map[string]*jsonschema.Schema,
 	toolCalls *toolCallLog,
-	executor func(ctx context.Context, call toolCall) (string, []toolCallSource, error),
+	executor func(ctx context.Context, call toolCall) (toolExecution, error),
 	tracePhase, traceID string,
 ) string {
 	applyWebSearchOptionsToToolCall(call.name, call.arguments, opts)
@@ -358,7 +370,8 @@ func resolveStreamingRouterToolCall(
 		debugLogf("toolruntime:%s %s tool.call name=%s args=%s", traceID, tracePhase, call.name, debugPreview(call.arguments, 400))
 	}
 	tstart := time.Now()
-	output, resultSources, err := executor(ctx, call)
+	execution, err := executor(ctx, call)
+	output := execution.output
 	record := toolCallRecord{
 		name:      call.name,
 		arguments: call.arguments,
@@ -370,8 +383,9 @@ func resolveStreamingRouterToolCall(
 		output = humanizeToolArgError(call.name, err, call.arguments)
 		record.errorReason = publicToolErrorReason(call.name, err)
 	} else {
-		record.resultSources = resultSources
+		record.resultSources = execution.sources
 		record.resultURLs = toolCallSourceURLs(record.resultSources)
+		record.pii = execution.pii
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
