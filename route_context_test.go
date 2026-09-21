@@ -2,72 +2,371 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-func TestRouteContextClientLookupCachesSuccess(t *testing.T) {
-	priority := -1
-	requests := 0
+const admissionTestModel = "gpt-oss-120b"
+
+func accessTokenForTest(header, payload string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".c2ln"
+}
+
+func TestRouteContextUncachedDecisions(t *testing.T) {
+	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if r.URL.Path != routeContextPath {
-			t.Fatalf("path = %q, want %q", r.URL.Path, routeContextPath)
+		if r.Method != http.MethodPost || r.URL.Path != routeContextPath || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("unexpected admission request: %s %s", r.Method, r.URL.Path)
 		}
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %q, want POST", r.Method)
-		}
-
 		var req routeContextRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.APIKey != "tk_test" || req.Model != admissionTestModel {
+			t.Errorf("bad request: %+v, %v", req, err)
 		}
-		if req.APIKey != "tk_test" {
-			t.Fatalf("request = %#v, want key", req)
+		n := calls.Add(1)
+		decision := decisionAllowed
+		if n == 2 {
+			decision = decisionDemote
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(routeContext{
-			Priority: &priority,
-			OrgID:    "org_test",
-		})
+		if n == 3 {
+			decision = decisionRejected
+		}
+		reason := ""
+		if decision != decisionAllowed {
+			reason = rateReasonRequests
+		}
+		fmt.Fprintf(w, `{"org_id":"org_test","rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":30,"requests":{"limit":2,"used":%d}}}`, decision, reason, n)
 	}))
 	defer server.Close()
-
 	client := newRouteContextClient(server.URL)
-	first, ok := client.Lookup(context.Background(), "tk_test", "gemma4-31b")
-	if !ok {
-		t.Fatal("expected first lookup to succeed")
+	for i, want := range []string{decisionAllowed, decisionDemote, decisionRejected} {
+		got, err := client.Lookup(context.Background(), "tk_test", admissionTestModel)
+		if want == decisionRejected {
+			if err == nil || err.apiError.Status != http.StatusTooManyRequests || err.retryAfter != "30" {
+				t.Fatalf("rejection: %v", err)
+			}
+		} else if err != nil || got.RateLimit.Decision != want || got.OrgID != "org_test" || *got.RateLimit.Requests.Used != int64(i+1) {
+			t.Fatalf("decision %s: %+v, %v", want, got, err)
+		}
 	}
-	second, ok := client.Lookup(context.Background(), "tk_test", "llama3-3-70b")
-	if !ok {
-		t.Fatal("expected second lookup to succeed from cache")
-	}
-
-	if first.Priority == nil || *first.Priority != priority {
-		t.Fatalf("first context = %#v, want high priority", first)
-	}
-	if second.Priority == nil || *second.Priority != priority {
-		t.Fatalf("second context = %#v, want high priority", second)
-	}
-	if first.OrgID != "org_test" || second.OrgID != "org_test" {
-		t.Fatalf("contexts = (%#v, %#v), want org_test org", first, second)
-	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	if calls.Load() != 3 {
+		t.Fatalf("counting calls = %d", calls.Load())
 	}
 }
 
-func TestRouteContextClientLookupFailsClosed(t *testing.T) {
+func TestRouteContextInvalidResponsesFailClosed(t *testing.T) {
+	for _, body := range []string{
+		`{}`, `null`, `[]`, `not json`, `{"priority":-1}`, `{"rate_limit":null}`,
+		`{"rate_limit":{"decision":"allowed"}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":null}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":-1}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":1.5}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":"30"}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":9223372036854775808}}`,
+		`{"rate_limit":{"decision":"unknown","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"ALLOWED","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":null,"retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"rejected","reason":"other","retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":-1}}`,
+		`{"rate_limit":{"decision":"rejected","reason":"requests","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"rejected","retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"rejected","reason":null,"retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"rejected","reason":42,"retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"demote","retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"demote","reason":"tokens","retry_after_seconds":1}}`,
+		`{"rate_limit":{"decision":"allowed","reason":"requests","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"exempt","reason":"tokens","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"requests":{"limit":10}}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"tokens":{"limit":10,"used":-1}}}`,
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0}} {}`,
+		strings.Repeat(" ", routeContextResponseLimit+1),
+	} {
+		t.Run(fmt.Sprintf("case_%d", len(body))+body[:min(len(body), 70)], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+			defer server.Close()
+			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			if err == nil || err.apiError.Status != http.StatusServiceUnavailable || err.retryAfter != "1" {
+				t.Fatalf("invalid response admitted: %v", err)
+			}
+		})
+	}
+}
+
+func TestRouteContextStatusesAndRejections(t *testing.T) {
+	for _, status := range []int{401, 402, 403, 404, 429, 500, 502, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "-10")
+				w.WriteHeader(status)
+				io.WriteString(w, `{"error":"credentials denied"}`)
+			}))
+			defer server.Close()
+			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			want := http.StatusServiceUnavailable
+			if status == 401 || status == 402 || status == 403 || status == 429 {
+				want = status
+			}
+			if err == nil || err.apiError.Status != want {
+				t.Fatalf("status: %v", err)
+			}
+			if want == http.StatusServiceUnavailable && err.retryAfter != "1" {
+				t.Fatalf("invalid retry forwarded: %q", err.retryAfter)
+			}
+		})
+	}
+	for _, reason := range []string{rateReasonRequests, rateReasonTokens} {
+		beforeTotal := testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel))
+		beforeReason := testutil.ToFloat64(manager.RateLimitRejectionsByReasonTotal.WithLabelValues(admissionTestModel, reason))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"rate_limit":{"decision":"rejected","reason":%q,"retry_after_seconds":1}}`, reason)
+		}))
+		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		server.Close()
+		if err == nil {
+			t.Fatal("rejection admitted")
+		}
+		rec := httptest.NewRecorder()
+		err.write(rec)
+		message := "requests"
+		if reason == rateReasonTokens {
+			message = "tokens"
+		}
+		if rec.Code != 429 || rec.Header().Get("Retry-After") != "1" || !strings.Contains(rec.Body.String(), "for "+message) {
+			t.Fatalf("rejection response: %d %v %s", rec.Code, rec.Header(), rec.Body.String())
+		}
+		if got := testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel)) - beforeTotal; got != 1 {
+			t.Fatalf("compatibility rejection counter delta = %v", got)
+		}
+		if got := testutil.ToFloat64(manager.RateLimitRejectionsByReasonTotal.WithLabelValues(admissionTestModel, reason)) - beforeReason; got != 1 {
+			t.Fatalf("%s rejection counter delta = %v", reason, got)
+		}
+	}
+}
+
+const quotaDenialTestBody = `{"error":{"message":"API key quota exhausted.","type":"insufficient_quota","code":"insufficient_quota","param":null}}`
+
+var quotaRetryAfterCases = []struct {
+	name   string
+	values []string
+	want   string
+}{
+	{"absent", nil, ""},
+	{"seconds", []string{"30"}, "30"},
+	{"zero seconds", []string{"0"}, "0"},
+	{"HTTP date", []string{"Sun, 06 Nov 1994 08:49:37 GMT"}, "Sun, 06 Nov 1994 08:49:37 GMT"},
+	{"negative", []string{"-1"}, ""},
+	{"signed", []string{"+30"}, ""},
+	{"fractional", []string{"1.5"}, ""},
+	{"overflow", []string{"18446744073709551616"}, ""},
+	{"invalid date", []string{"Sun, 99 Nov 1994 08:49:37 GMT"}, ""},
+	{"garbage", []string{"soon"}, ""},
+	{"multiple", []string{"30", "60"}, ""},
+}
+
+func TestRouteContextQuotaDenial(t *testing.T) {
+	for _, tc := range quotaRetryAfterCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			beforeFailures := testutil.ToFloat64(manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, "http_429"))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				for _, value := range tc.values {
+					w.Header().Add("Retry-After", value)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				io.WriteString(w, quotaDenialTestBody)
+			}))
+			defer server.Close()
+			client := newRouteContextClient(server.URL)
+			for _, model := range []string{admissionTestModel, ""} {
+				var err *routeContextError
+				if model == "" {
+					_, err = client.Metadata(context.Background(), "tk_test")
+				} else {
+					_, err = client.Lookup(context.Background(), "tk_test", model)
+				}
+				if err == nil {
+					t.Fatal("quota denial admitted")
+				}
+				rec := httptest.NewRecorder()
+				err.write(rec)
+				assertQuotaDenial(t, rec, tc.want)
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("quota denial calls = %d, want 2", calls.Load())
+			}
+			if testutil.ToFloat64(manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, "http_429")) != beforeFailures {
+				t.Fatal("quota denial counted as lookup outage")
+			}
+		})
+	}
+}
+
+func assertQuotaDenial(t *testing.T, rec *httptest.ResponseRecorder, retryAfter string) {
+	t.Helper()
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusTooManyRequests || envelope.Error.Type != "insufficient_quota" || envelope.Error.Code == nil || *envelope.Error.Code != "insufficient_quota" || envelope.Error.Message != "API key quota exhausted." || envelope.Error.Param != nil {
+		t.Fatalf("quota denial changed: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != retryAfter {
+		t.Fatalf("Retry-After = %q, want %q", got, retryAfter)
+	}
+	if retryAfter == "" && len(rec.Header().Values("Retry-After")) != 0 {
+		t.Fatal("unexpected retry header for lifetime cap")
+	}
+}
+
+func TestRouteContextQuotaDenialHidesUnrecognizedBodies(t *testing.T) {
+	for _, body := range []string{"<html>private upstream details</html>", `{"error":"private upstream details"}`, strings.Repeat("private upstream details", routeContextResponseLimit)} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, body)
+		}))
+		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		server.Close()
+		if err == nil || err.apiError.Status != http.StatusTooManyRequests || err.apiError.Message != http.StatusText(http.StatusTooManyRequests) || err.retryAfter != "" {
+			t.Fatalf("unsafe quota error handling: %v", err)
+		}
+	}
+}
+
+func TestRouteContextDecisionReasonContract(t *testing.T) {
+	for _, decision := range []string{decisionAllowed, decisionExempt, decisionDemote, decisionRejected, "unknown"} {
+		for _, reason := range []string{"", rateReasonRequests, rateReasonTokens, "unknown"} {
+			for _, retry := range []int64{-1, 0, 1} {
+				t.Run(fmt.Sprintf("%s/%s/%d", decision, reason, retry), func(t *testing.T) {
+					valid := retry >= 0 && ((decision == decisionAllowed || decision == decisionExempt) && reason == "" || decision == decisionDemote && reason == rateReasonRequests || decision == decisionRejected && retry > 0 && (reason == rateReasonRequests || reason == rateReasonTokens))
+					beforeSeries := testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal)
+					beforeRejections := testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel))
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":%d}}`, decision, reason, retry)
+					}))
+					defer server.Close()
+					_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+					if !valid {
+						if err == nil || err.apiError.Status != 503 {
+							t.Fatalf("invalid contract admitted: %v", err)
+						}
+						if testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal) != beforeSeries || testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel)) != beforeRejections {
+							t.Fatal("malformed decision emitted a quota rejection metric")
+						}
+					} else if decision == decisionRejected {
+						if err == nil || err.apiError.Status != 429 {
+							t.Fatalf("valid rejection failed: %v", err)
+						}
+					} else if err != nil {
+						t.Fatalf("valid decision failed: %v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRouteContextQuotaDetailsDoNotOverrideDecision(t *testing.T) {
+	for _, payload := range []string{
+		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"requests":{"limit":0,"used":10},"tokens":{"limit":1,"used":100}}}`,
+		`{"rate_limit":{"decision":"exempt","retry_after_seconds":0}}`,
+		`{"rate_limit":{"decision":"demote","reason":"requests","retry_after_seconds":1,"requests":{"limit":100,"used":0}}}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, payload) }))
+		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		server.Close()
+		if err != nil {
+			t.Fatalf("valid CP decision overridden by optional details: %v", err)
+		}
+	}
+}
+
+func TestRouteContextMetadataAndJWTClassification(t *testing.T) {
+	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
+		calls.Add(1)
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		if _, ok := req["model"]; ok {
+			t.Error("metadata lookup contained model")
+		}
+		io.WriteString(w, `{"org_id":"org_test","priority":-1}`)
 	}))
 	defer server.Close()
-
 	client := newRouteContextClient(server.URL)
-	if _, ok := client.Lookup(context.Background(), "tk_test", "gemma4-31b"); ok {
-		t.Fatal("expected lookup to fail closed")
+	got, err := client.Metadata(context.Background(), "tk_test")
+	if err != nil || got.OrgID != "org_test" {
+		t.Fatalf("metadata: %+v %v", got, err)
+	}
+	for _, typ := range []string{"at+jwt", "application/at+jwt", "AT+JWT"} {
+		jwt := accessTokenForTest(fmt.Sprintf(`{"typ":%q}`, typ), `{"sub":"user_test"}`)
+		if _, err := client.Lookup(context.Background(), jwt, admissionTestModel); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Metadata(context.Background(), jwt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("JWT made %d route-context calls", calls.Load()-1)
+	}
+	for _, token := range []string{
+		"opaque", "a.b.c", "", accessTokenForTest(`{"typ":"JWT"}`, `{"sub":"user"}`),
+		accessTokenForTest(`{"typ":"at+jwt"}`, `{"sub":42}`),
+		accessTokenForTest(`{"typ":"at+jwt"}`, `{broken`),
+		accessTokenForTest(`{"typ":"at+jwt"}`, `{}`),
+		accessTokenForTest(`{"typ":"at+jwt"}`, `{"sub":"user"}`) + "!",
+	} {
+		if jwtSubject(token) != "" {
+			t.Errorf("malformed/untyped bearer bypassed admission: %q", token)
+		}
+	}
+	var nilClient *routeContextClient
+	if _, err := nilClient.Lookup(context.Background(), "", admissionTestModel); err == nil || err.apiError.Status != 401 {
+		t.Fatalf("missing key: %v", err)
+	}
+	if _, err := nilClient.Lookup(context.Background(), "tk_test", admissionTestModel); err == nil || err.apiError.Status != 503 {
+		t.Fatalf("unconfigured client: %v", err)
+	}
+}
+
+func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == routeContextPath {
+			http.Redirect(w, r, "/replay", http.StatusTemporaryRedirect)
+			return
+		}
+		t.Error("admission redirect followed")
+	}))
+	_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	server.Close()
+	if err == nil || err.apiError.Status != 503 || calls.Load() != 1 {
+		t.Fatalf("redirect replay: %v, %d", err, calls.Load())
+	}
+	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	if err == nil || err.apiError.Status != 503 {
+		t.Fatalf("transport failure: %v", err)
+	}
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	start := time.Now()
+	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	if err == nil || err.apiError.Status != 503 || time.Since(start) > 3*routeContextLookupTimeout {
+		t.Fatalf("lookup deadline: %v, %v", err, time.Since(start))
 	}
 }

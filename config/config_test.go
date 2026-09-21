@@ -1,6 +1,45 @@
 package config
 
-import "testing"
+import (
+	"testing"
+)
+
+// A legacy rate_limit block must load like any other unknown field so a new
+// router can serve from the same runtime YAML as the old fleet it replaces.
+func TestLegacyRateLimitIgnored(t *testing.T) {
+	for _, value := range []string{"null", "0", "{}", "{max_requests_per_minute: 0}", "{max_requests_per_minute: 10, hard_max_requests_per_minute: 20}"} {
+		t.Run(value, func(t *testing.T) {
+			cfg, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    enclaves: [a.example]\n    rate_limit: " + value + "\n"))
+			if err != nil {
+				t.Fatalf("legacy policy %q rejected: %v", value, err)
+			}
+			if m := cfg.Models["gpt-oss-120b"]; m.Repo != "org/repo" || len(m.Hostnames) != 1 {
+				t.Fatalf("model fields lost alongside legacy policy: %+v", m)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigFeaturesRemainCompatible(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+future_runtime_setting: true
+models:
+  gpt-oss-120b:
+    repo: org/repo
+    enclaves: [a.example, b.example]
+    future_model_setting: true
+    overload: {max_requests_waiting: 10, clear_requests_waiting: 3, retry_after_minutes: 2}
+    cache_route: {mode: enforced, max_inflight_delta: 0}
+    reservations: [{org_ids: [org_test], enclaves: [a.example]}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := cfg.Models["gpt-oss-120b"]
+	if m.Repo != "org/repo" || len(m.Hostnames) != 2 || m.Overload == nil || m.Overload.ClearRequestsWaiting != 3 || m.CacheRoute == nil || m.CacheRoute.Mode != "enforced" || m.CacheRoute.MaxInflightDelta == nil || *m.CacheRoute.MaxInflightDelta != 0 || len(m.Reservations) != 1 || m.Reservations[0].OrgIDs[0] != "org_test" {
+		t.Fatalf("runtime features lost: %+v", m)
+	}
+}
 
 func TestOverloadConfigMarks(t *testing.T) {
 	tests := []struct {

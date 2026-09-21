@@ -211,11 +211,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			return nil
 		}
 		response, webSearch, err := runChatLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		defer emitBillingEvent(em, r, response, modelName, false)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
 		applyUsageMetrics(response, usageMetricsRequested, modelName, em, webSearch)
-		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	case "/v1/responses":
 		if streaming {
@@ -225,11 +225,11 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 			return nil
 		}
 		response, webSearch, err := runResponsesLoop(ctx, em, registry, body, modelName, requestHeaders, promptResult, routerOpts, eventFlags, harmony, dl)
+		defer emitBillingEvent(em, r, response, modelName, false)
 		if err != nil {
 			return writeUpstreamError(w, err)
 		}
 		applyUsageMetrics(response, usageMetricsRequested, modelName, em, webSearch)
-		emitBillingEvent(em, r, response, modelName, false)
 		return writeJSONResponse(w, response)
 	default:
 		return fmt.Errorf("unsupported tool runtime route: %s", r.URL.Path)
@@ -531,6 +531,9 @@ func formatUsageMetrics(em *manager.EnclaveManager, usage *tokencount.Usage, mod
 }
 
 func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *upstreamJSONResponse, modelName string, streaming bool) {
+	if response == nil {
+		return
+	}
 	apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 	if apiKey == "" {
 		return

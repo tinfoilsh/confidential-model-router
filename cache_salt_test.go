@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 )
 
 // jwtWithSubject builds an unsigned at+jwt-shaped token carrying the given
-// subject, matching the token type the outer shim verifies.
+// subject, matching the token type the downstream shims verify.
 func jwtWithSubject(sub string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"at+jwt"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `"}`))
@@ -183,7 +184,7 @@ func TestApplyCacheSaltAnchorsToJWTSubject(t *testing.T) {
 }
 
 // TestApplyCacheSaltOpaqueKeyIdentity covers callers without a JWT: they are
-// identified by the opaque API key (rateLimitIdentity's fallback), and the
+// identified by the opaque API key (cacheSaltIdentity's fallback), and the
 // salt must anchor to it.
 func TestApplyCacheSaltOpaqueKeyIdentity(t *testing.T) {
 	key := "tk_live_9f8e7d6c5b4a3210"
@@ -262,8 +263,9 @@ func TestSaltProxiedBody(t *testing.T) {
 	})
 
 	t.Run("leaves an unchanged body byte-identical", func(t *testing.T) {
-		const raw = `{"model":"m","messages":[]}`
+		const raw = "{ \"model\":\"gpt-oss-120b\", \"messages\":[] }\n"
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
+		req.Header.Set("Content-Length", strconv.Itoa(len(raw)))
 		// Disabled + no salt fields: nothing to do, must not re-marshal.
 		if _, _, err := saltProxiedBody(req, "tenant-a", false); err != nil {
 			t.Fatalf("saltProxiedBody: %v", err)
@@ -271,6 +273,9 @@ func TestSaltProxiedBody(t *testing.T) {
 		out, _ := io.ReadAll(req.Body)
 		if string(out) != raw {
 			t.Errorf("body was re-marshaled: got %q, want %q", out, raw)
+		}
+		if req.ContentLength != int64(len(raw)) || req.Header.Get("Content-Length") != strconv.Itoa(len(raw)) {
+			t.Fatal("unchanged body length changed")
 		}
 	})
 
@@ -285,6 +290,9 @@ func TestSaltProxiedBody(t *testing.T) {
 		raw, _ := io.ReadAll(req.Body)
 		if !strings.Contains(string(raw), `"seed":9007199254740993`) {
 			t.Errorf("seed lost precision: %s", raw)
+		}
+		if req.ContentLength != int64(len(raw)) || req.Header.Get("Content-Length") != strconv.Itoa(len(raw)) {
+			t.Fatal("rewritten body length does not match payload")
 		}
 	})
 
@@ -357,6 +365,61 @@ func TestSaltProxiedBody(t *testing.T) {
 			t.Errorf("non-boolean stream: streaming=%v err=%v, want false, nil", streaming, err)
 		}
 	})
+}
+
+type countedCloseBody struct {
+	io.Reader
+	closes int
+}
+
+func (b *countedCloseBody) Close() error {
+	b.closes++
+	return nil
+}
+
+func TestSaltProxiedBodyClosesOriginalOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw          string
+		enabled, wantError bool
+	}{
+		{"unchanged", `{"model":"gpt-oss-120b"}`, false, false},
+		{"rewritten", `{"model":"gpt-oss-120b"}`, true, false},
+		{"malformed", `{`, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.raw))
+			original := &countedCloseBody{Reader: req.Body}
+			req.Body = original
+			_, _, err := saltProxiedBody(req, "tenant-a", tc.enabled)
+			if (err != nil) != tc.wantError || original.closes != 1 {
+				t.Fatalf("error=%v, original close count=%d", err, original.closes)
+			}
+			if err == nil {
+				req.Body.Close()
+				if original.closes != 1 {
+					t.Fatal("closing replacement closed original again")
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceJSONBodyMarshalFailurePreservesRequest(t *testing.T) {
+	const raw = `{"model":"gpt-oss-120b"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(raw))
+	req.Header.Set("Content-Length", strconv.Itoa(len(raw)))
+	original := &countedCloseBody{Reader: req.Body}
+	req.Body = original
+	if err := replaceJSONBody(req, map[string]any{"invalid": make(chan struct{})}); err == nil {
+		t.Fatal("unsupported JSON value accepted")
+	}
+	if req.Body != original || original.closes != 0 || req.ContentLength != int64(len(raw)) || req.Header.Get("Content-Length") != strconv.Itoa(len(raw)) {
+		t.Fatal("marshal failure mutated request")
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil || string(got) != raw {
+		t.Fatalf("original body=%q error=%v", got, err)
+	}
 }
 
 // TestCacheSaltMetricSkippedInjection pins that a skipped injection emits no

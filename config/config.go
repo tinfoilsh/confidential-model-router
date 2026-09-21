@@ -13,18 +13,6 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// RateLimitConfig describes optional per-API-key request rate limits for a
-// model. Requests over the soft per-minute budget are sent to vLLM with a
-// lower scheduling priority; requests over the hard budget are rejected with
-// HTTP 429. Zero disables a budget. The hard check runs first, so when both
-// are set the hard budget must sit above the soft one — a hard budget at or
-// below the soft budget rejects requests before they can be demoted, turning
-// the soft tier off entirely.
-type RateLimitConfig struct {
-	MaxRequestsPerMinute     int64 `yaml:"max_requests_per_minute"`
-	HardMaxRequestsPerMinute int64 `yaml:"hard_max_requests_per_minute,omitempty"`
-}
-
 // CacheRouteConfig is the per-model cache-aware routing knob. Mode is the
 // rollout control: "off" (default), "shadow" (compute and meter the would-be
 // routing decision without acting), or "enforced" (route keyed requests to
@@ -51,12 +39,14 @@ type ReservationConfig struct {
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 }
 
-// Model represents the configuration for a single model
+// Model represents the configuration for a single model. Admission policy
+// (`rate_limit`) is owned by the control plane; a legacy field in runtime
+// YAML is ignored like any other unknown key so old and new routers can share
+// one configuration during a rolling deploy.
 type Model struct {
 	Repo         string              `yaml:"repo"`
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
-	RateLimit    *RateLimitConfig    `yaml:"rate_limit,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
 }

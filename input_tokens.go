@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -121,6 +122,16 @@ func handleInputTokens(
 	headers.Set("Content-Type", "application/json")
 	resp, err := dispatch(r.Context(), modelName, tokenizePath, tokenizeBytes, headers)
 	if err != nil {
+		var lookupErr *routeContextError
+		if errors.As(err, &lookupErr) {
+			lookupErr.write(w)
+			return
+		}
+		var apiErr *manager.APIError
+		if errors.As(err, &apiErr) {
+			writeError(w, apiErr)
+			return
+		}
 		writeError(w, &manager.ErrUpstream)
 		return
 	}
