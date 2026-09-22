@@ -39,10 +39,9 @@ type ReservationConfig struct {
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 }
 
-// Model represents the configuration for a single model. Admission policy
-// (`rate_limit`) is owned by the control plane; a legacy field in runtime
-// YAML is ignored like any other unknown key so old and new routers can share
-// one configuration during a rolling deploy.
+// Model represents the configuration for a single model. Admission policy is
+// owned by the control plane; a `rate_limit` key in runtime YAML is ignored
+// like any other unknown key.
 type Model struct {
 	Repo         string              `yaml:"repo"`
 	Hostnames    []string            `yaml:"enclaves"`

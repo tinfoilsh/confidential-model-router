@@ -794,47 +794,75 @@ func TestPublicToolErrorReasonStripsInternalDetail(t *testing.T) {
 	}
 }
 
-// TestPublicToolErrorReasonMarksSafetyBlocked pins that safety-blocked
-// errors (PII or prompt-injection filter trips) surface the dedicated
-// `blocked_by_safety_filter` reason rather than collapsing into the
-// generic `tool_error` constant. This is what clients key off to render
-// the corresponding web_search_call status as "blocked".
-func TestPublicToolErrorReasonMarksSafetyBlocked(t *testing.T) {
-	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	err := errors.New("query was blocked by safety filters: pii detected — rephrase and retry")
-	got := publicToolErrorReason("search", err)
-	if got != blockedToolErrorReason {
-		t.Fatalf("expected %q for safety-blocked error, got %q", blockedToolErrorReason, got)
+// TestPIICheckResultFromStructured pins how the router reads the
+// websearch server's PII masking report off a search result: the
+// signal is only present when the server says the check ran, offsets
+// and categories are preserved verbatim, and the removed text itself is
+// never reconstructed (the server does not send it).
+func TestPIICheckResultFromStructured(t *testing.T) {
+	structured := map[string]any{
+		"results":        []any{},
+		"pii_checked":    true,
+		"pii_masked":     true,
+		"redacted_query": "hiking trails",
+		"pii_redactions": []any{
+			map[string]any{"type": "private_email", "start": float64(0), "end": float64(16)},
+		},
 	}
-	if strings.Contains(got, "pii detected") {
-		t.Fatalf("public reason leaked detail: %q", got)
+	got := piiCheckResultFromStructured(routerSearchToolName, structured)
+	if got == nil {
+		t.Fatal("expected a PII result when pii_checked is true")
+	}
+	if !got.masked || got.redactedQuery != "hiking trails" {
+		t.Fatalf("masked/redactedQuery mismatch: %+v", got)
+	}
+	want := []piiRedaction{{kind: "private_email", start: 0, end: 16}}
+	if len(got.redactions) != 1 || got.redactions[0] != want[0] {
+		t.Fatalf("redactions = %+v, want %+v", got.redactions, want)
+	}
+
+	// Offsets are code points, not bytes or UTF-16 units, and the router
+	// forwards them untouched: "𐐷 é " is 4 code points, 8 bytes, 5 UTF-16
+	// units, so the email starts at code point 4.
+	unicode := map[string]any{
+		"results": []any{}, "pii_checked": true, "pii_masked": true, "redacted_query": "𐐷 é hiking trails",
+		"pii_redactions": []any{map[string]any{"type": "private_email", "start": float64(4), "end": float64(20)}},
+	}
+	if got := piiCheckResultFromStructured(routerSearchToolName, unicode); got == nil || len(got.redactions) != 1 || got.redactions[0] != (piiRedaction{kind: "private_email", start: 4, end: 20}) {
+		t.Fatalf("code point offsets must be forwarded verbatim, got %+v", got)
+	}
+
+	clean := map[string]any{"results": []any{}, "pii_checked": true, "pii_masked": false, "redacted_query": "hiking trails", "pii_redactions": []any{}}
+	if got := piiCheckResultFromStructured(routerSearchToolName, clean); got == nil || got.masked || got.redactedQuery != "hiking trails" || len(got.redactions) != 0 {
+		t.Fatalf("checked-but-clean must yield an unmasked report, got %+v", got)
+	}
+
+	unchecked := map[string]any{"results": []any{}, "pii_checked": false, "pii_masked": false, "pii_redactions": []any{}}
+	if got := piiCheckResultFromStructured(routerSearchToolName, unchecked); got != nil {
+		t.Fatalf("pii_checked=false must yield nil, got %+v", got)
+	}
+	if got := piiCheckResultFromStructured(routerSearchToolName, map[string]any{"results": []any{}}); got != nil {
+		t.Fatalf("legacy servers without pii fields must yield nil, got %+v", got)
+	}
+	if got := piiCheckResultFromStructured(routerFetchToolName, structured); got != nil {
+		t.Fatalf("fetch results must never carry a PII report, got %+v", got)
 	}
 }
 
-// TestFailureStatusForMapsSafetyBlock pins the web_search_call status
-// returned for each error class used on the streaming error paths.
-func TestFailureStatusForMapsSafetyBlock(t *testing.T) {
-	if got := failureStatusFor(errors.New("Query was blocked by safety filters: injection")); got != "blocked" {
-		t.Fatalf("expected blocked, got %q", got)
-	}
-	if got := failureStatusFor(errors.New("upstream timeout")); got != "failed" {
-		t.Fatalf("expected failed, got %q", got)
-	}
-}
-
-// TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed pins that a
-// recorded search whose errorReason is the safety-block constant
-// surfaces as status:"failed" on the spec-conformant web_search_call
-// output item (OpenAI's status enum has no "blocked" value). The
-// distinctive blocked signal is carried via tinfoil-event markers when
-// the caller opts in.
-func TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed(t *testing.T) {
+// TestBuildWebSearchCallOutputItemsCarriesPIISidecar pins that a search
+// whose query the websearch server masked surfaces the masking report on
+// the `_tinfoil.pii` sidecar of a spec-valid `completed` item, while the
+// envelope `action.query` stays the query the model asked for.
+func TestBuildWebSearchCallOutputItemsCarriesPIISidecar(t *testing.T) {
 	records := []toolCallRecord{
 		{
-			name:        "search",
-			arguments:   map[string]any{"query": "sensitive"},
-			errorReason: blockedToolErrorReason,
+			name:      "search",
+			arguments: map[string]any{"query": "john@example.com hiking trails"},
+			pii: &piiCheckResult{
+				masked:        true,
+				redactedQuery: "hiking trails",
+				redactions:    []piiRedaction{{kind: "private_email", start: 0, end: 16}},
+			},
 		},
 	}
 	items := buildWebSearchCallOutputItems(records, false)
@@ -842,11 +870,27 @@ func TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed(t *testing.T) {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}
 	item, _ := items[0].(map[string]any)
-	if got := stringValue(item["status"]); got != "failed" {
-		t.Fatalf("expected failed status (blocked collapsed for spec compat), got %q", got)
+	if got := stringValue(item["status"]); got != "completed" {
+		t.Fatalf("masking must not fail the call, got status %q", got)
 	}
-	if _, extra := item["reason"]; extra {
-		t.Fatalf("spec-conformant output item must not carry a reason field")
+	action, _ := item["action"].(map[string]any)
+	if got := stringValue(action["query"]); got != "john@example.com hiking trails" {
+		t.Fatalf("action.query must be the model's query, got %q", got)
+	}
+	sidecar, _ := item["_tinfoil"].(map[string]any)
+	pii, _ := sidecar["pii"].(map[string]any)
+	if pii == nil {
+		t.Fatalf("expected _tinfoil.pii on a masked search, got %#v", item["_tinfoil"])
+	}
+	if pii["masked"] != true || pii["redacted_query"] != "hiking trails" {
+		t.Fatalf("pii sidecar mismatch: %#v", pii)
+	}
+	redactions, _ := pii["redactions"].([]map[string]any)
+	if len(redactions) != 1 || redactions[0]["type"] != "private_email" || redactions[0]["start"] != 0 || redactions[0]["end"] != 16 {
+		t.Fatalf("pii.redactions mismatch: %#v", pii["redactions"])
+	}
+	if _, present := sidecar["error"]; present {
+		t.Fatalf("successful masked search must not carry an error code: %#v", sidecar)
 	}
 }
 
@@ -855,11 +899,11 @@ func TestBuildWebSearchCallOutputItemsCollapsesBlockedToFailed(t *testing.T) {
 // Responses API documents: type, id, status, action. In particular it
 // does NOT duplicate `item_id` onto the non-streaming output-item shape
 // (item_id is specced only on the streaming envelope), and it never
-// carries a non-spec `reason` field. The tinfoil-specific detail (raw
-// router status + error code) rides on a `_tinfoil` sidecar that is
+// carries a non-spec `reason` field. The tinfoil-specific detail (error
+// code, PII masking report) rides on a `_tinfoil` sidecar that is
 // omitted entirely on the happy path.
 func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
-	event := webSearchCallEvent("ws_1", "in_progress", "", map[string]any{"type": "search"})
+	event := webSearchCallEvent("ws_1", "in_progress", "", map[string]any{"type": "search"}, nil)
 	if got := stringValue(event["id"]); got != "ws_1" {
 		t.Fatalf("expected id=ws_1, got %q", got)
 	}
@@ -877,42 +921,31 @@ func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
 	}
 }
 
-// TestWebSearchCallEventCollapsesBlockedToFailed pins that the spec-only
-// web_search_call output-item status set is preserved: OpenAI documents
-// in_progress / searching / completed / failed, with no `blocked`. The
-// router's internal blocked status is collapsed onto failed on the
-// envelope, and the unfiltered `blocked` string rides on the `_tinfoil`
-// vendor-extension field alongside the opaque error code. Strict SDKs
-// ignore `_tinfoil`; Tinfoil-aware clients read it directly off the
-// item to distinguish safety blocks from generic failures.
-func TestWebSearchCallEventCollapsesBlockedToFailed(t *testing.T) {
-	event := webSearchCallEvent("ws_1", "blocked", blockedToolErrorReason, map[string]any{"type": "search"})
-	if got := stringValue(event["status"]); got != "failed" {
-		t.Fatalf("expected blocked to collapse onto failed on the output item, got %q", got)
+// TestWebSearchCallEventCheckedButUnmaskedCarriesPIISidecar pins that a
+// search whose PII check ran but removed nothing still reports that on
+// the sidecar, so clients can distinguish "checked, clean" from "check
+// did not run" (which omits `pii` entirely).
+func TestWebSearchCallEventCheckedButUnmaskedCarriesPIISidecar(t *testing.T) {
+	pii := &piiCheckResult{redactedQuery: "hiking trails"}
+	event := webSearchCallEvent("ws_1", "completed", "", map[string]any{"type": "search"}, pii)
+	sidecar, _ := event["_tinfoil"].(map[string]any)
+	report, _ := sidecar["pii"].(map[string]any)
+	if report == nil {
+		t.Fatalf("checked search must carry _tinfoil.pii, got %#v", event["_tinfoil"])
 	}
-	sidecar, ok := event["_tinfoil"].(map[string]any)
-	if !ok {
-		t.Fatalf("blocked tool call must carry a _tinfoil sidecar, got %#v", event["_tinfoil"])
+	if report["masked"] != false || report["redacted_query"] != "hiking trails" {
+		t.Fatalf("pii sidecar mismatch: %#v", report)
 	}
-	if got := stringValue(sidecar["status"]); got != "blocked" {
-		t.Fatalf("_tinfoil.status must carry the unfiltered blocked string, got %q", got)
-	}
-	errObj, _ := sidecar["error"].(map[string]any)
-	if errObj == nil {
-		t.Fatalf("_tinfoil sidecar must include an error object for errored calls: %#v", sidecar)
-	}
-	if got := stringValue(errObj["code"]); got != blockedToolErrorReason {
-		t.Fatalf("_tinfoil.error.code must carry the router error code, got %q", got)
+	if redactions, _ := report["redactions"].([]map[string]any); len(redactions) != 0 {
+		t.Fatalf("unmasked search must report an empty redaction list, got %#v", report["redactions"])
 	}
 }
 
-// TestWebSearchCallEventGenericFailureCarriesErrorCode pins that a
-// non-blocked failure still produces a `_tinfoil.error.code` field so
-// clients can branch UI on the specific failure reason, but omits the
-// `_tinfoil.status` field because the envelope `status: failed` is the
-// truthful carrier of that signal.
-func TestWebSearchCallEventGenericFailureCarriesErrorCode(t *testing.T) {
-	event := webSearchCallEvent("ws_1", "failed", "upstream_timeout", map[string]any{"type": "search"})
+// TestWebSearchCallEventFailureCarriesErrorCode pins that a failure
+// produces a `_tinfoil.error.code` field so clients can branch UI on
+// the specific failure reason, and nothing else rides on the sidecar.
+func TestWebSearchCallEventFailureCarriesErrorCode(t *testing.T) {
+	event := webSearchCallEvent("ws_1", "failed", "upstream_timeout", map[string]any{"type": "search"}, nil)
 	if got := stringValue(event["status"]); got != "failed" {
 		t.Fatalf("expected envelope status=failed, got %q", got)
 	}
@@ -920,8 +953,8 @@ func TestWebSearchCallEventGenericFailureCarriesErrorCode(t *testing.T) {
 	if !ok {
 		t.Fatalf("errored tool call must carry a _tinfoil sidecar, got %#v", event["_tinfoil"])
 	}
-	if _, present := sidecar["status"]; present {
-		t.Fatalf("_tinfoil.status must be omitted when envelope status already carries the signal: %#v", sidecar)
+	if len(sidecar) != 1 {
+		t.Fatalf("failure sidecar must carry only the error code: %#v", sidecar)
 	}
 	errObj, _ := sidecar["error"].(map[string]any)
 	if errObj == nil {
@@ -1067,17 +1100,17 @@ func TestParseIncludeActionSourcesReadsRequestFlag(t *testing.T) {
 
 // TestToolResultErrorMessageExtractsHandlerText pins that handler
 // errors packed into CallToolResult.Content (MCP's convention for tool
-// errors vs protocol errors) are surfaced as a single joined string the
-// router can feed into failureStatusFor / isToolCallBlocked.
+// errors vs protocol errors) are surfaced as a single joined string for
+// debug logging and the humanized model-facing error.
 func TestToolResultErrorMessageExtractsHandlerText(t *testing.T) {
 	result := &mcp.CallToolResult{
 		IsError: true,
 		Content: []mcp.Content{
-			&mcp.TextContent{Text: "query was blocked by safety filters: PII detected"},
+			&mcp.TextContent{Text: "search provider unavailable; retry after a short delay"},
 		},
 	}
-	if got := toolResultErrorMessage(result); !strings.Contains(got, "blocked by safety filters") {
-		t.Fatalf("expected blocked message, got %q", got)
+	if got := toolResultErrorMessage(result); !strings.Contains(got, "search provider unavailable") {
+		t.Fatalf("expected handler text, got %q", got)
 	}
 
 	empty := &mcp.CallToolResult{IsError: true}
