@@ -821,6 +821,17 @@ func TestPIICheckResultFromStructured(t *testing.T) {
 		t.Fatalf("redactions = %+v, want %+v", got.redactions, want)
 	}
 
+	// Offsets are code points, not bytes or UTF-16 units, and the router
+	// forwards them untouched: "𐐷 é " is 4 code points, 8 bytes, 5 UTF-16
+	// units, so the email starts at code point 4.
+	unicode := map[string]any{
+		"results": []any{}, "pii_checked": true, "pii_masked": true, "redacted_query": "𐐷 é hiking trails",
+		"pii_redactions": []any{map[string]any{"type": "private_email", "start": float64(4), "end": float64(20)}},
+	}
+	if got := piiCheckResultFromStructured(routerSearchToolName, unicode); got == nil || len(got.redactions) != 1 || got.redactions[0] != (piiRedaction{kind: "private_email", start: 4, end: 20}) {
+		t.Fatalf("code point offsets must be forwarded verbatim, got %+v", got)
+	}
+
 	clean := map[string]any{"results": []any{}, "pii_checked": true, "pii_masked": false, "redacted_query": "hiking trails", "pii_redactions": []any{}}
 	if got := piiCheckResultFromStructured(routerSearchToolName, clean); got == nil || got.masked || got.redactedQuery != "hiking trails" || len(got.redactions) != 0 {
 		t.Fatalf("checked-but-clean must yield an unmasked report, got %+v", got)
