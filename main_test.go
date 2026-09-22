@@ -942,7 +942,7 @@ func TestHandleInputTokens_AutoUsesRouterEffort(t *testing.T) {
 		}`))
 		req.Header.Set(autoroute.IntelligenceHeader, level)
 		rec := httptest.NewRecorder()
-		handleInputTokens(rec, req, "secret-key", "", func(body map[string]any) (string, error) {
+		handleInputTokens(rec, req, "secret-key", func(body map[string]any) (string, error) {
 			return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body)
 		}, dispatch)
 		if rec.Code != http.StatusOK {

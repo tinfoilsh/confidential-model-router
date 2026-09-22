@@ -98,7 +98,7 @@ func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
 		}
 		before := backends.Load()
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 		wantStatus, wantBackends := http.StatusOK, int64(1)
 		if overloaded {
 			wantStatus, wantBackends = http.StatusServiceUnavailable, 0
@@ -140,7 +140,7 @@ func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
 			const requests = 2
 			for range requests {
 				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":"hello"}]}`, "tk_test", ""))
+				handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":"hello"}]}`, "tk_test"))
 				if rec.Code != http.StatusOK {
 					t.Fatalf("cache-route dispatch: HTTP %d: %s", rec.Code, rec.Body.String())
 				}
@@ -169,14 +169,10 @@ func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		backends.Add(1)
 	}), "", false)
-	for _, tc := range []struct{ path, subdomain string }{
-		{"/v1/chat/completions", ""},
-		{"/v1/chat/completions", unknownModel},
-		{"/custom", unknownModel},
-	} {
+	{
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"model":%q,"messages":[]}`, unknownModel)
-		handler.ServeHTTP(rec, admissionRequest(tc.path, body, "tk_test", tc.subdomain))
+		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, "tk_test"))
 		var envelope manager.ErrorEnvelope
 		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 			t.Fatal(err)
@@ -190,14 +186,11 @@ func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	}
 }
 
-func admissionRequest(path, body, key, subdomain string) *http.Request {
+func admissionRequest(path, body, key string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		r.Header.Set("Authorization", "Bearer "+key)
-	}
-	if subdomain != "" {
-		r.Header.Set("X-Forwarded-Host", subdomain+"."+*domain)
 	}
 	return r
 }
@@ -214,8 +207,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 	zw.Write([]byte(`[{"jsonrpc":"2.0","method":"tools/list","id":9007199254740993}]`))
 	zw.Close()
 	cases := []struct {
-		name, path, body, subdomain, model, contentType, encoding string
-		raw, upgrade                                              bool
+		name, path, body, model, contentType, encoding string
+		raw, upgrade                                   bool
 	}{
 		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[]}`, model: admissionTestModel},
 		{name: "responses", path: "/v1/responses", body: `{"model":"gpt-oss-120b","priority":-99,"input":"hi"}`, model: admissionTestModel},
@@ -229,15 +222,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "file convert", path: "/v1/convert/file", body: "\x00\xfffile", model: "doc-upload", contentType: "application/octet-stream", raw: true},
 		{name: "realtime", path: "/v1/realtime?model=gpt-oss-120b", model: admissionTestModel, upgrade: true},
 		{name: "realtime default", path: "/v1/realtime?intent=transcription", model: "voxtral-mini-4b-realtime", upgrade: true},
-		{name: "subdomain chat", path: "/v1/chat/completions", subdomain: admissionTestModel, body: `{"model":"gpt-oss-120b","messages":[],"priority":-99,"seed":9007199254740993}`, model: admissionTestModel},
-		{name: "subdomain responses", path: "/v1/responses", subdomain: admissionTestModel, body: `{"input":"hi","priority":-99}`, model: admissionTestModel},
-		{name: "subdomain completions", path: "/v1/completions", subdomain: admissionTestModel, body: `{"prompt":"hi","priority":-99}`, model: admissionTestModel},
-		{name: "subdomain embeddings", path: "/v1/embeddings", subdomain: "nomic-embed-text", body: `{"input":"hi","priority":-99}`, model: "nomic-embed-text"},
-		{name: "subdomain audio", path: "/v1/audio/transcriptions", subdomain: "voxtral-small-24b", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
-		{name: "subdomain file", path: "/v1/convert/file", subdomain: "doc-upload", body: "raw file", model: "doc-upload", contentType: "application/octet-stream", raw: true},
-		{name: "MCP batch", path: "/mcp", subdomain: "websearch", body: `[{"jsonrpc":"2.0","method":"tools/list","id":9007199254740993}]`, model: "websearch", raw: true},
-		{name: "MCP compressed", path: "/mcp", subdomain: "websearch", body: compressed.String(), model: "websearch", encoding: "gzip", raw: true},
-		{name: "opaque subdomain", path: "/custom", subdomain: admissionTestModel, body: "\x00\xffraw", model: admissionTestModel, contentType: "application/octet-stream", raw: true},
+		{name: "MCP batch", path: "/mcp", body: `[{"jsonrpc":"2.0","method":"tools/list","id":9007199254740993}]`, model: "websearch", raw: true},
+		{name: "MCP compressed", path: "/mcp", body: compressed.String(), model: "websearch", encoding: "gzip", raw: true},
 	}
 	for _, decision := range []string{decisionAllowed, decisionDemote, decisionExempt, decisionRejected} {
 		t.Run(decision, func(t *testing.T) {
@@ -268,7 +254,7 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					beforeCP, beforeBackend := cpCalls.Load(), backendCalls.Load()
-					r := admissionRequest(tc.path, tc.body, "tk_test", tc.subdomain)
+					r := admissionRequest(tc.path, tc.body, "tk_test")
 					r.Header.Set("X-Tinfoil-Root-Request-Id", "client-chosen-id")
 					if tc.contentType != "" {
 						r.Header.Set("Content-Type", tc.contentType)
@@ -344,9 +330,6 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					if tc.name == "auto" && string(body["model"]) != `"gpt-oss-120b"` {
 						t.Fatalf("auto not resolved: %s", forwarded.body)
 					}
-					if tc.name == "subdomain chat" && string(body["seed"]) != "9007199254740993" {
-						t.Fatal("seed precision lost")
-					}
 				})
 			}
 		})
@@ -366,7 +349,7 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 			`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"function","name":"show","parameters":{"type":"object"},"x-tinfoil-tool-auto-continue":true}]}`,
 		} {
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test", ""))
+			handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test"))
 			if rec.Code != 429 {
 				t.Fatalf("reject HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -396,7 +379,7 @@ func TestAdmissionHandlerJWTClassificationAndMissingAuth(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", chatInputTokensPath, responsesInputTokensPath, "/v1/audio/speech"} {
 		for range 3 {
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[],"input":"hi"}`, jwt, ""))
+			handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[],"input":"hi"}`, jwt))
 			if rec.Code != 200 {
 				t.Fatalf("JWT HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -407,7 +390,7 @@ func TestAdmissionHandlerJWTClassificationAndMissingAuth(t *testing.T) {
 	}
 	for _, key := range []string{"", "opaque", accessTokenForTest(`{"typ":"JWT"}`, `{"sub":"user"}`), "a.b.c", jwt + "!"} {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, key, ""))
+		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, key))
 		if rec.Code != 401 {
 			t.Fatalf("invalid auth accepted: %d", rec.Code)
 		}
@@ -434,15 +417,13 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 		io.WriteString(w, `{"count":7}`)
 	}), admissionTestOrg, false)
 	for _, path := range []string{chatInputTokensPath, responsesInputTokensPath} {
-		for _, subdomain := range []string{"", admissionTestModel} {
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest(path, `{"model":"auto","messages":[],"input":"hi"}`, "tk_test", subdomain))
-			if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"input_tokens":7`) {
-				t.Fatalf("metadata count: %d %s", rec.Code, rec.Body.String())
-			}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, admissionRequest(path, `{"model":"auto","messages":[],"input":"hi"}`, "tk_test"))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"input_tokens":7`) {
+			t.Fatalf("metadata count: %d %s", rec.Code, rec.Body.String())
 		}
 	}
-	if calls.Load() != 4 {
+	if calls.Load() != 2 {
 		t.Fatalf("metadata calls=%d", calls.Load())
 	}
 }
@@ -466,7 +447,7 @@ func TestAdmissionHandlerOverloadPriorityExemption(t *testing.T) {
 				fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":0}%s}`, tc.decision, reason, tc.priority)
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); io.WriteString(w, `{}`) }), "", true)
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 			if rec.Code != tc.status {
 				t.Fatalf("overload priority: HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -546,7 +527,7 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","client_id":"tinfoil-chat","product":"chat"}`)
 			}
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]}],"web_search_options":{}}`, key, ""))
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]}],"web_search_options":{}}`, key))
 			if rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
 				t.Fatalf("tool loop HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -623,7 +604,7 @@ func TestAdmissionHandlerSharedDecisions(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"model":%q,"messages":[]}`, tc.model)
-		tc.handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, tc.key, ""))
+		tc.handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, tc.key))
 		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.message) {
 			t.Fatalf("request %d: %d %s", i, rec.Code, rec.Body.String())
 		}
@@ -649,7 +630,7 @@ func TestAdmissionHandlerJWTBypassDoesNotOverrideDownstreamRejection(t *testing.
 	}), "", false)
 	for _, path := range []string{"/v1/chat/completions", chatInputTokensPath} {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[]}`, forged, ""))
+		handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[]}`, forged))
 		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "Invalid JWT signature") {
 			t.Fatalf("downstream rejection overridden: %d %s", rec.Code, rec.Body.String())
 		}
@@ -752,7 +733,7 @@ func TestAdmissionHandlerFailuresAndEmptyOrg(t *testing.T) {
 				io.WriteString(w, `{}`)
 			}), org, false)
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 			// A lookup the control plane could not answer admits the request
 			// to the shared pool; only its verdicts stop it short of a backend.
 			wantBackends := int64(0)
@@ -780,7 +761,7 @@ func TestAdmissionHandlerConcurrentRequests(t *testing.T) {
 	for range requests {
 		wg.Go(func() {
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 			if rec.Code != http.StatusOK {
 				t.Errorf("concurrent admission: HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -809,7 +790,7 @@ func TestAdmissionHandlerMetadataFailures(t *testing.T) {
 				io.WriteString(w, `{"count":1}`)
 			}), "", false)
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest(chatInputTokensPath, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+			handler.ServeHTTP(rec, admissionRequest(chatInputTokensPath, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 			// A control plane outage on the metadata lookup still counts
 			// tokens; only credential denials stop the request.
 			want, wantBackends := status, int64(0)
@@ -837,7 +818,7 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backends.Add(1) }), "", false)
 			for _, path := range []string{"/v1/chat/completions", chatInputTokensPath} {
 				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
+				handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 				assertQuotaDenial(t, rec, tc.want)
 			}
 			if calls.Load() != 2 || backends.Load() != 0 {
@@ -847,42 +828,44 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 	}
 }
 
-func TestSubdomainHealthSkipsAdmission(t *testing.T) {
-	var cpCalls, backendCalls atomic.Int64
-	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cpCalls.Add(1)
-		http.Error(w, "unexpected admission", http.StatusInternalServerError)
+func TestModelHostHeaderIsIgnored(t *testing.T) {
+	var admissions atomic.Int64
+	admitted := make(chan routeContextRequest, 4)
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request routeContextRequest
+		json.NewDecoder(r.Body).Decode(&request)
+		admitted <- request
+		admissions.Add(1)
+		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backendCalls.Add(1)
 		io.WriteString(w, `{}`)
 	}), "", false)
 
-	probe := func(subdomain string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodGet, "/health", nil)
-		if subdomain != "" {
-			r.Header.Set("X-Forwarded-Host", subdomain+"."+*domain)
-		}
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, r)
-		return rec
+	// A model label in the forwarded host must not select the model: only
+	// the body does, and a body without one is rejected the same way.
+	withHost := func(r *http.Request) *http.Request {
+		r.Header.Set("X-Forwarded-Host", "nomic-embed-text.localhost")
+		return r
 	}
-
-	if rec := probe(admissionTestModel); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"`+admissionTestModel+`"`) {
-		t.Fatalf("healthy model: HTTP %d: %s", rec.Code, rec.Body.String())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, withHost(admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host-labelled chat: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := probe("unknown-model"); rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown model: HTTP %d: %s", rec.Code, rec.Body.String())
+	if request := <-admitted; request.Model != admissionTestModel {
+		t.Fatalf("host label selected the model: %+v", request)
 	}
-	if rec := probe(""); rec.Code != http.StatusOK {
-		t.Fatalf("router health: HTTP %d: %s", rec.Code, rec.Body.String())
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, withHost(admissionRequest("/v1/chat/completions", `{"messages":[]}`, "tk_test")))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("host label supplied a missing model: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
-	if err := manager.TripModelBreakersForTest(em, admissionTestModel); err != nil {
-		t.Fatal(err)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, withHost(httptest.NewRequest(http.MethodGet, "/health", nil)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("host-labelled health: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := probe(admissionTestModel); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("model with tripped breakers: HTTP %d: %s", rec.Code, rec.Body.String())
-	}
-	if cpCalls.Load() != 0 || backendCalls.Load() != 0 {
-		t.Fatalf("health probes reached the control plane %d times and a backend %d times", cpCalls.Load(), backendCalls.Load())
+	if admissions.Load() != 1 {
+		t.Fatalf("admissions = %d, want 1", admissions.Load())
 	}
 }

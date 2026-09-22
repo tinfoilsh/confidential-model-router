@@ -65,7 +65,6 @@ func handleInputTokens(
 	w http.ResponseWriter,
 	r *http.Request,
 	apiKey string,
-	routedModel string,
 	resolveModel inputTokenModelResolver,
 	dispatch inputTokenDispatch,
 ) {
@@ -92,7 +91,7 @@ func handleInputTokens(
 		return
 	}
 
-	modelName, err := inputTokensModel(body, routedModel, resolveModel)
+	modelName, err := inputTokensModel(body, resolveModel)
 	if err != nil {
 		writeError(w, asAPIError(err))
 		return
@@ -164,10 +163,7 @@ func handleInputTokens(
 	})
 }
 
-func inputTokensModel(body map[string]any, routedModel string, resolveModel inputTokenModelResolver) (string, error) {
-	if routedModel != "" {
-		return routedModel, nil
-	}
+func inputTokensModel(body map[string]any, resolveModel inputTokenModelResolver) (string, error) {
 	modelValue, ok := body["model"]
 	if !ok {
 		return "", inputTokensParamError("model", manager.ErrMsgMissingParam, "model")

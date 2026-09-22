@@ -208,8 +208,8 @@ func TestApplyCacheSaltJWTShapedOpaqueKeyUsesRawIdentity(t *testing.T) {
 	}
 }
 
-// TestSaltProxiedBody covers the subdomain routing path, where the body is
-// otherwise forwarded verbatim.
+// TestSaltProxiedBody covers endpoints whose body is otherwise forwarded
+// verbatim (embeddings, speech).
 func TestSaltProxiedBody(t *testing.T) {
 	tenantSalt, _ := cachesalt.Derive("tenant-a", "")
 
@@ -300,7 +300,7 @@ func TestSaltProxiedBody(t *testing.T) {
 		const raw = `not json`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
 		if _, _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
-			t.Fatal("expected malformed subdomain body to be rejected")
+			t.Fatal("expected malformed proxied body to be rejected")
 		}
 	})
 

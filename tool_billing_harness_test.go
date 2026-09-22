@@ -171,7 +171,7 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				r := admissionRequest(path, string(encoded), "tk_test", "").WithContext(ctx)
+				r := admissionRequest(path, string(encoded), "tk_test").WithContext(ctx)
 				r.Header.Set("X-Request-Id", "original-request")
 				rec := httptest.NewRecorder()
 				capture := &safeguards.Capture{ResponseWriter: rec}
