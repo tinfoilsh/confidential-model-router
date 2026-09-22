@@ -739,8 +739,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
-			} else if r.URL.Path == "/mcp" {
-				modelName = "websearch"
 			} else { // This is an OpenAI-compatible API request
 				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
@@ -935,8 +933,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		// Requests whose body was not parsed above (audio, file conversion,
-		// realtime, and MCP) are admitted here, after the
-		// authoritative model lookup.
+		// and realtime) are admitted here, after the authoritative model lookup.
 		if admission == nil {
 			if !admit() {
 				return

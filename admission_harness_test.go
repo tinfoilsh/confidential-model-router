@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -202,13 +201,9 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 	part, _ := mw.CreateFormFile("file", "audio.wav")
 	part.Write([]byte("\x00\xffaudio"))
 	mw.Close()
-	var compressed bytes.Buffer
-	zw := gzip.NewWriter(&compressed)
-	zw.Write([]byte(`[{"jsonrpc":"2.0","method":"tools/list","id":9007199254740993}]`))
-	zw.Close()
 	cases := []struct {
-		name, path, body, model, contentType, encoding string
-		raw, upgrade                                   bool
+		name, path, body, model, contentType string
+		raw, upgrade                         bool
 	}{
 		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[]}`, model: admissionTestModel},
 		{name: "responses", path: "/v1/responses", body: `{"model":"gpt-oss-120b","priority":-99,"input":"hi"}`, model: admissionTestModel},
@@ -222,8 +217,6 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "file convert", path: "/v1/convert/file", body: "\x00\xfffile", model: "doc-upload", contentType: "application/octet-stream", raw: true},
 		{name: "realtime", path: "/v1/realtime?model=gpt-oss-120b", model: admissionTestModel, upgrade: true},
 		{name: "realtime default", path: "/v1/realtime?intent=transcription", model: "voxtral-mini-4b-realtime", upgrade: true},
-		{name: "MCP batch", path: "/mcp", body: `[{"jsonrpc":"2.0","method":"tools/list","id":9007199254740993}]`, model: "websearch", raw: true},
-		{name: "MCP compressed", path: "/mcp", body: compressed.String(), model: "websearch", encoding: "gzip", raw: true},
 	}
 	for _, decision := range []string{decisionAllowed, decisionDemote, decisionExempt, decisionRejected} {
 		t.Run(decision, func(t *testing.T) {
@@ -258,9 +251,6 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					r.Header.Set("X-Tinfoil-Root-Request-Id", "client-chosen-id")
 					if tc.contentType != "" {
 						r.Header.Set("Content-Type", tc.contentType)
-					}
-					if tc.encoding != "" {
-						r.Header.Set("Content-Encoding", tc.encoding)
 					}
 					if tc.upgrade {
 						r.Method = http.MethodGet
@@ -305,8 +295,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 						return
 					}
 					if tc.raw {
-						if !bytes.Equal(forwarded.body, []byte(tc.body)) || forwarded.header.Get("Content-Encoding") != tc.encoding {
-							t.Fatal("opaque body or encoding corrupted")
+						if !bytes.Equal(forwarded.body, []byte(tc.body)) {
+							t.Fatal("opaque body corrupted")
 						}
 						return
 					}
@@ -823,6 +813,32 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 				t.Fatalf("quota denial dispatch: CP=%d backend=%d", calls.Load(), backends.Load())
 			}
 		})
+	}
+}
+
+func TestMCPDoesNotImplicitlySelectModel(t *testing.T) {
+	var admissions, backends atomic.Int64
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admissions.Add(1)
+		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backends.Add(1)
+		io.WriteString(w, `{}`)
+	}), "", false)
+	for _, host := range []string{"inference.tinfoil.sh", "websearch.inference.tinfoil.sh", "code-execution.inference.tinfoil.sh"} {
+		t.Run(host, func(t *testing.T) {
+			req := admissionRequest("/mcp", `{"jsonrpc":"2.0","method":"tools/list","id":1}`, "tk_test")
+			req.Host = host
+			req.Header.Set("X-Forwarded-Host", host)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("MCP without a model: HTTP %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if admissions.Load() != 0 || backends.Load() != 0 {
+		t.Fatalf("MCP selected a model: admissions=%d backends=%d", admissions.Load(), backends.Load())
 	}
 }
 
