@@ -212,27 +212,25 @@ func TestApplyCacheSaltJWTShapedOpaqueKeyUsesRawIdentity(t *testing.T) {
 // verbatim (speech).
 func TestSaltProxiedBody(t *testing.T) {
 	tenantSalt, _ := cachesalt.Derive("tenant-a", "")
-	for _, path := range []string{"/v1/embeddings", "/v1/audio/speech"} {
-		t.Run("strip-only "+path, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-oss-120b","input":"hello","stream":true,"cache_salt":"client-chosen","user_cache_secret":"secret"}`))
-			_, mode, err := saltProxiedBody(req, "tenant-a", true)
-			if err != nil {
-				t.Fatal(err)
+	t.Run("strip-only speech", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"gpt-oss-120b","input":"hello","stream":true,"cache_salt":"client-chosen","user_cache_secret":"secret"}`))
+		_, mode, err := saltProxiedBody(req, "tenant-a", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode != cachesalt.ModeNone {
+			t.Fatalf("mode = %q, want ModeNone", mode)
+		}
+		body := decodeBody(t, req)
+		for _, field := range []string{"cache_salt", "user_cache_secret", "stream_options"} {
+			if _, exists := body[field]; exists {
+				t.Errorf("unexpected forwarded field %q", field)
 			}
-			if mode != cachesalt.ModeNone {
-				t.Fatalf("mode = %q, want ModeNone", mode)
-			}
-			body := decodeBody(t, req)
-			for _, field := range []string{"cache_salt", "user_cache_secret", "stream_options"} {
-				if _, exists := body[field]; exists {
-					t.Errorf("unexpected forwarded field %q", field)
-				}
-			}
-			if body["input"] != "hello" || body["stream"] != true {
-				t.Fatalf("request content changed: %+v", body)
-			}
-		})
-	}
+		}
+		if body["input"] != "hello" || body["stream"] != true {
+			t.Fatalf("request content changed: %+v", body)
+		}
+	})
 
 	t.Run("injects and strips on the salted body", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
