@@ -935,18 +935,18 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		// Requests whose body was not parsed above (audio, file conversion,
-		// realtime, embeddings, and MCP) are admitted here, after the
+		// realtime, and MCP) are admitted here, after the
 		// authoritative model lookup.
 		if admission == nil {
 			if !admit() {
 				return
 			}
-			// Embeddings and speech carry a JSON object the engine accepts a
+			// Speech carries a JSON object the engine accepts a
 			// priority field on, so a client-supplied value must be stripped
 			// like on the parsed paths. Other endpoints may carry JSON-RPC
 			// batches, compressed payloads, or opaque file data and are
 			// proxied verbatim.
-			if !isWebSocketUpgrade(r) && (r.URL.Path == "/v1/embeddings" || r.URL.Path == "/v1/audio/speech") {
+			if !isWebSocketUpgrade(r) && r.URL.Path == "/v1/audio/speech" {
 				body, _, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
 				if err != nil {
 					writeError(w, invalidJSONError(err))

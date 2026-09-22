@@ -850,8 +850,13 @@ func TestModelHostHeaderIsIgnored(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("host-labelled chat: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
-	if request := <-admitted; request.Model != admissionTestModel {
-		t.Fatalf("host label selected the model: %+v", request)
+	select {
+	case request := <-admitted:
+		if request.Model != admissionTestModel {
+			t.Fatalf("host label selected the model: %+v", request)
+		}
+	default:
+		t.Fatal("request completed without admission")
 	}
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, withHost(admissionRequest("/v1/chat/completions", `{"messages":[]}`, "tk_test")))

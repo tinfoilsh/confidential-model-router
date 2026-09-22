@@ -67,8 +67,8 @@ func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cac
 }
 
 // saltProxiedBody applies cache-salt and streaming-usage handling to a request
-// that the router otherwise forwards verbatim (the subdomain routing path,
-// which never parses the body elsewhere). It rewrites r.Body in place and
+// whose JSON fields must be sanitized before forwarding, such as speech.
+// It rewrites r.Body in place and
 // returns the parsed body and the derivation mode. The body must be one JSON
 // object so router-owned fields can never bypass rewriting on a malformed
 // request.
