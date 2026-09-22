@@ -8,11 +8,51 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	log "github.com/sirupsen/logrus"
 
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 	usageclient "github.com/tinfoilsh/usage-reporting-go/client"
 )
+
+// Emission counters pair with the proxy's router_request_* observation
+// metrics: observed-vs-emitted localizes a loss to the usage handler, while
+// the usage_reporter_* counters below localize it to enqueueing or delivery.
+var (
+	eventsEmitted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_billing_events_emitted_total",
+		Help: "Billing events handed to the usage reporter, by model.",
+	}, []string{"model"})
+	promptTokensEmitted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_billing_prompt_tokens_emitted_total",
+		Help: "Prompt tokens on billing events handed to the usage reporter, by model.",
+	}, []string{"model"})
+
+	reporterStatsOnce sync.Once
+)
+
+// registerReporterStats exports the reporter's delivery accounting as
+// Prometheus counters. Registered once for the process-lifetime collector;
+// extra collectors (tests) are ignored.
+func registerReporterStats(reporter *usageclient.ReporterClient) {
+	reporterStatsOnce.Do(func() {
+		counter := func(name, help string, read func(usageclient.Stats) uint64) prometheus.CounterFunc {
+			return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, func() float64 {
+				return float64(read(reporter.Stats()))
+			})
+		}
+		prometheus.MustRegister(
+			counter("usage_reporter_enqueued_events_total", "Events accepted into the reporter buffer.", func(s usageclient.Stats) uint64 { return s.Enqueued }),
+			counter("usage_reporter_delivered_events_total", "Events in batches acknowledged with HTTP 2xx.", func(s usageclient.Stats) uint64 { return s.DeliveredEvents }),
+			counter("usage_reporter_delivered_batches_total", "Batches acknowledged with HTTP 2xx.", func(s usageclient.Stats) uint64 { return s.DeliveredBatches }),
+			counter("usage_reporter_failed_events_total", "Events discarded with a failed batch (no retry).", func(s usageclient.Stats) uint64 { return s.FailedEvents }),
+			counter("usage_reporter_failed_batches_total", "Batches that failed delivery and were discarded.", func(s usageclient.Stats) uint64 { return s.FailedBatches }),
+			counter("usage_reporter_dropped_buffer_full_total", "Oldest events overwritten on buffer overflow.", func(s usageclient.Stats) uint64 { return s.DroppedBufferFull }),
+			counter("usage_reporter_dropped_disabled_total", "Events discarded because the reporter is not configured.", func(s usageclient.Stats) uint64 { return s.DroppedDisabled }),
+		)
+	})
+}
 
 // Event represents a billing event with token usage. CachedPromptTokens is the
 // subset of PromptTokens that the model served from its prompt cache; the
@@ -65,6 +105,7 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 			Secret:     reporterSecret,
 		}),
 	}
+	registerReporterStats(c.reporter)
 	return c
 }
 
@@ -103,6 +144,9 @@ func (c *Collector) AddEvent(event Event) {
 				Quantity: cachedInputTokens,
 			})
 		}
+
+		eventsEmitted.WithLabelValues(event.Model).Inc()
+		promptTokensEmitted.WithLabelValues(event.Model).Add(float64(inputTokens))
 
 		c.reporter.AddEvent(usagereporting.Event{
 			RequestID:  event.RequestID,
