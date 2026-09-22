@@ -193,6 +193,7 @@ func admissionRequest(path, body, key string) *http.Request {
 }
 
 func TestAdmissionHandlerEntryPoints(t *testing.T) {
+	const precisionSeed = "9007199254740993" // 2^53+1 cannot be represented by float64.
 	var multipartBody bytes.Buffer
 	mw := multipart.NewWriter(&multipartBody)
 	mw.WriteField("model", "voxtral-small-24b")
@@ -203,13 +204,13 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		name, path, body, model, contentType string
 		raw, upgrade                         bool
 	}{
-		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[],"seed":9007199254740993}` + "\n\t ", model: admissionTestModel},
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[],"seed":` + precisionSeed + "}\n\t ", model: admissionTestModel},
 		{name: "responses", path: "/v1/responses", body: `{"model":"gpt-oss-120b","priority":-99,"input":"hi"}`, model: admissionTestModel},
 		{name: "completions", path: "/v1/completions", body: `{"model":"gpt-oss-120b","priority":-99,"prompt":"hi"}`, model: admissionTestModel},
 		{name: "auto", path: "/v1/chat/completions", body: `{"model":"auto","messages":[],"auto_model_options":{"intelligence":100}}`, model: admissionTestModel},
 		{name: "embeddings", path: "/v1/embeddings", body: `{"model":"nomic-embed-text","priority":-99,"input":"hi"}`, model: "nomic-embed-text"},
 		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99,"stream":true}` + "\n\t ", model: "qwen3-tts"},
-		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":9007199254740993,"stream":true,"stream_options":{"include_usage":false},"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
+		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":` + precisionSeed + `,"stream":true,"stream_options":{"include_usage":false},"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
 		{name: "transcription", path: "/v1/audio/transcriptions", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "translation", path: "/v1/audio/translations", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "file convert", path: "/v1/convert/file", body: "\x00\xfffile", model: "doc-upload", contentType: "application/octet-stream", raw: true},
@@ -302,6 +303,10 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					if err := json.Unmarshal(forwarded.body, &body); err != nil {
 						t.Fatal(err)
 					}
+					var sent map[string]json.RawMessage
+					if err := json.Unmarshal([]byte(tc.body), &sent); err != nil {
+						t.Fatal(err)
+					}
 					priority := ""
 					if cacheSaltPaths[r.URL.Path] && decision == decisionDemote {
 						priority = "1"
@@ -315,26 +320,20 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					if forwarded.contentLength != int64(len(forwarded.body)) {
 						t.Fatal("wrong rewritten content length")
 					}
-					if tc.name == "auto" && string(body["model"]) != `"gpt-oss-120b"` {
-						t.Fatalf("auto not resolved: %s", forwarded.body)
+					if _, hasModel := sent["model"]; hasModel && string(body["model"]) != fmt.Sprintf("%q", tc.model) {
+						t.Fatalf("wrong forwarded model: %s", forwarded.body)
 					}
-					if (tc.name == "chat" || tc.name == "speech explicit") && string(body["seed"]) != "9007199254740993" {
+					if !bytes.Equal(body["seed"], sent["seed"]) {
 						t.Fatalf("seed precision lost: %s", forwarded.body)
 					}
-					if tc.name == "speech explicit" {
+					if r.URL.Path == "/v1/audio/speech" {
 						for _, field := range []string{"cache_salt", "user_cache_secret"} {
 							if _, exists := body[field]; exists {
 								t.Errorf("speech forwarded %s: %s", field, forwarded.body)
 							}
 						}
-						if string(body["stream"]) != "true" || string(body["input"]) != `"hi"` {
+						if !bytes.Equal(body["stream"], sent["stream"]) || !bytes.Equal(body["input"], sent["input"]) {
 							t.Fatalf("speech content changed: %s", forwarded.body)
-						}
-					}
-					if r.URL.Path == "/v1/audio/speech" {
-						var sent map[string]json.RawMessage
-						if err := json.Unmarshal([]byte(tc.body), &sent); err != nil {
-							t.Fatal(err)
 						}
 						if !bytes.Equal(body["stream_options"], sent["stream_options"]) {
 							t.Fatalf("speech stream_options were injected or changed: %s", forwarded.body)
