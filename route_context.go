@@ -118,7 +118,7 @@ func quotaRetryAfter(header http.Header) string {
 // inference outage. The counter and log line make the degradation visible.
 func routeContextUnavailable(model, reason string) routeContext {
 	manager.RouteContextLookupFailuresTotal.WithLabelValues(model, reason).Inc()
-	log.WithFields(log.Fields{"model": model, "reason": reason}).Warn("route-context lookup unavailable, admitting without quota decision")
+	log.WithFields(log.Fields{"model": model, "reason": reason}).Debug("route-context lookup unavailable, admitting without quota decision")
 	return routeContext{}
 }
 
@@ -136,8 +136,11 @@ func newRouteContextClient(controlPlaneURL string) *routeContextClient {
 // enforced; a lookup the control plane cannot answer admits the request with
 // an empty context.
 func (c *routeContextClient) Lookup(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
+	if apiKey == "" {
+		return routeContext{}, &routeContextError{apiError: &manager.ErrMissingAPIKey}
+	}
 	if model == "" {
-		return routeContextUnavailable(model, "missing_model"), nil
+		return routeContext{}, &routeContextError{apiError: manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgMissingParam, "model")}
 	}
 	resolved, err := c.fetch(ctx, apiKey, model)
 	if err != nil {
