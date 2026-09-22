@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -64,7 +65,7 @@ func TestRouteContextUncachedDecisions(t *testing.T) {
 	}
 }
 
-func TestRouteContextInvalidResponsesFailClosed(t *testing.T) {
+func TestRouteContextInvalidResponsesAdmitWithoutDecision(t *testing.T) {
 	for _, body := range []string{
 		`{}`, `null`, `[]`, `not json`, `{"priority":-1}`, `{"rate_limit":null}`,
 		`{"rate_limit":{"decision":"allowed"}}`,
@@ -94,16 +95,52 @@ func TestRouteContextInvalidResponsesFailClosed(t *testing.T) {
 		t.Run(fmt.Sprintf("case_%d", len(body))+body[:min(len(body), 70)], func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 			defer server.Close()
-			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-			if err == nil || err.apiError.Status != http.StatusServiceUnavailable || err.retryAfter != "1" {
-				t.Fatalf("invalid response admitted: %v", err)
+			before := lookupFailures(t, admissionTestModel)
+			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			assertAdmittedWithoutDecision(t, resolved, err)
+			if lookupFailures(t, admissionTestModel) != before+1 {
+				t.Fatal("invalid response not counted as a lookup failure")
 			}
 		})
 	}
 }
 
+// lookupFailures sums RouteContextLookupFailuresTotal across reasons for one model.
+func lookupFailures(t *testing.T, model string) float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(manager.RouteContextLookupFailuresTotal)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total float64
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "model" && label.GetValue() == model {
+					total += metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
+}
+
+// assertAdmittedWithoutDecision checks the fail-open shape: no error, and no
+// priority, org, or decision that could grant more than the shared default.
+func assertAdmittedWithoutDecision(t *testing.T, resolved routeContext, err *routeContextError) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("lookup outage rejected the request: %v", err)
+	}
+	if resolved.Priority != nil || resolved.OrgID != "" || resolved.RateLimit != nil || resolved.overloadExempt() {
+		t.Fatalf("lookup outage granted context: %+v", resolved)
+	}
+}
+
 func TestRouteContextStatusesAndRejections(t *testing.T) {
-	for _, status := range []int{401, 402, 403, 404, 429, 500, 502, 503} {
+	for _, status := range []int{401, 402, 403, 404, 429, 500, 502, 503, 504} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Retry-After", "-10")
@@ -111,16 +148,21 @@ func TestRouteContextStatusesAndRejections(t *testing.T) {
 				io.WriteString(w, `{"error":"credentials denied"}`)
 			}))
 			defer server.Close()
-			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-			want := http.StatusServiceUnavailable
+			failures := manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, fmt.Sprintf("http_%d", status))
+			before := testutil.ToFloat64(failures)
+			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 			if status == 401 || status == 402 || status == 403 || status == 429 {
-				want = status
+				if err == nil || err.apiError.Status != status {
+					t.Fatalf("denial not forwarded: %v", err)
+				}
+				if testutil.ToFloat64(failures) != before {
+					t.Fatal("denial counted as a lookup outage")
+				}
+				return
 			}
-			if err == nil || err.apiError.Status != want {
-				t.Fatalf("status: %v", err)
-			}
-			if want == http.StatusServiceUnavailable && err.retryAfter != "1" {
-				t.Fatalf("invalid retry forwarded: %q", err.retryAfter)
+			assertAdmittedWithoutDecision(t, resolved, err)
+			if testutil.ToFloat64(failures) != before+1 {
+				t.Fatal("status failure not counted as a lookup outage")
 			}
 		})
 	}
@@ -255,11 +297,9 @@ func TestRouteContextDecisionReasonContract(t *testing.T) {
 						fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":%d}}`, decision, reason, retry)
 					}))
 					defer server.Close()
-					_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+					resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 					if !valid {
-						if err == nil || err.apiError.Status != 503 {
-							t.Fatalf("invalid contract admitted: %v", err)
-						}
+						assertAdmittedWithoutDecision(t, resolved, err)
 						if testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal) != beforeSeries || testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel)) != beforeRejections {
 							t.Fatal("malformed decision emitted a quota rejection metric")
 						}
@@ -335,9 +375,8 @@ func TestRouteContextMetadataAndJWTClassification(t *testing.T) {
 	if _, err := nilClient.Lookup(context.Background(), "", admissionTestModel); err == nil || err.apiError.Status != 401 {
 		t.Fatalf("missing key: %v", err)
 	}
-	if _, err := nilClient.Lookup(context.Background(), "tk_test", admissionTestModel); err == nil || err.apiError.Status != 503 {
-		t.Fatalf("unconfigured client: %v", err)
-	}
+	resolved, err := nilClient.Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
 }
 
 func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
@@ -350,23 +389,58 @@ func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
 		}
 		t.Error("admission redirect followed")
 	}))
-	_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 	server.Close()
-	if err == nil || err.apiError.Status != 503 || calls.Load() != 1 {
-		t.Fatalf("redirect replay: %v, %d", err, calls.Load())
+	assertAdmittedWithoutDecision(t, resolved, err)
+	if calls.Load() != 1 {
+		t.Fatalf("redirect replayed: %d calls", calls.Load())
 	}
-	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-	if err == nil || err.apiError.Status != 503 {
-		t.Fatalf("transport failure: %v", err)
-	}
+	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
 	}))
 	defer server.Close()
+	transportFailures := manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, "transport")
+	before := testutil.ToFloat64(transportFailures)
 	start := time.Now()
-	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-	if err == nil || err.apiError.Status != 503 || time.Since(start) > 3*routeContextLookupTimeout {
-		t.Fatalf("lookup deadline: %v, %v", err, time.Since(start))
+	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
+	if elapsed := time.Since(start); elapsed < routeContextLookupTimeout || elapsed > 3*routeContextLookupTimeout {
+		t.Fatalf("lookup deadline not enforced: %v", time.Since(start))
+	}
+	if testutil.ToFloat64(transportFailures) != before+1 {
+		t.Fatal("timeout not counted as a transport failure")
+	}
+}
+
+func TestRouteContextMissingInputDoesNotFailOpen(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := newRouteContextClient(server.URL)
+	for _, tc := range []struct {
+		key, model string
+		status     int
+	}{
+		{"", "", http.StatusUnauthorized},
+		{"", admissionTestModel, http.StatusUnauthorized},
+		{"tk_test", "", http.StatusBadRequest},
+	} {
+		before := lookupFailures(t, tc.model)
+		_, err := client.Lookup(context.Background(), tc.key, tc.model)
+		if err == nil || err.apiError.Status != tc.status {
+			t.Fatalf("key present=%v model=%q: %v", tc.key != "", tc.model, err)
+		}
+		if lookupFailures(t, tc.model) != before {
+			t.Fatal("missing input counted as a control-plane outage")
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("missing input reached the control plane")
 	}
 }

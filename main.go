@@ -610,6 +610,25 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
+		// Per-model health is answered by the router from its own view of
+		// the model's enclaves. It is an unauthenticated probe, not an
+		// inference request, so it never goes through admission and never
+		// reaches a backend.
+		if modelName != "" && r.URL.Path == "/health" {
+			if !em.ModelExists(modelName) {
+				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
+				return
+			}
+			if !em.Ready() || !em.HasHealthyEnclave(modelName) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(map[string]any{"status": "not ready", "model": modelName})
+				return
+			}
+			sendJSON(w, map[string]any{"status": "ok", "model": modelName, "version": version})
+			return
+		}
+
 		if isInputTokensPath(r.URL.Path) {
 			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
 				if _, found := em.GetModel(modelName); !found {
