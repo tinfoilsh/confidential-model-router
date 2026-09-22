@@ -939,8 +939,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 			if speechBody != nil {
 				// Speech does not support cache salting.
-				delete(speechBody, "cache_salt")
-				delete(speechBody, "user_cache_secret")
+				applyCacheSalt(speechBody, r.URL.Path, apiKey, false)
 				admission.applyPriority(speechBody, r.URL.Path, modelName)
 				if err := replaceJSONBody(r, speechBody); err != nil {
 					writeError(w, &manager.ErrServer)

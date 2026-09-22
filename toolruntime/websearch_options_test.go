@@ -500,6 +500,7 @@ func TestIntValue_TriState(t *testing.T) {
 }
 
 func TestIntValue_JSONNumbers(t *testing.T) {
+	maxWholeFloat := math.Floor(math.Nextafter(-float64(math.MinInt), 0))
 	for _, tc := range []struct {
 		value json.Number
 		want  int
@@ -511,6 +512,8 @@ func TestIntValue_JSONNumbers(t *testing.T) {
 		{"42.5", 0, false},
 		{"1e100", 0, false},
 		{"1e1000000", 0, false},
+		{json.Number(strconv.FormatFloat(maxWholeFloat, 'f', -1, 64)), int(maxWholeFloat), true},
+		{json.Number(strconv.Itoa(math.MinInt)), math.MinInt, true},
 		{json.Number(strconv.FormatFloat(-float64(math.MinInt), 'f', -1, 64)), 0, false},
 		// Keep the float64 rounding used before UseNumber was introduced.
 		{"1.0000000000000000001", 1, true},

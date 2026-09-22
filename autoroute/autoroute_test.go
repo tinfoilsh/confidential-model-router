@@ -9,11 +9,12 @@ import (
 
 func TestParseIntelligence(t *testing.T) {
 	cases := []struct {
-		name    string
-		header  string
-		body    map[string]any
-		want    int
-		wantErr bool
+		name        string
+		header      string
+		body        map[string]any
+		want        int
+		wantErr     bool
+		wantMessage string
 	}{
 		{name: "default when nothing set", body: map[string]any{}, want: DefaultIntelligence},
 		{name: "header", header: "72", body: map[string]any{}, want: 72},
@@ -39,9 +40,10 @@ func TestParseIntelligence(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "body out of range rejected",
-			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: float64(250)}},
-			wantErr: true,
+			name:        "body out of range rejected",
+			body:        map[string]any{OptionsField: map[string]any{IntelligenceKey: float64(250)}},
+			wantErr:     true,
+			wantMessage: "Invalid intelligence level 250: must be between 0 and 100.",
 		},
 		{
 			name:   "legacy array ignored, header used",
@@ -67,6 +69,9 @@ func TestParseIntelligence(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error, got level %d", got)
 				}
+				if tc.wantMessage != "" && err.Error() != tc.wantMessage {
+					t.Fatalf("error = %q, want %q", err, tc.wantMessage)
+				}
 				return
 			}
 			if err != nil {
@@ -88,6 +93,9 @@ func TestParseIntelligenceJSONNumbers(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
+		{"0", 0, false},
+		{"100", 100, false},
+		{"-1", 0, true},
 		{"42", 42, false},
 		{"42.0", 42, false},
 		{"4.2e1", 42, false},

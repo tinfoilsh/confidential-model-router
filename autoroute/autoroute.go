@@ -159,8 +159,8 @@ func intelligenceFromJSON(value any) (int, error) {
 			return intelligenceFromJSON(parsed)
 		}
 	case float64:
-		if number >= MinIntelligence && number <= MaxIntelligence && number == math.Trunc(number) {
-			return int(number), nil
+		if number == math.Trunc(number) && number >= math.MinInt && number < -float64(math.MinInt) {
+			return validateIntelligence(int(number), intelligenceParam)
 		}
 	}
 	return 0, &ValidationError{
