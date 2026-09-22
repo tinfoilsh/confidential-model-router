@@ -467,6 +467,9 @@ func intValue(raw any) (int, bool) {
 	case int:
 		return v, true
 	case int64:
+		if v < math.MinInt || v > math.MaxInt {
+			return 0, false
+		}
 		return int(v), true
 	case float64:
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -475,13 +478,15 @@ func intValue(raw any) (int, bool) {
 		if v != math.Trunc(v) {
 			return 0, false
 		}
-		if v < math.MinInt || v > math.MaxInt {
+		// MaxInt rounds up in float64 on 64-bit systems; use an exclusive bound.
+		if v < math.MinInt || v >= -float64(math.MinInt) {
 			return 0, false
 		}
 		return int(v), true
 	case json.Number:
-		if n, err := v.Int64(); err == nil {
-			return int(n), true
+		// Preserve legacy float64 option semantics without expanding exponents.
+		if n, err := v.Float64(); err == nil {
+			return intValue(n)
 		}
 	case string:
 		trimmed := strings.TrimSpace(v)

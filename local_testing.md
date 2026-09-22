@@ -101,7 +101,6 @@ DEBUG=1 \
 LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
 LOCAL_MCP_ENDPOINT_CODE_EXECUTION=http://127.0.0.1:7070/mcp \
 PORT=8090 \
-DOMAIN=localhost \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
 UPDATE_CONFIG_URL=/tmp/model-router-local.yml \
 USAGE_REPORTER_SECRET=test-secret \

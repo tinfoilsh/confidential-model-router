@@ -28,6 +28,7 @@ const (
 	billingTestToolBudget       = 10
 	billingTestToolName         = "show"
 	billingTestAutoContinueFlag = "x-tinfoil-tool-auto-continue"
+	billingTestPrecisionSeed    = json.Number("9007199254740993") // 2^53+1 cannot be represented by float64.
 )
 
 func billingLoopBody(path, model string) map[string]any {
@@ -132,8 +133,13 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					turn := int(turns.Add(1))
 					var request map[string]any
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					decoder := json.NewDecoder(r.Body)
+					decoder.UseNumber()
+					if err := decoder.Decode(&request); err != nil {
 						t.Error(err)
+					}
+					if request["seed"] != billingTestPrecisionSeed {
+						t.Errorf("seed precision lost on turn %d: %v", turn, request["seed"])
 					}
 					if r.URL.Path != path || request["model"] != admissionTestModel || request["stream"] != false {
 						t.Errorf("unexpected loop dispatch: %s %#v", r.URL.Path, request)
@@ -164,6 +170,7 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				}), "", false)
 				stopBilling := manager.EnableBillingForTest(em)
 				body := billingLoopBody(path, admissionTestModel)
+				body["seed"] = billingTestPrecisionSeed
 				if tc.router {
 					body["model"] = "auto"
 				}
@@ -171,7 +178,7 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				r := admissionRequest(path, string(encoded), "tk_test", "").WithContext(ctx)
+				r := admissionRequest(path, string(encoded), "tk_test").WithContext(ctx)
 				r.Header.Set("X-Request-Id", "original-request")
 				rec := httptest.NewRecorder()
 				capture := &safeguards.Capture{ResponseWriter: rec}

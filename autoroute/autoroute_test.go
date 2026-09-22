@@ -1,6 +1,7 @@
 package autoroute
 
 import (
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"testing"
@@ -8,11 +9,12 @@ import (
 
 func TestParseIntelligence(t *testing.T) {
 	cases := []struct {
-		name    string
-		header  string
-		body    map[string]any
-		want    int
-		wantErr bool
+		name        string
+		header      string
+		body        map[string]any
+		want        int
+		wantErr     bool
+		wantMessage string
 	}{
 		{name: "default when nothing set", body: map[string]any{}, want: DefaultIntelligence},
 		{name: "header", header: "72", body: map[string]any{}, want: 72},
@@ -38,9 +40,10 @@ func TestParseIntelligence(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "body out of range rejected",
-			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: float64(250)}},
-			wantErr: true,
+			name:        "body out of range rejected",
+			body:        map[string]any{OptionsField: map[string]any{IntelligenceKey: float64(250)}},
+			wantErr:     true,
+			wantMessage: "Invalid intelligence level 250: must be between 0 and 100.",
 		},
 		{
 			name:   "legacy array ignored, header used",
@@ -66,6 +69,9 @@ func TestParseIntelligence(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error, got level %d", got)
 				}
+				if tc.wantMessage != "" && err.Error() != tc.wantMessage {
+					t.Fatalf("error = %q, want %q", err, tc.wantMessage)
+				}
 				return
 			}
 			if err != nil {
@@ -78,6 +84,34 @@ func TestParseIntelligence(t *testing.T) {
 				t.Fatalf("%s must be stripped from the body", OptionsField)
 			}
 		})
+	}
+}
+
+func TestParseIntelligenceJSONNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		value   json.Number
+		want    int
+		wantErr bool
+	}{
+		{"0", 0, false},
+		{"100", 100, false},
+		{"-1", 0, true},
+		{"42", 42, false},
+		{"42.0", 42, false},
+		{"4.2e1", 42, false},
+		{"42.5", 0, true},
+		{"101", 0, true},
+		{"1e100", 0, true},
+		{"1e1000000", 0, true},
+		// Keep the float64 rounding used before UseNumber was introduced.
+		{"42.0000000000000000001", 42, false},
+		{"1e-1000000", 0, false},
+	} {
+		body := map[string]any{OptionsField: map[string]any{IntelligenceKey: tc.value}}
+		got, err := ParseIntelligence(http.Header{}, body)
+		if (err != nil) != tc.wantErr || (err == nil && got != tc.want) {
+			t.Errorf("intelligence %s: got (%d, %v), want level=%d error=%v", tc.value, got, err, tc.want, tc.wantErr)
+		}
 	}
 }
 

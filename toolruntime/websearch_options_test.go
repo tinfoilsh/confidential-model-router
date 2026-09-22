@@ -1,8 +1,10 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"math"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -494,6 +496,33 @@ func TestIntValue_TriState(t *testing.T) {
 	}
 	if n, ok := intValue("42"); !ok || n != 42 {
 		t.Errorf("intValue(\"42\") = (%d, %v), want (42, true)", n, ok)
+	}
+}
+
+func TestIntValue_JSONNumbers(t *testing.T) {
+	maxWholeFloat := math.Floor(math.Nextafter(-float64(math.MinInt), 0))
+	for _, tc := range []struct {
+		value json.Number
+		want  int
+		ok    bool
+	}{
+		{"42", 42, true},
+		{"42.0", 42, true},
+		{"4.2e1", 42, true},
+		{"42.5", 0, false},
+		{"1e100", 0, false},
+		{"1e1000000", 0, false},
+		{json.Number(strconv.FormatFloat(maxWholeFloat, 'f', -1, 64)), int(maxWholeFloat), true},
+		{json.Number(strconv.Itoa(math.MinInt)), math.MinInt, true},
+		{json.Number(strconv.FormatFloat(-float64(math.MinInt), 'f', -1, 64)), 0, false},
+		// Keep the float64 rounding used before UseNumber was introduced.
+		{"1.0000000000000000001", 1, true},
+		{"1e-1000000", 0, true},
+	} {
+		got, ok := intValue(tc.value)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("intValue(%q) = (%d, %v), want (%d, %v)", tc.value, got, ok, tc.want, tc.ok)
+		}
 	}
 }
 

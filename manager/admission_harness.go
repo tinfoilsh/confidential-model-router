@@ -71,20 +71,3 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 	em.modelIntelligence.Store(&scores)
 	return nil
 }
-
-// TripModelBreakersForTest opens the circuit breaker of every enclave the
-// model has, so the model reads as having no healthy backend.
-func TripModelBreakersForTest(em *EnclaveManager, name string) error {
-	model, ok := em.GetModel(name)
-	if !ok {
-		return fmt.Errorf("model %s not configured", name)
-	}
-	model.mu.RLock()
-	defer model.mu.RUnlock()
-	for _, enclave := range model.Enclaves {
-		for i := 0; i < cbFailureThreshold; i++ {
-			enclave.cb.RecordFailure()
-		}
-	}
-	return nil
-}

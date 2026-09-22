@@ -40,7 +40,7 @@ func TestHandleInputTokensChatRequest(t *testing.T) {
 		"max_completion_tokens":100
 	}`))
 	rec := httptest.NewRecorder()
-	handleInputTokens(rec, req, "secret-key", "", nil, dispatch)
+	handleInputTokens(rec, req, "secret-key", nil, dispatch)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -103,7 +103,7 @@ func TestHandleInputTokensResponsesRequest(t *testing.T) {
 		}]
 	}`))
 	rec := httptest.NewRecorder()
-	handleInputTokens(rec, req, "secret-key", "", nil, dispatch)
+	handleInputTokens(rec, req, "secret-key", nil, dispatch)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -245,7 +245,7 @@ func TestHandleInputTokensRequiresBearerKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, responsesInputTokensPath, strings.NewReader(`{"model":"gpt-oss-120b","input":"hello"}`))
 	rec := httptest.NewRecorder()
 
-	handleInputTokens(rec, req, "", "", nil, dispatch)
+	handleInputTokens(rec, req, "", nil, dispatch)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
@@ -262,31 +262,6 @@ func TestHandleInputTokensRequiresBearerKey(t *testing.T) {
 	}
 }
 
-func TestHandleInputTokensUsesSubdomainModel(t *testing.T) {
-	var dispatchedModel string
-	dispatch := func(_ context.Context, modelName, _ string, _ []byte, _ http.Header) (*http.Response, error) {
-		dispatchedModel = modelName
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"count":5}`)),
-		}, nil
-	}
-	req := httptest.NewRequest(http.MethodPost, chatInputTokensPath, strings.NewReader(`{
-		"messages":[{"role":"user","content":"hello"}]
-	}`))
-	rec := httptest.NewRecorder()
-
-	handleInputTokens(rec, req, "secret-key", "subdomain-model", nil, dispatch)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if dispatchedModel != "subdomain-model" {
-		t.Fatalf("expected subdomain model, got %q", dispatchedModel)
-	}
-}
-
 func TestHandleInputTokensForwardsTokenizeError(t *testing.T) {
 	dispatch := func(context.Context, string, string, []byte, http.Header) (*http.Response, error) {
 		header := make(http.Header)
@@ -300,7 +275,7 @@ func TestHandleInputTokensForwardsTokenizeError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, chatInputTokensPath, strings.NewReader(`{"model":"gpt-oss-120b","messages":[]}`))
 	rec := httptest.NewRecorder()
 
-	handleInputTokens(rec, req, "secret-key", "", nil, dispatch)
+	handleInputTokens(rec, req, "secret-key", nil, dispatch)
 
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d", rec.Code)

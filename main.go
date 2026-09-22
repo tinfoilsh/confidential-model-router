@@ -12,7 +12,6 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -202,7 +201,6 @@ var (
 	verbose                   = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
 	initConfigURL             = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
 	updateConfigURL           = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	domain                    = flag.String("d", getEnvOrDefault("DOMAIN", "localhost"), "domain used by this router (env: DOMAIN)")
 	refreshInterval           = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 	// debug enables non-production behaviors such as honoring
 	// LOCAL_MCP_ENDPOINT_<MODEL> env vars to bypass attested TLS
@@ -306,34 +304,6 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		}
 	}
 	return false
-}
-
-func parseModelFromSubdomain(r *http.Request, domain string) (string, error) {
-	// Check if the request is for a subdomain and derive model from leftmost subdomain.
-	host := r.Header.Get("X-Forwarded-Host")
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	log.Debugf("host (from X-Forwarded-Host): %s", host)
-	if !strings.HasSuffix(host, "."+domain) {
-		return "", nil
-	}
-
-	// If request is for a subdomain, use leftmost label as model name (e.g., deepseek.inference.tinfoil.sh -> deepseek)
-	if host != domain && strings.HasSuffix(host, "."+domain) {
-		sub := strings.TrimSuffix(host, "."+domain)
-		if sub == "" {
-			return "", fmt.Errorf("subdomain is empty")
-		} else {
-			parts := strings.Split(sub, ".")
-			if len(parts) > 0 && parts[0] != "" {
-				return parts[0], nil
-			} else {
-				return "", fmt.Errorf("first subdomain is empty")
-			}
-		}
-	}
-	return "", nil
 }
 
 // modelHeaderMatches reports whether the optional X-Tinfoil-Model header,
@@ -482,7 +452,7 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	log.Debugf("Configuration: domain=%s, port=%s, controlPlaneURL=%s", *domain, *port, *controlPlaneURL)
+	log.Debugf("Configuration: port=%s, controlPlaneURL=%s", *port, *controlPlaneURL)
 	log.Infof("Refresh interval: %s", *refreshInterval)
 
 	if *usageReporterSecret == "" {
@@ -564,6 +534,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		var modelName string
 		var err error
+		var speechBody map[string]any
 
 		// Set when the request is eligible for cache-route shadow
 		// observation.
@@ -605,30 +576,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		w, capture, finishCapture := safeguardsSubmitter.Observe(w, r, manager.IsFirstPartyChatAccessJWT)
 		defer finishCapture()
 
-		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
-			writeError(w, manager.ErrInvalidRequest.WithMessage("Invalid request: %v.", err))
-			return
-		}
-
-		// Per-model health is answered by the router from its own view of
-		// the model's enclaves. It is an unauthenticated probe, not an
-		// inference request, so it never goes through admission and never
-		// reaches a backend.
-		if modelName != "" && r.URL.Path == "/health" {
-			if !em.ModelExists(modelName) {
-				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
-				return
-			}
-			if !em.Ready() || !em.HasHealthyEnclave(modelName) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusServiceUnavailable)
-				json.NewEncoder(w).Encode(map[string]any{"status": "not ready", "model": modelName})
-				return
-			}
-			sendJSON(w, map[string]any{"status": "ok", "model": modelName, "version": version})
-			return
-		}
-
 		if isInputTokensPath(r.URL.Path) {
 			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
 				if _, found := em.GetModel(modelName); !found {
@@ -641,7 +588,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				}
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
-			handleInputTokens(w, r, apiKey, modelName, func(body map[string]any) (string, error) {
+			handleInputTokens(w, r, apiKey, func(body map[string]any) (string, error) {
 				return resolveAutoModel(em, r.Header, inputTokensCompletionPath(r.URL.Path), body)
 			}, dispatch)
 			return
@@ -649,9 +596,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		// WebSocket upgrade on /v1/realtime: extract model from ?model= query parameter, skip body parsing
 		if isWebSocketUpgrade(r) && r.URL.Path == "/v1/realtime" {
-			if modelName == "" {
-				modelName = r.URL.Query().Get("model")
-			}
+			modelName = r.URL.Query().Get("model")
 			if modelName == "" && r.URL.Query().Get("intent") == "transcription" {
 				// OpenAI Realtime transcription clients connect with
 				// ?intent=transcription and select the model in session.update,
@@ -691,7 +636,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				"model": modelName,
 				"path":  r.URL.Path,
 			}).Debug("WebSocket upgrade request")
-		} else if modelName == "" { // The request does not use a subdomain. We route using specific inference routing logic.
+		} else {
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
 				return
@@ -759,23 +704,21 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
-				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				r.Body.Close()
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				speechBody, err = decodeJSONBody(bodyBytes)
+				if err != nil {
 					writeError(w, invalidJSONError(err))
 					return
 				}
-				if m, ok := body["model"].(string); ok && m != "" {
+				if m, ok := speechBody["model"].(string); ok && m != "" {
 					modelName = m
 				} else {
 					modelName = "qwen3-tts"
 				}
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
@@ -796,14 +739,14 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
-				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				body, err := decodeJSONBody(bodyBytes)
+				if err != nil {
 					writeError(w, invalidJSONError(err))
 					return
 				}
@@ -901,7 +844,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// user_cache_secret, strip any client-supplied cache_salt,
 				// and (when enabled) inject the derived per-principal salt
 				// on endpoints that support it.
-				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
+				mode := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
 
 				// If streaming request, ensure upstream usage is available for billing.
@@ -979,50 +922,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					}
 				}
 			}
-		} else if cacheSaltPaths[r.URL.Path] {
-			// Subdomain-routed request on a salt-supporting endpoint. This
-			// path proxies the body verbatim (no parsing above), so apply
-			// cache-salt handling here to keep the strip-and-inject invariant
-			// holding across both routing modes rather than only path routing.
-			//
-			// The subdomain names the model before the body is touched, so
-			// reject unknown models up front: the wildcard TLS cert makes
-			// arbitrary subdomains reachable, and 404ing them must not cost
-			// an unbounded body read (it also keeps bogus names out of the
-			// injection metric). This must return, not skip salting — a skip
-			// could race a config refresh that adds the model between here
-			// and the authoritative lookup below, forwarding an unsanitized
-			// body to the engine.
-			if _, found := em.GetModel(modelName); !found {
-				em.ReportUnknownModel(apiKey, modelName)
-				writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
-				return
-			}
-			body, mode, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
-			if err != nil {
-				var tooLarge *http.MaxBytesError
-				if errors.As(err, &tooLarge) {
-					writeRequestBodyError(w, err)
-					return
-				}
-				writeError(w, invalidJSONError(err))
-				return
-			}
-			// Subdomain-routed streams must feed the same SLA metrics as
-			// path-routed ones; this is the only place their body is parsed.
-			isStreaming, _ = body["stream"].(bool)
-			recordCacheSaltInjection(modelName, mode)
-			if capture != nil {
-				capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
-			}
-			if !admit() {
-				return
-			}
-			admission.applyPriority(body, r.URL.Path, modelName)
-			if err := replaceJSONBody(r, body); err != nil {
-				writeError(w, &manager.ErrServer)
-				return
-			}
 		}
 
 		model, found := em.GetModel(modelName)
@@ -1032,26 +931,17 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
-		// Requests whose body was not parsed above (audio, file conversion,
-		// realtime, embeddings, MCP, and opaque subdomain paths) are admitted
-		// here, after the authoritative model lookup.
+		// Audio, file conversion, and realtime are admitted here, after the
+		// authoritative model lookup.
 		if admission == nil {
 			if !admit() {
 				return
 			}
-			// Embeddings and speech carry a JSON object the engine accepts a
-			// priority field on, so a client-supplied value must be stripped
-			// like on the parsed paths. Other endpoints may carry JSON-RPC
-			// batches, compressed payloads, or opaque file data and are
-			// proxied verbatim.
-			if !isWebSocketUpgrade(r) && (r.URL.Path == "/v1/embeddings" || r.URL.Path == "/v1/audio/speech") {
-				body, _, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
-				if err != nil {
-					writeError(w, invalidJSONError(err))
-					return
-				}
-				admission.applyPriority(body, r.URL.Path, modelName)
-				if err := replaceJSONBody(r, body); err != nil {
+			if speechBody != nil {
+				// Speech does not support cache salting.
+				applyCacheSalt(speechBody, r.URL.Path, apiKey, false)
+				admission.applyPriority(speechBody, r.URL.Path, modelName)
+				if err := replaceJSONBody(r, speechBody); err != nil {
 					writeError(w, &manager.ErrServer)
 					return
 				}

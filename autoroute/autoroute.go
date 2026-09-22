@@ -6,6 +6,7 @@
 package autoroute
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -150,14 +151,22 @@ func (e *ValidationError) Error() string {
 }
 
 func intelligenceFromJSON(value any) (int, error) {
-	number, ok := value.(float64)
-	if !ok || number != math.Trunc(number) {
-		return 0, &ValidationError{
-			Param:   intelligenceParam,
-			Message: fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence),
+	switch number := value.(type) {
+	case json.Number:
+		// Router options retain their legacy float64 semantics; forwarded
+		// request fields keep their exact json.Number values.
+		if parsed, err := number.Float64(); err == nil {
+			return intelligenceFromJSON(parsed)
+		}
+	case float64:
+		if number == math.Trunc(number) && number >= math.MinInt && number < -float64(math.MinInt) {
+			return validateIntelligence(int(number), intelligenceParam)
 		}
 	}
-	return validateIntelligence(int(number), intelligenceParam)
+	return 0, &ValidationError{
+		Param:   intelligenceParam,
+		Message: fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence),
+	}
 }
 
 func validateIntelligence(level int, param string) (int, error) {

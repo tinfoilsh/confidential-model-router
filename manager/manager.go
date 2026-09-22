@@ -186,12 +186,6 @@ func (em *EnclaveManager) DebugMode() bool {
 	return em.debug
 }
 
-// ModelExists checks if a model exists
-func (em *EnclaveManager) ModelExists(modelName string) bool {
-	_, found := em.GetModel(modelName)
-	return found
-}
-
 // GetModel gets a model by name
 func (em *EnclaveManager) GetModel(modelName string) (*Model, bool) {
 	model, found := em.models.Load(modelName)
