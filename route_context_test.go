@@ -64,7 +64,7 @@ func TestRouteContextUncachedDecisions(t *testing.T) {
 	}
 }
 
-func TestRouteContextInvalidResponsesFailClosed(t *testing.T) {
+func TestRouteContextInvalidResponsesAdmitWithoutDecision(t *testing.T) {
 	for _, body := range []string{
 		`{}`, `null`, `[]`, `not json`, `{"priority":-1}`, `{"rate_limit":null}`,
 		`{"rate_limit":{"decision":"allowed"}}`,
@@ -94,11 +94,34 @@ func TestRouteContextInvalidResponsesFailClosed(t *testing.T) {
 		t.Run(fmt.Sprintf("case_%d", len(body))+body[:min(len(body), 70)], func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 			defer server.Close()
-			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-			if err == nil || err.apiError.Status != http.StatusServiceUnavailable || err.retryAfter != "1" {
-				t.Fatalf("invalid response admitted: %v", err)
+			before := lookupFailures(admissionTestModel)
+			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			assertAdmittedWithoutDecision(t, resolved, err)
+			if lookupFailures(admissionTestModel) != before+1 {
+				t.Fatal("invalid response not counted as a lookup failure")
 			}
 		})
+	}
+}
+
+// lookupFailures sums RouteContextLookupFailuresTotal across reasons for one model.
+func lookupFailures(model string) float64 {
+	var total float64
+	for _, reason := range []string{"missing_model", "configuration", "marshal", "request", "transport", "decode", "decision", "http_404", "http_500", "http_502", "http_503"} {
+		total += testutil.ToFloat64(manager.RouteContextLookupFailuresTotal.WithLabelValues(model, reason))
+	}
+	return total
+}
+
+// assertAdmittedWithoutDecision checks the fail-open shape: no error, and no
+// priority, org, or decision that could grant more than the shared default.
+func assertAdmittedWithoutDecision(t *testing.T, resolved routeContext, err *routeContextError) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("lookup outage rejected the request: %v", err)
+	}
+	if resolved.Priority != nil || resolved.OrgID != "" || resolved.RateLimit != nil || resolved.overloadExempt() {
+		t.Fatalf("lookup outage granted context: %+v", resolved)
 	}
 }
 
@@ -111,17 +134,14 @@ func TestRouteContextStatusesAndRejections(t *testing.T) {
 				io.WriteString(w, `{"error":"credentials denied"}`)
 			}))
 			defer server.Close()
-			_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-			want := http.StatusServiceUnavailable
+			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 			if status == 401 || status == 402 || status == 403 || status == 429 {
-				want = status
+				if err == nil || err.apiError.Status != status {
+					t.Fatalf("denial not forwarded: %v", err)
+				}
+				return
 			}
-			if err == nil || err.apiError.Status != want {
-				t.Fatalf("status: %v", err)
-			}
-			if want == http.StatusServiceUnavailable && err.retryAfter != "1" {
-				t.Fatalf("invalid retry forwarded: %q", err.retryAfter)
-			}
+			assertAdmittedWithoutDecision(t, resolved, err)
 		})
 	}
 	for _, reason := range []string{rateReasonRequests, rateReasonTokens} {
@@ -255,11 +275,9 @@ func TestRouteContextDecisionReasonContract(t *testing.T) {
 						fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":%d}}`, decision, reason, retry)
 					}))
 					defer server.Close()
-					_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+					resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 					if !valid {
-						if err == nil || err.apiError.Status != 503 {
-							t.Fatalf("invalid contract admitted: %v", err)
-						}
+						assertAdmittedWithoutDecision(t, resolved, err)
 						if testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal) != beforeSeries || testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel)) != beforeRejections {
 							t.Fatal("malformed decision emitted a quota rejection metric")
 						}
@@ -335,9 +353,8 @@ func TestRouteContextMetadataAndJWTClassification(t *testing.T) {
 	if _, err := nilClient.Lookup(context.Background(), "", admissionTestModel); err == nil || err.apiError.Status != 401 {
 		t.Fatalf("missing key: %v", err)
 	}
-	if _, err := nilClient.Lookup(context.Background(), "tk_test", admissionTestModel); err == nil || err.apiError.Status != 503 {
-		t.Fatalf("unconfigured client: %v", err)
-	}
+	resolved, err := nilClient.Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
 }
 
 func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
@@ -350,23 +367,23 @@ func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
 		}
 		t.Error("admission redirect followed")
 	}))
-	_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
 	server.Close()
-	if err == nil || err.apiError.Status != 503 || calls.Load() != 1 {
-		t.Fatalf("redirect replay: %v, %d", err, calls.Load())
+	assertAdmittedWithoutDecision(t, resolved, err)
+	if calls.Load() != 1 {
+		t.Fatalf("redirect replayed: %d calls", calls.Load())
 	}
-	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-	if err == nil || err.apiError.Status != 503 {
-		t.Fatalf("transport failure: %v", err)
-	}
+	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
 	}))
 	defer server.Close()
 	start := time.Now()
-	_, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
-	if err == nil || err.apiError.Status != 503 || time.Since(start) > 3*routeContextLookupTimeout {
-		t.Fatalf("lookup deadline: %v, %v", err, time.Since(start))
+	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	assertAdmittedWithoutDecision(t, resolved, err)
+	if time.Since(start) > 3*routeContextLookupTimeout {
+		t.Fatalf("lookup deadline not enforced: %v", time.Since(start))
 	}
 }

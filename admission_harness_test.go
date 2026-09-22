@@ -354,11 +354,11 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 }
 
 func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
-	for _, response := range []string{`{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":9}}`, `{}`} {
+	{
 		var backendCalls, cpCalls atomic.Int64
 		_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cpCalls.Add(1)
-			io.WriteString(w, response)
+			io.WriteString(w, `{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":9}}`)
 		}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backendCalls.Add(1) }), "", false)
 		for _, body := range []string{
 			`{"model":"gpt-oss-120b","input":[{"role":"user","content":[{"type":"input_file","filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}]}]}`,
@@ -367,11 +367,7 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 		} {
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test", ""))
-			want := 429
-			if response == "{}" {
-				want = 503
-			}
-			if rec.Code != want {
+			if rec.Code != 429 {
 				t.Fatalf("reject HTTP %d: %s", rec.Code, rec.Body.String())
 			}
 		}
@@ -735,10 +731,10 @@ func TestAdmissionHandlerFailuresAndEmptyOrg(t *testing.T) {
 		{"unauthorized", `{"error":"invalid key"}`, 401, 401, false},
 		{"payment", `{"error":"payment required"}`, 402, 402, false},
 		{"forbidden", `{"error":"forbidden"}`, 403, 403, false},
-		{"outage", `{}`, 500, 503, false},
-		{"missing decision", `{}`, 200, 503, false},
-		{"invalid decision", `{"rate_limit":{"decision":"other","retry_after_seconds":0}}`, 200, 503, false},
-		{"negative retry", `{"rate_limit":{"decision":"rejected","retry_after_seconds":-1}}`, 200, 503, false},
+		{"outage", `{}`, 500, 200, false},
+		{"missing decision", `{}`, 200, 200, false},
+		{"invalid decision", `{"rate_limit":{"decision":"other","retry_after_seconds":0}}`, 200, 200, false},
+		{"negative retry", `{"rate_limit":{"decision":"rejected","retry_after_seconds":-1}}`, 200, 200, false},
 		{"empty org", `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, 200, 503, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -751,10 +747,19 @@ func TestAdmissionHandlerFailuresAndEmptyOrg(t *testing.T) {
 				calls.Add(1)
 				w.WriteHeader(tc.upstream)
 				io.WriteString(w, tc.response)
-			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backends.Add(1) }), org, false)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backends.Add(1)
+				io.WriteString(w, `{}`)
+			}), org, false)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
-			if rec.Code != tc.want || calls.Load() != 1 || backends.Load() != 0 {
+			// A lookup the control plane could not answer admits the request
+			// to the shared pool; only its verdicts stop it short of a backend.
+			wantBackends := int64(0)
+			if tc.want == http.StatusOK {
+				wantBackends = 1
+			}
+			if rec.Code != tc.want || calls.Load() != 1 || backends.Load() != wantBackends {
 				t.Fatalf("failure dispatch: HTTP=%d CP=%d backend=%d %s", rec.Code, calls.Load(), backends.Load(), rec.Body.String())
 			}
 		})
@@ -799,18 +804,20 @@ func TestAdmissionHandlerMetadataFailures(t *testing.T) {
 					t.Error("metadata failure retried as admission")
 				}
 				w.WriteHeader(status)
-			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backends.Add(1) }), "", false)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backends.Add(1)
+				io.WriteString(w, `{"count":1}`)
+			}), "", false)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest(chatInputTokensPath, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test", ""))
-			want := status
+			// A control plane outage on the metadata lookup still counts
+			// tokens; only credential denials stop the request.
+			want, wantBackends := status, int64(0)
 			if status == http.StatusInternalServerError {
-				want = http.StatusServiceUnavailable
-				if rec.Header().Get("Retry-After") != "1" {
-					t.Fatal("metadata outage lost retry hint")
-				}
+				want, wantBackends = http.StatusOK, 1
 			}
-			if rec.Code != want || calls.Load() != 1 || backends.Load() != 0 {
-				t.Fatalf("metadata failure: HTTP=%d CP=%d backend=%d", rec.Code, calls.Load(), backends.Load())
+			if rec.Code != want || calls.Load() != 1 || backends.Load() != wantBackends {
+				t.Fatalf("metadata failure: HTTP=%d CP=%d backend=%d: %s", rec.Code, calls.Load(), backends.Load(), rec.Body.String())
 			}
 		})
 	}

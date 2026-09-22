@@ -11,21 +11,21 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 const (
-	routeContextPath              = "/api/shim/route-context"
-	routeContextLookupTimeout     = 500 * time.Millisecond
-	routeContextRetryAfterSeconds = 1
-	routeContextResponseLimit     = 64 << 10
-	demotedPriority               = 1
-	decisionAllowed               = "allowed"
-	decisionDemote                = "demote"
-	decisionRejected              = "rejected"
-	decisionExempt                = "exempt"
-	rateReasonRequests            = "requests"
-	rateReasonTokens              = "tokens"
+	routeContextPath          = "/api/shim/route-context"
+	routeContextLookupTimeout = 500 * time.Millisecond
+	routeContextResponseLimit = 64 << 10
+	demotedPriority           = 1
+	decisionAllowed           = "allowed"
+	decisionDemote            = "demote"
+	decisionRejected          = "rejected"
+	decisionExempt            = "exempt"
+	rateReasonRequests        = "requests"
+	rateReasonTokens          = "tokens"
 )
 
 type routeContextClient struct {
@@ -62,7 +62,7 @@ func (q *routeQuota) valid() bool {
 }
 
 // valid enforces the decision contract documented in the control plane's
-// docs/model-rate-limits.md. Anything else fails closed.
+// docs/model-rate-limits.md. Anything else is treated as a lookup outage.
 func (r *routeRateLimit) valid() bool {
 	if r == nil || r.RetryAfterSeconds == nil || *r.RetryAfterSeconds < 0 || !r.Requests.valid() || !r.Tokens.valid() {
 		return false
@@ -111,12 +111,15 @@ func quotaRetryAfter(header http.Header) string {
 	return ""
 }
 
-func routeContextUnavailable(model, reason string) *routeContextError {
+// routeContextUnavailable records a lookup the control plane did not answer.
+// The request is still served: authentication happens again at the enclave,
+// so the only thing lost is this one request's shared-quota accounting and
+// any configured priority, and a control plane outage must not become an
+// inference outage. The counter and log line make the degradation visible.
+func routeContextUnavailable(model, reason string) routeContext {
 	manager.RouteContextLookupFailuresTotal.WithLabelValues(model, reason).Inc()
-	return &routeContextError{
-		apiError:   &manager.ErrAdmissionUnavailable,
-		retryAfter: strconv.Itoa(routeContextRetryAfterSeconds),
-	}
+	log.WithFields(log.Fields{"model": model, "reason": reason}).Warn("route-context lookup unavailable, admitting without quota decision")
+	return routeContext{}
 }
 
 func newRouteContextClient(controlPlaneURL string) *routeContextClient {
@@ -129,9 +132,12 @@ func newRouteContextClient(controlPlaneURL string) *routeContextClient {
 // Lookup applies quota admission to one external inference request. JWT shape
 // classification skips only this quota lookup, not authentication: downstream
 // model and tool shims must verify the credential before serving inference.
+// A missing credential and every verdict the control plane returns are
+// enforced; a lookup the control plane cannot answer admits the request with
+// an empty context.
 func (c *routeContextClient) Lookup(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
 	if model == "" {
-		return routeContext{}, routeContextUnavailable(model, "missing_model")
+		return routeContextUnavailable(model, "missing_model"), nil
 	}
 	resolved, err := c.fetch(ctx, apiKey, model)
 	if err != nil {
@@ -151,7 +157,9 @@ func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (route
 }
 
 // fetch performs one uncached, non-replayable call and validates the response
-// shape. It does not act on the decision; Lookup does.
+// shape. It does not act on the decision; Lookup does. Only credential
+// denials are returned as errors; anything that prevents a decision from
+// being read yields an empty context.
 func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
 	if jwtSubject(apiKey) != "" {
 		return routeContext{}, nil
@@ -160,17 +168,17 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 		return routeContext{}, &routeContextError{apiError: &manager.ErrMissingAPIKey}
 	}
 	if c == nil || c.endpoint == "" || c.httpClient == nil {
-		return routeContext{}, routeContextUnavailable(model, "configuration")
+		return routeContextUnavailable(model, "configuration"), nil
 	}
 	body, err := json.Marshal(routeContextRequest{APIKey: apiKey, Model: model})
 	if err != nil {
-		return routeContext{}, routeContextUnavailable(model, "marshal")
+		return routeContextUnavailable(model, "marshal"), nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, routeContextLookupTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return routeContext{}, routeContextUnavailable(model, "request")
+		return routeContextUnavailable(model, "request"), nil
 	}
 	// Admission is not replayable, even after a connection failure or redirect.
 	req.GetBody = nil
@@ -179,7 +187,7 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
-		return routeContext{}, routeContextUnavailable(model, "transport")
+		return routeContextUnavailable(model, "transport"), nil
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, routeContextResponseLimit+1))
@@ -190,14 +198,14 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 		return routeContext{}, denial
 	}
 	if resp.StatusCode != http.StatusOK {
-		return routeContext{}, routeContextUnavailable(model, fmt.Sprintf("http_%d", resp.StatusCode))
+		return routeContextUnavailable(model, fmt.Sprintf("http_%d", resp.StatusCode)), nil
 	}
 	var resolved routeContext
 	if data == nil || json.Unmarshal(data, &resolved) != nil {
-		return routeContext{}, routeContextUnavailable(model, "decode")
+		return routeContextUnavailable(model, "decode"), nil
 	}
 	if model != "" && !resolved.RateLimit.valid() {
-		return routeContext{}, routeContextUnavailable(model, "decision")
+		return routeContextUnavailable(model, "decision"), nil
 	}
 	return resolved, nil
 }
