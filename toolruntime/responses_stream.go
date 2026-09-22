@@ -658,12 +658,10 @@ func (s *responsesStreamer) forwardEvent(eventType string, event map[string]any)
 //   - response.output_item.done (terminal status completed or failed)
 //
 // The stream is always fully spec-conformant on the Responses path; no
-// opt-in marker channel is used. Clients that want to distinguish a
-// safety-filter block from a generic failure can inspect the non-spec
-// `status` strings on the terminal `web_search_call` output item carried
-// in `response.completed.output`, which is collapsed onto `failed` at
-// the envelope level but preserved on the record for tooling.
-func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (string, []toolCallSource, error) {
+// opt-in marker channel is used. Anything the spec has no slot for (error
+// codes, PII masking) rides on the `_tinfoil` sidecar of the terminal
+// `web_search_call` item.
+func (s *responsesStreamer) executeTool(ctx context.Context, registry *sessionRegistry, call toolCall) (toolExecution, error) {
 	return executeToolWithProgress(ctx, registry, s.citations, &responsesToolProgressEmitter{streamer: s}, call)
 }
 
@@ -703,14 +701,11 @@ func (s *responsesStreamer) emitToolCallPhase(eventType, itemID string, outputIn
 }
 
 // closeWebSearchCallItem emits response.output_item.done for a
-// router-owned web_search_call item with the given terminal status. The
-// spec defines the envelope status enum as {in_progress, searching,
-// completed, failed}, so any internal `blocked` value is collapsed
-// inside webSearchCallEvent and the unfiltered router status (plus any
-// error code) rides on the `_tinfoil` sidecar for clients that want to
-// render a distinct affordance for safety-filter blocks.
-func (s *responsesStreamer) closeWebSearchCallItem(id string, outputIndex int, action map[string]any, status, errorCode string) {
-	item := webSearchCallEvent(id, status, errorCode, action)
+// router-owned web_search_call item with the given terminal status. Any
+// error code or PII masking report rides on the `_tinfoil` sidecar the
+// spec has no slot for.
+func (s *responsesStreamer) closeWebSearchCallItem(id string, outputIndex int, action map[string]any, status, errorCode string, pii *piiCheckResult) {
+	item := webSearchCallEvent(id, status, errorCode, action, pii)
 	s.emitEvent("response.output_item.done", map[string]any{
 		"type":         "response.output_item.done",
 		"output_index": outputIndex,
@@ -972,7 +967,7 @@ func runResponsesStreaming(
 			tstart := time.Now()
 			output := resolveStreamingRouterToolCall(
 				ctx, call, searchOpts, toolSchemas, streamer.toolCalls,
-				func(ctx context.Context, call toolCall) (string, []toolCallSource, error) {
+				func(ctx context.Context, call toolCall) (toolExecution, error) {
 					return streamer.executeTool(ctx, registry, call)
 				},
 				"", "",

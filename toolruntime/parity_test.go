@@ -14,9 +14,8 @@ import (
 // marker stream for live progress (since chat has no spec slot for
 // web_search_call); Responses uses the spec-defined web_search_call
 // output items. The assertion here is that the terminal status set on
-// each surface matches one-for-one (with chat's `blocked` collapsed onto
-// the spec-valid `failed` for comparison), and that citation URLs and
-// visible text are identical across surfaces.
+// each surface matches one-for-one, and that citation URLs and visible
+// text are identical across surfaces.
 func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -40,8 +39,8 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 		})
 		tc.record(toolCallRecord{
 			name:        "search",
-			arguments:   map[string]any{"query": "blocked query"},
-			errorReason: blockedToolErrorReason,
+			arguments:   map[string]any{"query": "failing query"},
+			errorReason: publicToolErrorReasonString,
 		})
 		return c, tc
 	}
@@ -97,13 +96,11 @@ func TestChatAndResponsesParityOnSameToolCalls(t *testing.T) {
 
 	// Terminal status alignment: the chat marker sequence's terminal
 	// statuses must match the Responses spec web_search_call statuses
-	// one-for-one, with chat's router-specific `blocked` status
-	// collapsed onto the spec-valid `failed` (OpenAI's
-	// web_search_call.status enum has no dedicated blocked slot).
-	chatTerminals := collapseBlockedTerminalStatuses(extractMarkerStatuses(t, chatContent))
+	// one-for-one.
+	chatTerminals := terminalStatuses(extractMarkerStatuses(t, chatContent))
 	specStatuses := extractSpecStatuses(t, respBody)
 	if !stringSliceEqual(chatTerminals, specStatuses) {
-		t.Fatalf("terminal status set differs:\n chat terminals (blocked->failed): %v\n responses spec statuses:          %v", chatTerminals, specStatuses)
+		t.Fatalf("terminal status set differs:\n chat terminals:          %v\n responses spec statuses: %v", chatTerminals, specStatuses)
 	}
 }
 
@@ -248,19 +245,13 @@ func stripMarkers(text string) string {
 	return strings.TrimSpace(stripped)
 }
 
-// collapseBlockedTerminalStatuses maps the in_progress+terminal marker
-// sequence onto the spec-compliant web_search_call status list. Only the
-// terminal statuses survive (one per recorded tool call) and any router
-// `blocked` status collapses onto the spec's `failed` status because
-// OpenAI's web_search_call schema has no dedicated slot for it.
-func collapseBlockedTerminalStatuses(markerStatuses []string) []string {
+// terminalStatuses drops the in_progress markers from a marker status
+// sequence so only the terminal status per recorded tool call remains.
+func terminalStatuses(markerStatuses []string) []string {
 	out := make([]string, 0, len(markerStatuses)/2)
 	for _, s := range markerStatuses {
 		if s == "in_progress" {
 			continue
-		}
-		if s == "blocked" {
-			s = "failed"
 		}
 		out = append(out, s)
 	}

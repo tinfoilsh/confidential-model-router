@@ -95,6 +95,12 @@ func TestExecuteRouterToolCallPreservesStructuredSearchMetadata(t *testing.T) {
 					"author":         "Alex Example",
 					"favicon":        "https://example.com/favicon.ico",
 				}},
+				"pii_checked":    true,
+				"pii_masked":     true,
+				"redacted_query": "example",
+				"pii_redactions": []any{
+					map[string]any{"type": "private_email", "start": float64(0), "end": float64(16)},
+				},
 			},
 		}, nil
 	})
@@ -145,10 +151,15 @@ func TestExecuteRouterToolCallPreservesStructuredSearchMetadata(t *testing.T) {
 	if _, present := source["favicon"]; present {
 		t.Fatalf("favicon must not be returned: %#v", source)
 	}
+	sidecar, _ := item["_tinfoil"].(map[string]any)
+	pii, _ := sidecar["pii"].(map[string]any)
+	if pii == nil || pii["masked"] != true || pii["redacted_query"] != "example" {
+		t.Fatalf("PII report from the tool server was not surfaced on _tinfoil.pii: %#v", item["_tinfoil"])
+	}
 
 	streamer, recorder := newTestResponsesStreamerForSpecEvents(t)
 	streamer.includeActionSources = true
-	_, _, err = executeToolWithProgress(
+	execution, err := executeToolWithProgress(
 		ctx,
 		registry,
 		&citations.State{NextIndex: 1},
@@ -158,12 +169,16 @@ func TestExecuteRouterToolCallPreservesStructuredSearchMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeToolWithProgress: %v", err)
 	}
+	if execution.pii == nil || !execution.pii.masked {
+		t.Fatalf("streaming execution must carry the PII report for the record: %+v", execution.pii)
+	}
 	streamBody := recorder.Body.String()
 	for _, field := range []string{
 		`"title":"Example result"`,
 		`"snippet":"Relevant excerpt."`,
 		`"published_date":"2026-08-10"`,
 		`"author":"Alex Example"`,
+		`"pii":{"masked":true,"redacted_query":"example","redactions":[{"end":16,"start":0,"type":"private_email"}]}`,
 	} {
 		if !strings.Contains(streamBody, field) {
 			t.Fatalf("streaming terminal item missing %s: %s", field, streamBody)

@@ -305,6 +305,7 @@ func executeRouterToolCall(
 	} else {
 		record.resultSources = toolCallSourcesForResult(call.name, structured, output)
 		record.resultURLs = toolCallSourceURLs(record.resultSources)
+		record.pii = piiCheckResultFromStructured(call.name, structured)
 		if traceID != "" {
 			debugLogf("toolruntime:%s %s tool.result name=%s elapsed=%s output_len=%d urls=%v preview=%q",
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))

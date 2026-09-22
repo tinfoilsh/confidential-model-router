@@ -100,12 +100,12 @@ func TestStreamedFetchCarriesRawExcerptsWithoutHarmonyCursors(t *testing.T) {
 	streamer, recorder := newTestChatStreamer(t)
 	streamer.citations.Harmony = true
 	streamer.eventFlags.webSearch = true
-	output, sources, err := streamer.executeTool(ctx, registry, toolCall{name: routerFetchToolName, arguments: map[string]any{"urls": []any{url}}})
+	execution, err := streamer.executeTool(ctx, registry, toolCall{name: routerFetchToolName, arguments: map[string]any{"urls": []any{url}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output, "[1] Fetched page") || len(sources) != 1 {
-		t.Fatalf("unexpected live output: %q", output)
+	if !strings.Contains(execution.output, "[1] Fetched page") || len(execution.sources) != 1 {
+		t.Fatalf("unexpected live output: %q", execution.output)
 	}
 	completed := 0
 	for _, frame := range strings.Split(recorder.Body.String(), "\n\n") {

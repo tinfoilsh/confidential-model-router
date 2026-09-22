@@ -46,7 +46,7 @@ func TestChatStreamerEmitTinfoilEventMarkerWritesDeltaWhenEnabled(t *testing.T) 
 	streamer, rec := newTestChatStreamer(t)
 	streamer.eventFlags = tinfoilEventFlags{webSearch: true}
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil)
+	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search", "query": "q"}, "", nil, nil)
 
 	body := rec.Body.String()
 	// Pull exactly one `data:` frame, decode it, and assert the
@@ -91,7 +91,7 @@ func TestChatStreamerEmitTinfoilEventMarkerIsNoOpWhenDisabled(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.eventFlags = tinfoilEventFlags{}
 
-	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "", nil)
+	streamer.emitTinfoilEventMarker("ws_1", "in_progress", map[string]any{"type": "search"}, "", nil, nil)
 
 	if body := rec.Body.String(); body != "" {
 		t.Fatalf("expected empty stream when events are disabled, got %q", body)
@@ -110,7 +110,7 @@ func TestChatStreamerEmitsSourcesOnTerminalMarker(t *testing.T) {
 		{url: "https://first.example", title: "First"},
 		{url: "https://second.example", title: "Second"},
 	}
-	streamer.emitTinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources)
+	streamer.emitTinfoilEventMarker("ws_1", "completed", map[string]any{"type": "search", "query": "q"}, "", sources, nil)
 
 	frame := firstSSEDataFrame(t, rec.Body.String())
 	var chunk map[string]any
@@ -130,6 +130,56 @@ func TestChatStreamerEmitsSourcesOnTerminalMarker(t *testing.T) {
 	}
 }
 
+// TestChatStreamerEmitsPIIOnTerminalMarker pins the Chat progress
+// emitter end to end: closing a search handle with a PII report puts
+// `pii` on the terminal marker's delta.content and nowhere else, so
+// opt-in Chat clients get the same masking signal as the Responses
+// sidecar.
+func TestChatStreamerEmitsPIIOnTerminalMarker(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.eventFlags = tinfoilEventFlags{webSearch: true}
+	emitter := &chatToolProgressEmitter{streamer: streamer}
+
+	details := map[string]any{"type": "search", "query": "john@example.com hiking trails"}
+	handle := emitter.open("ws_1", routerSearchToolName, details)
+	emitter.close(handle, routerSearchToolName, details, toolProgressResult{
+		pii: &piiCheckResult{
+			masked:        true,
+			redactedQuery: "hiking trails",
+			redactions:    []piiRedaction{{kind: "private_email", start: 0, end: 16}},
+		},
+	}, "completed", "")
+
+	var payloads []map[string]any
+	for _, frame := range strings.Split(rec.Body.String(), "\n\n") {
+		if !strings.HasPrefix(frame, "data: {") {
+			continue
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame, "data: ")), &chunk); err != nil {
+			t.Fatalf("chat stream frame must be valid JSON: %v (%q)", err, frame)
+		}
+		content := chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"].(string)
+		for _, match := range tinfoilEventMarkerPattern.FindAllStringSubmatch(content, -1) {
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(match[1]), &decoded); err != nil {
+				t.Fatalf("marker payload must be valid JSON: %v (%q)", err, match[1])
+			}
+			payloads = append(payloads, decoded)
+		}
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("expected in_progress + completed markers, got %d: %#v", len(payloads), payloads)
+	}
+	if _, present := payloads[0]["pii"]; payloads[0]["status"] != "in_progress" || present {
+		t.Fatalf("in_progress marker must not carry pii: %#v", payloads[0])
+	}
+	report, _ := payloads[1]["pii"].(map[string]any)
+	if payloads[1]["status"] != "completed" || report == nil || report["masked"] != true || report["redacted_query"] != "hiking trails" {
+		t.Fatalf("completed marker must carry the pii report: %#v", payloads[1])
+	}
+}
+
 // TestResponsesStreamerEmitsSpecWebSearchCallEvents pins the Responses
 // streaming contract for router-owned web_search tool calls: the router
 // MUST emit the spec-defined event sequence documented by OpenAI
@@ -144,7 +194,7 @@ func TestResponsesStreamerEmitsSpecWebSearchCallEvents(t *testing.T) {
 	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
 	streamer.emitToolCallPhase("response.web_search_call.searching", "ws_1", idx)
 	streamer.emitToolCallPhase("response.web_search_call.completed", "ws_1", idx)
-	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "")
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "", nil)
 
 	body := rec.Body.String()
 	wantOrder := []string{
@@ -256,7 +306,7 @@ func TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent(t *testing.T) {
 	action := map[string]any{"type": "search", "query": "q"}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
 	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
-	streamer.closeWebSearchCallItem("ws_1", idx, action, "failed", "upstream_timeout")
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "failed", "upstream_timeout", nil)
 
 	body := rec.Body.String()
 	if strings.Contains(body, "response.web_search_call.completed") {
@@ -285,23 +335,26 @@ func TestResponsesStreamerWebSearchCallFailedOmitsCompletedEvent(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar pins
-// that a safety-filter block on a router-owned web_search tool call
-// surfaces on the live stream as:
-//   - envelope `status: "failed"` (spec-conformant; OpenAI's
-//     web_search_call.status enum has no `blocked` slot)
-//   - vendor-extension `_tinfoil: {status: "blocked", error: {code: ...}}`
-//     carrying the unfiltered router signal for Tinfoil-aware clients
+// TestResponsesStreamerMaskedWebSearchCallCarriesTinfoilSidecar pins
+// that a search whose query the websearch server masked surfaces on the
+// live stream as a spec-valid `completed` item whose `_tinfoil.pii`
+// sidecar carries the masking report. The envelope action keeps the
+// model's original query; the sanitized query rides on the sidecar.
 //
 // Strict OpenAI SDKs ignore `_tinfoil`; clients that want the richer
 // UX read it off the terminal `output_item.done.item` directly.
-func TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar(t *testing.T) {
+func TestResponsesStreamerMaskedWebSearchCallCarriesTinfoilSidecar(t *testing.T) {
 	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
 
-	action := map[string]any{"type": "search", "query": "sensitive"}
+	action := map[string]any{"type": "search", "query": "john@example.com hiking trails"}
+	pii := &piiCheckResult{
+		masked:        true,
+		redactedQuery: "hiking trails",
+		redactions:    []piiRedaction{{kind: "private_email", start: 0, end: 16}},
+	}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
 	streamer.emitToolCallPhase("response.web_search_call.in_progress", "ws_1", idx)
-	streamer.closeWebSearchCallItem("ws_1", idx, action, "blocked", blockedToolErrorReason)
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "", pii)
 
 	body := rec.Body.String()
 	var terminalItem map[string]any
@@ -321,19 +374,30 @@ func TestResponsesStreamerBlockedWebSearchCallCarriesTinfoilSidecar(t *testing.T
 	if terminalItem == nil {
 		t.Fatalf("expected a terminal response.output_item.done frame: %q", body)
 	}
-	if terminalItem["status"] != "failed" {
-		t.Fatalf("envelope status must collapse onto failed, got %v", terminalItem["status"])
+	if terminalItem["status"] != "completed" {
+		t.Fatalf("masking must not fail the call, got status %v", terminalItem["status"])
+	}
+	if got := terminalItem["action"].(map[string]any)["query"]; got != "john@example.com hiking trails" {
+		t.Fatalf("action.query must stay the model's query, got %v", got)
 	}
 	sidecar, ok := terminalItem["_tinfoil"].(map[string]any)
 	if !ok {
-		t.Fatalf("blocked terminal frame must carry a _tinfoil sidecar, got %#v", terminalItem["_tinfoil"])
+		t.Fatalf("masked terminal frame must carry a _tinfoil sidecar, got %#v", terminalItem["_tinfoil"])
 	}
-	if sidecar["status"] != "blocked" {
-		t.Fatalf("_tinfoil.status must be the unfiltered router status, got %v", sidecar["status"])
+	if _, present := sidecar["error"]; present {
+		t.Fatalf("masked search is not an error: %#v", sidecar)
 	}
-	errObj, _ := sidecar["error"].(map[string]any)
-	if errObj == nil || errObj["code"] != blockedToolErrorReason {
-		t.Fatalf("_tinfoil.error.code = %v, want %q", errObj, blockedToolErrorReason)
+	report, _ := sidecar["pii"].(map[string]any)
+	if report == nil || report["masked"] != true || report["redacted_query"] != "hiking trails" {
+		t.Fatalf("_tinfoil.pii mismatch: %#v", sidecar["pii"])
+	}
+	redactions, _ := report["redactions"].([]any)
+	if len(redactions) != 1 {
+		t.Fatalf("expected one redaction, got %#v", report["redactions"])
+	}
+	span := redactions[0].(map[string]any)
+	if span["type"] != "private_email" || span["start"] != float64(0) || span["end"] != float64(16) {
+		t.Fatalf("redaction span mismatch: %#v", span)
 	}
 }
 
@@ -347,7 +411,7 @@ func TestResponsesStreamerSuccessfulWebSearchCallOmitsTinfoilSidecar(t *testing.
 
 	action := map[string]any{"type": "search", "query": "q"}
 	idx := streamer.openWebSearchCallItem("ws_1", action)
-	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "")
+	streamer.closeWebSearchCallItem("ws_1", idx, action, "completed", "", nil)
 
 	body := rec.Body.String()
 	for _, line := range strings.Split(body, "\n") {
