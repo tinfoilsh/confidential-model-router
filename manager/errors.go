@@ -32,8 +32,6 @@ const (
 	ErrCodeServerOverloaded   = "server_is_overloaded"
 	ErrCodeUpstreamError      = "upstream_error"
 	ErrCodeDocumentProcessing = "document_processing_failed"
-
-	ErrCodeAdmissionUnavailable = "admission_unavailable"
 )
 
 // Client-facing error messages, aligned with OpenAI's standard error messages
@@ -57,8 +55,7 @@ const (
 	ErrMsgAutoNoScores     = "Model 'auto' is not available: no models publish intelligence scores."
 	ErrMsgAutoUnavailable  = "Model 'auto' is not available for this request."
 
-	ErrMsgTokenRateLimited     = "Rate limit reached for tokens. Retry after %d seconds."
-	ErrMsgAdmissionUnavailable = "Request admission is temporarily unavailable. Please try again later."
+	ErrMsgTokenRateLimited = "Rate limit reached for tokens. Retry after %d seconds."
 )
 
 // APIError is an error response in OpenAI's format. Param and Code are
@@ -96,12 +93,6 @@ func (e APIError) WithStatus(status int) *APIError {
 // Predeclared errors. Parameterized messages are filled in with WithMessage
 // at the call site.
 var (
-	ErrAdmissionUnavailable = APIError{
-		Status:  http.StatusServiceUnavailable,
-		Type:    ErrTypeServiceUnavailable,
-		Code:    ErrCodeAdmissionUnavailable,
-		Message: ErrMsgAdmissionUnavailable,
-	}
 	ErrServer = APIError{
 		Status:  http.StatusInternalServerError,
 		Type:    ErrTypeServer,
