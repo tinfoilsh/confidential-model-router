@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -505,6 +506,43 @@ func TestIntValue_TriState(t *testing.T) {
 		if n, ok := intValue(value); ok {
 			t.Errorf("intValue(%q) = (%d, true), want (_, false)", value, n)
 		}
+	}
+}
+
+func TestIntValue_ExactJSONNumbers(t *testing.T) {
+	cases := []struct {
+		value json.Number
+		want  int
+		ok    bool
+	}{
+		{"1.20e2", 120, true},
+		{"-1.20e2", -120, true},
+		{"0.000e-400", 0, true},
+		{json.Number(strconv.Itoa(math.MaxInt) + ".0"), math.MaxInt, true},
+		{json.Number(strconv.Itoa(math.MinInt) + ".0"), math.MinInt, true},
+		{json.Number(strconv.FormatUint(uint64(math.MaxInt)+1, 10) + ".0"), 0, false},
+		{json.Number("-" + strconv.FormatUint(uint64(math.MaxInt)+2, 10) + ".0"), 0, false},
+		{"1.0000000000000000001", 0, false},
+		{"0.9999999999999999999", 0, false},
+		{"9.223372036854776e18", 0, false},
+		{"1e-400", 0, false},
+		{"1e400", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.value), func(t *testing.T) {
+			got, ok := intValue(tc.value)
+			if ok != tc.ok || (ok && got != tc.want) {
+				t.Fatalf("intValue(%q) = (%d, %v), want (%d, %v)", tc.value, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+	if want, err := strconv.Atoi("9007199254740993"); err == nil {
+		if got, ok := intValue(json.Number("9007199254740993.0")); !ok || got != want {
+			t.Fatalf("large decimal integer = (%d, %v), want (%d, true)", got, ok, want)
+		}
+	}
+	if got, ok := intValue(-float64(math.MinInt)); ok {
+		t.Fatalf("out-of-range float converted to %d", got)
 	}
 }
 

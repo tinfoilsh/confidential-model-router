@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
@@ -151,19 +152,24 @@ func (e *ValidationError) Error() string {
 }
 
 func intelligenceFromJSON(value any) (int, error) {
-	number, ok := value.(float64)
-	if exact, isNumber := value.(json.Number); isNumber {
-		var err error
-		number, err = exact.Float64()
-		ok = err == nil
-	}
-	if !ok || number != math.Trunc(number) {
-		return 0, &ValidationError{
-			Param:   intelligenceParam,
-			Message: fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence),
+	switch number := value.(type) {
+	case json.Number:
+		exact, ok := new(big.Rat).SetString(string(number))
+		if ok && exact.IsInt() && exact.Num().IsInt64() {
+			level := exact.Num().Int64()
+			if level >= MinIntelligence && level <= MaxIntelligence {
+				return int(level), nil
+			}
+		}
+	case float64:
+		if number >= MinIntelligence && number <= MaxIntelligence && number == math.Trunc(number) {
+			return int(number), nil
 		}
 	}
-	return validateIntelligence(int(number), intelligenceParam)
+	return 0, &ValidationError{
+		Param:   intelligenceParam,
+		Message: fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence),
+	}
 }
 
 func validateIntelligence(level int, param string) (int, error) {

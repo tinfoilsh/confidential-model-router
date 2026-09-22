@@ -2,6 +2,8 @@ package autoroute
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"testing"
@@ -102,6 +104,27 @@ func TestParseIntelligence(t *testing.T) {
 			}
 			if _, present := tc.body[OptionsField]; present {
 				t.Fatalf("%s must be stripped from the body", OptionsField)
+			}
+		})
+	}
+}
+
+func TestParseIntelligenceRejectsUnsafeNumbers(t *testing.T) {
+	for _, value := range []any{
+		json.Number("1e100"), json.Number("-1e100"),
+		json.Number("9223372036854775808"),
+		json.Number("42.0000000000000000001"),
+		json.Number("100.0000000000000000001"),
+		json.Number("1e-400"),
+		float64(1e100), float64(-1e100), math.Inf(1), math.NaN(),
+	} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			body := map[string]any{OptionsField: map[string]any{IntelligenceKey: value}}
+			_, err := ParseIntelligence(http.Header{}, body)
+			validation, ok := err.(*ValidationError)
+			want := fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence)
+			if !ok || validation.Param != intelligenceParam || validation.Message != want {
+				t.Fatalf("error = %v, want %q for %s", err, want, intelligenceParam)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"encoding/json"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -467,6 +468,9 @@ func intValue(raw any) (int, bool) {
 	case int:
 		return v, true
 	case int64:
+		if v < math.MinInt || v > math.MaxInt {
+			return 0, false
+		}
 		return int(v), true
 	case float64:
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -475,17 +479,19 @@ func intValue(raw any) (int, bool) {
 		if v != math.Trunc(v) {
 			return 0, false
 		}
-		if v < math.MinInt || v > math.MaxInt {
+		// MaxInt rounds up in float64 on 64-bit systems; use an exclusive bound.
+		if v < math.MinInt || v >= -float64(math.MinInt) {
 			return 0, false
 		}
 		return int(v), true
 	case json.Number:
-		if n, err := v.Int64(); err == nil {
-			return int(n), true
+		if n, err := strconv.Atoi(string(v)); err == nil {
+			return n, true
 		}
-		// UseNumber also retains decimal and exponent forms of integers.
-		if n, err := v.Float64(); err == nil {
-			return intValue(n)
+		// Decimal and exponent forms must be integral before any rounding.
+		n, ok := new(big.Rat).SetString(string(v))
+		if ok && n.IsInt() && n.Num().IsInt64() {
+			return intValue(n.Num().Int64())
 		}
 	case string:
 		trimmed := strings.TrimSpace(v)

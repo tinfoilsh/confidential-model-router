@@ -40,7 +40,6 @@ var errBodyNotObject = errors.New("request body must be one JSON object")
 // opaque key) happens here via cacheSaltIdentity so the call site cannot
 // wire the wrong value.
 func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) cachesalt.Mode {
-	// An absent body has no fields to strip or salt.
 	if body == nil {
 		return cachesalt.ModeNone
 	}

@@ -210,8 +210,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "completions", path: "/v1/completions", body: `{"model":"gpt-oss-120b","priority":-99,"prompt":"hi"}`, model: admissionTestModel},
 		{name: "auto", path: "/v1/chat/completions", body: `{"model":"auto","messages":[],"auto_model_options":{"intelligence":100}}`, model: admissionTestModel},
 		{name: "embeddings", path: "/v1/embeddings", body: `{"model":"nomic-embed-text","priority":-99,"input":"hi"}`, model: "nomic-embed-text"},
-		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99}` + "\n\t ", model: "qwen3-tts"},
-		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":9007199254740993,"stream":true,"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
+		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99,"stream":true}` + "\n\t ", model: "qwen3-tts"},
+		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":9007199254740993,"stream":true,"stream_options":{"include_usage":false},"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
 		{name: "transcription", path: "/v1/audio/transcriptions", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "translation", path: "/v1/audio/translations", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "file convert", path: "/v1/convert/file", body: "\x00\xfffile", model: "doc-upload", contentType: "application/octet-stream", raw: true},
@@ -324,13 +324,22 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 						t.Fatalf("seed precision lost: %s", forwarded.body)
 					}
 					if tc.name == "speech explicit" {
-						for _, field := range []string{"cache_salt", "user_cache_secret", "stream_options"} {
+						for _, field := range []string{"cache_salt", "user_cache_secret"} {
 							if _, exists := body[field]; exists {
 								t.Errorf("speech forwarded %s: %s", field, forwarded.body)
 							}
 						}
 						if string(body["stream"]) != "true" || string(body["input"]) != `"hi"` {
 							t.Fatalf("speech content changed: %s", forwarded.body)
+						}
+					}
+					if r.URL.Path == "/v1/audio/speech" {
+						var sent map[string]json.RawMessage
+						if err := json.Unmarshal([]byte(tc.body), &sent); err != nil {
+							t.Fatal(err)
+						}
+						if !bytes.Equal(body["stream_options"], sent["stream_options"]) {
+							t.Fatalf("speech stream_options were injected or changed: %s", forwarded.body)
 						}
 					}
 				})
