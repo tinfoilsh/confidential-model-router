@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,12 +43,9 @@ func TestApplyCacheSaltStripsFieldsUnconditionally(t *testing.T) {
 				"cache_salt":        "client-chosen",
 				"user_cache_secret": "s1",
 			}
-			mode, changed := applyCacheSalt(body, tc.path, tc.apiKey, tc.enabled)
+			mode := applyCacheSalt(body, tc.path, tc.apiKey, tc.enabled)
 			if mode != cachesalt.ModeNone {
 				t.Errorf("mode = %q, want ModeNone", mode)
-			}
-			if !changed {
-				t.Error("changed = false, want true (fields were present)")
 			}
 			if _, ok := body["cache_salt"]; ok {
 				t.Error("client-supplied cache_salt survived")
@@ -58,20 +54,6 @@ func TestApplyCacheSaltStripsFieldsUnconditionally(t *testing.T) {
 				t.Error("user_cache_secret survived")
 			}
 		})
-	}
-}
-
-func TestApplyCacheSaltChangedFlag(t *testing.T) {
-	// A body with neither field, on a non-injecting call, must report no
-	// change so verbatim-proxy callers can skip re-marshaling.
-	body := map[string]any{"model": "m"}
-	if _, changed := applyCacheSalt(body, "/v1/embeddings", "tenant-a", true); changed {
-		t.Error("changed = true for a body with no salt fields on a non-injecting path")
-	}
-	// Injection is itself a change.
-	body = map[string]any{"model": "m"}
-	if _, changed := applyCacheSalt(body, "/v1/chat/completions", "tenant-a", true); !changed {
-		t.Error("changed = false despite injecting a salt")
 	}
 }
 
@@ -118,7 +100,7 @@ func TestApplyCacheSaltModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mode, _ := applyCacheSalt(tc.body, "/v1/chat/completions", "tenant-a", true)
+			mode := applyCacheSalt(tc.body, "/v1/chat/completions", "tenant-a", true)
 			if mode != tc.wantMode {
 				t.Errorf("mode = %q, want %q", mode, tc.wantMode)
 			}
@@ -148,7 +130,7 @@ func TestApplyCacheSaltEndpointAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
 			body := map[string]any{"model": "m"}
-			mode, _ := applyCacheSalt(body, tc.path, "tenant-a", true)
+			mode := applyCacheSalt(body, tc.path, "tenant-a", true)
 			_, injected := body["cache_salt"]
 			if injected != tc.inject {
 				t.Errorf("injected = %v, want %v", injected, tc.inject)
@@ -208,184 +190,6 @@ func TestApplyCacheSaltJWTShapedOpaqueKeyUsesRawIdentity(t *testing.T) {
 	}
 }
 
-// TestSaltProxiedBody covers endpoints whose body is otherwise forwarded
-// verbatim (speech).
-func TestSaltProxiedBody(t *testing.T) {
-	tenantSalt, _ := cachesalt.Derive("tenant-a", "")
-	t.Run("strip-only speech", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"gpt-oss-120b","input":"hello","stream":true,"cache_salt":"client-chosen","user_cache_secret":"secret"}`))
-		_, mode, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != cachesalt.ModeNone {
-			t.Fatalf("mode = %q, want ModeNone", mode)
-		}
-		body := decodeBody(t, req)
-		for _, field := range []string{"cache_salt", "user_cache_secret", "stream_options"} {
-			if _, exists := body[field]; exists {
-				t.Errorf("unexpected forwarded field %q", field)
-			}
-		}
-		if body["input"] != "hello" || body["stream"] != true {
-			t.Fatalf("request content changed: %+v", body)
-		}
-	})
-
-	t.Run("injects and strips on the salted body", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader(`{"model":"m","cache_salt":"client-chosen","user_cache_secret":"s1"}`))
-		_, mode, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		userSalt, _ := cachesalt.Derive("tenant-a", "s1")
-		if mode != cachesalt.ModeUser {
-			t.Errorf("mode = %q, want ModeUser", mode)
-		}
-		got := decodeBody(t, req)
-		if got["cache_salt"] != userSalt {
-			t.Errorf("cache_salt = %v, want %q", got["cache_salt"], userSalt)
-		}
-		if _, ok := got["user_cache_secret"]; ok {
-			t.Error("user_cache_secret survived to the engine")
-		}
-	})
-
-	t.Run("strips client salt even when disabled", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader(`{"model":"m","cache_salt":"client-chosen"}`))
-		_, mode, err := saltProxiedBody(req, "tenant-a", false)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		if mode != cachesalt.ModeNone {
-			t.Errorf("mode = %q, want ModeNone", mode)
-		}
-		if got := decodeBody(t, req); got["cache_salt"] != nil {
-			t.Errorf("client cache_salt survived while disabled: %v", got["cache_salt"])
-		}
-	})
-
-	t.Run("injects tenant salt with no secret", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"m"}`))
-		_, mode, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		if mode != cachesalt.ModeTenant {
-			t.Errorf("mode = %q, want ModeTenant", mode)
-		}
-		if got := decodeBody(t, req); got["cache_salt"] != tenantSalt {
-			t.Errorf("cache_salt = %v, want %q", got["cache_salt"], tenantSalt)
-		}
-	})
-
-	t.Run("leaves an unchanged body byte-identical", func(t *testing.T) {
-		const raw = "{ \"model\":\"gpt-oss-120b\", \"messages\":[] }\n"
-		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-		req.Header.Set("Content-Length", strconv.Itoa(len(raw)))
-		// Disabled + no salt fields: nothing to do, must not re-marshal.
-		if _, _, err := saltProxiedBody(req, "tenant-a", false); err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		out, _ := io.ReadAll(req.Body)
-		if string(out) != raw {
-			t.Errorf("body was re-marshaled: got %q, want %q", out, raw)
-		}
-		if req.ContentLength != int64(len(raw)) || req.Header.Get("Content-Length") != strconv.Itoa(len(raw)) {
-			t.Fatal("unchanged body length changed")
-		}
-	})
-
-	t.Run("preserves int64 precision through the re-marshal", func(t *testing.T) {
-		// 2^53+1 is not representable as float64; default JSON decoding
-		// would silently turn it into ...992.
-		req := httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader(`{"model":"m","seed":9007199254740993}`))
-		if _, _, err := saltProxiedBody(req, "tenant-a", true); err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		raw, _ := io.ReadAll(req.Body)
-		if !strings.Contains(string(raw), `"seed":9007199254740993`) {
-			t.Errorf("seed lost precision: %s", raw)
-		}
-		if req.ContentLength != int64(len(raw)) || req.Header.Get("Content-Length") != strconv.Itoa(len(raw)) {
-			t.Fatal("rewritten body length does not match payload")
-		}
-	})
-
-	t.Run("rejects a non-JSON body", func(t *testing.T) {
-		const raw = `not json`
-		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-		if _, _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
-			t.Fatal("expected malformed proxied body to be rejected")
-		}
-	})
-
-	t.Run("rejects a body with trailing data", func(t *testing.T) {
-		// json.Unmarshal rejects all of these, and so must the engine-bound
-		// rewrite: re-marshaling only the first value would silently convert
-		// a request the engine rejects into one it accepts. The '}'/' ]'
-		// cases are the regression: dec.More() reports "no more elements" at
-		// either byte, so they used to slip past the trailing-data guard.
-		for _, raw := range []string{
-			`{"model":"m","cache_salt":"evil"}}`,
-			`{"model":"m"}]`,
-			`{"model":"m"}} garbage`,
-			`{"model":"m"}{"model":"n"}`,
-			`{"model":"m"} x`,
-		} {
-			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(raw))
-			if _, _, err := saltProxiedBody(req, "tenant-a", true); err == nil {
-				t.Errorf("expected trailing-data body %q to be rejected", raw)
-			}
-		}
-	})
-
-	t.Run("trailing whitespace is not trailing data", func(t *testing.T) {
-		// json.Unmarshal accepts trailing whitespace, so the strictness fix
-		// must not regress ordinary clients that end the body with a newline.
-		req := httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader("{\"model\":\"m\"}\n\t "))
-		_, mode, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		if mode != cachesalt.ModeTenant {
-			t.Errorf("mode = %q, want ModeTenant", mode)
-		}
-		if got := decodeBody(t, req); got["cache_salt"] != tenantSalt {
-			t.Errorf("cache_salt = %v, want %q", got["cache_salt"], tenantSalt)
-		}
-	})
-
-	t.Run("reports the stream flag for SLA gating", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader(`{"model":"m","stream":true}`))
-		parsed, _, err := saltProxiedBody(req, "tenant-a", true)
-		if err != nil {
-			t.Fatalf("saltProxiedBody: %v", err)
-		}
-		if streaming, _ := parsed["stream"].(bool); !streaming {
-			t.Error("stream:true was not reported")
-		}
-		body := decodeBody(t, req)
-		streamOptions, ok := body["stream_options"].(map[string]any)
-		if !ok || streamOptions["include_usage"] != true || streamOptions["continuous_usage_stats"] != true {
-			t.Fatalf("streaming usage options were not injected: %#v", body)
-		}
-
-		// A non-boolean stream value must read as non-streaming, not error.
-		req = httptest.NewRequest("POST", "/v1/chat/completions",
-			strings.NewReader(`{"model":"m","stream":"yes"}`))
-		parsed, _, err = saltProxiedBody(req, "tenant-a", true)
-		if streaming, _ := parsed["stream"].(bool); err != nil || streaming {
-			t.Errorf("non-boolean stream: streaming=%v err=%v, want false, nil", streaming, err)
-		}
-	})
-}
-
 type countedCloseBody struct {
 	io.Reader
 	closes int
@@ -394,33 +198,6 @@ type countedCloseBody struct {
 func (b *countedCloseBody) Close() error {
 	b.closes++
 	return nil
-}
-
-func TestSaltProxiedBodyClosesOriginalOnce(t *testing.T) {
-	for _, tc := range []struct {
-		name, raw          string
-		enabled, wantError bool
-	}{
-		{"unchanged", `{"model":"gpt-oss-120b"}`, false, false},
-		{"rewritten", `{"model":"gpt-oss-120b"}`, true, false},
-		{"malformed", `{`, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.raw))
-			original := &countedCloseBody{Reader: req.Body}
-			req.Body = original
-			_, _, err := saltProxiedBody(req, "tenant-a", tc.enabled)
-			if (err != nil) != tc.wantError || original.closes != 1 {
-				t.Fatalf("error=%v, original close count=%d", err, original.closes)
-			}
-			if err == nil {
-				req.Body.Close()
-				if original.closes != 1 {
-					t.Fatal("closing replacement closed original again")
-				}
-			}
-		})
-	}
 }
 
 func TestReplaceJSONBodyMarshalFailurePreservesRequest(t *testing.T) {
@@ -447,11 +224,8 @@ func TestCacheSaltMetricSkippedInjection(t *testing.T) {
 	before := testutil.CollectAndCount(manager.CacheSaltInjectionsTotal)
 
 	// Skipped: empty identity on an allowlisted, enabled path.
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	_, mode, err := saltProxiedBody(req, "", true)
-	if err != nil {
-		t.Fatalf("saltProxiedBody: %v", err)
-	}
+	mode := applyCacheSalt(map[string]any{"model": "m"}, "/v1/chat/completions", "", true)
+	recordCacheSaltInjection("skipped-injection", mode)
 	if mode != cachesalt.ModeNone {
 		t.Fatalf("mode = %q, want ModeNone", mode)
 	}
@@ -462,9 +236,8 @@ func TestCacheSaltMetricSkippedInjection(t *testing.T) {
 	}
 }
 
-// TestRecordCacheSaltInjection pins the guard that both routing branches rely
-// on: ModeNone emits no sample (an empty mode label must never exist), any
-// real mode counts one under exactly {model, mode}.
+// TestRecordCacheSaltInjection pins the metric guard: ModeNone emits no
+// sample; any real mode counts one under exactly {model, mode}.
 func TestRecordCacheSaltInjection(t *testing.T) {
 	before := testutil.CollectAndCount(manager.CacheSaltInjectionsTotal)
 
@@ -486,19 +259,4 @@ func TestRecordCacheSaltInjection(t *testing.T) {
 	if got := testutil.ToFloat64(manager.CacheSaltInjectionsTotal.WithLabelValues("record-metric-count", "user")) - userBase; got != 2 {
 		t.Errorf(`series {record-metric-count,user} delta = %v, want 2`, got)
 	}
-}
-
-// decodeBody reads the request's current Body (the value saltProxiedBody
-// rewrote it to) and parses it as JSON.
-func decodeBody(t *testing.T, req *http.Request) map[string]any {
-	t.Helper()
-	raw, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("unmarshal body %q: %v", raw, err)
-	}
-	return m
 }

@@ -1,6 +1,7 @@
 package autoroute
 
 import (
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"testing"
@@ -30,6 +31,31 @@ func TestParseIntelligence(t *testing.T) {
 		{
 			name:    "body fractional rejected",
 			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: 42.5}},
+			wantErr: true,
+		},
+		{
+			name: "exact JSON number",
+			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("90")}},
+			want: 90,
+		},
+		{
+			name: "exact JSON decimal integer",
+			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("42.0")}},
+			want: 42,
+		},
+		{
+			name: "exact JSON exponent integer",
+			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("4.2e1")}},
+			want: 42,
+		},
+		{
+			name:    "exact JSON fraction rejected",
+			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("42.5")}},
+			wantErr: true,
+		},
+		{
+			name:    "exact JSON overflow rejected",
+			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("1e400")}},
 			wantErr: true,
 		},
 		{

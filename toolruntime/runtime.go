@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -670,7 +671,9 @@ func isStream(body map[string]any) bool {
 func cloneJSONMap(in map[string]any) map[string]any {
 	data, _ := json.Marshal(in)
 	var out map[string]any
-	_ = json.Unmarshal(data, &out)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	_ = decoder.Decode(&out)
 	return out
 }
 

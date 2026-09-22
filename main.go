@@ -534,6 +534,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		var modelName string
 		var err error
+		var speechBody map[string]any
 
 		// Set when the request is eligible for cache-route shadow
 		// observation.
@@ -703,23 +704,21 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				return
 			} else if r.URL.Path == "/v1/audio/speech" {
 				// Extract model from JSON body, default to qwen3-tts
-				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				r.Body.Close()
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				speechBody, err = decodeJSONBody(bodyBytes)
+				if err != nil {
 					writeError(w, invalidJSONError(err))
 					return
 				}
-				if m, ok := body["model"].(string); ok && m != "" {
+				if m, ok := speechBody["model"].(string); ok && m != "" {
 					modelName = m
 				} else {
 					modelName = "qwen3-tts"
 				}
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
@@ -740,14 +739,14 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
-				var body map[string]any
 				bodyBytes, err := io.ReadAll(r.Body)
 
 				if err != nil {
 					writeRequestBodyError(w, err)
 					return
 				}
-				if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				body, err := decodeJSONBody(bodyBytes)
+				if err != nil {
 					writeError(w, invalidJSONError(err))
 					return
 				}
@@ -845,7 +844,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// user_cache_secret, strip any client-supplied cache_salt,
 				// and (when enabled) inject the derived per-principal salt
 				// on endpoints that support it.
-				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
+				mode := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
 				recordCacheSaltInjection(modelName, mode)
 
 				// If streaming request, ensure upstream usage is available for billing.
@@ -932,25 +931,18 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
-		// Requests whose body was not parsed above (audio, file conversion,
-		// and realtime) are admitted here, after the authoritative model lookup.
+		// Audio, file conversion, and realtime are admitted here, after the
+		// authoritative model lookup.
 		if admission == nil {
 			if !admit() {
 				return
 			}
-			// Speech carries a JSON object the engine accepts a
-			// priority field on, so a client-supplied value must be stripped
-			// like on the parsed paths. Other endpoints may carry JSON-RPC
-			// batches, compressed payloads, or opaque file data and are
-			// proxied verbatim.
-			if !isWebSocketUpgrade(r) && r.URL.Path == "/v1/audio/speech" {
-				body, _, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
-				if err != nil {
-					writeError(w, invalidJSONError(err))
-					return
-				}
-				admission.applyPriority(body, r.URL.Path, modelName)
-				if err := replaceJSONBody(r, body); err != nil {
+			if speechBody != nil {
+				// Speech does not support cache salting.
+				delete(speechBody, "cache_salt")
+				delete(speechBody, "user_cache_secret")
+				admission.applyPriority(speechBody, r.URL.Path, modelName)
+				if err := replaceJSONBody(r, speechBody); err != nil {
 					writeError(w, &manager.ErrServer)
 					return
 				}

@@ -6,6 +6,7 @@
 package autoroute
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -151,6 +152,11 @@ func (e *ValidationError) Error() string {
 
 func intelligenceFromJSON(value any) (int, error) {
 	number, ok := value.(float64)
+	if exact, isNumber := value.(json.Number); isNumber {
+		var err error
+		number, err = exact.Float64()
+		ok = err == nil
+	}
 	if !ok || number != math.Trunc(number) {
 		return 0, &ValidationError{
 			Param:   intelligenceParam,

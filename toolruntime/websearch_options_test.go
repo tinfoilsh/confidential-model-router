@@ -1,6 +1,7 @@
 package toolruntime
 
 import (
+	"encoding/json"
 	"math"
 	"reflect"
 	"testing"
@@ -494,6 +495,16 @@ func TestIntValue_TriState(t *testing.T) {
 	}
 	if n, ok := intValue("42"); !ok || n != 42 {
 		t.Errorf("intValue(\"42\") = (%d, %v), want (42, true)", n, ok)
+	}
+	for _, value := range []json.Number{"42", "42.0", "4.2e1"} {
+		if n, ok := intValue(value); !ok || n != 42 {
+			t.Errorf("intValue(%q) = (%d, %v), want (42, true)", value, n, ok)
+		}
+	}
+	for _, value := range []json.Number{"42.5", "1e400"} {
+		if n, ok := intValue(value); ok {
+			t.Errorf("intValue(%q) = (%d, true), want (_, false)", value, n)
+		}
 	}
 }
 

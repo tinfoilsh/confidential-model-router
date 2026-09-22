@@ -205,13 +205,13 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		name, path, body, model, contentType string
 		raw, upgrade                         bool
 	}{
-		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[]}`, model: admissionTestModel},
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-oss-120b","priority":-99,"messages":[],"seed":9007199254740993}` + "\n\t ", model: admissionTestModel},
 		{name: "responses", path: "/v1/responses", body: `{"model":"gpt-oss-120b","priority":-99,"input":"hi"}`, model: admissionTestModel},
 		{name: "completions", path: "/v1/completions", body: `{"model":"gpt-oss-120b","priority":-99,"prompt":"hi"}`, model: admissionTestModel},
-		{name: "auto", path: "/v1/chat/completions", body: `{"model":"auto","messages":[]}`, model: admissionTestModel},
+		{name: "auto", path: "/v1/chat/completions", body: `{"model":"auto","messages":[],"auto_model_options":{"intelligence":100}}`, model: admissionTestModel},
 		{name: "embeddings", path: "/v1/embeddings", body: `{"model":"nomic-embed-text","priority":-99,"input":"hi"}`, model: "nomic-embed-text"},
-		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99}`, model: "qwen3-tts"},
-		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi"}`, model: admissionTestModel},
+		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99}` + "\n\t ", model: "qwen3-tts"},
+		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":9007199254740993,"stream":true,"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
 		{name: "transcription", path: "/v1/audio/transcriptions", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "translation", path: "/v1/audio/translations", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "file convert", path: "/v1/convert/file", body: "\x00\xfffile", model: "doc-upload", contentType: "application/octet-stream", raw: true},
@@ -320,9 +320,47 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					if tc.name == "auto" && string(body["model"]) != `"gpt-oss-120b"` {
 						t.Fatalf("auto not resolved: %s", forwarded.body)
 					}
+					if (tc.name == "chat" || tc.name == "speech explicit") && string(body["seed"]) != "9007199254740993" {
+						t.Fatalf("seed precision lost: %s", forwarded.body)
+					}
+					if tc.name == "speech explicit" {
+						for _, field := range []string{"cache_salt", "user_cache_secret", "stream_options"} {
+							if _, exists := body[field]; exists {
+								t.Errorf("speech forwarded %s: %s", field, forwarded.body)
+							}
+						}
+						if string(body["stream"]) != "true" || string(body["input"]) != `"hi"` {
+							t.Fatalf("speech content changed: %s", forwarded.body)
+						}
+					}
 				})
 			}
 		})
+	}
+}
+
+func TestAdmissionHandlerRejectsMalformedJSON(t *testing.T) {
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("malformed JSON reached admission")
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("malformed JSON reached a backend")
+	}), "", false)
+	for _, path := range []string{"/v1/chat/completions", "/v1/audio/speech"} {
+		for _, body := range []string{
+			"", "not json", "null", "[]", "42", `{`,
+			`{"model":"gpt-oss-120b"}}`,
+			`{"model":"gpt-oss-120b"}]`,
+			`{"model":"gpt-oss-120b"} {}`,
+			`{"model":"gpt-oss-120b"} x`,
+		} {
+			t.Run(path+"/"+body, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, admissionRequest(path, body, "tk_test"))
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
+				}
+			})
+		}
 	}
 }
 

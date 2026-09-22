@@ -483,6 +483,10 @@ func intValue(raw any) (int, bool) {
 		if n, err := v.Int64(); err == nil {
 			return int(n), true
 		}
+		// UseNumber also retains decimal and exponent forms of integers.
+		if n, err := v.Float64(); err == nil {
+			return intValue(n)
+		}
 	case string:
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {

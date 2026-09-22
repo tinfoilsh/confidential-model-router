@@ -8,7 +8,6 @@ containers:
     restart: always
     networks: [web]
     env:
-      - DOMAIN
       - REFRESH_INTERVAL: "1m"
       - CACHE_SALT_ENABLED: "true"
       - USAGE_REPORTER_ID: "model-router"
@@ -90,7 +89,6 @@ networks:
 
 shim:
   upstream-port: 8089
-  tls-wildcard: true
   paths:
     - /
     - /health

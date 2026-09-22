@@ -34,81 +34,44 @@ var errBodyNotObject = errors.New("request body must be one JSON object")
 //
 // When enabled, the endpoint supports the field, and the caller resolves to
 // a non-empty identity, it injects the derived salt into body. It returns
-// the derivation mode (ModeNone if no salt was injected) and whether it
-// modified body at all, so callers that proxy verbatim can skip a needless
-// re-marshal.
+// the derivation mode (ModeNone if no salt was injected).
 //
 // apiKey is the raw bearer token; identity anchoring (JWT subject, else the
 // opaque key) happens here via cacheSaltIdentity so the call site cannot
 // wire the wrong value.
-func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) (cachesalt.Mode, bool) {
-	// A JSON `null` body unmarshals to a nil map (with no error). It carries
-	// no fields to strip and no prompt to cache, and injecting would panic on
-	// the nil map — treat it as passthrough. The engine rejects the null body.
+func applyCacheSalt(body map[string]any, path, apiKey string, enabled bool) cachesalt.Mode {
+	// An absent body has no fields to strip or salt.
 	if body == nil {
-		return cachesalt.ModeNone, false
+		return cachesalt.ModeNone
 	}
-	_, hadSecret := body["user_cache_secret"]
-	_, hadSalt := body["cache_salt"]
 	secret, _ := body["user_cache_secret"].(string)
 	delete(body, "user_cache_secret")
 	delete(body, "cache_salt")
-	changed := hadSecret || hadSalt
 
 	if !enabled || !cacheSaltPaths[path] {
-		return cachesalt.ModeNone, changed
+		return cachesalt.ModeNone
 	}
 	salt, mode := cachesalt.Derive(cacheSaltIdentity(apiKey), secret)
 	if salt == "" {
-		return cachesalt.ModeNone, changed
+		return cachesalt.ModeNone
 	}
 	body["cache_salt"] = salt
-	return mode, true
+	return mode
 }
 
-// saltProxiedBody applies cache-salt and streaming-usage handling to a request
-// whose JSON fields must be sanitized before forwarding, such as speech.
-// It rewrites r.Body in place and
-// returns the parsed body and the derivation mode. The body must be one JSON
-// object so router-owned fields can never bypass rewriting on a malformed
-// request.
-func saltProxiedBody(r *http.Request, apiKey string, enabled bool) (map[string]any, cachesalt.Mode, error) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	r.Body.Close()
-	if err != nil {
-		return nil, cachesalt.ModeNone, err
-	}
-
-	// UseNumber keeps numbers as their exact text across the re-marshal;
-	// the default float64 decoding silently corrupts int64-range values
-	// (e.g. seed). decodeConsumedAll rejects trailing data, matching
-	// json.Unmarshal's single-document strictness, so a body the engine
-	// would reject is never re-marshaled into one it accepts.
+// decodeJSONBody preserves exact numbers (such as int64 seeds) when the
+// router rewrites a request. Require one object, with no trailing data.
+func decodeJSONBody(bodyBytes []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
 	dec.UseNumber()
 	var body map[string]any
-	if err := dec.Decode(&body); err != nil || !decodeConsumedAll(dec) || body == nil {
-		if err != nil {
-			return nil, cachesalt.ModeNone, err
-		}
-		return nil, cachesalt.ModeNone, errBodyNotObject
+	if err := dec.Decode(&body); err != nil {
+		return nil, err
 	}
-	streaming, _ := body["stream"].(bool)
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-	mode, changed := applyCacheSalt(body, r.URL.Path, apiKey, enabled)
-	if streaming && cacheSaltPaths[r.URL.Path] {
-		ensureStreamingUsageOptions(body, r.Header)
-		changed = true
+	if !decodeConsumedAll(dec) || body == nil {
+		return nil, errBodyNotObject
 	}
-	if !changed {
-		return body, mode, nil
-	}
-
-	if err := replaceJSONBody(r, body); err != nil {
-		return nil, cachesalt.ModeNone, err
-	}
-	return body, mode, nil
+	return body, nil
 }
 
 // recordCacheSaltInjection counts a performed injection. A skipped one
