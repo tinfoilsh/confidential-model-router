@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/tinfoilsh/confidential-model-router/internal/jsonnumber"
 )
 
 // Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`,
@@ -486,7 +484,10 @@ func intValue(raw any) (int, bool) {
 		}
 		return int(v), true
 	case json.Number:
-		return jsonnumber.Int(v)
+		// Preserve legacy float64 option semantics without expanding exponents.
+		if n, err := v.Float64(); err == nil {
+			return intValue(n)
+		}
 	case string:
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {

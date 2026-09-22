@@ -13,8 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/tinfoilsh/confidential-model-router/internal/jsonnumber"
 )
 
 const (
@@ -155,8 +153,10 @@ func (e *ValidationError) Error() string {
 func intelligenceFromJSON(value any) (int, error) {
 	switch number := value.(type) {
 	case json.Number:
-		if level, ok := jsonnumber.Int(number); ok && level >= MinIntelligence && level <= MaxIntelligence {
-			return level, nil
+		// Router options retain their legacy float64 semantics; forwarded
+		// request fields keep their exact json.Number values.
+		if parsed, err := number.Float64(); err == nil {
+			return intelligenceFromJSON(parsed)
 		}
 	case float64:
 		if number >= MinIntelligence && number <= MaxIntelligence && number == math.Trunc(number) {

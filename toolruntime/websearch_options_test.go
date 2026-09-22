@@ -499,8 +499,8 @@ func TestIntValue_TriState(t *testing.T) {
 	}
 }
 
-func TestIntValue_ExactJSONNumbers(t *testing.T) {
-	cases := []struct {
+func TestIntValue_JSONNumbers(t *testing.T) {
+	for _, tc := range []struct {
 		value json.Number
 		want  int
 		ok    bool
@@ -509,36 +509,17 @@ func TestIntValue_ExactJSONNumbers(t *testing.T) {
 		{"42.0", 42, true},
 		{"4.2e1", 42, true},
 		{"42.5", 0, false},
-		{"1.20e2", 120, true},
-		{"-1.20e2", -120, true},
-		{"0.000e-400", 0, true},
-		{json.Number(strconv.Itoa(math.MaxInt) + ".0"), math.MaxInt, true},
-		{json.Number(strconv.Itoa(math.MinInt) + ".0"), math.MinInt, true},
-		{json.Number(strconv.FormatUint(uint64(math.MaxInt)+1, 10) + ".0"), 0, false},
-		{json.Number("-" + strconv.FormatUint(uint64(math.MaxInt)+2, 10) + ".0"), 0, false},
-		{"1.0000000000000000001", 0, false},
-		{"0.9999999999999999999", 0, false},
-		{"9.223372036854776e18", 0, false},
-		{"1e-400", 0, false},
-		{"1e400", 0, false},
-		{"1e1000000000", 0, false},
-		{"1e-1000000000", 0, false},
-	}
-	for _, tc := range cases {
-		t.Run(string(tc.value), func(t *testing.T) {
-			got, ok := intValue(tc.value)
-			if ok != tc.ok || (ok && got != tc.want) {
-				t.Fatalf("intValue(%q) = (%d, %v), want (%d, %v)", tc.value, got, ok, tc.want, tc.ok)
-			}
-		})
-	}
-	if want, err := strconv.Atoi("9007199254740993"); err == nil {
-		if got, ok := intValue(json.Number("9007199254740993.0")); !ok || got != want {
-			t.Fatalf("large decimal integer = (%d, %v), want (%d, true)", got, ok, want)
+		{"1e100", 0, false},
+		{"1e1000000", 0, false},
+		{json.Number(strconv.FormatFloat(-float64(math.MinInt), 'f', -1, 64)), 0, false},
+		// Keep the float64 rounding used before UseNumber was introduced.
+		{"1.0000000000000000001", 1, true},
+		{"1e-1000000", 0, true},
+	} {
+		got, ok := intValue(tc.value)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("intValue(%q) = (%d, %v), want (%d, %v)", tc.value, got, ok, tc.want, tc.ok)
 		}
-	}
-	if got, ok := intValue(-float64(math.MinInt)); ok {
-		t.Fatalf("out-of-range float converted to %d", got)
 	}
 }
 

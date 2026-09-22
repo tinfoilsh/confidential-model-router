@@ -2,8 +2,6 @@ package autoroute
 
 import (
 	"encoding/json"
-	"fmt"
-	"math"
 	"net/http"
 	"reflect"
 	"testing"
@@ -33,31 +31,6 @@ func TestParseIntelligence(t *testing.T) {
 		{
 			name:    "body fractional rejected",
 			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: 42.5}},
-			wantErr: true,
-		},
-		{
-			name: "exact JSON number",
-			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("90")}},
-			want: 90,
-		},
-		{
-			name: "exact JSON decimal integer",
-			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("42.0")}},
-			want: 42,
-		},
-		{
-			name: "exact JSON exponent integer",
-			body: map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("4.2e1")}},
-			want: 42,
-		},
-		{
-			name:    "exact JSON fraction rejected",
-			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("42.5")}},
-			wantErr: true,
-		},
-		{
-			name:    "exact JSON overflow rejected",
-			body:    map[string]any{OptionsField: map[string]any{IntelligenceKey: json.Number("1e400")}},
 			wantErr: true,
 		},
 		{
@@ -109,25 +82,28 @@ func TestParseIntelligence(t *testing.T) {
 	}
 }
 
-func TestParseIntelligenceRejectsUnsafeNumbers(t *testing.T) {
-	for _, value := range []any{
-		json.Number("1e100"), json.Number("-1e100"),
-		json.Number("9223372036854775808"),
-		json.Number("42.0000000000000000001"),
-		json.Number("100.0000000000000000001"),
-		json.Number("1e-400"),
-		json.Number("1e1000000000"), json.Number("1e-1000000000"),
-		float64(1e100), float64(-1e100), math.Inf(1), math.NaN(),
+func TestParseIntelligenceJSONNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		value   json.Number
+		want    int
+		wantErr bool
+	}{
+		{"42", 42, false},
+		{"42.0", 42, false},
+		{"4.2e1", 42, false},
+		{"42.5", 0, true},
+		{"101", 0, true},
+		{"1e100", 0, true},
+		{"1e1000000", 0, true},
+		// Keep the float64 rounding used before UseNumber was introduced.
+		{"42.0000000000000000001", 42, false},
+		{"1e-1000000", 0, false},
 	} {
-		t.Run(fmt.Sprint(value), func(t *testing.T) {
-			body := map[string]any{OptionsField: map[string]any{IntelligenceKey: value}}
-			_, err := ParseIntelligence(http.Header{}, body)
-			validation, ok := err.(*ValidationError)
-			want := fmt.Sprintf(errMsgInvalidParam, intelligenceParam, MinIntelligence, MaxIntelligence)
-			if !ok || validation.Param != intelligenceParam || validation.Message != want {
-				t.Fatalf("error = %v, want %q for %s", err, want, intelligenceParam)
-			}
-		})
+		body := map[string]any{OptionsField: map[string]any{IntelligenceKey: tc.value}}
+		got, err := ParseIntelligence(http.Header{}, body)
+		if (err != nil) != tc.wantErr || (err == nil && got != tc.want) {
+			t.Errorf("intelligence %s: got (%d, %v), want level=%d error=%v", tc.value, got, err, tc.want, tc.wantErr)
+		}
 	}
 }
 

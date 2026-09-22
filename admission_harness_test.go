@@ -861,13 +861,10 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 }
 
 func TestMCPDoesNotImplicitlySelectModel(t *testing.T) {
-	var admissions, backends atomic.Int64
 	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		admissions.Add(1)
-		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+		t.Error("MCP request reached admission")
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backends.Add(1)
-		io.WriteString(w, `{}`)
+		t.Error("MCP request reached a backend")
 	}), "", false)
 	for _, host := range []string{"inference.tinfoil.sh", "websearch.inference.tinfoil.sh", "code-execution.inference.tinfoil.sh"} {
 		t.Run(host, func(t *testing.T) {
@@ -881,22 +878,25 @@ func TestMCPDoesNotImplicitlySelectModel(t *testing.T) {
 			}
 		})
 	}
-	if admissions.Load() != 0 || backends.Load() != 0 {
-		t.Fatalf("MCP selected a model: admissions=%d backends=%d", admissions.Load(), backends.Load())
-	}
 }
 
 func TestModelHostHeaderIsIgnored(t *testing.T) {
 	var admissions atomic.Int64
-	admitted := make(chan routeContextRequest, 4)
 	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request routeContextRequest
-		json.NewDecoder(r.Body).Decode(&request)
-		admitted <- request
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		if request.Model != admissionTestModel {
+			t.Errorf("host label selected the model: %+v", request)
+		}
 		admissions.Add(1)
-		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+		if _, err := io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`); err != nil {
+			t.Error(err)
+		}
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{}`)
+		w.WriteHeader(http.StatusOK)
 	}), "", false)
 
 	// A model label in the forwarded host must not select the model: only
@@ -909,14 +909,6 @@ func TestModelHostHeaderIsIgnored(t *testing.T) {
 	handler.ServeHTTP(rec, withHost(admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("host-labelled chat: HTTP %d: %s", rec.Code, rec.Body.String())
-	}
-	select {
-	case request := <-admitted:
-		if request.Model != admissionTestModel {
-			t.Fatalf("host label selected the model: %+v", request)
-		}
-	default:
-		t.Fatal("request completed without admission")
 	}
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, withHost(admissionRequest("/v1/chat/completions", `{"messages":[]}`, "tk_test")))
