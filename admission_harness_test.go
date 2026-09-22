@@ -839,3 +839,43 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 		})
 	}
 }
+
+func TestSubdomainHealthSkipsAdmission(t *testing.T) {
+	var cpCalls, backendCalls atomic.Int64
+	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cpCalls.Add(1)
+		http.Error(w, "unexpected admission", http.StatusInternalServerError)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls.Add(1)
+		io.WriteString(w, `{}`)
+	}), "", false)
+
+	probe := func(subdomain string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/health", nil)
+		if subdomain != "" {
+			r.Header.Set("X-Forwarded-Host", subdomain+"."+*domain)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec
+	}
+
+	if rec := probe(admissionTestModel); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"`+admissionTestModel+`"`) {
+		t.Fatalf("healthy model: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := probe("unknown-model"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown model: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := probe(""); rec.Code != http.StatusOK {
+		t.Fatalf("router health: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := manager.TripModelBreakersForTest(em, admissionTestModel); err != nil {
+		t.Fatal(err)
+	}
+	if rec := probe(admissionTestModel); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("model with tripped breakers: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if cpCalls.Load() != 0 || backendCalls.Load() != 0 {
+		t.Fatalf("health probes reached the control plane %d times and a backend %d times", cpCalls.Load(), backendCalls.Load())
+	}
+}
