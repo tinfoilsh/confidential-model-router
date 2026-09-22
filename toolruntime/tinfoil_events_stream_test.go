@@ -130,6 +130,56 @@ func TestChatStreamerEmitsSourcesOnTerminalMarker(t *testing.T) {
 	}
 }
 
+// TestChatStreamerEmitsPIIOnTerminalMarker pins the Chat progress
+// emitter end to end: closing a search handle with a PII report puts
+// `pii` on the terminal marker's delta.content and nowhere else, so
+// opt-in Chat clients get the same masking signal as the Responses
+// sidecar.
+func TestChatStreamerEmitsPIIOnTerminalMarker(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.eventFlags = tinfoilEventFlags{webSearch: true}
+	emitter := &chatToolProgressEmitter{streamer: streamer}
+
+	details := map[string]any{"type": "search", "query": "john@example.com hiking trails"}
+	handle := emitter.open("ws_1", routerSearchToolName, details)
+	emitter.close(handle, routerSearchToolName, details, toolProgressResult{
+		pii: &piiCheckResult{
+			masked:        true,
+			redactedQuery: "hiking trails",
+			redactions:    []piiRedaction{{kind: "private_email", start: 0, end: 16}},
+		},
+	}, "completed", "")
+
+	var payloads []map[string]any
+	for _, frame := range strings.Split(rec.Body.String(), "\n\n") {
+		if !strings.HasPrefix(frame, "data: {") {
+			continue
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame, "data: ")), &chunk); err != nil {
+			t.Fatalf("chat stream frame must be valid JSON: %v (%q)", err, frame)
+		}
+		content := chunk["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"].(string)
+		for _, match := range tinfoilEventMarkerPattern.FindAllStringSubmatch(content, -1) {
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(match[1]), &decoded); err != nil {
+				t.Fatalf("marker payload must be valid JSON: %v (%q)", err, match[1])
+			}
+			payloads = append(payloads, decoded)
+		}
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("expected in_progress + completed markers, got %d: %#v", len(payloads), payloads)
+	}
+	if _, present := payloads[0]["pii"]; payloads[0]["status"] != "in_progress" || present {
+		t.Fatalf("in_progress marker must not carry pii: %#v", payloads[0])
+	}
+	report, _ := payloads[1]["pii"].(map[string]any)
+	if payloads[1]["status"] != "completed" || report == nil || report["masked"] != true || report["redacted_query"] != "hiking trails" {
+		t.Fatalf("completed marker must carry the pii report: %#v", payloads[1])
+	}
+}
+
 // TestResponsesStreamerEmitsSpecWebSearchCallEvents pins the Responses
 // streaming contract for router-owned web_search tool calls: the router
 // MUST emit the spec-defined event sequence documented by OpenAI

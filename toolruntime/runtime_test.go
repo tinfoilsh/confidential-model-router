@@ -821,6 +821,11 @@ func TestPIICheckResultFromStructured(t *testing.T) {
 		t.Fatalf("redactions = %+v, want %+v", got.redactions, want)
 	}
 
+	clean := map[string]any{"results": []any{}, "pii_checked": true, "pii_masked": false, "redacted_query": "hiking trails", "pii_redactions": []any{}}
+	if got := piiCheckResultFromStructured(routerSearchToolName, clean); got == nil || got.masked || got.redactedQuery != "hiking trails" || len(got.redactions) != 0 {
+		t.Fatalf("checked-but-clean must yield an unmasked report, got %+v", got)
+	}
+
 	unchecked := map[string]any{"results": []any{}, "pii_checked": false, "pii_masked": false, "pii_redactions": []any{}}
 	if got := piiCheckResultFromStructured(routerSearchToolName, unchecked); got != nil {
 		t.Fatalf("pii_checked=false must yield nil, got %+v", got)
@@ -883,8 +888,8 @@ func TestBuildWebSearchCallOutputItemsCarriesPIISidecar(t *testing.T) {
 // Responses API documents: type, id, status, action. In particular it
 // does NOT duplicate `item_id` onto the non-streaming output-item shape
 // (item_id is specced only on the streaming envelope), and it never
-// carries a non-spec `reason` field. The tinfoil-specific detail (raw
-// router status + error code) rides on a `_tinfoil` sidecar that is
+// carries a non-spec `reason` field. The tinfoil-specific detail (error
+// code, PII masking report) rides on a `_tinfoil` sidecar that is
 // omitted entirely on the happy path.
 func TestWebSearchCallEventMatchesOpenAISpec(t *testing.T) {
 	event := webSearchCallEvent("ws_1", "in_progress", "", map[string]any{"type": "search"}, nil)

@@ -315,14 +315,32 @@ func TestTinfoilEventMarkersForRecordsMapsPII(t *testing.T) {
 		},
 	}
 	combined := tinfoilEventMarkersForRecords(records)
-	if got := strings.Count(combined, `"pii":{`); got != 1 {
-		t.Fatalf("expected exactly one pii report (search terminal marker), got %d in %q", got, combined)
+	matches := tinfoilEventMarkerPattern.FindAllStringSubmatch(combined, -1)
+	if len(matches) != 4 {
+		t.Fatalf("expected 4 markers (search pair + fetch pair), got %d", len(matches))
 	}
-	if !strings.Contains(combined, `"pii":{"masked":true,"redacted_query":"hiking trails","redactions":[{"end":16,"start":0,"type":"private_email"}]}`) {
-		t.Fatalf("pii report shape mismatch: %q", combined)
+	piiMarkers := 0
+	for _, match := range matches {
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(match[1]), &decoded); err != nil {
+			t.Fatalf("marker payload must be valid JSON: %v (%q)", err, match[1])
+		}
+		status, _ := decoded["status"].(string)
+		action, _ := decoded["action"].(map[string]any)
+		report, hasPII := decoded["pii"].(map[string]any)
+		isTerminalSearch := status == "completed" && action["type"] == "search"
+		if hasPII != isTerminalSearch {
+			t.Fatalf("pii must ride only on the terminal search marker: %q", match[1])
+		}
+		if hasPII {
+			piiMarkers++
+			if report["masked"] != true || report["redacted_query"] != "hiking trails" {
+				t.Fatalf("pii report mismatch: %#v", report)
+			}
+		}
 	}
-	if !strings.Contains(combined, `"status":"completed"`) {
-		t.Fatalf("masked search must still complete: %q", combined)
+	if piiMarkers != 1 {
+		t.Fatalf("expected exactly one pii report, got %d", piiMarkers)
 	}
 }
 
