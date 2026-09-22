@@ -337,26 +337,24 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 }
 
 func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
-	{
-		var backendCalls, cpCalls atomic.Int64
-		_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			cpCalls.Add(1)
-			io.WriteString(w, `{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":9}}`)
-		}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backendCalls.Add(1) }), "", false)
-		for _, body := range []string{
-			`{"model":"gpt-oss-120b","input":[{"role":"user","content":[{"type":"input_file","filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}]}]}`,
-			`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"web_search"}]}`,
-			`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"function","name":"show","parameters":{"type":"object"},"x-tinfoil-tool-auto-continue":true}]}`,
-		} {
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test"))
-			if rec.Code != 429 {
-				t.Fatalf("reject HTTP %d: %s", rec.Code, rec.Body.String())
-			}
+	var backendCalls, cpCalls atomic.Int64
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cpCalls.Add(1)
+		io.WriteString(w, `{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":9}}`)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backendCalls.Add(1) }), "", false)
+	for _, body := range []string{
+		`{"model":"gpt-oss-120b","input":[{"role":"user","content":[{"type":"input_file","filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}]}]}`,
+		`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"web_search"}]}`,
+		`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"function","name":"show","parameters":{"type":"object"},"x-tinfoil-tool-auto-continue":true}]}`,
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test"))
+		if rec.Code != 429 {
+			t.Fatalf("reject HTTP %d: %s", rec.Code, rec.Body.String())
 		}
-		if backendCalls.Load() != 0 || cpCalls.Load() != 3 {
-			t.Fatalf("preprocessing after rejection: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
-		}
+	}
+	if backendCalls.Load() != 0 || cpCalls.Load() != 3 {
+		t.Fatalf("preprocessing after rejection: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
 	}
 }
 
