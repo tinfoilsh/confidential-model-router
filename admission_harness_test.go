@@ -168,17 +168,15 @@ func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		backends.Add(1)
 	}), "", false)
-	{
-		rec := httptest.NewRecorder()
-		body := fmt.Sprintf(`{"model":%q,"messages":[]}`, unknownModel)
-		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, "tk_test"))
-		var envelope manager.ErrorEnvelope
-		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
-			t.Fatal(err)
-		}
-		if rec.Code != http.StatusNotFound || envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeModelNotFound {
-			t.Fatalf("unknown model: HTTP %d: %s", rec.Code, rec.Body.String())
-		}
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"model":%q,"messages":[]}`, unknownModel)
+	handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, "tk_test"))
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusNotFound || envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeModelNotFound {
+		t.Fatalf("unknown model: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
 	if admissions.Load() != 0 || backends.Load() != 0 {
 		t.Fatalf("unknown model reached admission/backend: %d/%d", admissions.Load(), backends.Load())

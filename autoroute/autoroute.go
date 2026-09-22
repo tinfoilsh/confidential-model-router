@@ -9,11 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/tinfoilsh/confidential-model-router/internal/jsonnumber"
 )
 
 const (
@@ -154,12 +155,8 @@ func (e *ValidationError) Error() string {
 func intelligenceFromJSON(value any) (int, error) {
 	switch number := value.(type) {
 	case json.Number:
-		exact, ok := new(big.Rat).SetString(string(number))
-		if ok && exact.IsInt() && exact.Num().IsInt64() {
-			level := exact.Num().Int64()
-			if level >= MinIntelligence && level <= MaxIntelligence {
-				return int(level), nil
-			}
+		if level, ok := jsonnumber.Int(number); ok && level >= MinIntelligence && level <= MaxIntelligence {
+			return level, nil
 		}
 	case float64:
 		if number >= MinIntelligence && number <= MaxIntelligence && number == math.Trunc(number) {

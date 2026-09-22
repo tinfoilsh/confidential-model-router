@@ -497,16 +497,6 @@ func TestIntValue_TriState(t *testing.T) {
 	if n, ok := intValue("42"); !ok || n != 42 {
 		t.Errorf("intValue(\"42\") = (%d, %v), want (42, true)", n, ok)
 	}
-	for _, value := range []json.Number{"42", "42.0", "4.2e1"} {
-		if n, ok := intValue(value); !ok || n != 42 {
-			t.Errorf("intValue(%q) = (%d, %v), want (42, true)", value, n, ok)
-		}
-	}
-	for _, value := range []json.Number{"42.5", "1e400"} {
-		if n, ok := intValue(value); ok {
-			t.Errorf("intValue(%q) = (%d, true), want (_, false)", value, n)
-		}
-	}
 }
 
 func TestIntValue_ExactJSONNumbers(t *testing.T) {
@@ -515,6 +505,10 @@ func TestIntValue_ExactJSONNumbers(t *testing.T) {
 		want  int
 		ok    bool
 	}{
+		{"42", 42, true},
+		{"42.0", 42, true},
+		{"4.2e1", 42, true},
+		{"42.5", 0, false},
 		{"1.20e2", 120, true},
 		{"-1.20e2", -120, true},
 		{"0.000e-400", 0, true},
@@ -527,6 +521,8 @@ func TestIntValue_ExactJSONNumbers(t *testing.T) {
 		{"9.223372036854776e18", 0, false},
 		{"1e-400", 0, false},
 		{"1e400", 0, false},
+		{"1e1000000000", 0, false},
+		{"1e-1000000000", 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.value), func(t *testing.T) {

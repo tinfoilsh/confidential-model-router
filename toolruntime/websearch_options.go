@@ -3,10 +3,11 @@ package toolruntime
 import (
 	"encoding/json"
 	"math"
-	"math/big"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tinfoilsh/confidential-model-router/internal/jsonnumber"
 )
 
 // Retrieval-depth buckets mapped onto the MCP `search` tool's `max_results`,
@@ -485,14 +486,7 @@ func intValue(raw any) (int, bool) {
 		}
 		return int(v), true
 	case json.Number:
-		if n, err := strconv.Atoi(string(v)); err == nil {
-			return n, true
-		}
-		// Decimal and exponent forms must be integral before any rounding.
-		n, ok := new(big.Rat).SetString(string(v))
-		if ok && n.IsInt() && n.Num().IsInt64() {
-			return intValue(n.Num().Int64())
-		}
+		return jsonnumber.Int(v)
 	case string:
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {

@@ -116,6 +116,7 @@ func TestParseIntelligenceRejectsUnsafeNumbers(t *testing.T) {
 		json.Number("42.0000000000000000001"),
 		json.Number("100.0000000000000000001"),
 		json.Number("1e-400"),
+		json.Number("1e1000000000"), json.Number("1e-1000000000"),
 		float64(1e100), float64(-1e100), math.Inf(1), math.NaN(),
 	} {
 		t.Run(fmt.Sprint(value), func(t *testing.T) {
