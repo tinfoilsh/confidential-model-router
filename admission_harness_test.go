@@ -34,7 +34,17 @@ type admissionBackendRequest struct {
 	contentLength int64
 }
 
-func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, overloaded bool) (*manager.EnclaveManager, http.Handler) {
+type admissionHarness struct {
+	http.Handler
+	client *routeContextClient
+}
+
+func (h *admissionHarness) warm(apiKey, model string) {
+	h.client.refresh(context.Background(), apiKey, model, routeContextKey(apiKey, model))
+	h.client.refreshes.Wait()
+}
+
+func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, overloaded bool) (*manager.EnclaveManager, *admissionHarness) {
 	t.Helper()
 	models := []string{admissionTestModel, "nomic-embed-text", "qwen3-tts", "voxtral-small-24b", "voxtral-mini-4b-realtime", "doc-upload", "websearch"}
 	var cfg strings.Builder
@@ -45,7 +55,7 @@ func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, ove
 	return newAdmissionHarnessWithConfig(t, cp, backend, org, overloaded, []byte(cfg.String()))
 }
 
-func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org string, overloaded bool, cfg []byte) (*manager.EnclaveManager, http.Handler) {
+func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org string, overloaded bool, cfg []byte) (*manager.EnclaveManager, *admissionHarness) {
 	t.Helper()
 	control := httptest.NewServer(cp)
 	t.Cleanup(control.Close)
@@ -76,7 +86,9 @@ func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org s
 	if err := manager.ConfigureAdmissionModelForTest(em, admissionTestModel, org, overloaded); err != nil {
 		t.Fatal(err)
 	}
-	return em, newRouterHandler(em, newRouteContextClient(control.URL), nil)
+	client := newRouteContextClient(control.URL)
+	t.Cleanup(client.refreshes.Wait)
+	return em, &admissionHarness{newRouterHandler(em, client, nil), client}
 }
 
 func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
@@ -144,6 +156,7 @@ func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
 					t.Fatalf("cache-route dispatch: HTTP %d: %s", rec.Code, rec.Body.String())
 				}
 			}
+			handler.client.refreshes.Wait()
 			if admissions.Load() != requests || backends.Load() != requests {
 				t.Fatalf("admissions=%d backends=%d", admissions.Load(), backends.Load())
 			}
@@ -245,6 +258,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 			}), admissionTestOrg, false)
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
+					handler.warm("tk_test", tc.model)
+					<-admissions
 					beforeCP, beforeBackend := cpCalls.Load(), backendCalls.Load()
 					r := admissionRequest(tc.path, tc.body, "tk_test")
 					r.Header.Set("X-Tinfoil-Root-Request-Id", "client-chosen-id")
@@ -260,6 +275,7 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					}
 					rec := httptest.NewRecorder()
 					handler.ServeHTTP(rec, r)
+					handler.client.refreshes.Wait()
 					wantStatus := 200
 					if decision == decisionRejected {
 						wantStatus = 429
@@ -376,6 +392,8 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 		cpCalls.Add(1)
 		io.WriteString(w, `{"rate_limit":{"decision":"rejected","reason":"tokens","retry_after_seconds":9}}`)
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backendCalls.Add(1) }), "", false)
+	handler.warm("tk_test", admissionTestModel)
+	cpCalls.Store(0)
 	for _, body := range []string{
 		`{"model":"gpt-oss-120b","input":[{"role":"user","content":[{"type":"input_file","filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}]}]}`,
 		`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"web_search"}]}`,
@@ -387,6 +405,7 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 			t.Fatalf("reject HTTP %d: %s", rec.Code, rec.Body.String())
 		}
 	}
+	handler.client.refreshes.Wait()
 	if backendCalls.Load() != 0 || cpCalls.Load() != 3 {
 		t.Fatalf("preprocessing after rejection: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
 	}
@@ -403,6 +422,10 @@ func TestAdmissionHandlerJWTClassificationAndMissingAuth(t *testing.T) {
 		backendCalls.Add(1)
 		if r.Header.Get("Authorization") == "" {
 			t.Error("auth stripped")
+		}
+		if jwtSubject(manager.BearerToken(r.Header.Get("Authorization"))) == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"count":7,"result":"ok"}`)
@@ -427,8 +450,20 @@ func TestAdmissionHandlerJWTClassificationAndMissingAuth(t *testing.T) {
 			t.Fatalf("invalid auth accepted: %d", rec.Code)
 		}
 	}
-	if backendCalls.Load() != 12 || cpCalls.Load() != 4 {
+	handler.client.refreshes.Wait()
+	if backendCalls.Load() != 16 || cpCalls.Load() != 4 {
 		t.Fatalf("invalid auth bypass: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
+	}
+	for _, key := range []string{"opaque", accessTokenForTest(`{"typ":"JWT"}`, `{"sub":"user"}`), "a.b.c", jwt + "!"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, key))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("cached credential denial lost: %d", rec.Code)
+		}
+	}
+	handler.client.refreshes.Wait()
+	if backendCalls.Load() != 16 || cpCalls.Load() != 8 {
+		t.Fatalf("cached denial dispatch: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
 	}
 }
 
@@ -478,6 +513,7 @@ func TestAdmissionHandlerOverloadPriorityExemption(t *testing.T) {
 				}
 				fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":0}%s}`, tc.decision, reason, tc.priority)
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); io.WriteString(w, `{}`) }), "", true)
+			handler.warm("tk_test", admissionTestModel)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 			if rec.Code != tc.status {
@@ -520,7 +556,6 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 					return
 				}
 				cpCalls.Add(1)
-				record("admit")
 				var req routeContextRequest
 				json.NewDecoder(r.Body).Decode(&req)
 				if req.Model != admissionTestModel {
@@ -557,9 +592,13 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			key := "tk_test"
 			if jwt {
 				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","client_id":"tinfoil-chat","product":"chat"}`)
+			} else {
+				handler.warm(key, admissionTestModel)
+				cpCalls.Store(0)
 			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]}],"web_search_options":{}}`, key))
+			handler.client.refreshes.Wait()
 			if rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
 				t.Fatalf("tool loop HTTP %d: %s", rec.Code, rec.Body.String())
 			}
@@ -572,10 +611,7 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			}
 			orderMu.Lock()
 			defer orderMu.Unlock()
-			wantOrder := "admit,convert,model,tool,model"
-			if jwt {
-				wantOrder = "convert,model,tool,model"
-			}
+			wantOrder := "convert,model,tool,model"
 			if strings.Join(order, ",") != wantOrder {
 				t.Fatalf("dispatch order: %v", order)
 			}
@@ -616,20 +652,27 @@ func TestAdmissionHandlerSharedDecisions(t *testing.T) {
 	}), "", false)
 	secondControl := httptest.NewServer(control)
 	defer secondControl.Close()
-	second := newRouterHandler(em, newRouteContextClient(secondControl.URL), nil)
+	secondClient := newRouteContextClient(secondControl.URL)
+	defer secondClient.refreshes.Wait()
+	second := &admissionHarness{newRouterHandler(em, secondClient, nil), secondClient}
 	for i, tc := range []struct {
-		handler    http.Handler
-		key, model string
-		status     int
-		message    string
+		handler     *admissionHarness
+		key, model  string
+		status      int
+		message     string
+		latchTokens bool
 	}{
-		{first, "tk_account_a", admissionTestModel, 200, ""},
-		{second, "tk_account_b", admissionTestModel, 200, `"priority":1`},
-		{first, "tk_account_b", admissionTestModel, 429, "for requests"},
-		{second, "tk_account_a", "nomic-embed-text", 200, ""},
-		{second, "tk_account_a", "nomic-embed-text", 429, "for tokens"},
+		{first, "tk_account_a", admissionTestModel, 200, "", false},
+		{second, "tk_account_b", admissionTestModel, 200, "", false},
+		{second, "tk_account_b", admissionTestModel, 200, `"priority":1`, false},
+		{second, "tk_account_b", admissionTestModel, 429, "for requests", false},
+		{first, "tk_account_a", admissionTestModel, 200, "", false},
+		{first, "tk_account_a", admissionTestModel, 429, "for requests", false},
+		{second, "tk_account_a", "nomic-embed-text", 200, "", false},
+		{second, "tk_account_a", "nomic-embed-text", 200, "", true},
+		{second, "tk_account_a", "nomic-embed-text", 429, "for tokens", false},
 	} {
-		if i == 4 {
+		if tc.latchTokens {
 			mu.Lock()
 			tokensUsed = 100
 			mu.Unlock()
@@ -637,12 +680,13 @@ func TestAdmissionHandlerSharedDecisions(t *testing.T) {
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"model":%q,"messages":[]}`, tc.model)
 		tc.handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", body, tc.key))
+		tc.handler.client.refreshes.Wait()
 		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.message) {
 			t.Fatalf("request %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	if calls.Load() != 5 || backends.Load() != 3 {
-		t.Fatalf("cached or repeated admission: CP=%d backend=%d", calls.Load(), backends.Load())
+	if calls.Load() != 9 || backends.Load() != 6 {
+		t.Fatalf("cached admission accounting: CP=%d backend=%d", calls.Load(), backends.Load())
 	}
 }
 
@@ -730,6 +774,7 @@ func TestAdmissionHandlerRealtimeUpgrade(t *testing.T) {
 	if _, err := io.ReadFull(resp.Body, pong); err != nil || string(pong) != "pong" {
 		t.Fatalf("upgrade roundtrip: %q %v", pong, err)
 	}
+	handler.client.refreshes.Wait()
 	if calls.Load() != 1 {
 		t.Fatalf("upgrade admission calls=%d", calls.Load())
 	}
@@ -764,8 +809,11 @@ func TestAdmissionHandlerFailuresAndEmptyOrg(t *testing.T) {
 				backends.Add(1)
 				io.WriteString(w, `{}`)
 			}), org, false)
+			handler.warm("tk_test", admissionTestModel)
+			calls.Store(0)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
+			handler.client.refreshes.Wait()
 			// A lookup the control plane could not answer admits the request
 			// to the shared pool; only its verdicts stop it short of a backend.
 			wantBackends := int64(0)
@@ -800,8 +848,44 @@ func TestAdmissionHandlerConcurrentRequests(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	handler.client.refreshes.Wait()
 	if calls.Load() != requests || backends.Load() != requests {
 		t.Fatalf("concurrent admission calls=%d backend=%d, want %d each", calls.Load(), backends.Load(), requests)
+	}
+}
+
+func TestAdmissionHandlerDoesNotWaitForControlPlane(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		close(started)
+		select {
+		case <-release:
+			io.WriteString(w, cachedRejectedResponse)
+		case <-r.Context().Done():
+			t.Error("inference waited for the control-plane timeout")
+		}
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"result":"inference completed"}`)
+	}), "", false)
+	releaseResponse := sync.OnceFunc(func() { close(release) })
+	defer releaseResponse()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "inference completed") {
+		t.Fatalf("cold-cache inference: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * routeContextLookupTimeout):
+		t.Fatal("request did not refresh admission")
+	}
+	releaseResponse()
+	handler.client.refreshes.Wait()
+	got, err := handler.client.cache.get(routeContextKey("tk_test", admissionTestModel))
+	if err != nil || got.RateLimit == nil || got.RateLimit.Decision != decisionRejected {
+		t.Fatalf("background verdict not cached: %+v %v", got, err)
 	}
 }
 
@@ -848,11 +932,14 @@ func TestAdmissionHandlerQuotaDenial(t *testing.T) {
 				w.WriteHeader(http.StatusTooManyRequests)
 				io.WriteString(w, quotaDenialTestBody)
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backends.Add(1) }), "", false)
+			handler.warm("tk_test", admissionTestModel)
+			calls.Store(0)
 			for _, path := range []string{"/v1/chat/completions", chatInputTokensPath} {
 				rec := httptest.NewRecorder()
 				handler.ServeHTTP(rec, admissionRequest(path, `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
 				assertQuotaDenial(t, rec, tc.want)
 			}
+			handler.client.refreshes.Wait()
 			if calls.Load() != 2 || backends.Load() != 0 {
 				t.Fatalf("quota denial dispatch: CP=%d backend=%d", calls.Load(), backends.Load())
 			}
@@ -920,6 +1007,7 @@ func TestModelHostHeaderIsIgnored(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ok"`) {
 		t.Fatalf("host-labelled health: HTTP %d: %s", rec.Code, rec.Body.String())
 	}
+	handler.client.refreshes.Wait()
 	if admissions.Load() != 1 {
 		t.Fatalf("admissions = %d, want 1", admissions.Load())
 	}

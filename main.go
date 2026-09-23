@@ -503,6 +503,7 @@ func main() {
 	go em.StartWorker()
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
+	defer routeContextClient.refreshes.Wait()
 
 	safeguardsSubmitter := safeguards.NewSubmitter(*safeguardsURL)
 	defer safeguardsSubmitter.Close()
