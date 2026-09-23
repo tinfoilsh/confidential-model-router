@@ -144,6 +144,15 @@ func TestFormatUsageWebSearch(t *testing.T) {
 			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1,cost_usd=0.052",
 		},
 		{
+			name:    "multiple services accumulate at their own rates",
+			pricing: modelPricing,
+			webSearch: &WebSearchUsage{Calls: 2, SessionPricing: sessionPricing, Services: []ServiceUsage{
+				{Calls: 2, Pricing: &ModelPricing{RequestPrice: 0.005}},
+				{Calls: 3, Pricing: &ModelPricing{RequestPrice: 0.002}},
+			}},
+			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=2,other_cost_usd=0.016,cost_usd=0.068",
+		},
+		{
 			name:    "unknown service fee omits both other_cost_usd and cost_usd",
 			pricing: modelPricing,
 			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing, Services: []ServiceUsage{
