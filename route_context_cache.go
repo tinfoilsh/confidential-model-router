@@ -39,6 +39,9 @@ type routeContextCache struct {
 	lru      list.List
 	bytes    int
 	maxBytes int
+	// Missing keys reject refreshes older than any evicted result, without
+	// retaining an unbounded table of per-key sequence tombstones.
+	evictedSequence uint64
 }
 
 func (c *routeContextCache) get(key routeContextCacheKey) (routeContext, *routeContextError) {
@@ -74,10 +77,13 @@ func (c *routeContextCache) put(key routeContextCacheKey, resolved routeContext,
 		c.bytes -= entry.bytes
 		c.lru.Remove(element)
 		delete(c.entries, key)
+	} else if sequence <= c.evictedSequence {
+		return
 	}
 	for c.bytes+size > c.maxBytes {
 		oldest := c.lru.Back()
 		entry := c.lru.Remove(oldest).(routeContextCacheEntry)
+		c.evictedSequence = max(c.evictedSequence, entry.sequence)
 		delete(c.entries, entry.key)
 		c.bytes -= entry.bytes
 	}

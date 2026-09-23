@@ -292,3 +292,26 @@ func TestRouteContextCacheIsolationEvictionAndOrdering(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteContextCacheLateRefreshAfterEviction(t *testing.T) {
+	cache := routeContextCache{maxBytes: 2 * routeContextCacheEntryOverhead}
+	key := routeContextKey("tk_test", admissionTestModel)
+	other := routeContextKey("tk_other", admissionTestModel)
+	newer := routeContext{OrgID: "new"}
+	cache.put(key, newer, nil, 2)
+	cache.put(other, routeContext{OrgID: "other"}, nil, 3)
+	if got, _ := cache.get(key); got.OrgID != "" {
+		t.Fatal("fixture did not evict newer result")
+	}
+	cache.put(key, routeContext{OrgID: "old"}, nil, 1)
+	if got, _ := cache.get(key); got.OrgID != "" {
+		t.Fatalf("late refresh revived an evicted result: %+v", got)
+	}
+	if got, _ := cache.get(other); got.OrgID != "other" {
+		t.Fatal("late refresh displaced an unrelated cached result")
+	}
+	cache.put(key, newer, nil, 4)
+	if got, _ := cache.get(key); got.OrgID != newer.OrgID {
+		t.Fatal("fresh refresh could not repopulate evicted key")
+	}
+}
