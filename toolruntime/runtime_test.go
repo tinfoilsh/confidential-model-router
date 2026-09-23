@@ -224,6 +224,53 @@ func TestToolCallLogWebSearchCallsCountsSearchAndFetchOnly(t *testing.T) {
 	}
 }
 
+func TestToolCallLogPIIFilterCallsCountsOnlyCheckedSearches(t *testing.T) {
+	var nilLog *toolCallLog
+	if got := nilLog.piiFilterCalls(); got != 0 {
+		t.Fatalf("nil log pii filter calls = %d, want 0", got)
+	}
+
+	log := &toolCallLog{}
+	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{masked: true}})
+	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{masked: false}})
+	log.record(toolCallRecord{name: routerSearchToolName})
+	log.record(toolCallRecord{name: routerSearchToolName, errorReason: publicToolErrorReasonString})
+	log.record(toolCallRecord{name: routerFetchToolName})
+
+	if got := log.piiFilterCalls(); got != 2 {
+		t.Fatalf("pii filter calls = %d, want 2 (checked searches only, masked or not)", got)
+	}
+}
+
+func TestWebSearchUsageAttachesPIIFilterServiceOnlyWhenItRan(t *testing.T) {
+	em := newTestEnclaveManager()
+
+	log := &toolCallLog{}
+	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{}})
+	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{}})
+	log.record(toolCallRecord{name: routerSearchToolName})
+
+	usage := webSearchUsage(em, log)
+	if usage.Calls != 3 {
+		t.Fatalf("web search calls = %d, want 3", usage.Calls)
+	}
+	if len(usage.Services) != 1 || usage.Services[0].Calls != 2 {
+		t.Fatalf("expected one pii filter service with 2 calls, got %+v", usage.Services)
+	}
+
+	// The test manager has no catalog, so the fee is unknown and cost_usd
+	// must be withheld rather than reported short.
+	got := manager.FormatUsage(&tokencount.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}, "m", &manager.ModelPricing{}, usage)
+	want := "prompt=10,completion=5,total=15,model=m,web_search_calls=3"
+	if got != want {
+		t.Fatalf("usage header = %q, want %q", got, want)
+	}
+
+	if unchecked := webSearchUsage(em, &toolCallLog{}); len(unchecked.Services) != 0 {
+		t.Fatalf("expected no services when the filter never ran, got %+v", unchecked.Services)
+	}
+}
+
 func TestApplyUsageMetricsReportsWebSearchCalls(t *testing.T) {
 	newResponse := func() *upstreamJSONResponse {
 		return &upstreamJSONResponse{

@@ -77,6 +77,20 @@ func (l *toolCallLog) webSearchCalls() int {
 	return count
 }
 
+// piiFilterCalls counts the search calls on which the websearch service
+// reported that the privacy filter ran. The service bills the filter per run
+// only on successful searches, so failed calls (which carry no PII result)
+// are correctly excluded.
+func (l *toolCallLog) piiFilterCalls() int {
+	count := 0
+	for _, record := range l.list() {
+		if record.pii != nil {
+			count++
+		}
+	}
+	return count
+}
+
 // toolCallRecord captures a tool call the router made on the user's behalf,
 // used to surface web_search_call progress items to clients. errorReason
 // carries the tool-side error message when the call failed so terminal

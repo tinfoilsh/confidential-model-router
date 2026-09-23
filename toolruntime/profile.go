@@ -45,6 +45,11 @@ var CodeExecution = Profile{
 	ToolServerModel: "code-execution",
 }
 
+// piiFilterModel is the catalog key for the privacy filter that the websearch
+// service runs on outgoing queries. The router never dials it directly, but
+// reads its published per-request price to report the fee in usage metrics.
+const piiFilterModel = "pii-filter"
+
 var profiles = []Descriptor{
 	{
 		Profile:           WebSearch,
