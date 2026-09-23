@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"sync"
+	"time"
 )
 
 const (
@@ -50,7 +51,18 @@ func (c *routeContextCache) get(key routeContextCacheKey) (routeContext, *routeC
 	if element := c.entries[key]; element != nil {
 		c.lru.MoveToFront(element)
 		entry := element.Value.(routeContextCacheEntry)
-		return entry.resolved, entry.err
+		resolved := entry.resolved
+		if decision := resolved.RateLimit; decision != nil && decision.Decision == decisionRejected {
+			remaining := *decision.RetryAfterSeconds - int64(time.Since(decision.observedAt)/time.Second)
+			if remaining <= 0 {
+				resolved.RateLimit = nil
+			} else {
+				current := *decision
+				current.RetryAfterSeconds = &remaining
+				resolved.RateLimit = &current
+			}
+		}
+		return resolved, entry.err
 	}
 	return routeContext{}, nil
 }

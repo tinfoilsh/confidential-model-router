@@ -57,6 +57,7 @@ type routeRateLimit struct {
 	RetryAfterSeconds *int64      `json:"retry_after_seconds"`
 	Requests          *routeQuota `json:"requests,omitempty"`
 	Tokens            *routeQuota `json:"tokens,omitempty"`
+	observedAt        time.Time
 }
 
 type routeQuota struct {
@@ -222,6 +223,7 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 	req.Header.Set("Content-Type", "application/json")
 	client := *c.httpClient
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	startedAt := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return routeContextUnavailable(model, "transport"), nil
@@ -243,6 +245,10 @@ func (c *routeContextClient) fetch(ctx context.Context, apiKey, model string) (r
 	}
 	if model != "" && !resolved.RateLimit.valid() {
 		return routeContextUnavailable(model, "decision"), nil
+	}
+	if model != "" {
+		// Anchor the countdown before the lookup so response latency cannot extend a rejection.
+		resolved.RateLimit.observedAt = startedAt
 	}
 	return resolved, nil
 }
