@@ -19,9 +19,23 @@ const (
 // time the model invokes search or fetch, so the fee applies once when Calls
 // is positive regardless of how many calls followed. SessionPricing is the
 // websearch tool's published pricing; nil means the fee is unknown.
+//
+// Services lists the auxiliary services that ran inside the tool loop and
+// bill per call rather than per session (the privacy filter, for example).
+// Their fees are summed into other_cost_usd so the trailer format does not
+// grow a field per service.
 type WebSearchUsage struct {
 	Calls          int
 	SessionPricing *ModelPricing
+	Services       []ServiceUsage
+}
+
+// ServiceUsage records how many times a per-call-priced service ran during a
+// request. Pricing is the service's published pricing from the model
+// catalog; nil means the fee is unknown and cost_usd must be omitted.
+type ServiceUsage struct {
+	Calls   int
+	Pricing *ModelPricing
 }
 
 func (w *WebSearchUsage) billed() bool {
@@ -29,7 +43,18 @@ func (w *WebSearchUsage) billed() bool {
 }
 
 func (w *WebSearchUsage) costKnown() bool {
-	return !w.billed() || w.SessionPricing != nil
+	if w == nil {
+		return true
+	}
+	if w.billed() && w.SessionPricing == nil {
+		return false
+	}
+	for _, s := range w.Services {
+		if s.Calls > 0 && s.Pricing == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *WebSearchUsage) costNanos() int64 {
@@ -37,6 +62,34 @@ func (w *WebSearchUsage) costNanos() int64 {
 		return 0
 	}
 	return requestPriceNanos(w.SessionPricing.RequestPrice)
+}
+
+// otherBilled reports whether any per-call service ran at least once.
+func (w *WebSearchUsage) otherBilled() bool {
+	if w == nil {
+		return false
+	}
+	for _, s := range w.Services {
+		if s.Calls > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// otherCostNanos sums the per-call service fees. Callers must check
+// costKnown first; a service with calls but no pricing contributes zero here.
+func (w *WebSearchUsage) otherCostNanos() int64 {
+	if w == nil {
+		return 0
+	}
+	var total int64
+	for _, s := range w.Services {
+		if s.Calls > 0 && s.Pricing != nil {
+			total += int64(s.Calls) * requestPriceNanos(s.Pricing.RequestPrice)
+		}
+	}
+	return total
 }
 
 // CostKnownWithoutUsage reports whether request price alone determines cost.
