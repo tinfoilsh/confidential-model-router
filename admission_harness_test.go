@@ -656,22 +656,23 @@ func TestAdmissionHandlerSharedDecisions(t *testing.T) {
 	defer secondClient.refreshes.Wait()
 	second := &admissionHarness{newRouterHandler(em, secondClient, nil), secondClient}
 	for i, tc := range []struct {
-		handler    *admissionHarness
-		key, model string
-		status     int
-		message    string
+		handler     *admissionHarness
+		key, model  string
+		status      int
+		message     string
+		latchTokens bool
 	}{
-		{first, "tk_account_a", admissionTestModel, 200, ""},
-		{second, "tk_account_b", admissionTestModel, 200, ""},
-		{second, "tk_account_b", admissionTestModel, 200, `"priority":1`},
-		{second, "tk_account_b", admissionTestModel, 429, "for requests"},
-		{first, "tk_account_a", admissionTestModel, 200, ""},
-		{first, "tk_account_a", admissionTestModel, 429, "for requests"},
-		{second, "tk_account_a", "nomic-embed-text", 200, ""},
-		{second, "tk_account_a", "nomic-embed-text", 200, ""},
-		{second, "tk_account_a", "nomic-embed-text", 429, "for tokens"},
+		{first, "tk_account_a", admissionTestModel, 200, "", false},
+		{second, "tk_account_b", admissionTestModel, 200, "", false},
+		{second, "tk_account_b", admissionTestModel, 200, `"priority":1`, false},
+		{second, "tk_account_b", admissionTestModel, 429, "for requests", false},
+		{first, "tk_account_a", admissionTestModel, 200, "", false},
+		{first, "tk_account_a", admissionTestModel, 429, "for requests", false},
+		{second, "tk_account_a", "nomic-embed-text", 200, "", false},
+		{second, "tk_account_a", "nomic-embed-text", 200, "", true},
+		{second, "tk_account_a", "nomic-embed-text", 429, "for tokens", false},
 	} {
-		if i == 7 {
+		if tc.latchTokens {
 			mu.Lock()
 			tokensUsed = 100
 			mu.Unlock()
