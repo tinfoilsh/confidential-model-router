@@ -24,7 +24,15 @@ func accessTokenForTest(header, payload string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".c2ln"
 }
 
-func TestRouteContextUncachedDecisions(t *testing.T) {
+func (c *routeContextClient) fetchDecision(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
+	resolved, err := c.fetch(ctx, apiKey, model)
+	if err != nil || resolved.RateLimit == nil {
+		return resolved, err
+	}
+	return resolved, applyRateDecision(model, resolved.RateLimit)
+}
+
+func TestRouteContextFetchedDecisions(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != routeContextPath || r.Header.Get("Content-Type") != "application/json" {
@@ -51,7 +59,7 @@ func TestRouteContextUncachedDecisions(t *testing.T) {
 	defer server.Close()
 	client := newRouteContextClient(server.URL)
 	for i, want := range []string{decisionAllowed, decisionDemote, decisionRejected} {
-		got, err := client.Lookup(context.Background(), "tk_test", admissionTestModel)
+		got, err := client.fetchDecision(context.Background(), "tk_test", admissionTestModel)
 		if want == decisionRejected {
 			if err == nil || err.apiError.Status != http.StatusTooManyRequests || err.retryAfter != "30" {
 				t.Fatalf("rejection: %v", err)
@@ -96,7 +104,7 @@ func TestRouteContextInvalidResponsesAdmitWithoutDecision(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 			defer server.Close()
 			before := lookupFailures(t, admissionTestModel)
-			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			resolved, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 			assertAdmittedWithoutDecision(t, resolved, err)
 			if lookupFailures(t, admissionTestModel) != before+1 {
 				t.Fatal("invalid response not counted as a lookup failure")
@@ -150,7 +158,7 @@ func TestRouteContextStatusesAndRejections(t *testing.T) {
 			defer server.Close()
 			failures := manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, fmt.Sprintf("http_%d", status))
 			before := testutil.ToFloat64(failures)
-			resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+			resolved, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 			if status == 401 || status == 402 || status == 403 || status == 429 {
 				if err == nil || err.apiError.Status != status {
 					t.Fatalf("denial not forwarded: %v", err)
@@ -172,7 +180,7 @@ func TestRouteContextStatusesAndRejections(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"rate_limit":{"decision":"rejected","reason":%q,"retry_after_seconds":1}}`, reason)
 		}))
-		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		_, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 		server.Close()
 		if err == nil {
 			t.Fatal("rejection admitted")
@@ -235,7 +243,7 @@ func TestRouteContextQuotaDenial(t *testing.T) {
 				if model == "" {
 					_, err = client.Metadata(context.Background(), "tk_test")
 				} else {
-					_, err = client.Lookup(context.Background(), "tk_test", model)
+					_, err = client.fetchDecision(context.Background(), "tk_test", model)
 				}
 				if err == nil {
 					t.Fatal("quota denial admitted")
@@ -277,7 +285,7 @@ func TestRouteContextQuotaDenialHidesUnrecognizedBodies(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			io.WriteString(w, body)
 		}))
-		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		_, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 		server.Close()
 		if err == nil || err.apiError.Status != http.StatusTooManyRequests || err.apiError.Message != http.StatusText(http.StatusTooManyRequests) || err.retryAfter != "" {
 			t.Fatalf("unsafe quota error handling: %v", err)
@@ -297,7 +305,7 @@ func TestRouteContextDecisionReasonContract(t *testing.T) {
 						fmt.Fprintf(w, `{"rate_limit":{"decision":%q,"reason":%q,"retry_after_seconds":%d}}`, decision, reason, retry)
 					}))
 					defer server.Close()
-					resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+					resolved, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 					if !valid {
 						assertAdmittedWithoutDecision(t, resolved, err)
 						if testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal) != beforeSeries || testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel)) != beforeRejections {
@@ -323,7 +331,7 @@ func TestRouteContextQuotaDetailsDoNotOverrideDecision(t *testing.T) {
 		`{"rate_limit":{"decision":"demote","reason":"requests","retry_after_seconds":1,"requests":{"limit":100,"used":0}}}`,
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, payload) }))
-		_, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+		_, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 		server.Close()
 		if err != nil {
 			t.Fatalf("valid CP decision overridden by optional details: %v", err)
@@ -389,13 +397,13 @@ func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
 		}
 		t.Error("admission redirect followed")
 	}))
-	resolved, err := newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	resolved, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 	server.Close()
 	assertAdmittedWithoutDecision(t, resolved, err)
 	if calls.Load() != 1 {
 		t.Fatalf("redirect replayed: %d calls", calls.Load())
 	}
-	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	resolved, err = newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 	assertAdmittedWithoutDecision(t, resolved, err)
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -405,7 +413,7 @@ func TestRouteContextTimeoutAndNoRedirectReplay(t *testing.T) {
 	transportFailures := manager.RouteContextLookupFailuresTotal.WithLabelValues(admissionTestModel, "transport")
 	before := testutil.ToFloat64(transportFailures)
 	start := time.Now()
-	resolved, err = newRouteContextClient(server.URL).Lookup(context.Background(), "tk_test", admissionTestModel)
+	resolved, err = newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 	assertAdmittedWithoutDecision(t, resolved, err)
 	if elapsed := time.Since(start); elapsed < routeContextLookupTimeout || elapsed > 3*routeContextLookupTimeout {
 		t.Fatalf("lookup deadline not enforced: %v", time.Since(start))

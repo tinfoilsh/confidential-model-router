@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -19,6 +21,7 @@ const (
 	routeContextPath          = "/api/shim/route-context"
 	routeContextLookupTimeout = 500 * time.Millisecond
 	routeContextResponseLimit = 64 << 10
+	routeContextMaxRefreshes  = 256
 	demotedPriority           = 1
 	decisionAllowed           = "allowed"
 	decisionDemote            = "demote"
@@ -29,8 +32,12 @@ const (
 )
 
 type routeContextClient struct {
-	endpoint   string
-	httpClient *http.Client
+	endpoint     string
+	httpClient   *http.Client
+	cache        routeContextCache
+	refreshSlots chan struct{}
+	refreshes    sync.WaitGroup
+	sequence     atomic.Uint64
 }
 
 type routeContextRequest struct {
@@ -103,38 +110,39 @@ func quotaRetryAfter(header http.Header) string {
 	}
 	value := strings.TrimSpace(values[0])
 	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
-		return value
+		return strings.Clone(value)
 	}
 	if _, err := http.ParseTime(value); err == nil {
-		return value
+		return strings.Clone(value)
 	}
 	return ""
 }
 
 // routeContextUnavailable records a lookup the control plane did not answer.
-// The request is still served: authentication happens again at the enclave,
-// so the only thing lost is this one request's shared-quota accounting and
-// any configured priority, and a control plane outage must not become an
-// inference outage. The counter and log line make the degradation visible.
+// Inference keeps its cached context; metadata falls back to an empty context.
+// Authentication happens again at the enclave. The counter and log line make
+// the degradation visible without turning an outage into an inference outage.
 func routeContextUnavailable(model, reason string) routeContext {
 	manager.RouteContextLookupFailuresTotal.WithLabelValues(model, reason).Inc()
-	log.WithFields(log.Fields{"model": model, "reason": reason}).Debug("route-context lookup unavailable, admitting without quota decision")
+	log.WithFields(log.Fields{"model": model, "reason": reason}).Debug("route-context lookup unavailable")
 	return routeContext{}
 }
 
 func newRouteContextClient(controlPlaneURL string) *routeContextClient {
 	return &routeContextClient{
-		endpoint:   strings.TrimRight(controlPlaneURL, "/") + routeContextPath,
-		httpClient: &http.Client{},
+		endpoint:     strings.TrimRight(controlPlaneURL, "/") + routeContextPath,
+		httpClient:   &http.Client{Transport: http.DefaultTransport},
+		cache:        routeContextCache{maxBytes: routeContextCacheMaxBytes},
+		refreshSlots: make(chan struct{}, routeContextMaxRefreshes),
 	}
 }
 
-// Lookup applies quota admission to one external inference request. JWT shape
+// Lookup applies cached quota admission to one external inference request. JWT shape
 // classification skips only this quota lookup, not authentication: downstream
 // model and tool shims must verify the credential before serving inference.
-// A missing credential and every verdict the control plane returns are
-// enforced; a lookup the control plane cannot answer admits the request with
-// an empty context.
+// A cache miss admits with an empty context. Every request attempts a bounded
+// background refresh, including cached rejections, so recovered callers can
+// resume. Unavailable lookups leave the cached verdict unchanged.
 func (c *routeContextClient) Lookup(ctx context.Context, apiKey, model string) (routeContext, *routeContextError) {
 	if apiKey == "" {
 		return routeContext{}, &routeContextError{apiError: &manager.ErrMissingAPIKey}
@@ -142,15 +150,41 @@ func (c *routeContextClient) Lookup(ctx context.Context, apiKey, model string) (
 	if model == "" {
 		return routeContext{}, &routeContextError{apiError: manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgMissingParam, "model")}
 	}
-	resolved, err := c.fetch(ctx, apiKey, model)
+	if jwtSubject(apiKey) != "" {
+		return routeContext{}, nil
+	}
+	if c == nil {
+		return routeContextUnavailable(model, "configuration"), nil
+	}
+	key := routeContextKey(apiKey, model)
+	resolved, err := c.cache.get(key)
+	c.refresh(ctx, apiKey, model, key)
 	if err != nil {
 		return routeContext{}, err
 	}
 	if resolved.RateLimit == nil {
-		// JWT bearers skip the lookup and carry no decision.
+		// Cold entries carry no decision until a refresh succeeds.
 		return resolved, nil
 	}
 	return resolved, applyRateDecision(model, resolved.RateLimit)
+}
+
+func (c *routeContextClient) refresh(ctx context.Context, apiKey, model string, key routeContextCacheKey) {
+	select {
+	case c.refreshSlots <- struct{}{}:
+	default:
+		routeContextUnavailable(model, "busy")
+		return
+	}
+	sequence := c.sequence.Add(1)
+	ctx = context.WithoutCancel(ctx)
+	c.refreshes.Go(func() {
+		defer func() { <-c.refreshSlots }()
+		resolved, err := c.fetch(ctx, apiKey, model)
+		if err != nil || resolved.RateLimit != nil {
+			c.cache.put(key, resolved, err, sequence)
+		}
+	})
 }
 
 // Metadata deliberately omits model: token counting must never consume an

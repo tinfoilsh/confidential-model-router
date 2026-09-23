@@ -184,6 +184,7 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				capture := &safeguards.Capture{ResponseWriter: rec}
 				if tc.router {
 					handler.ServeHTTP(capture, r)
+					handler.client.refreshes.Wait()
 					if admissions.Load() != 1 {
 						t.Fatalf("admissions = %d", admissions.Load())
 					}
