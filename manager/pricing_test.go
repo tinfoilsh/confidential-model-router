@@ -127,6 +127,45 @@ func TestFormatUsageWebSearch(t *testing.T) {
 			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing},
 			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
 		},
+		{
+			name:    "per-call service fees are summed into other_cost_usd and cost_usd",
+			pricing: modelPricing,
+			webSearch: &WebSearchUsage{Calls: 2, SessionPricing: sessionPricing, Services: []ServiceUsage{
+				{Calls: 2, Pricing: &ModelPricing{RequestPrice: 0.005}},
+			}},
+			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=2,other_cost_usd=0.01,cost_usd=0.062",
+		},
+		{
+			name:    "service with zero calls adds nothing",
+			pricing: modelPricing,
+			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing, Services: []ServiceUsage{
+				{Calls: 0, Pricing: &ModelPricing{RequestPrice: 0.005}},
+			}},
+			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1,cost_usd=0.052",
+		},
+		{
+			name:    "multiple services accumulate at their own rates",
+			pricing: modelPricing,
+			webSearch: &WebSearchUsage{Calls: 2, SessionPricing: sessionPricing, Services: []ServiceUsage{
+				{Calls: 2, Pricing: &ModelPricing{RequestPrice: 0.005}},
+				{Calls: 3, Pricing: &ModelPricing{RequestPrice: 0.002}},
+			}},
+			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=2,other_cost_usd=0.016,cost_usd=0.068",
+		},
+		{
+			name:    "unknown service fee omits both other_cost_usd and cost_usd",
+			pricing: modelPricing,
+			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing, Services: []ServiceUsage{
+				{Calls: 1},
+			}},
+			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
+		},
+		{
+			name:      "unknown billing outcome withholds total despite known prices",
+			pricing:   modelPricing,
+			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing, OtherCostUnknown: true},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
+		},
 	}
 
 	for _, tt := range tests {

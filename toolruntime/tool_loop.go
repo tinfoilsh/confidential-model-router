@@ -293,8 +293,9 @@ func executeRouterToolCall(
 	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, registry.metaFor(call.name))
 	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
-		name:      call.name,
-		arguments: call.arguments,
+		name:       call.name,
+		arguments:  call.arguments,
+		piiBilling: piiBillingFromStructured(call.name, structured, err),
 	}
 	if err != nil {
 		if traceID != "" {
@@ -822,7 +823,7 @@ func callTool(ctx context.Context, session *mcp.ClientSession, name string, argu
 		if message == "" {
 			message = "tool call failed"
 		}
-		return "", nil, errors.New(message)
+		return "", result.StructuredContent, errors.New(message)
 	}
 	if debugEnabled {
 		hasStructured := result.StructuredContent != nil

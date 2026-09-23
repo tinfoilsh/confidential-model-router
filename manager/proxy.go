@@ -42,7 +42,9 @@ const (
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
-	websearchModel = "websearch"
+	websearchModel         = "websearch"
+	privacyFilterModel     = "pii-filter"
+	billableRequestsHeader = "X-Tinfoil-Billable-Requests"
 )
 
 // tokenLabelsKey carries the landing pool and priority class from the
@@ -323,6 +325,17 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
 			responsePricing = wrapper.pricing
 		}
+		// This model reports usage at its endpoint; proxying it must not emit
+		// a second router:model_request event for the same inference.
+		if modelName == privacyFilterModel {
+			if usageMetricsRequested && resp.StatusCode == http.StatusOK {
+				if resp.Header.Get(billableRequestsHeader) != "1" {
+					responsePricing = nil
+				}
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(&tokencount.Usage{}, modelName, responsePricing, nil))
+			}
+			return nil
+		}
 		if streaming && usageMetricsRequested {
 			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)
 			if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
@@ -517,8 +530,10 @@ func normalizeUpstreamErrorResponse(resp *http.Response, modelName, host string)
 //
 // webSearch is nil for requests that never entered the tool runtime. When the
 // model invoked web search, web_search_calls is emitted and the session fee
-// is folded into cost_usd. cost_usd is omitted whenever any component of the
-// total is unknown so a partial figure is never mistaken for the full cost.
+// is folded into cost_usd. Per-call auxiliary services (such as the privacy
+// filter) are summed into other_cost_usd, which is also folded into
+// cost_usd. cost_usd is omitted whenever any component of the total is
+// unknown so a partial figure is never mistaken for the full cost.
 func FormatUsage(usage *tokencount.Usage, model string, pricing *ModelPricing, webSearch *WebSearchUsage) string {
 	formatted := "prompt=" + strconv.Itoa(usage.PromptTokens) +
 		",completion=" + strconv.Itoa(usage.CompletionTokens) +
@@ -536,8 +551,11 @@ func FormatUsage(usage *tokencount.Usage, model string, pricing *ModelPricing, w
 	if webSearch.billed() {
 		formatted += ",web_search_calls=" + strconv.Itoa(webSearch.Calls)
 	}
+	if webSearch.otherBilled() && webSearch.costKnown() {
+		formatted += ",other_cost_usd=" + formatNanosUSD(webSearch.otherCostNanos())
+	}
 	if pricing != nil && webSearch.costKnown() {
-		formatted += ",cost_usd=" + formatNanosUSD(requestCostNanos(usage, *pricing)+webSearch.costNanos())
+		formatted += ",cost_usd=" + formatNanosUSD(requestCostNanos(usage, *pricing)+webSearch.costNanos()+webSearch.otherCostNanos())
 	}
 
 	return formatted

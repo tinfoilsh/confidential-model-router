@@ -63,9 +63,10 @@ type toolProgressResult struct {
 // to the loop: the text the upstream model sees plus the metadata the
 // loop records on the toolCallRecord for client-facing progress items.
 type toolExecution struct {
-	output  string
-	sources []toolCallSource
-	pii     *piiCheckResult
+	output     string
+	sources    []toolCallSource
+	pii        *piiCheckResult
+	piiBilling serviceBilling
 }
 
 // toolProgressHandle is the opaque per-call handle returned by
@@ -177,17 +178,19 @@ func executeSingleToolWithProgress(
 	}
 
 	output, structured, err := callTool(ctx, session, dispatchName, call.arguments, meta)
+	billing := piiBillingFromStructured(call.name, structured, err)
 	if err != nil {
 		result := toolProgressResult{}
 		if !isWebSearchTool(call.name) {
 			result.output = err.Error()
 		}
 		emitter.close(handle, call.name, details, result, "failed", publicToolErrorReason(call.name, err))
-		return toolExecution{}, err
+		return toolExecution{piiBilling: billing}, err
 	}
 	execution := toolExecution{
-		output: applyStructuredFormat(call.name, output, structured, state),
-		pii:    piiCheckResultFromStructured(call.name, structured),
+		output:     applyStructuredFormat(call.name, output, structured, state),
+		pii:        piiCheckResultFromStructured(call.name, structured),
+		piiBilling: billing,
 	}
 	execution.sources = toolCallSourcesForResult(call.name, structured, execution.output)
 
@@ -373,8 +376,9 @@ func resolveStreamingRouterToolCall(
 	execution, err := executor(ctx, call)
 	output := execution.output
 	record := toolCallRecord{
-		name:      call.name,
-		arguments: call.arguments,
+		name:       call.name,
+		arguments:  call.arguments,
+		piiBilling: execution.piiBilling,
 	}
 	if err != nil {
 		if traceID != "" {

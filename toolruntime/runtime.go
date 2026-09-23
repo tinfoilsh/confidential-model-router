@@ -334,13 +334,27 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry 
 
 // webSearchUsage summarizes the router-owned search/fetch calls recorded
 // during a request together with the websearch tool's published session
-// pricing so the usage metrics header can report the fee.
+// pricing so the usage metrics header can report the fee. Privacy filter
+// runs are attached as a per-call service so their fee lands in
+// other_cost_usd.
 func webSearchUsage(em *manager.EnclaveManager, toolCalls *toolCallLog) *manager.WebSearchUsage {
 	usage := &manager.WebSearchUsage{Calls: toolCalls.webSearchCalls()}
+	for _, record := range toolCalls.list() {
+		usage.OtherCostUnknown = usage.OtherCostUnknown || record.piiBilling.unknown
+	}
 	if em != nil {
 		if pricing, ok := em.ModelPricing(WebSearch.ToolServerModel); ok {
 			usage.SessionPricing = &pricing
 		}
+	}
+	if piiCalls := toolCalls.piiFilterCalls(); piiCalls > 0 {
+		service := manager.ServiceUsage{Calls: piiCalls}
+		if em != nil {
+			if pricing, ok := em.ModelPricing(piiFilterModel); ok {
+				service.Pricing = &pricing
+			}
+		}
+		usage.Services = append(usage.Services, service)
 	}
 	return usage
 }

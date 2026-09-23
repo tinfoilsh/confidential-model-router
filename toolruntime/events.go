@@ -77,6 +77,43 @@ func (l *toolCallLog) webSearchCalls() int {
 	return count
 }
 
+// piiFilterCalls counts endpoint billing receipts, including completed
+// inference followed by a failed search. A detection flag is not a receipt.
+func (l *toolCallLog) piiFilterCalls() int {
+	count := 0
+	for _, record := range l.list() {
+		count += record.piiBilling.calls
+	}
+	return count
+}
+
+type serviceBilling struct {
+	calls   int
+	unknown bool
+}
+
+const piiFilterRequestsField = "pii_filter_requests"
+
+func piiBillingFromStructured(name string, structured any, callErr error) serviceBilling {
+	if !isRouterSearchToolName(name) {
+		return serviceBilling{}
+	}
+	content, _ := structured.(map[string]any)
+	if value, present := content[piiFilterRequestsField]; present {
+		// One search invokes the filter at most once. JSON numbers must be integers.
+		switch value {
+		case 0, float64(0):
+			return serviceBilling{}
+		case 1, float64(1):
+			return serviceBilling{calls: 1}
+		default:
+			return serviceBilling{unknown: true}
+		}
+	}
+	checked, _ := content["pii_checked"].(bool)
+	return serviceBilling{unknown: checked || callErr != nil}
+}
+
 // toolCallRecord captures a tool call the router made on the user's behalf,
 // used to surface web_search_call progress items to clients. errorReason
 // carries the tool-side error message when the call failed so terminal
@@ -96,6 +133,7 @@ type toolCallRecord struct {
 	errorReason   string
 	output        string // raw tool output text; used by code-exec events
 	pii           *piiCheckResult
+	piiBilling    serviceBilling
 }
 
 // piiCheckResult mirrors the PII metadata the websearch server attaches to
