@@ -25,9 +25,10 @@ const (
 // Their fees are summed into other_cost_usd so the trailer format does not
 // grow a field per service.
 type WebSearchUsage struct {
-	Calls          int
-	SessionPricing *ModelPricing
-	Services       []ServiceUsage
+	Calls            int
+	SessionPricing   *ModelPricing
+	Services         []ServiceUsage
+	OtherCostUnknown bool
 }
 
 // ServiceUsage records how many times a per-call-priced service ran during a
@@ -46,7 +47,7 @@ func (w *WebSearchUsage) costKnown() bool {
 	if w == nil {
 		return true
 	}
-	if w.billed() && w.SessionPricing == nil {
+	if w.OtherCostUnknown || w.billed() && w.SessionPricing == nil {
 		return false
 	}
 	for _, s := range w.Services {

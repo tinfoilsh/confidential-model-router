@@ -224,21 +224,22 @@ func TestToolCallLogWebSearchCallsCountsSearchAndFetchOnly(t *testing.T) {
 	}
 }
 
-func TestToolCallLogPIIFilterCallsCountsOnlyCheckedSearches(t *testing.T) {
+func TestToolCallLogPIIFilterCallsCountsReceipts(t *testing.T) {
 	var nilLog *toolCallLog
 	if got := nilLog.piiFilterCalls(); got != 0 {
 		t.Fatalf("nil log pii filter calls = %d, want 0", got)
 	}
 
 	log := &toolCallLog{}
-	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{masked: true}})
+	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{masked: true}, piiBilling: serviceBilling{calls: 1}})
+	log.record(toolCallRecord{name: routerSearchToolName, errorReason: publicToolErrorReasonString, piiBilling: serviceBilling{calls: 1}})
 	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{masked: false}})
 	log.record(toolCallRecord{name: routerSearchToolName})
 	log.record(toolCallRecord{name: routerSearchToolName, errorReason: publicToolErrorReasonString})
 	log.record(toolCallRecord{name: routerFetchToolName})
 
 	if got := log.piiFilterCalls(); got != 2 {
-		t.Fatalf("pii filter calls = %d, want 2 (checked searches only, masked or not)", got)
+		t.Fatalf("pii filter calls = %d, want 2 receipts including a failed search", got)
 	}
 }
 
@@ -246,8 +247,8 @@ func TestWebSearchUsageAttachesPIIFilterServiceOnlyWhenItRan(t *testing.T) {
 	em := newTestEnclaveManager()
 
 	log := &toolCallLog{}
-	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{}})
-	log.record(toolCallRecord{name: routerSearchToolName, pii: &piiCheckResult{}})
+	log.record(toolCallRecord{name: routerSearchToolName, piiBilling: serviceBilling{calls: 1}})
+	log.record(toolCallRecord{name: routerSearchToolName, piiBilling: serviceBilling{calls: 1}})
 	log.record(toolCallRecord{name: routerSearchToolName})
 
 	usage := webSearchUsage(em, log)

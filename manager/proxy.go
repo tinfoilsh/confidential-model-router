@@ -42,7 +42,9 @@ const (
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
-	websearchModel = "websearch"
+	websearchModel         = "websearch"
+	privacyFilterModel     = "pii-filter"
+	billableRequestsHeader = "X-Tinfoil-Billable-Requests"
 )
 
 // tokenLabelsKey carries the landing pool and priority class from the
@@ -322,6 +324,17 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		var responsePricing *ModelPricing
 		if wrapper, ok := req.Context().Value(usageWriterKey{}).(*usageMetricsWriter); ok {
 			responsePricing = wrapper.pricing
+		}
+		// This model reports usage at its endpoint; proxying it must not emit
+		// a second router:model_request event for the same inference.
+		if modelName == privacyFilterModel {
+			if usageMetricsRequested && resp.StatusCode == http.StatusOK {
+				if resp.Header.Get(billableRequestsHeader) != "1" {
+					responsePricing = nil
+				}
+				resp.Header.Set(UsageMetricsResponseHeader, FormatUsage(&tokencount.Usage{}, modelName, responsePricing, nil))
+			}
+			return nil
 		}
 		if streaming && usageMetricsRequested {
 			addTrailerHeader(resp.Header, UsageMetricsResponseHeader)

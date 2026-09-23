@@ -77,18 +77,41 @@ func (l *toolCallLog) webSearchCalls() int {
 	return count
 }
 
-// piiFilterCalls counts the search calls on which the websearch service
-// reported that the privacy filter ran. The service bills the filter per run
-// only on successful searches, so failed calls (which carry no PII result)
-// are correctly excluded.
+// piiFilterCalls counts endpoint billing receipts, including completed
+// inference followed by a failed search. A detection flag is not a receipt.
 func (l *toolCallLog) piiFilterCalls() int {
 	count := 0
 	for _, record := range l.list() {
-		if record.pii != nil {
-			count++
-		}
+		count += record.piiBilling.calls
 	}
 	return count
+}
+
+type serviceBilling struct {
+	calls   int
+	unknown bool
+}
+
+const piiFilterRequestsField = "pii_filter_requests"
+
+func piiBillingFromStructured(name string, structured any, callErr error) serviceBilling {
+	if !isRouterSearchToolName(name) {
+		return serviceBilling{}
+	}
+	content, _ := structured.(map[string]any)
+	if value, present := content[piiFilterRequestsField]; present {
+		// One search invokes the filter at most once. JSON numbers must be integers.
+		switch value {
+		case 0, float64(0):
+			return serviceBilling{}
+		case 1, float64(1):
+			return serviceBilling{calls: 1}
+		default:
+			return serviceBilling{unknown: true}
+		}
+	}
+	checked, _ := content["pii_checked"].(bool)
+	return serviceBilling{unknown: checked || callErr != nil}
 }
 
 // toolCallRecord captures a tool call the router made on the user's behalf,
@@ -110,6 +133,7 @@ type toolCallRecord struct {
 	errorReason   string
 	output        string // raw tool output text; used by code-exec events
 	pii           *piiCheckResult
+	piiBilling    serviceBilling
 }
 
 // piiCheckResult mirrors the PII metadata the websearch server attaches to

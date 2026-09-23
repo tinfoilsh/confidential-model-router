@@ -151,6 +151,12 @@ func TestFormatUsageWebSearch(t *testing.T) {
 			}},
 			expected: "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
 		},
+		{
+			name:      "unknown billing outcome withholds total despite known prices",
+			pricing:   modelPricing,
+			webSearch: &WebSearchUsage{Calls: 1, SessionPricing: sessionPricing, OtherCostUnknown: true},
+			expected:  "prompt=1000,completion=500,total=1500,model=m,web_search_calls=1",
+		},
 	}
 
 	for _, tt := range tests {

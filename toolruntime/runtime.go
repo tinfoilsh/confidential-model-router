@@ -339,6 +339,9 @@ func runResponsesLoop(ctx context.Context, em *manager.EnclaveManager, registry 
 // other_cost_usd.
 func webSearchUsage(em *manager.EnclaveManager, toolCalls *toolCallLog) *manager.WebSearchUsage {
 	usage := &manager.WebSearchUsage{Calls: toolCalls.webSearchCalls()}
+	for _, record := range toolCalls.list() {
+		usage.OtherCostUnknown = usage.OtherCostUnknown || record.piiBilling.unknown
+	}
 	if em != nil {
 		if pricing, ok := em.ModelPricing(WebSearch.ToolServerModel); ok {
 			usage.SessionPricing = &pricing
