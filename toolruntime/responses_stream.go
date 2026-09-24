@@ -611,11 +611,9 @@ func (s *responsesStreamer) emitAnnotationEvents(matches []citations.Annotation,
 		annotation := map[string]any{
 			"type":        "url_citation",
 			"url":         match.Source.URL,
+			"title":       match.Source.CitationTitle(),
 			"start_index": match.StartIndex,
 			"end_index":   match.EndIndex,
-		}
-		if match.Source.Title != "" {
-			annotation["title"] = match.Source.Title
 		}
 		annotationIndex := s.annotationCounts[key]
 		s.annotationCounts[key] = annotationIndex + 1

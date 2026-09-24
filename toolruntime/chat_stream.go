@@ -1206,11 +1206,9 @@ func nestedAnnotationsFromMatches(matches []citations.Annotation) []any {
 	for _, match := range matches {
 		citation := map[string]any{
 			"url":         match.Source.URL,
+			"title":       match.Source.CitationTitle(),
 			"start_index": match.StartIndex,
 			"end_index":   match.EndIndex,
-		}
-		if match.Source.Title != "" {
-			citation["title"] = match.Source.Title
 		}
 		out = append(out, map[string]any{
 			"type":         "url_citation",

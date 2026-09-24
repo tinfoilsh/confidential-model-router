@@ -20,6 +20,15 @@ type Source struct {
 	Title string
 }
 
+// CitationTitle supplies the required wire field without changing the recorded
+// title, so source resolution can still prefer a later, genuinely titled result.
+func (s Source) CitationTitle() string {
+	if strings.TrimSpace(s.Title) == "" {
+		return s.URL
+	}
+	return s.Title
+}
+
 // State accumulates the sources the router surfaced during tool execution
 // so later passes over the model's final content can recognize inline
 // markdown links and emit url_citation annotations.
@@ -284,11 +293,9 @@ func (c *State) NestedAnnotationsFor(text string) []any {
 	for _, match := range matches {
 		citation := map[string]any{
 			"url":         match.Source.URL,
+			"title":       match.Source.CitationTitle(),
 			"start_index": match.StartIndex,
 			"end_index":   match.EndIndex,
-		}
-		if match.Source.Title != "" {
-			citation["title"] = match.Source.Title
 		}
 		annotations = append(annotations, map[string]any{
 			"type":         "url_citation",
@@ -313,9 +320,7 @@ func (c *State) FlatAnnotationsFor(text string) []any {
 			"start_index": match.StartIndex,
 			"end_index":   match.EndIndex,
 			"url":         match.Source.URL,
-		}
-		if match.Source.Title != "" {
-			annotation["title"] = match.Source.Title
+			"title":       match.Source.CitationTitle(),
 		}
 		annotations = append(annotations, annotation)
 	}
