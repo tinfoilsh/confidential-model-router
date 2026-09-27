@@ -2,7 +2,9 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -225,7 +227,7 @@ func TestUpstreamDocumentErrorBoundsAndClassifiesEnclaveBody(t *testing.T) {
 		wantMsg    string
 	}{
 		{"client fault keeps status and body", http.StatusUnprocessableEntity, "unsupported file type\n", http.StatusUnprocessableEntity, ErrTypeInvalidRequest, "Document processing failed: unsupported file type"},
-		{"enclave 5xx keeps status", http.StatusInternalServerError, "boom", http.StatusInternalServerError, ErrTypeServer, "Document processing failed: boom"},
+		{"enclave 5xx keeps status", http.StatusInternalServerError, "boom", http.StatusInternalServerError, ErrTypeServer, errMsgDocumentFailed},
 		{"unavailable keeps status", http.StatusServiceUnavailable, "", http.StatusServiceUnavailable, ErrTypeServiceUnavailable, errMsgDocumentFailed},
 		{"timeout keeps status", http.StatusGatewayTimeout, "", http.StatusGatewayTimeout, ErrTypeServer, errMsgDocumentFailed},
 		{"unexpected redirect is not an error status", http.StatusTemporaryRedirect, "", http.StatusBadGateway, ErrTypeServer, errMsgDocumentFailed},
@@ -262,6 +264,39 @@ func TestDocumentErrorRetryHeaders(t *testing.T) {
 			if got.Status != http.StatusServiceUnavailable || got.RetryAfter != tc.want {
 				t.Fatalf("document error lost status/retry metadata: %+v", got)
 			}
+		}
+	}
+}
+
+func TestDocumentServerErrorsHideInternalMessages(t *testing.T) {
+	const privateDetail = "/srv/private/document.py:42: internal traceback"
+	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		for _, tc := range []struct {
+			name     string
+			body     string
+			wantType string
+			wantCode string
+		}{
+			{"plain", privateDetail, errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"html", "<html>" + privateDetail + "</html>", errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"unrecognized json", `{"detail":"` + privateDetail + `"}`, errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"nested error", `{"error":{"type":"server_error","code":"fixture_error","message":"` + privateDetail + `"}}`, ErrTypeServer, "fixture_error"},
+			{"flat error", `{"object":"error","type":"ServiceUnavailableError","code":"fixture_error","message":"` + privateDetail + `"}`, ErrTypeServiceUnavailable, "fixture_error"},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", status, tc.name), func(t *testing.T) {
+				got := upstreamDocumentError(status, http.Header{"Retry-After": {"30"}}, []byte(tc.body))
+				if got.Message != errMsgDocumentFailed || got.Type != tc.wantType || got.Code != tc.wantCode {
+					t.Errorf("document error = %+v", got)
+				}
+				rec := httptest.NewRecorder()
+				WriteAPIError(rec, got)
+				if rec.Code != status || rec.Header().Get("Retry-After") != "30" {
+					t.Errorf("status/retry changed: %d/%q", rec.Code, rec.Header().Get("Retry-After"))
+				}
+				if strings.Contains(rec.Body.String(), privateDetail) {
+					t.Fatal("internal document error leaked to the client")
+				}
+			})
 		}
 	}
 }

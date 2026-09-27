@@ -203,8 +203,8 @@ func (em *EnclaveManager) ConvertFile(
 	return parseDocUploadResponse(respBody, mode)
 }
 
-// upstreamDocumentError surfaces a doc-upload enclave failure. The enclave's
-// response text is included so clients see why their document was rejected,
+// upstreamDocumentError surfaces a doc-upload enclave failure. Client rejection
+// details are included so clients see why their document was rejected,
 // bounded so an unexpected body cannot balloon the error response. HTTP errors
 // retain their status, structured classification, and valid retry hint.
 func upstreamDocumentError(status int, header http.Header, respBody []byte) *APIError {
@@ -212,7 +212,13 @@ func upstreamDocumentError(status int, header http.Header, respBody []byte) *API
 		return fileConversionError(http.StatusBadGateway, errMsgDocumentFailed)
 	}
 	if normalized, ok := NormalizeUpstreamError(status, respBody); ok {
+		if status >= http.StatusInternalServerError {
+			normalized.Message = errMsgDocumentFailed
+		}
 		return normalized.WithRetryAfter(header)
+	}
+	if status >= http.StatusInternalServerError {
+		return fileConversionError(status, errMsgDocumentFailed).WithRetryAfter(header)
 	}
 	if status == http.StatusTooManyRequests {
 		return ErrRateLimited.WithMessage(errMsgDocumentRateLimited).WithRetryAfter(header)
