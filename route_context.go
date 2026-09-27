@@ -104,21 +104,6 @@ func (e *routeContextError) write(w http.ResponseWriter) {
 	writeError(w, e.apiError)
 }
 
-func quotaRetryAfter(header http.Header) string {
-	values := header.Values("Retry-After")
-	if len(values) != 1 {
-		return ""
-	}
-	value := strings.TrimSpace(values[0])
-	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
-		return strings.Clone(value)
-	}
-	if _, err := http.ParseTime(value); err == nil {
-		return strings.Clone(value)
-	}
-	return ""
-}
-
 // routeContextUnavailable records a lookup the control plane did not answer.
 // Inference keeps its cached context; metadata falls back to an empty context.
 // Authentication happens again at the enclave. The counter and log line make
@@ -284,7 +269,7 @@ func credentialDenial(resp *http.Response, data []byte) *routeContextError {
 	}
 	denial := &routeContextError{apiError: apiErr}
 	if quota {
-		denial.retryAfter = quotaRetryAfter(resp.Header)
+		denial.retryAfter = manager.RetryAfterFromHeader(resp.Header)
 	}
 	return denial
 }

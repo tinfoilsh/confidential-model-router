@@ -2,7 +2,9 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -225,14 +227,17 @@ func TestUpstreamDocumentErrorBoundsAndClassifiesEnclaveBody(t *testing.T) {
 		wantMsg    string
 	}{
 		{"client fault keeps status and body", http.StatusUnprocessableEntity, "unsupported file type\n", http.StatusUnprocessableEntity, ErrTypeInvalidRequest, "Document processing failed: unsupported file type"},
-		{"enclave 5xx becomes 502", http.StatusInternalServerError, "boom", http.StatusBadGateway, ErrTypeServer, "Document processing failed: boom"},
+		{"enclave 5xx keeps status", http.StatusInternalServerError, "boom", http.StatusInternalServerError, ErrTypeServer, errMsgDocumentFailed},
+		{"unavailable keeps status", http.StatusServiceUnavailable, "", http.StatusServiceUnavailable, ErrTypeServiceUnavailable, errMsgDocumentFailed},
+		{"timeout keeps status", http.StatusGatewayTimeout, "", http.StatusGatewayTimeout, ErrTypeServer, errMsgDocumentFailed},
+		{"unexpected redirect is not an error status", http.StatusTemporaryRedirect, "", http.StatusBadGateway, ErrTypeServer, errMsgDocumentFailed},
 		{"empty body uses fixed message", http.StatusBadRequest, "  ", http.StatusBadRequest, ErrTypeInvalidRequest, errMsgDocumentFailed},
 		{"oversized body is truncated", http.StatusBadRequest, long, http.StatusBadRequest, ErrTypeInvalidRequest, "Document processing failed: " + long[:maxDocumentErrorDetailBytes] + "..."},
 		{"rate limit is a rate_limit_error", http.StatusTooManyRequests, "slow down", http.StatusTooManyRequests, ErrTypeRateLimit, errMsgDocumentRateLimited},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := upstreamDocumentError(tc.status, []byte(tc.body))
+			got := upstreamDocumentError(tc.status, nil, []byte(tc.body))
 			wantCode := ErrCodeDocumentProcessing
 			if tc.wantType == ErrTypeRateLimit {
 				wantCode = ErrCodeRateLimitExceeded
@@ -247,10 +252,59 @@ func TestUpstreamDocumentErrorBoundsAndClassifiesEnclaveBody(t *testing.T) {
 	}
 }
 
+func TestDocumentErrorRetryHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		retry []string
+		want  string
+	}{
+		{nil, ""}, {[]string{"42"}, "42"}, {[]string{"-1"}, ""}, {[]string{"10", "20"}, ""},
+	} {
+		for _, body := range []string{"", "plain error", `{"error":{"type":"service_unavailable_error","message":"unavailable"}}`} {
+			got := upstreamDocumentError(http.StatusServiceUnavailable, http.Header{"Retry-After": tc.retry}, []byte(body))
+			if got.Status != http.StatusServiceUnavailable || got.RetryAfter != tc.want {
+				t.Fatalf("document error lost status/retry metadata: %+v", got)
+			}
+		}
+	}
+}
+
+func TestDocumentServerErrorsHideInternalMessages(t *testing.T) {
+	const privateDetail = "/srv/private/document.py:42: internal traceback"
+	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		for _, tc := range []struct {
+			name     string
+			body     string
+			wantType string
+			wantCode string
+		}{
+			{"plain", privateDetail, errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"html", "<html>" + privateDetail + "</html>", errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"unrecognized json", `{"detail":"` + privateDetail + `"}`, errTypeForStatus(status), ErrCodeDocumentProcessing},
+			{"nested error", `{"error":{"type":"server_error","code":"fixture_error","message":"` + privateDetail + `"}}`, ErrTypeServer, "fixture_error"},
+			{"flat error", `{"object":"error","type":"ServiceUnavailableError","code":"fixture_error","message":"` + privateDetail + `"}`, ErrTypeServiceUnavailable, "fixture_error"},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", status, tc.name), func(t *testing.T) {
+				got := upstreamDocumentError(status, http.Header{"Retry-After": {"30"}}, []byte(tc.body))
+				if got.Message != errMsgDocumentFailed || got.Type != tc.wantType || got.Code != tc.wantCode {
+					t.Errorf("document error = %+v", got)
+				}
+				rec := httptest.NewRecorder()
+				WriteAPIError(rec, got)
+				if rec.Code != status || rec.Header().Get("Retry-After") != "30" {
+					t.Errorf("status/retry changed: %d/%q", rec.Code, rec.Header().Get("Retry-After"))
+				}
+				if strings.Contains(rec.Body.String(), privateDetail) {
+					t.Fatal("internal document error leaked to the client")
+				}
+			})
+		}
+	}
+}
+
 func TestUpstreamDocumentErrorTruncatesOnUTF8Boundary(t *testing.T) {
 	// Fill to one byte short of the limit, then a 3-byte rune that straddles it.
 	body := strings.Repeat("a", maxDocumentErrorDetailBytes-1) + "€" + "tail"
-	got := upstreamDocumentError(http.StatusBadRequest, []byte(body))
+	got := upstreamDocumentError(http.StatusBadRequest, nil, []byte(body))
 	if !utf8.ValidString(got.Message) {
 		t.Fatalf("message is not valid UTF-8: %q", got.Message)
 	}

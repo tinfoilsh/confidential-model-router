@@ -121,6 +121,22 @@ func (e *DelegationHTTPError) Error() string {
 	return fmt.Sprintf("delegation endpoint returned status %d", e.StatusCode)
 }
 
+func (e *DelegationHTTPError) APIError() *APIError {
+	if e.StatusCode < http.StatusBadRequest || e.StatusCode > maxHTTPErrorStatus {
+		return &ErrUpstream
+	}
+	message := http.StatusText(e.StatusCode)
+	if message == "" {
+		message = ErrMsgServerError
+	}
+	return &APIError{
+		Status:     e.StatusCode,
+		Type:       errTypeForStatus(e.StatusCode),
+		Message:    message,
+		RetryAfter: e.RetryAfter,
+	}
+}
+
 func validateDelegationControlPlaneURL(controlPlaneURL string, debug bool) error {
 	if debug {
 		return nil
@@ -243,7 +259,7 @@ func (p *delegatedAuthorization) exchange(ctx context.Context, payload delegatio
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return delegationResponse{}, &DelegationHTTPError{
 			StatusCode: resp.StatusCode,
-			RetryAfter: resp.Header.Get("Retry-After"),
+			RetryAfter: RetryAfterFromHeader(resp.Header),
 		}
 	}
 	var result delegationResponse

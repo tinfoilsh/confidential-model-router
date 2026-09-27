@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -186,6 +187,7 @@ func (s *streamBase) emitBillingEvent(r *http.Request, em *manager.EnclaveManage
 // the generic upstream message so internal error text stays in the logs.
 func upstreamErrorPayload(err error) map[string]any {
 	var apiErr *manager.APIError
+	var delegationErr *manager.DelegationHTTPError
 	if upErr, ok := err.(*upstreamError); ok {
 		var recognized bool
 		apiErr, recognized = manager.NormalizeUpstreamError(upErr.statusCode, upErr.body)
@@ -195,6 +197,8 @@ func upstreamErrorPayload(err error) map[string]any {
 				"bytes":  len(upErr.body),
 			}).Warn("upstream error body is not an OpenAI error object")
 		}
+	} else if errors.As(err, &delegationErr) {
+		apiErr = delegationErr.APIError()
 	} else {
 		log.WithError(err).Warn("stream terminated by non-upstream error")
 		apiErr = &manager.ErrUpstream

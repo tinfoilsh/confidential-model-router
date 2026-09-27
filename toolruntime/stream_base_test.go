@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -54,6 +55,25 @@ func TestUpstreamErrorPayloadHidesRawBodies(t *testing.T) {
 	})
 	if payload["message"] != manager.ErrMsgServerError || payload["code"] != manager.ErrCodeUpstreamError {
 		t.Fatalf("raw body leaked: %v", payload)
+	}
+}
+
+func TestStreamDelegationErrorRetainsClassification(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		wantType string
+	}{
+		{http.StatusUnauthorized, manager.ErrTypeAuthentication},
+		{http.StatusPaymentRequired, manager.ErrTypeInsufficientQuota},
+		{http.StatusForbidden, manager.ErrTypePermission},
+		{http.StatusTooManyRequests, manager.ErrTypeRateLimit},
+		{http.StatusServiceUnavailable, manager.ErrTypeServiceUnavailable},
+	} {
+		err := fmt.Errorf("private transport detail: %w", &manager.DelegationHTTPError{StatusCode: tc.status})
+		payload := upstreamErrorPayload(err)
+		if payload["type"] != tc.wantType || payload["message"] != http.StatusText(tc.status) {
+			t.Errorf("status %d: unexpected stream payload: %v", tc.status, payload)
+		}
 	}
 }
 
