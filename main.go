@@ -899,8 +899,13 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 						// holds a 200; the failure was reported in-band and a
 						// JSON error here would corrupt the event stream.
 						var aborted *toolruntime.StreamAbortedError
+						var delegationErr *manager.DelegationHTTPError
 						if !errors.As(err, &aborted) {
-							writeError(tw, &manager.ErrUpstream)
+							if errors.As(err, &delegationErr) {
+								writeError(tw, delegationErr.APIError())
+							} else {
+								writeError(tw, &manager.ErrUpstream)
+							}
 						}
 					}
 					toolServed = true

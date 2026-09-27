@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 // Error type strings returned in API error responses. These follow the
@@ -15,6 +17,9 @@ const (
 	ErrTypeRateLimit          = "rate_limit_error"
 	ErrTypeServiceUnavailable = "service_unavailable_error"
 	ErrTypeServer             = "server_error"
+	ErrTypeInsufficientQuota  = "insufficient_quota"
+	ErrTypeAuthentication     = "authentication_error"
+	ErrTypePermission         = "permission_error"
 )
 
 // Machine-readable error codes carried in the `code` field of API error
@@ -61,11 +66,12 @@ const (
 // APIError is an error response in OpenAI's format. Param and Code are
 // emitted as JSON null when empty, matching OpenAI's envelope.
 type APIError struct {
-	Status  int
-	Type    string
-	Code    string
-	Param   string
-	Message string
+	Status     int
+	Type       string
+	Code       string
+	Param      string
+	Message    string
+	RetryAfter string
 }
 
 func (e *APIError) Error() string {
@@ -88,6 +94,27 @@ func (e APIError) WithParam(param string) *APIError {
 func (e APIError) WithStatus(status int) *APIError {
 	e.Status = status
 	return &e
+}
+
+func (e APIError) WithRetryAfter(header http.Header) *APIError {
+	e.RetryAfter = RetryAfterFromHeader(header)
+	return &e
+}
+
+// RetryAfterFromHeader accepts a single delay-seconds or HTTP-date value.
+func RetryAfterFromHeader(header http.Header) string {
+	values := header.Values("Retry-After")
+	if len(values) != 1 {
+		return ""
+	}
+	value := strings.TrimSpace(values[0])
+	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
+		return strings.Clone(value)
+	}
+	if _, err := http.ParseTime(value); err == nil {
+		return strings.Clone(value)
+	}
+	return ""
 }
 
 // Predeclared errors. Parameterized messages are filled in with WithMessage
@@ -221,6 +248,9 @@ func (e *APIError) Envelope() ErrorEnvelope {
 
 // WriteAPIError writes the error as a JSON response with its status code.
 func WriteAPIError(w http.ResponseWriter, e *APIError) {
+	if e.RetryAfter != "" {
+		w.Header().Set("Retry-After", e.RetryAfter)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Status)
 	json.NewEncoder(w).Encode(e.Envelope())
@@ -229,6 +259,8 @@ func WriteAPIError(w http.ResponseWriter, e *APIError) {
 // MaxUpstreamErrorBodyBytes bounds how much of a backend error response is
 // buffered for normalization. Larger bodies are replaced by ErrUpstream.
 const MaxUpstreamErrorBodyBytes = 64 << 10
+
+const maxHTTPErrorStatus = 599
 
 // upstreamErrorTypes maps the error type names emitted by inference backends
 // (vLLM uses Python exception class names) to OpenAI's error taxonomy.
@@ -296,9 +328,9 @@ var openAIErrorTypes = map[string]bool{
 	ErrTypeRateLimit:          true,
 	ErrTypeServiceUnavailable: true,
 	ErrTypeServer:             true,
-	"insufficient_quota":      true,
-	"authentication_error":    true,
-	"permission_error":        true,
+	ErrTypeInsufficientQuota:  true,
+	ErrTypeAuthentication:     true,
+	ErrTypePermission:         true,
 	"not_found_error":         true,
 }
 
@@ -306,6 +338,12 @@ var openAIErrorTypes = map[string]bool{
 // when the backend did not name one.
 func errTypeForStatus(status int) string {
 	switch {
+	case status == http.StatusUnauthorized:
+		return ErrTypeAuthentication
+	case status == http.StatusForbidden:
+		return ErrTypePermission
+	case status == http.StatusPaymentRequired:
+		return ErrTypeInsufficientQuota
 	case status == http.StatusTooManyRequests:
 		return ErrTypeRateLimit
 	case status == http.StatusServiceUnavailable:

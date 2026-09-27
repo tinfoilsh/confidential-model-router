@@ -56,17 +56,11 @@ const (
 	errMsgDocumentFailedDetail    = "Document processing failed: %s"
 )
 
-// fileConversionError returns a document-processing APIError. 4xx statuses
-// are the client's fault (invalid_request_error); everything else is a
-// server_error.
+// fileConversionError returns a document-processing APIError classified by status.
 func fileConversionError(status int, message string) *APIError {
-	errType := ErrTypeServer
-	if status >= 400 && status < 500 {
-		errType = ErrTypeInvalidRequest
-	}
 	return &APIError{
 		Status:  status,
-		Type:    errType,
+		Type:    errTypeForStatus(status),
 		Code:    ErrCodeDocumentProcessing,
 		Message: message,
 	}
@@ -193,13 +187,17 @@ func (em *EnclaveManager) ConvertFile(
 		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentRequestFailed)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxUpstreamErrorBodyBytes+1))
+		if err != nil || len(respBody) > MaxUpstreamErrorBodyBytes {
+			respBody = nil
+		}
+		return nil, upstreamDocumentError(resp.StatusCode, resp.Header, respBody)
+	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fileConversionError(http.StatusBadGateway, errMsgDocumentReadResponse)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, upstreamDocumentError(resp.StatusCode, respBody)
 	}
 
 	return parseDocUploadResponse(respBody, mode)
@@ -207,24 +205,26 @@ func (em *EnclaveManager) ConvertFile(
 
 // upstreamDocumentError surfaces a doc-upload enclave failure. The enclave's
 // response text is included so clients see why their document was rejected,
-// bounded so an unexpected body cannot balloon the error response. Non-2xx
-// statuses other than client faults are reported as 502: the enclave's own
-// 5xx codes describe its internals, not the router's.
-func upstreamDocumentError(status int, respBody []byte) *APIError {
+// bounded so an unexpected body cannot balloon the error response. HTTP errors
+// retain their status, structured classification, and valid retry hint.
+func upstreamDocumentError(status int, header http.Header, respBody []byte) *APIError {
+	if status < http.StatusBadRequest || status > maxHTTPErrorStatus {
+		return fileConversionError(http.StatusBadGateway, errMsgDocumentFailed)
+	}
+	if normalized, ok := NormalizeUpstreamError(status, respBody); ok {
+		return normalized.WithRetryAfter(header)
+	}
 	if status == http.StatusTooManyRequests {
-		return ErrRateLimited.WithMessage(errMsgDocumentRateLimited)
+		return ErrRateLimited.WithMessage(errMsgDocumentRateLimited).WithRetryAfter(header)
 	}
 	detail := strings.TrimSpace(string(respBody))
 	if len(detail) > maxDocumentErrorDetailBytes {
 		detail = strings.ToValidUTF8(detail[:maxDocumentErrorDetailBytes], "") + "..."
 	}
-	if status < 400 || status >= 500 {
-		status = http.StatusBadGateway
-	}
 	if detail == "" {
-		return fileConversionError(status, errMsgDocumentFailed)
+		return fileConversionError(status, errMsgDocumentFailed).WithRetryAfter(header)
 	}
-	return fileConversionError(status, fmt.Sprintf(errMsgDocumentFailedDetail, detail))
+	return fileConversionError(status, fmt.Sprintf(errMsgDocumentFailedDetail, detail)).WithRetryAfter(header)
 }
 
 func escapeMultipartFilename(filename string) string {

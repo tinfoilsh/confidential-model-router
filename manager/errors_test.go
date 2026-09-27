@@ -69,6 +69,34 @@ func TestAPIErrorWithHelpersDoNotMutateBase(t *testing.T) {
 	}
 }
 
+func TestAPIErrorRetryAfterIsValidatedAndNotInBody(t *testing.T) {
+	const date = "Wed, 21 Oct 2037 07:28:00 GMT"
+	for _, tc := range []struct {
+		values []string
+		want   string
+	}{
+		{nil, ""}, {[]string{""}, ""}, {[]string{"0"}, "0"},
+		{[]string{" 42 "}, "42"}, {[]string{date}, date},
+		{[]string{"-1"}, ""}, {[]string{"+1"}, ""}, {[]string{"1.5"}, ""},
+		{[]string{"tomorrow"}, ""}, {[]string{"10", "20"}, ""},
+		{[]string{"10, 20"}, ""}, {[]string{"30\r\nX-Injected: yes"}, ""},
+	} {
+		rec := httptest.NewRecorder()
+		err := ErrRateLimited.WithRetryAfter(http.Header{"Retry-After": tc.values})
+		WriteAPIError(rec, err)
+		if got := rec.Header().Get("Retry-After"); got != tc.want {
+			t.Errorf("Retry-After(%q) = %q, want %q", tc.values, got, tc.want)
+		}
+		var body map[string]map[string]any
+		if json.Unmarshal(rec.Body.Bytes(), &body) != nil || len(body) != 1 || len(body["error"]) != 4 {
+			t.Fatalf("retry metadata changed the error envelope: %s", rec.Body.String())
+		}
+	}
+	if ErrRateLimited.RetryAfter != "" {
+		t.Fatal("base error was mutated")
+	}
+}
+
 func TestNormalizeUpstreamError(t *testing.T) {
 	cases := []struct {
 		name       string

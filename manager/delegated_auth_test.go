@@ -336,13 +336,56 @@ func TestPostToEnclaveDelegationFailureBlocksDownstream(t *testing.T) {
 	headers := http.Header{"Authorization": []string{"Bearer original"}}
 	ctx := WithAuthorizationProvider(context.Background(), provider)
 
-	if _, err := postToEnclave(ctx, server.Client(), enclave, "/v1/chat/completions", []byte("{}"), headers, nil); err == nil {
-		t.Fatal("expected delegated authorization failure")
+	_, err := postToEnclave(ctx, server.Client(), enclave, "/v1/chat/completions", []byte("{}"), headers, nil)
+	var delegationErr *DelegationHTTPError
+	if !errors.As(err, &delegationErr) || delegationErr.APIError().Status != http.StatusServiceUnavailable {
+		t.Fatalf("delegated refresh lost its status: %v", err)
 	}
 	if got := downstreamCalls.Load(); got != 0 {
 		t.Fatalf("downstream calls = %d, want 0", got)
 	}
 	if got := headers.Get("Authorization"); got != "Bearer original" {
 		t.Fatalf("original headers changed to %q", got)
+	}
+}
+
+func TestDelegationErrorRetryMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		status    int
+		retry     []string
+		wantRetry string
+	}{
+		{http.StatusTooManyRequests, []string{"42"}, "42"},
+		{http.StatusServiceUnavailable, []string{"Wed, 21 Oct 2037 07:28:00 GMT"}, "Wed, 21 Oct 2037 07:28:00 GMT"},
+		{http.StatusServiceUnavailable, []string{"-1"}, ""},
+		{http.StatusServiceUnavailable, []string{"10", "20"}, ""},
+		{http.StatusForbidden, nil, ""},
+	} {
+		t.Run(fmt.Sprintf("%d/%v", tc.status, tc.retry), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for _, value := range tc.retry {
+					w.Header().Add("Retry-After", value)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"access_token":"private-detail"}`))
+			}))
+			defer server.Close()
+			provider := &delegatedAuthorization{client: server.Client(), endpoint: server.URL, now: time.Now}
+			_, err := provider.exchange(context.Background(), delegationRequest{})
+			var delegationErr *DelegationHTTPError
+			if !errors.As(err, &delegationErr) {
+				t.Fatalf("expected delegation HTTP error: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			WriteAPIError(rec, delegationErr.APIError())
+			if rec.Code != tc.status || rec.Header().Get("Retry-After") != tc.wantRetry || strings.Contains(rec.Body.String(), "private-detail") {
+				t.Fatalf("delegation response: %d %v %s", rec.Code, rec.Header(), rec.Body.String())
+			}
+		})
+	}
+	for _, status := range []int{0, http.StatusOK, http.StatusTemporaryRedirect, maxHTTPErrorStatus + 1} {
+		if got := (&DelegationHTTPError{StatusCode: status}).APIError(); got.Status != http.StatusBadGateway {
+			t.Errorf("non-error status %d surfaced as %d", status, got.Status)
+		}
 	}
 }
