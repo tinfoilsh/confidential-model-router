@@ -281,7 +281,9 @@ func TestResponsesStreamerForwardsClientOwnedFunctionCall(t *testing.T) {
 func TestResponsesStreamerCanonicalizesStringifiedAutoContinueArguments(t *testing.T) {
 	streamer, rec := newTestResponsesStreamer(t)
 	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`
+	// Trailing prose after the JSON object exercises the same repair the
+	// chat streaming path applies before canonicalization.
+	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}Here is the preview.`
 	frames := []string{
 		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":""}}`,
 		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":` + jsonStringChat(rawArguments) + `}}`,

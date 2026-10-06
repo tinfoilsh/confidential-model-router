@@ -476,6 +476,9 @@ func (s *responsesStreamer) handleOutputItemDone(event map[string]any, result *r
 		delete(s.functionCallArguments, upstreamIndex)
 		if _, isAutoContinue := s.autoContinueTools[stringValue(item["name"])]; isAutoContinue {
 			if rawArgs, ok := item["arguments"].(string); ok {
+				if repaired, changed := sanitizeToolCallArgumentsJSON([]byte(rawArgs)); changed && jsonBytesValid(repaired) {
+					rawArgs = string(repaired)
+				}
 				item["arguments"] = canonicalizeAutoContinueArguments(rawArgs)
 			}
 		}
