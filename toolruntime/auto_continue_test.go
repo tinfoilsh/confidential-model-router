@@ -382,8 +382,13 @@ func TestAutoContinueToolOutputReportsSchemaViolation(t *testing.T) {
 		t.Fatalf("error should name the tool and offending field, got %q", message)
 	}
 
-	// A second failure for the same tool is acknowledged so the model
-	// does not loop forever on a schema it cannot satisfy.
+	// Failures past the retry cap are acknowledged so the model does not
+	// loop forever on a schema it cannot satisfy.
+	for i := 1; i < maxAutoContinueSchemaRetries; i++ {
+		if out := autoContinueToolOutput(call, schemas, failures); out == autoContinueToolResult {
+			t.Fatalf("retry %d should still report the error", i+1)
+		}
+	}
 	if out := autoContinueToolOutput(call, schemas, failures); out != autoContinueToolResult {
 		t.Fatalf("expected retries to be capped at %d, got %s", maxAutoContinueSchemaRetries, out)
 	}

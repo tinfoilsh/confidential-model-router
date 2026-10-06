@@ -72,8 +72,9 @@ const (
 	// given auto-continue tool is told its arguments failed validation.
 	// Past this the router acknowledges the call as executed so a model
 	// that cannot satisfy the schema moves on instead of burning the whole
-	// tool budget regenerating the same widget.
-	maxAutoContinueSchemaRetries = 1
+	// tool budget regenerating the same widget. Two attempts cover the
+	// common case where fixing one field surfaces a second error.
+	maxAutoContinueSchemaRetries = 2
 )
 
 // autoContinueConfig is what a request's tools array tells the router
