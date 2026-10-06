@@ -91,6 +91,11 @@ type responsesStreamer struct {
 	// client stream. Client-owned tool calls are forwarded live.
 	ownedTools map[string]struct{}
 
+	// autoContinueTools names the client tools the caller flagged for
+	// router-side continuation; their function_call arguments are
+	// canonicalized before the output item is forwarded to the client.
+	autoContinueTools map[string]struct{}
+
 	// includeActionSources mirrors the request's opt-in for
 	// `web_search_call.action.sources` on the terminal snapshot.
 	includeActionSources bool
@@ -469,6 +474,14 @@ func (s *responsesStreamer) handleOutputItemDone(event map[string]any, result *r
 			}
 		}
 		delete(s.functionCallArguments, upstreamIndex)
+		if _, isAutoContinue := s.autoContinueTools[stringValue(item["name"])]; isAutoContinue {
+			if rawArgs, ok := item["arguments"].(string); ok {
+				if repaired, changed := sanitizeToolCallArgumentsJSON([]byte(rawArgs)); changed && jsonBytesValid(repaired) {
+					rawArgs = string(repaired)
+				}
+				item["arguments"] = canonicalizeAutoContinueArguments(rawArgs)
+			}
+		}
 	}
 	clientIndex, ok := s.outputIndexMap[upstreamIndex]
 	if !ok {
@@ -875,10 +888,10 @@ func (s *responsesStreamer) totalsBillingUsage() map[string]any {
 // buildResponsesStreamRequest builds the upstream /v1/responses request for
 // the streaming path. It shares its body construction with the non-streaming
 // loop via buildResponsesUpstreamRequest, then forces streaming.
-func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
-	base, autoContinueTools := buildResponsesUpstreamRequest(body, tools, prompt)
+func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
+	base, autoContinue := buildResponsesUpstreamRequest(body, tools, prompt)
 	base["stream"] = true
-	return base, autoContinueTools
+	return base, autoContinue
 }
 
 func runResponsesStreaming(
@@ -907,7 +920,9 @@ func runResponsesStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	base, autoContinueTools := buildResponsesStreamRequest(body, tools, prompt)
+	base, autoContinue := buildResponsesStreamRequest(body, tools, prompt)
+	autoContinueTools := autoContinue.tools
+	autoContinueFailures := autoContinueSchemaFailures{}
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 
@@ -924,6 +939,7 @@ func runResponsesStreaming(
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            ownedTools,
+		autoContinueTools:     autoContinueTools,
 		includeActionSources:  searchOpts.includeActionSources,
 	}
 
@@ -981,13 +997,15 @@ func runResponsesStreaming(
 		}
 		// Auto-continue client tool calls: inject a synthetic
 		// function_call_output so the model can continue producing
-		// the prose that surrounds the rendered widget.
+		// the prose that surrounds the rendered widget. Arguments the
+		// client's schema would reject yield an error output so the
+		// model retries instead of believing the widget rendered.
 		if !mixedTurn {
 			for _, call := range autoContinueCalls {
 				toolOutputs = append(toolOutputs, map[string]any{
 					"type":    "function_call_output",
 					"call_id": call.id,
-					"output":  autoContinueToolResult,
+					"output":  autoContinueToolOutput(call, autoContinue.schemas, autoContinueFailures),
 				})
 			}
 		}

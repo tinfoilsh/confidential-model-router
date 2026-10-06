@@ -320,6 +320,34 @@ func TestChatStreamerPumpPreservesLargeAutoContinueArguments(t *testing.T) {
 	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", rawArguments)
 }
 
+func TestChatStreamerPumpCanonicalizesStringifiedAutoContinueArguments(t *testing.T) {
+	streamer, rec := newTestChatStreamer(t)
+	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
+	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`
+	upstream := chatToolCallTurn("up_1", "call_widget", "render_artifact_preview", rawArguments)
+
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+
+	calls := emittedChatToolCallDeltas(t, rec.Body.String())
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool_call delta, got %d", len(calls))
+	}
+	function, _ := calls[0]["function"].(map[string]any)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stringValue(function["arguments"])), &decoded); err != nil {
+		t.Fatalf("forwarded arguments are not JSON: %v", err)
+	}
+	source, ok := decoded["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected source unwrapped into an object, got %#v", decoded["source"])
+	}
+	if source["type"] != "html" || source["html"] != "<p>hi</p>" {
+		t.Fatalf("unexpected unwrapped source: %#v", source)
+	}
+}
+
 func TestChatStreamerPumpPreservesOrderAfterBufferedAutoContinueCall(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
 	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}

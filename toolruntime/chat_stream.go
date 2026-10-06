@@ -847,6 +847,7 @@ func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntr
 			if repaired, changed := sanitizeToolCallArgumentsJSON(arguments); changed && jsonBytesValid(repaired) {
 				arguments = repaired
 			}
+			arguments = []byte(canonicalizeAutoContinueArguments(string(arguments)))
 		}
 		toolType := entry.toolType
 		if toolType == "" {
@@ -969,11 +970,11 @@ func (b *chatToolCallBuilder) raw() []any {
 // the streaming path. It shares its body construction with the non-streaming
 // loop via buildChatUpstreamRequest, then forces streaming with usage
 // reporting.
-func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
-	reqBody, autoContinueTools := buildChatUpstreamRequest(body, tools, prompt)
+func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
+	reqBody, autoContinue := buildChatUpstreamRequest(body, tools, prompt)
 	reqBody["stream"] = true
 	reqBody["stream_options"] = streamUsageOptions()
-	return reqBody, autoContinueTools
+	return reqBody, autoContinue
 }
 
 // streamUsageOptions returns the stream_options set on every upstream
@@ -1016,7 +1017,9 @@ func runChatStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	reqBody, autoContinueTools := buildChatStreamRequest(body, tools, prompt)
+	reqBody, autoContinue := buildChatStreamRequest(body, tools, prompt)
+	autoContinueTools := autoContinue.tools
+	autoContinueFailures := autoContinueSchemaFailures{}
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
@@ -1124,15 +1127,17 @@ func runChatStreaming(
 				})
 			}
 		}
-		// Auto-continue client tool calls: synthesise a constant
-		// "executed" result and fold it into history so the model
-		// can keep generating the prose that surrounds the widget.
+		// Auto-continue client tool calls: synthesise a result and fold
+		// it into history so the model can keep generating the prose
+		// that surrounds the widget. Arguments the client's schema would
+		// reject yield an error result so the model retries instead of
+		// believing the widget rendered.
 		if !mixedTurn {
 			for _, call := range autoContinueCalls {
 				messages = append(messages, map[string]any{
 					"role":         "tool",
 					"tool_call_id": call.id,
-					"content":      autoContinueToolResult,
+					"content":      autoContinueToolOutput(call, autoContinue.schemas, autoContinueFailures),
 				})
 			}
 		}

@@ -308,6 +308,120 @@ func TestFilterResponsesOutputItemsCanonicalisesArguments(t *testing.T) {
 	}
 }
 
+// artifactPreviewParameters mirrors the JSON Schema the web client sends
+// for render_artifact_preview: `source` is a discriminated union of
+// objects, which is exactly the field models most often get wrong.
+const artifactPreviewParameters = `{
+	"type":"object",
+	"properties":{
+		"title":{"type":"string"},
+		"source":{"anyOf":[
+			{"type":"object","properties":{"type":{"type":"string","enum":["url"]},"url":{"type":"string"}},"required":["type","url"],"additionalProperties":false},
+			{"type":"object","properties":{"type":{"type":"string","enum":["html"]},"html":{"type":"string"}},"required":["type","html"],"additionalProperties":false},
+			{"type":"object","properties":{"type":{"type":"string","enum":["markdown"]},"markdown":{"type":"string"}},"required":["type","markdown"],"additionalProperties":false}
+		]}
+	},
+	"required":["source"],
+	"additionalProperties":false
+}`
+
+func artifactPreviewChatTools(t *testing.T) []any {
+	t.Helper()
+	var params map[string]any
+	if err := json.Unmarshal([]byte(artifactPreviewParameters), &params); err != nil {
+		t.Fatalf("parse fixture schema: %v", err)
+	}
+	return []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":                         "render_artifact_preview",
+				"parameters":                   params,
+				"x-tinfoil-tool-auto-continue": true,
+			},
+		},
+	}
+}
+
+func TestAutoContinueSchemasCapturesFlaggedChatToolParameters(t *testing.T) {
+	tools := artifactPreviewChatTools(t)
+	tools = append(tools, map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "lookup_order", "parameters": map[string]any{"type": "object"}},
+	})
+	names := extractAndStripAutoContinueChatTools(tools)
+	schemas := autoContinueSchemas(tools, names)
+	if schemas["render_artifact_preview"] == nil {
+		t.Fatalf("expected resolved schema for flagged tool, got %v", schemas)
+	}
+	if _, ok := schemas["lookup_order"]; ok {
+		t.Fatalf("unflagged tool must not be validated")
+	}
+}
+
+func TestAutoContinueToolOutputReportsSchemaViolation(t *testing.T) {
+	tools := artifactPreviewChatTools(t)
+	schemas := autoContinueSchemas(tools, extractAndStripAutoContinueChatTools(tools))
+	failures := autoContinueSchemaFailures{}
+
+	call := toolCall{
+		id:        "c1",
+		name:      "render_artifact_preview",
+		arguments: map[string]any{"title": "Demo", "source": "<p>hi</p>"},
+	}
+	out := autoContinueToolOutput(call, schemas, failures)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("tool output is not JSON: %v", err)
+	}
+	if payload["status"] != "error" {
+		t.Fatalf("expected error status for invalid arguments, got %s", out)
+	}
+	message := stringValue(payload["error"])
+	if !strings.Contains(message, "source") || !strings.Contains(message, "render_artifact_preview") {
+		t.Fatalf("error should name the tool and offending field, got %q", message)
+	}
+
+	// Failures past the retry cap are acknowledged so the model does not
+	// loop forever on a schema it cannot satisfy.
+	for i := 1; i < maxAutoContinueSchemaRetries; i++ {
+		if out := autoContinueToolOutput(call, schemas, failures); out == autoContinueToolResult {
+			t.Fatalf("retry %d should still report the error", i+1)
+		}
+	}
+	if out := autoContinueToolOutput(call, schemas, failures); out != autoContinueToolResult {
+		t.Fatalf("expected retries to be capped at %d, got %s", maxAutoContinueSchemaRetries, out)
+	}
+}
+
+func TestAutoContinueToolOutputAcknowledgesValidArguments(t *testing.T) {
+	tools := artifactPreviewChatTools(t)
+	schemas := autoContinueSchemas(tools, extractAndStripAutoContinueChatTools(tools))
+
+	valid := toolCall{
+		name:      "render_artifact_preview",
+		arguments: map[string]any{"title": "Demo", "source": map[string]any{"type": "html", "html": "<p>hi</p>"}},
+	}
+	if out := autoContinueToolOutput(valid, schemas, autoContinueSchemaFailures{}); out != autoContinueToolResult {
+		t.Fatalf("valid arguments should be acknowledged, got %s", out)
+	}
+
+	// Stringified nested JSON is unwrapped before validation, matching
+	// what the client receives after canonicalization.
+	stringified := toolCall{
+		name:      "render_artifact_preview",
+		arguments: map[string]any{"source": `{"type":"markdown","markdown":"# hi"}`},
+	}
+	if out := autoContinueToolOutput(stringified, schemas, autoContinueSchemaFailures{}); out != autoContinueToolResult {
+		t.Fatalf("stringified-but-unwrappable arguments should be acknowledged, got %s", out)
+	}
+
+	unknown := toolCall{name: "render_unknown", arguments: map[string]any{"anything": 1}}
+	if out := autoContinueToolOutput(unknown, schemas, autoContinueSchemaFailures{}); out != autoContinueToolResult {
+		t.Fatalf("tools without a schema should be acknowledged, got %s", out)
+	}
+}
+
 func setKeys(m map[string]struct{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

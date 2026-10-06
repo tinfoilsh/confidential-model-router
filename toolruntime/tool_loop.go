@@ -89,6 +89,12 @@ type toolLoopAdapter interface {
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
+
+	// autoContinueParameterSchemas returns the resolved parameter schema
+	// per auto-continue tool, captured from the caller's tools array by
+	// buildInitialRequest. Used to validate arguments before the router
+	// acknowledges a call.
+	autoContinueParameterSchemas() map[string]*jsonschema.Resolved
 }
 
 // toolOutput pairs an upstream tool call's id/name with the text the router
@@ -134,6 +140,8 @@ func runToolLoop(
 	toolSchemas := adapter.schemas()
 	path := adapter.upstreamPath()
 	var autoContinueResponseItems []any
+	autoContinueSchemas := adapter.autoContinueParameterSchemas()
+	autoContinueFailures := autoContinueSchemaFailures{}
 	var completedHeaders http.Header
 	// Error exits carry billing-only usage from fully consumed successful turns;
 	// the caller must still surface the original error, not this partial result.
@@ -199,14 +207,16 @@ func runToolLoop(
 			})
 		}
 		// Auto-continue client tool calls don't reach any external
-		// service. Synthesise a constant result so the model's history
-		// stays protocol-valid and the next turn can produce the prose
-		// that would otherwise be lost when the model hands off.
+		// service. Synthesise a result so the model's history stays
+		// protocol-valid and the next turn can produce the prose that
+		// would otherwise be lost when the model hands off. Arguments
+		// the client's schema would reject yield an error result so the
+		// model can retry rather than believing the widget rendered.
 		for _, call := range autoContinueCalls {
 			outputs = append(outputs, toolOutput{
 				callID: call.id,
 				name:   call.name,
-				output: autoContinueToolResult,
+				output: autoContinueToolOutput(call, autoContinueSchemas, autoContinueFailures),
 			})
 		}
 
@@ -321,16 +331,17 @@ func executeRouterToolCall(
 // messages history shape, the trace id threaded through debug logs, and the
 // per-iteration assistant-history sanitization quirk.
 type chatLoopAdapter struct {
-	body              map[string]any
-	prompt            *mcp.GetPromptResult
-	tools             []*mcp.Tool
-	ownedTools        map[string]struct{}
-	autoContinueTools map[string]struct{}
-	modelName         string
-	requestHeaders    http.Header
-	tid               string
-	opts              webSearchOptions
-	toolSchemas       map[string]*jsonschema.Schema
+	body                map[string]any
+	prompt              *mcp.GetPromptResult
+	tools               []*mcp.Tool
+	ownedTools          map[string]struct{}
+	autoContinueTools   map[string]struct{}
+	autoContinueSchemas map[string]*jsonschema.Resolved
+	modelName           string
+	requestHeaders      http.Header
+	tid                 string
+	opts                webSearchOptions
+	toolSchemas         map[string]*jsonschema.Schema
 }
 
 func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header, routerOpts *RouterOptions) *chatLoopAdapter {
@@ -357,6 +368,9 @@ func (a *chatLoopAdapter) options() webSearchOptions  { return a.opts }
 func (a *chatLoopAdapter) schemas() map[string]*jsonschema.Schema {
 	return a.toolSchemas
 }
+func (a *chatLoopAdapter) autoContinueParameterSchemas() map[string]*jsonschema.Resolved {
+	return a.autoContinueSchemas
+}
 
 func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
 	if response == nil || response.body == nil || usage == nil {
@@ -377,7 +391,7 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 // stripped from it. Callers set the stream flag (and stream_options) for their
 // mode; the shared body is otherwise identical, so keeping it in one place
 // stops the two paths from drifting.
-func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
+func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	delete(reqBody, "code_execution_options")
@@ -388,15 +402,20 @@ func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mc
 	stripRouterOwnedIncludes(reqBody)
 	applyParallelToolCallsPolicy(reqBody)
 	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
+	autoContinue := autoContinueConfig{
+		tools:   autoContinueTools,
+		schemas: autoContinueSchemas(reqBody["tools"], autoContinueTools),
+	}
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
-	return reqBody, autoContinueTools
+	return reqBody, autoContinue
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
-	reqBody, autoContinueTools := buildChatUpstreamRequest(a.body, a.tools, a.prompt)
+	reqBody, autoContinue := buildChatUpstreamRequest(a.body, a.tools, a.prompt)
 	reqBody["stream"] = false
-	a.autoContinueTools = autoContinueTools
+	a.autoContinueTools = autoContinue.tools
+	a.autoContinueSchemas = autoContinue.schemas
 
 	if debugEnabled {
 		ownedNames := make([]string, 0, len(a.ownedTools))
@@ -549,15 +568,16 @@ func (a *chatLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[string]
 // list that threads every prior output back into each subsequent turn, plus
 // the `include` opt-in for `action.sources` on web_search_call items.
 type responsesLoopAdapter struct {
-	body              map[string]any
-	prompt            *mcp.GetPromptResult
-	tools             []*mcp.Tool
-	ownedTools        map[string]struct{}
-	autoContinueTools map[string]struct{}
-	base              map[string]any
-	accumulatedInput  []any
-	opts              webSearchOptions
-	toolSchemas       map[string]*jsonschema.Schema
+	body                map[string]any
+	prompt              *mcp.GetPromptResult
+	tools               []*mcp.Tool
+	ownedTools          map[string]struct{}
+	autoContinueTools   map[string]struct{}
+	autoContinueSchemas map[string]*jsonschema.Resolved
+	base                map[string]any
+	accumulatedInput    []any
+	opts                webSearchOptions
+	toolSchemas         map[string]*jsonschema.Schema
 }
 
 func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, routerOpts *RouterOptions) *responsesLoopAdapter {
@@ -579,7 +599,10 @@ func (a *responsesLoopAdapter) tracePhase(iteration int) string {
 func (a *responsesLoopAdapter) includeActionSources() bool             { return a.opts.includeActionSources }
 func (a *responsesLoopAdapter) options() webSearchOptions              { return a.opts }
 func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema { return a.toolSchemas }
-func (a *responsesLoopAdapter) preIteration(map[string]any, int)       {}
+func (a *responsesLoopAdapter) autoContinueParameterSchemas() map[string]*jsonschema.Resolved {
+	return a.autoContinueSchemas
+}
+func (a *responsesLoopAdapter) preIteration(map[string]any, int) {}
 
 func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
 	if response == nil || response.body == nil || usage == nil {
@@ -603,24 +626,29 @@ func (a *responsesLoopAdapter) attachCitations(body map[string]any, state *citat
 // streaming path forwards a client-supplied value); the shared body is
 // otherwise identical, so keeping it in one place stops the two paths from
 // drifting.
-func buildResponsesUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, map[string]struct{}) {
+func buildResponsesUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
 	base := cloneJSONMap(body)
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
 	applyParallelToolCallsPolicy(base)
 	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
+	autoContinue := autoContinueConfig{
+		tools:   autoContinueTools,
+		schemas: autoContinueSchemas(base["tools"], autoContinueTools),
+	}
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 	base["input"] = stripClientSyntheticResponseItems(base["input"])
-	return base, autoContinueTools
+	return base, autoContinue
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
-	base, autoContinueTools := buildResponsesUpstreamRequest(a.body, a.tools, a.prompt)
+	base, autoContinue := buildResponsesUpstreamRequest(a.body, a.tools, a.prompt)
 	base["stream"] = false
 	delete(base, "stream_options")
-	a.autoContinueTools = autoContinueTools
+	a.autoContinueTools = autoContinue.tools
+	a.autoContinueSchemas = autoContinue.schemas
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
 	return base
