@@ -91,6 +91,11 @@ type responsesStreamer struct {
 	// client stream. Client-owned tool calls are forwarded live.
 	ownedTools map[string]struct{}
 
+	// autoContinueTools names the client tools the caller flagged for
+	// router-side continuation; their function_call arguments are
+	// canonicalized before the output item is forwarded to the client.
+	autoContinueTools map[string]struct{}
+
 	// includeActionSources mirrors the request's opt-in for
 	// `web_search_call.action.sources` on the terminal snapshot.
 	includeActionSources bool
@@ -469,6 +474,11 @@ func (s *responsesStreamer) handleOutputItemDone(event map[string]any, result *r
 			}
 		}
 		delete(s.functionCallArguments, upstreamIndex)
+		if _, isAutoContinue := s.autoContinueTools[stringValue(item["name"])]; isAutoContinue {
+			if rawArgs, ok := item["arguments"].(string); ok {
+				item["arguments"] = canonicalizeAutoContinueArguments(rawArgs)
+			}
+		}
 	}
 	clientIndex, ok := s.outputIndexMap[upstreamIndex]
 	if !ok {
@@ -924,6 +934,7 @@ func runResponsesStreaming(
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            ownedTools,
+		autoContinueTools:     autoContinueTools,
 		includeActionSources:  searchOpts.includeActionSources,
 	}
 

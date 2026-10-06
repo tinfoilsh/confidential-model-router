@@ -278,6 +278,40 @@ func TestResponsesStreamerForwardsClientOwnedFunctionCall(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamerCanonicalizesStringifiedAutoContinueArguments(t *testing.T) {
+	streamer, rec := newTestResponsesStreamer(t)
+	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
+	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`
+	frames := []string{
+		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":""}}`,
+		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":` + jsonStringChat(rawArguments) + `}}`,
+		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream"}}`,
+	}
+	upstream := strings.Join(frames, "\n\n") + "\n\n"
+	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)), true); err != nil {
+		t.Fatalf("pumpUpstream returned error: %v", err)
+	}
+
+	if len(streamer.finalOutput) != 1 {
+		t.Fatalf("expected one forwarded function_call item, got %#v", streamer.finalOutput)
+	}
+	item, _ := streamer.finalOutput[0].(map[string]any)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stringValue(item["arguments"])), &decoded); err != nil {
+		t.Fatalf("forwarded arguments are not JSON: %v", err)
+	}
+	source, ok := decoded["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected source unwrapped into an object, got %#v", decoded["source"])
+	}
+	if source["type"] != "html" || source["html"] != "<p>hi</p>" {
+		t.Fatalf("unexpected unwrapped source: %#v", source)
+	}
+	if !strings.Contains(rec.Body.String(), `\"type\":\"html\"`) {
+		t.Fatalf("expected live output_item.done to carry canonicalized arguments, got %s", rec.Body.String())
+	}
+}
+
 // TestResponsesStreamerFinalizeAttachesAnnotationsToCompletedOutput pins
 // the parity contract with the non-streaming path: the terminal
 // response.completed event echoes normalized text AND flat url_citation

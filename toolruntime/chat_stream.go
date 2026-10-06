@@ -847,6 +847,7 @@ func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntr
 			if repaired, changed := sanitizeToolCallArgumentsJSON(arguments); changed && jsonBytesValid(repaired) {
 				arguments = repaired
 			}
+			arguments = []byte(canonicalizeAutoContinueArguments(string(arguments)))
 		}
 		toolType := entry.toolType
 		if toolType == "" {

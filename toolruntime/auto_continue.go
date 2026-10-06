@@ -231,7 +231,13 @@ func canonicalizeAutoContinueArguments(raw string) string {
 	if err != nil {
 		return raw
 	}
-	unwrapped := deepUnwrapJSONStrings(decoded)
+	unwrapped, changed := deepUnwrapJSONStrings(decoded)
+	if !changed {
+		// Re-encoding would reorder keys and drop the model's original
+		// formatting; a payload that needed no unwrapping is forwarded
+		// byte-for-byte.
+		return raw
+	}
 	encoded, err := json.Marshal(unwrapped)
 	if err != nil {
 		return raw
@@ -243,39 +249,46 @@ func canonicalizeAutoContinueArguments(raw string) string {
 // payload and replaces any string whose contents are themselves valid JSON
 // for an array or object with the decoded structure. Plain strings,
 // numbers, bools, and nulls pass through unchanged. Map keys are not
-// rewritten.
+// rewritten. The boolean reports whether any string was unwrapped.
 //
 // Removal criteria: see `canonicalizeAutoContinueArguments`. This helper
 // has no other call sites and goes away with it.
-func deepUnwrapJSONStrings(value any) any {
+func deepUnwrapJSONStrings(value any) (any, bool) {
 	switch v := value.(type) {
 	case string:
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
-			return v
+			return v, false
 		}
 		if trimmed[0] != '{' && trimmed[0] != '[' {
-			return v
+			return v, false
 		}
 		nested, err := decodeJSONValue(trimmed)
 		if err != nil {
-			return v
+			return v, false
 		}
-		return deepUnwrapJSONStrings(nested)
+		unwrapped, _ := deepUnwrapJSONStrings(nested)
+		return unwrapped, true
 	case []any:
 		out := make([]any, len(v))
+		changed := false
 		for i, item := range v {
-			out[i] = deepUnwrapJSONStrings(item)
+			var itemChanged bool
+			out[i], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
 		}
-		return out
+		return out, changed
 	case map[string]any:
 		out := make(map[string]any, len(v))
+		changed := false
 		for k, item := range v {
-			out[k] = deepUnwrapJSONStrings(item)
+			var itemChanged bool
+			out[k], itemChanged = deepUnwrapJSONStrings(item)
+			changed = changed || itemChanged
 		}
-		return out
+		return out, changed
 	default:
-		return value
+		return value, false
 	}
 }
 
