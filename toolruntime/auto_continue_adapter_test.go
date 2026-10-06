@@ -186,6 +186,45 @@ func TestChatAdapterStripsFlagFromUpstreamRequest(t *testing.T) {
 	}
 }
 
+// TestAdaptersCaptureAutoContinueSchemas verifies both loop adapters keep
+// the caller's parameter schema for flagged tools so the loop can validate
+// arguments, while the upstream request still carries the schema minus the
+// router flag.
+func TestAdaptersCaptureAutoContinueSchemas(t *testing.T) {
+	chat := newChatLoopAdapter(
+		map[string]any{
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			"tools":    artifactPreviewChatTools(t),
+		},
+		nil, nil, nil, "m", http.Header{}, nil,
+	)
+	chat.buildInitialRequest()
+	if chat.autoContinueParameterSchemas()["render_artifact_preview"] == nil {
+		t.Fatalf("chat adapter did not capture auto-continue schema")
+	}
+
+	var params map[string]any
+	if err := json.Unmarshal([]byte(artifactPreviewParameters), &params); err != nil {
+		t.Fatalf("parse fixture schema: %v", err)
+	}
+	responses := newResponsesLoopAdapter(
+		map[string]any{
+			"input": []any{map[string]any{"role": "user", "content": "hi"}},
+			"tools": []any{map[string]any{
+				"type":                         "function",
+				"name":                         "render_artifact_preview",
+				"parameters":                   params,
+				"x-tinfoil-tool-auto-continue": true,
+			}},
+		},
+		nil, nil, nil, nil,
+	)
+	responses.buildInitialRequest()
+	if responses.autoContinueParameterSchemas()["render_artifact_preview"] == nil {
+		t.Fatalf("responses adapter did not capture auto-continue schema")
+	}
+}
+
 func TestChatAdapterCarriesAutoContinueCallsToFinalResponse(t *testing.T) {
 	adapter := newChatLoopAdapter(map[string]any{}, nil, nil, nil, "m", http.Header{}, nil)
 	state := map[string]any{

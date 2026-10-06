@@ -3,8 +3,11 @@ package toolruntime
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // Auto-continue client tools.
@@ -32,6 +35,12 @@ import (
 // produce the surrounding prose. The client sees a single coherent
 // response that contains both the tool call and the follow-up content.
 //
+// Because the client never reports back, the router is the only party
+// that can tell the model its arguments were unusable. The tool's
+// `parameters` schema is therefore kept and the arguments validated
+// before the synthetic result is chosen: a schema violation yields an
+// error result naming the field so the model can call the tool again.
+//
 // Three classes of tools end up flowing through the router:
 //
 //   1. Router-owned (web_search, fetch): registered via MCP profiles. The
@@ -58,7 +67,128 @@ const (
 	// know the call succeeded, with no content that could influence the
 	// follow-up answer.
 	autoContinueToolResult = `{"status":"executed"}`
+
+	// maxAutoContinueSchemaRetries bounds how many times per request a
+	// given auto-continue tool is told its arguments failed validation.
+	// Past this the router acknowledges the call as executed so a model
+	// that cannot satisfy the schema moves on instead of burning the whole
+	// tool budget regenerating the same widget.
+	maxAutoContinueSchemaRetries = 1
 )
+
+// autoContinueConfig is what a request's tools array tells the router
+// about auto-continue tools: which names to acknowledge, and the resolved
+// parameter schema for each so arguments can be checked before the ack.
+type autoContinueConfig struct {
+	tools   map[string]struct{}
+	schemas map[string]*jsonschema.Resolved
+}
+
+// autoContinueSchemas resolves the JSON Schema `parameters` of every tool
+// in names so the router can validate the model's arguments before
+// acknowledging the call. Chat tools nest the definition under `function`;
+// the Responses shape is flat. Tools whose schema fails to parse or
+// resolve are omitted and simply never validated.
+func autoContinueSchemas(rawTools any, names map[string]struct{}) map[string]*jsonschema.Resolved {
+	tools, _ := rawTools.([]any)
+	if len(tools) == 0 || len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]*jsonschema.Resolved, len(names))
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		def := tool
+		if fn, ok := tool["function"].(map[string]any); ok {
+			def = fn
+		}
+		name := stringValue(def["name"])
+		if _, flagged := names[name]; !flagged {
+			continue
+		}
+		params := def["parameters"]
+		if params == nil {
+			continue
+		}
+		schema, err := parseInputSchema(params)
+		if err != nil || schema == nil {
+			continue
+		}
+		resolved, err := schema.Resolve(nil)
+		if err != nil {
+			debugLogf("toolruntime:auto_continue schema_unresolvable tool=%s err=%v", name, err)
+			continue
+		}
+		out[name] = resolved
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// autoContinueSchemaFailures counts, per tool name, how many times the
+// router has already returned a validation error for one request.
+type autoContinueSchemaFailures map[string]int
+
+// autoContinueToolOutput returns the synthetic tool result for one
+// auto-continue call. Arguments that satisfy the tool's schema (or belong
+// to a tool with no resolvable schema) are acknowledged as executed. When
+// they do not, the model receives a structured error naming the offending
+// field so it can call the tool again with corrected arguments, which is
+// the only way for it to learn the client could not render the widget.
+func autoContinueToolOutput(call toolCall, schemas map[string]*jsonschema.Resolved, failures autoContinueSchemaFailures) string {
+	resolved := schemas[call.name]
+	if resolved == nil {
+		return autoContinueToolResult
+	}
+	problem := validateAutoContinueArguments(call.arguments, resolved)
+	if problem == "" {
+		return autoContinueToolResult
+	}
+	if failures[call.name] >= maxAutoContinueSchemaRetries {
+		debugLogf("toolruntime:auto_continue schema_invalid tool=%s retries_exhausted problem=%s", call.name, problem)
+		return autoContinueToolResult
+	}
+	failures[call.name]++
+	debugLogf("toolruntime:auto_continue schema_invalid tool=%s problem=%s", call.name, problem)
+	payload, err := json.Marshal(map[string]any{
+		"status": "error",
+		"error": fmt.Sprintf(
+			"The arguments for %s did not match the tool's parameter schema and the component was not displayed: %s. Call %s again with corrected arguments that match the schema exactly.",
+			call.name, problem, call.name,
+		),
+	})
+	if err != nil {
+		return autoContinueToolResult
+	}
+	return string(payload)
+}
+
+// validateAutoContinueArguments checks arguments against the resolved
+// schema and returns a short description of the first problem, or "" when
+// the arguments are valid. The arguments are canonicalized first so the
+// router validates the same shape it forwards to the client (see
+// canonicalizeAutoContinueArguments), and round-tripped through plain
+// json.Unmarshal so numbers are float64, which the validator understands,
+// rather than json.Number, which it treats as a string.
+func validateAutoContinueArguments(arguments map[string]any, resolved *jsonschema.Resolved) string {
+	encoded, err := json.Marshal(arguments)
+	if err != nil {
+		return ""
+	}
+	var instance any
+	if err := json.Unmarshal([]byte(canonicalizeAutoContinueArguments(string(encoded))), &instance); err != nil {
+		return ""
+	}
+	err = resolved.Validate(instance)
+	if err == nil {
+		return ""
+	}
+	return strings.TrimPrefix(err.Error(), "validating root: ")
+}
 
 // HasAutoContinueTools reports whether the request declares any client tool
 // the router should auto-acknowledge and continue. Main uses this to route
