@@ -144,3 +144,32 @@ type trackedVerificationBody struct {
 }
 
 func (b *trackedVerificationBody) Close() error { b.closed = true; return nil }
+
+func TestExpiredEnclaveCannotSkipVerification(t *testing.T) {
+	var challenges atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		challenges.Add(1)
+		io.WriteString(w, `{"format":"https://tinfoil.sh/predicate/attestation/v3"}`)
+	}))
+	defer server.Close()
+	trustVerificationServer(t, server)
+	verifier, err := verify.NewVerifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := enclave.CertPubkeyFP(server.Certificate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := strings.TrimPrefix(server.URL, "https://")
+	existing := &Enclave{tlsKeyFP: key, freshnessExpiresAt: time.Now().Add(-time.Second)}
+	model := &Model{Repo: "tinfoilsh/confidential-gpt-oss-120b", Enclaves: map[string]*Enclave{host: existing}}
+	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: time.Minute}
+	em.models.Store("gpt-oss-120b", model)
+	if err := em.addEnclave("gpt-oss-120b", host); err == nil {
+		t.Fatal("accepted an expired enclave without successful re-verification")
+	}
+	if challenges.Load() != 1 || model.Enclaves[host] != existing {
+		t.Fatal("failed re-verification must preserve the expired entry without authorizing it")
+	}
+}

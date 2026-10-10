@@ -55,13 +55,11 @@ func TestLiveV3Verification(t *testing.T) {
 				if key != actual {
 					t.Fatalf("attested TLS key does not match serving certificate")
 				}
-				var envelope struct {
-					CollateralFormat string `json:"collateral_format"`
-				}
-				if err := json.Unmarshal(body, &envelope); err != nil {
+				parsed, err := document.Parse(body, nonce)
+				if err != nil {
 					t.Fatal(err)
 				}
-				kind := string(verified.EnclaveMeasurement.Type) + "/" + envelope.CollateralFormat
+				kind := string(verified.EnclaveMeasurement.Type) + "/" + parsed.CollateralFormat()
 				t.Logf("verified %s, expires %s", kind, verified.FreshnessExpiresAt)
 				if checkedTypes[kind] {
 					return
