@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
+	attestation "github.com/tinfoilsh/tinfoil-go/enclave"
 )
 
 // InstallFakeEnclaveForTest registers ts as the only enclave for modelName,
@@ -42,7 +42,7 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 		host:      host,
 		modelName: modelName,
 		tlsKeyFP:  fp,
-		proxy:     newProxy(host, fp, modelName, em.billingCollector, cb),
+		proxy:     newProxy(host, fp, modelName, em.billingCollector, cb, time.Time{}),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 		pricing:   em.ModelPricing,
