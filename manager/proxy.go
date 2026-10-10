@@ -22,7 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
+	tinfoilClient "github.com/tinfoilsh/tinfoil-go/enclave"
 )
 
 const (
@@ -89,10 +89,12 @@ func classifyProxyError(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
-	if errors.Is(err, tinfoilClient.ErrCertMismatch) {
+	var attestationErr *tinfoilClient.AttestationError
+	if errors.As(err, &attestationErr) {
 		return "tls_mismatch"
 	}
-	if errors.Is(err, tinfoilClient.ErrNoTLS) || errors.Is(err, tinfoilClient.ErrNoValidCertificate) {
+	var configurationErr *tinfoilClient.ConfigurationError
+	if errors.As(err, &configurationErr) {
 		return "tls_error"
 	}
 	var netErr *net.OpError
@@ -172,7 +174,7 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, expiresAt time.Time) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -185,9 +187,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 
 	transport := &slowHeaderTripper{
-		base: &tinfoilClient.TLSBoundRoundTripper{
-			ExpectedPublicKey: publicKeyFP,
-		},
+		base:    newAttestedTransport(publicKeyFP, expiresAt),
 		timeout: responseHeaderTimeout,
 		onSlow: func() {
 			log.WithFields(log.Fields{

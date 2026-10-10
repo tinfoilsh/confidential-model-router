@@ -12,8 +12,6 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
-
-	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 )
 
 // FileConversionMode is one of the modes accepted by /v1/convert/file. The
@@ -174,9 +172,7 @@ func (em *EnclaveManager) ConvertFile(
 	client := &http.Client{
 		Timeout: 10 * time.Minute,
 		Transport: &slowHeaderTripper{
-			base: &tinfoilClient.TLSBoundRoundTripper{
-				ExpectedPublicKey: enclave.tlsKeyFP,
-			},
+			base:    newAttestedTransport(enclave.tlsKeyFP, enclave.freshnessExpiresAt),
 			timeout: responseHeaderTimeout,
 			onSlow:  func() {},
 		},
