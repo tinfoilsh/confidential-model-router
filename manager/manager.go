@@ -321,6 +321,8 @@ func (em *EnclaveManager) addEnclave(modelName, host string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch remote attestation: %w", err)
 	}
+	// The pinned workload and signed collateral freshness define accepted releases.
+	// Model tag and measurement fields below report verified state; they are not trust anchors.
 	verification, err := em.verifier.VerifyV3(remoteAttestation, nonce, model.Repo)
 	if err != nil {
 		return fmt.Errorf("failed to verify remote attestation: %w", err)

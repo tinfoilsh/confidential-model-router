@@ -52,11 +52,17 @@ func TestAttestationFetchChallengeAndBounds(t *testing.T) {
 		{"oversized", http.StatusOK, strings.Repeat("x", maxAttestationBytes+1), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var redirects atomic.Int32
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/redirect-target" {
+					redirects.Add(1)
+					io.WriteString(w, payload)
+					return
+				}
 				if r.URL.Path != "/.well-known/tinfoil-attestation" || r.URL.Query().Get("nonce") != hex.EncodeToString(nonce) {
 					t.Errorf("incorrect attestation challenge: %s", r.URL)
 				}
-				w.Header().Set("Location", "http://127.0.0.1/forbidden")
+				w.Header().Set("Location", "/redirect-target")
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			}))
@@ -65,6 +71,9 @@ func TestAttestationFetchChallengeAndBounds(t *testing.T) {
 			body, err := attestationFetch(strings.TrimPrefix(server.URL, "https://"), nonce)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("fetch error = %v, want error %v", err, tc.wantError)
+			}
+			if redirects.Load() != 0 {
+				t.Fatal("attestation fetch followed a redirect")
 			}
 			if !tc.wantError && string(body) != payload {
 				t.Fatalf("unexpected document: %s", body)
@@ -129,12 +138,19 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 		t.Fatalf("expired request: err=%v closed=%v upstream calls=%d", err, closed.closed, calls.Load())
 	}
 
+	if got := classifyProxyError(err); got != "attestation_expired" {
+		t.Fatalf("expired evidence classified as %q", got)
+	}
+
 	wrongKey := newAttestedTransport(strings.Repeat("0", len(key)), time.Now().Add(time.Hour))
 	defer wrongKey.CloseIdleConnections()
 	request, _ = http.NewRequest(http.MethodGet, server.URL, nil)
 	_, err = wrongKey.RoundTrip(request)
 	if !errors.As(err, &attestationErr) || calls.Load() != 1 {
 		t.Fatalf("wrong-key request: err=%v upstream calls=%d", err, calls.Load())
+	}
+	if got := classifyProxyError(err); got != "tls_mismatch" {
+		t.Fatalf("wrong key classified as %q", got)
 	}
 }
 
@@ -171,5 +187,23 @@ func TestExpiredEnclaveCannotSkipVerification(t *testing.T) {
 	}
 	if challenges.Load() != 1 || model.Enclaves[host] != existing {
 		t.Fatal("failed re-verification must preserve the expired entry without authorizing it")
+	}
+}
+
+func TestTLSAddress(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"enclave.example", "enclave.example:443"},
+		{"enclave.example:8443", "enclave.example:8443"},
+		{"127.0.0.1", "127.0.0.1:443"},
+		{"[::1]", "[::1]:443"},
+		{"[::1]:8443", "[::1]:8443"},
+		{"::1", "[::1]:443"},
+		{"[fe80::1%eth0]", "[fe80::1%eth0]:443"},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := tlsAddress(tc.host); got != tc.want {
+				t.Fatalf("tlsAddress(%q) = %q, want %q", tc.host, got, tc.want)
+			}
+		})
 	}
 }

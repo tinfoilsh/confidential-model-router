@@ -1,9 +1,10 @@
 package manager
 
 import (
-	"fmt"
+	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tinfoilsh/tinfoil-go/enclave"
@@ -11,11 +12,13 @@ import (
 
 const maxAttestationBytes = 32 << 20
 
+var errAttestationExpired = errors.New("enclave attestation has expired")
+
 func tlsAddress(host string) string {
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return host
 	}
-	return net.JoinHostPort(host, "443")
+	return net.JoinHostPort(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"), "443")
 }
 
 // attestedTransport rejects new requests once the authenticated witness expires,
@@ -37,7 +40,7 @@ func (t *attestedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if req.Body != nil {
 			req.Body.Close()
 		}
-		return nil, &enclave.AttestationError{Err: fmt.Errorf("enclave attestation has expired")}
+		return nil, &enclave.AttestationError{Err: errAttestationExpired}
 	}
 	return t.TLSBoundRoundTripper.RoundTrip(req)
 }

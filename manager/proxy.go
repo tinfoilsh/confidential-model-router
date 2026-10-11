@@ -89,6 +89,9 @@ func classifyProxyError(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
+	if errors.Is(err, errAttestationExpired) {
+		return "attestation_expired"
+	}
 	var attestationErr *tinfoilClient.AttestationError
 	if errors.As(err, &attestationErr) {
 		return "tls_mismatch"
