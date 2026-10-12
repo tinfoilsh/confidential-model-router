@@ -763,13 +763,16 @@ func (m *Model) CacheRouteSettings() cacheroute.Settings {
 	return cacheroute.SettingsFrom(m.CacheRoute)
 }
 
-// HasHealthyEnclave reports whether the model has at least one enclave with
+// HasHealthyEnclave reports whether the caller's pools have an enclave with
 // unexpired attestation and a closed circuit breaker. Used by the auto router
 // to skip models whose backends cannot accept requests.
-func (m *Model) HasHealthyEnclave() bool {
+func (m *Model) HasHealthyEnclave(primary, spill map[string]bool) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, enclave := range m.Enclaves {
+		if primary != nil && !primary[enclave.host] && !spill[enclave.host] {
+			continue
+		}
 		if enclave.attestationValid(time.Now()) && (enclave.cb == nil || enclave.cb.Closed()) {
 			return true
 		}

@@ -106,11 +106,18 @@ func (em *EnclaveManager) AutoRouteCatalog() []autoroute.Model {
 	return catalog
 }
 
-// HasHealthyEnclave reports whether the named model is known and has at least
-// one enclave whose circuit breaker is closed.
-func (em *EnclaveManager) HasHealthyEnclave(modelName string) bool {
+// AutoRouteStatus reports whether the caller has a configured pool and whether
+// any enclave in that pool has a closed circuit breaker.
+func (em *EnclaveManager) AutoRouteStatus(modelName, orgID string) (eligible, healthy bool) {
 	model, found := em.GetModel(modelName)
-	return found && model.HasHealthyEnclave()
+	if !found {
+		return false, false
+	}
+	primary, spill := model.ReservationPools(orgID)
+	if primary != nil && len(primary) == 0 && len(spill) == 0 {
+		return false, false
+	}
+	return true, model.HasHealthyEnclave(primary, spill)
 }
 
 // validIntelligence reports whether every published score is inside the

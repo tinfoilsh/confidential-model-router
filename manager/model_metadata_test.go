@@ -3,6 +3,8 @@ package manager
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
 func TestModelIntelligenceJSONAndLookup(t *testing.T) {
@@ -72,21 +74,55 @@ func TestModelIntelligenceJSONAndLookup(t *testing.T) {
 	}
 }
 
-func TestManagerHasHealthyEnclave(t *testing.T) {
+func TestAutoRouteStatus(t *testing.T) {
 	down := newTestModel("a")
 	tripBreaker(down.Enclaves["a"])
 	em := newTestManager(map[string]*Model{
 		"down-model": down,
 		"up-model":   newTestModel("b"),
 	})
-	if em.HasHealthyEnclave("down-model") {
-		t.Fatal("tripped model reported healthy")
+	if eligible, healthy := em.AutoRouteStatus("down-model", ""); !eligible || healthy {
+		t.Fatalf("tripped model status = (%v, %v), want eligible but unhealthy", eligible, healthy)
 	}
-	if !em.HasHealthyEnclave("up-model") {
-		t.Fatal("healthy model reported unhealthy")
+	if eligible, healthy := em.AutoRouteStatus("up-model", ""); !eligible || !healthy {
+		t.Fatalf("healthy model status = (%v, %v), want eligible and healthy", eligible, healthy)
 	}
-	if em.HasHealthyEnclave("unknown-model") {
-		t.Fatal("unknown model reported healthy")
+	if eligible, healthy := em.AutoRouteStatus("unknown-model", ""); eligible || healthy {
+		t.Fatalf("unknown model status = (%v, %v), want ineligible and unhealthy", eligible, healthy)
+	}
+}
+
+func TestAutoRouteStatusReservedPools(t *testing.T) {
+	const modelName = "reserved-model"
+	model := newTestModel("a", "b")
+	model.applyReservations(modelName, []config.ReservationConfig{
+		{OrgIDs: []string{"org-a"}, Enclaves: []string{"a"}},
+		{OrgIDs: []string{"org-b"}, Enclaves: []string{"b"}},
+	}, []string{"a", "b"})
+	tripBreaker(model.Enclaves["a"])
+	em := newTestManager(map[string]*Model{modelName: model})
+	for _, tc := range []struct {
+		orgID    string
+		eligible bool
+		healthy  bool
+	}{
+		{"org-a", true, false},
+		{"org-b", true, true},
+		{"org-other", false, false},
+		{"", false, false},
+	} {
+		if eligible, healthy := em.AutoRouteStatus(modelName, tc.orgID); eligible != tc.eligible || healthy != tc.healthy {
+			t.Errorf("org %q status = (%v, %v), want (%v, %v)", tc.orgID, eligible, healthy, tc.eligible, tc.healthy)
+		}
+	}
+
+	model.applyReservations(modelName, []config.ReservationConfig{
+		{OrgIDs: []string{"org-a"}, Enclaves: []string{"a"}},
+	}, []string{"a", "b"})
+	for _, orgID := range []string{"org-a", "org-other", ""} {
+		if eligible, healthy := em.AutoRouteStatus(modelName, orgID); !eligible || !healthy {
+			t.Errorf("org %q with healthy shared spill = (%v, %v), want eligible and healthy", orgID, eligible, healthy)
+		}
 	}
 }
 

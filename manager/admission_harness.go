@@ -71,3 +71,14 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 	em.modelIntelligence.Store(&scores)
 	return nil
 }
+
+func ConfigureReservationsForTest(em *EnclaveManager, name string, reservations []config.ReservationConfig, hosts []string) error {
+	model, ok := em.GetModel(name)
+	if !ok {
+		return fmt.Errorf("model %s not configured", name)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	model.applyReservations(name, reservations, hosts)
+	return nil
+}
