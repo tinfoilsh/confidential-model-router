@@ -155,12 +155,19 @@ func TestRouteContextMetadataKeepsNewerAdmissionIdentity(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response))}, nil
 		})
-		go client.Metadata(t.Context(), "tk_test")
+		result := make(chan routeContext, 1)
+		go func() {
+			resolved, _ := client.Metadata(t.Context(), "tk_test")
+			result <- resolved
+		}()
 		synctest.Wait()
 		client.Lookup(t.Context(), "tk_test", admissionTestModel)
 		client.refreshes.Wait()
 		close(release)
 		synctest.Wait()
+		if resolved := <-result; resolved.OrgID != "org_new" {
+			t.Fatalf("cold lookup returned superseded identity: %+v", resolved)
+		}
 		resolved, err := client.Metadata(t.Context(), "tk_test")
 		if err != nil || resolved.OrgID != "org_new" || resolved.RateLimit != nil {
 			t.Fatalf("late metadata replaced admission identity: %+v, %v", resolved, err)

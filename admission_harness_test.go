@@ -532,6 +532,8 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var metadata, admissions, backends atomic.Int64
 			var fail, warming atomic.Bool
+			metadataStarted := make(chan struct{})
+			var metadataOnce sync.Once
 			reservationOrg := admissionTestOrg
 			if tc.shared || tc.unreserved {
 				reservationOrg = ""
@@ -544,10 +546,18 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 				}
 				if req.Model == "" {
 					metadata.Add(1)
+					metadataOnce.Do(func() { close(metadataStarted) })
 				} else {
 					admissions.Add(1)
 					if req.Model != admissionTestModel {
 						t.Errorf("admitted model = %q", req.Model)
+					}
+					if tc.wantMetadata != 0 && !warming.Load() {
+						select {
+						case <-metadataStarted:
+						case <-r.Context().Done():
+							return
+						}
 					}
 				}
 				if tc.denial != 0 && !warming.Load() {
@@ -607,7 +617,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 			if rec.Code != tc.status || backends.Load() != wantBackends {
 				t.Fatalf("HTTP=%d backend calls=%d: %s", rec.Code, backends.Load(), rec.Body.String())
 			}
-			if metadata.Load() > tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
+			if metadata.Load() != tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
 				t.Fatalf("metadata calls=%d admission calls=%d", metadata.Load(), admissions.Load())
 			}
 		})

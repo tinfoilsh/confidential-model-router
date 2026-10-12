@@ -231,6 +231,9 @@ func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (route
 	case <-ctx.Done():
 		return routeContextUnavailable("", "canceled"), nil
 	case fetched := <-result:
+		if current, err := c.cache.get(key); !current.refreshedAt.IsZero() {
+			return current, err
+		}
 		if fetched.Err != nil {
 			return routeContext{}, fetched.Err.(*routeContextError)
 		}
