@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 )
@@ -31,7 +30,7 @@ func TestPrivacyFilterProxyDoesNotBillTwice(t *testing.T) {
 			}))
 			defer backend.Close()
 			target, _ := url.Parse(backend.URL)
-			proxy := newProxy(target.Host, "", privacyFilterModel, collector, newCircuitBreaker(), time.Time{})
+			proxy := newProxy(target.Host, "", privacyFilterModel, collector, newCircuitBreaker(), nil)
 			proxy.Transport = http.DefaultTransport
 			proxy.Director = func(req *http.Request) { req.URL.Scheme, req.URL.Host = target.Scheme, target.Host }
 			req := httptest.NewRequest(http.MethodPost, "/redact", strings.NewReader(`{"text":"hello"}`))

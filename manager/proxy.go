@@ -177,7 +177,7 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, expiresAt time.Time) *httputil.ReverseProxy {
+func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, attestation *attestationState) *httputil.ReverseProxy {
 	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
@@ -190,7 +190,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 
 	transport := &slowHeaderTripper{
-		base:    newAttestedTransport(publicKeyFP, expiresAt),
+		base:    newAttestedTransport(publicKeyFP, attestation),
 		timeout: responseHeaderTimeout,
 		onSlow: func() {
 			log.WithFields(log.Fields{

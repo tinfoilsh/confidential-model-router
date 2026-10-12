@@ -42,7 +42,7 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 		host:      host,
 		modelName: modelName,
 		tlsKeyFP:  fp,
-		proxy:     newProxy(host, fp, modelName, em.billingCollector, cb, time.Time{}),
+		proxy:     newProxy(host, fp, modelName, em.billingCollector, cb, nil),
 		metrics:   newEnclaveMetrics(host, modelName),
 		cb:        cb,
 		pricing:   em.ModelPricing,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -96,6 +97,10 @@ func FromBytes(data []byte) (*Config, error) {
 
 // Loads configuration from a URL or file
 func Load(url string, sha256_required bool) (*Config, error) {
+	return LoadContext(context.Background(), url, sha256_required)
+}
+
+func LoadContext(ctx context.Context, url string, sha256_required bool) (*Config, error) {
 	cleanURL, expectedSHA := parseURLWithSHA(url)
 	log.Debugf("loading config from %s (sha256_required=%v)", cleanURL, sha256_required)
 	if sha256_required {
@@ -114,7 +119,11 @@ func Load(url string, sha256_required bool) (*Config, error) {
 			return nil, fmt.Errorf("failed to read runtime config: %w", err)
 		}
 	} else {
-		resp, err := http.Get(cleanURL)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cleanURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create runtime config request: %w", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch runtime config: %w", err)
 		}

@@ -116,7 +116,7 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := newAttestedTransport(key, time.Now().Add(time.Hour))
+	transport := newAttestedTransport(key, newAttestationState(time.Now().Add(time.Hour), time.Now(), ""))
 	defer transport.CloseIdleConnections()
 	request, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	response, err := transport.RoundTrip(request)
@@ -129,7 +129,7 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 		t.Fatalf("response = %q, %v", body, err)
 	}
 
-	transport.expiresAt = time.Now().Add(-time.Second)
+	transport.attestation.current.Store(&verifiedAttestation{expiresAt: time.Now().Add(-time.Second)})
 	closed := &trackedVerificationBody{Reader: bytes.NewReader([]byte("private request"))}
 	request, _ = http.NewRequest(http.MethodPost, server.URL, closed)
 	_, err = transport.RoundTrip(request)
@@ -142,7 +142,7 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 		t.Fatalf("expired evidence classified as %q", got)
 	}
 
-	wrongKey := newAttestedTransport(strings.Repeat("0", len(key)), time.Now().Add(time.Hour))
+	wrongKey := newAttestedTransport(strings.Repeat("0", len(key)), newAttestationState(time.Now().Add(time.Hour), time.Now(), ""))
 	defer wrongKey.CloseIdleConnections()
 	request, _ = http.NewRequest(http.MethodGet, server.URL, nil)
 	_, err = wrongKey.RoundTrip(request)
@@ -178,7 +178,7 @@ func TestExpiredEnclaveCannotSkipVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := strings.TrimPrefix(server.URL, "https://")
-	existing := &Enclave{tlsKeyFP: key, freshnessExpiresAt: time.Now().Add(-time.Second)}
+	existing := &Enclave{tlsKeyFP: key, attestation: newAttestationState(time.Now().Add(-time.Second), time.Now(), "")}
 	model := &Model{Repo: "tinfoilsh/confidential-gpt-oss-120b", Enclaves: map[string]*Enclave{host: existing}}
 	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: time.Minute}
 	em.models.Store("gpt-oss-120b", model)

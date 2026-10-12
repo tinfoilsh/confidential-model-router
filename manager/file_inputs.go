@@ -172,7 +172,7 @@ func (em *EnclaveManager) ConvertFile(
 	client := &http.Client{
 		Timeout: 10 * time.Minute,
 		Transport: &slowHeaderTripper{
-			base:    newAttestedTransport(enclave.tlsKeyFP, enclave.freshnessExpiresAt),
+			base:    newAttestedTransport(enclave.tlsKeyFP, enclave.attestation),
 			timeout: responseHeaderTimeout,
 			onSlow:  func() {},
 		},
