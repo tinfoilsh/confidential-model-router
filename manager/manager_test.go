@@ -115,25 +115,25 @@ func tripBreaker(e *Enclave) {
 
 func TestHasHealthyEnclave(t *testing.T) {
 	healthy := newTestModel("a", "b")
-	if !healthy.HasHealthyEnclave() {
+	if !healthy.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expected healthy model with closed breakers")
 	}
 
 	down := newTestModel("a", "b")
 	tripBreaker(down.Enclaves["a"])
 	tripBreaker(down.Enclaves["b"])
-	if down.HasHealthyEnclave() {
+	if down.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expected unhealthy model with all breakers open")
 	}
 
 	partial := newTestModel("a", "b")
 	tripBreaker(partial.Enclaves["a"])
-	if !partial.HasHealthyEnclave() {
+	if !partial.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expected healthy model when one breaker is still closed")
 	}
 
 	empty := &Model{Enclaves: map[string]*Enclave{}}
-	if empty.HasHealthyEnclave() {
+	if empty.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expected unhealthy model with no enclaves")
 	}
 }

@@ -653,10 +653,15 @@ func TestDetectToolProfiles(t *testing.T) {
 type fakeCatalog struct {
 	models  []autoroute.Model
 	healthy map[string]bool
+	owners  map[string]string
 }
 
 func (f fakeCatalog) AutoRouteCatalog() []autoroute.Model { return f.models }
-func (f fakeCatalog) HasHealthyEnclave(name string) bool  { return f.healthy[name] }
+func (f fakeCatalog) AutoRouteStatus(name, orgID string) (eligible, healthy bool) {
+	owner := f.owners[name]
+	eligible = owner == "" || owner == orgID
+	return eligible, eligible && f.healthy[name]
+}
 
 func autoTestReasoning() *autoroute.Reasoning {
 	return &autoroute.Reasoning{
@@ -702,7 +707,7 @@ func TestResolveAutoModel_HeaderPicksModelAndEffort(t *testing.T) {
 		"stream":   true,
 	}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -727,7 +732,7 @@ func TestResolveAutoModel_BodyOptionsWinOverHeader(t *testing.T) {
 		"auto_model_options": map[string]any{"intelligence": float64(0)},
 	}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -743,7 +748,7 @@ func TestResolveAutoModel_DefaultLevel(t *testing.T) {
 	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
 	body := map[string]any{"model": "auto"}
 
-	resolved, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -767,7 +772,7 @@ func TestResolveAutoModel_FallsBackWhenBestFitUnhealthy(t *testing.T) {
 	header.Set(autoroute.IntelligenceHeader, "100")
 	body := map[string]any{"model": "auto"}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -785,12 +790,55 @@ func TestResolveAutoModel_NothingHealthyStillResolvesBestFit(t *testing.T) {
 	header.Set(autoroute.IntelligenceHeader, "100")
 	body := map[string]any{"model": "auto"}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
 	if resolved != "smart-text" {
 		t.Fatalf("resolved = %q, want best-fit smart-text so serving surfaces the outage", resolved)
+	}
+}
+
+func TestResolveAutoModel_RespectsReservations(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		catalog := fakeCatalog{models: autoTestCatalog(), owners: map[string]string{"smart-text": "org-owner"}}
+		if healthy {
+			catalog.healthy = allHealthy(catalog.models)
+		}
+		for _, tc := range []struct {
+			orgID string
+			want  string
+		}{
+			{"org-owner", "smart-text"},
+			{"org-other", "smart-vision"},
+			{"", "smart-vision"},
+		} {
+			header := http.Header{}
+			header.Set(autoroute.IntelligenceHeader, "100")
+			body := map[string]any{"model": "auto"}
+			resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, tc.orgID)
+			if err != nil || resolved != tc.want || body["model"] != tc.want {
+				t.Errorf("org %q, healthy=%v: resolved=%q body model=%v err=%v, want %q", tc.orgID, healthy, resolved, body["model"], err, tc.want)
+			}
+		}
+	}
+}
+
+func TestResolveAutoModel_NoEligiblePool(t *testing.T) {
+	models := autoTestCatalog()
+	owners := make(map[string]string, len(models))
+	for _, model := range models {
+		owners[model.Name] = "org-owner"
+	}
+	catalog := fakeCatalog{models: models, healthy: allHealthy(models), owners: owners}
+	body := map[string]any{"model": "auto"}
+	resolved, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body, "org-other")
+	var apiErr *manager.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != manager.ErrModelUnavailable.Code {
+		t.Fatalf("expected model unavailable, got model=%q err=%v", resolved, err)
+	}
+	if resolved != "" || body["model"] != "auto" {
+		t.Fatalf("ineligible model selected: resolved=%q body=%v", resolved, body)
 	}
 }
 
@@ -806,7 +854,7 @@ func TestResolveAutoModel_VisualInputRequiresMultimodal(t *testing.T) {
 		}}},
 	}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -823,7 +871,7 @@ func TestResolveAutoModel_VisualInputWithoutMultimodalModels(t *testing.T) {
 		"input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_image", "image_url": "https://x/y.png"}}}},
 	}
 
-	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/responses", body); err == nil {
+	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/responses", body, ""); err == nil {
 		t.Fatal("expected error when an image request has no multimodal candidates")
 	}
 }
@@ -837,7 +885,7 @@ func TestResolveAutoModel_RouterEffortOverridesClient(t *testing.T) {
 		"chat_template_kwargs": map[string]any{"reasoning_effort": "low", "keep": "me"},
 	}
 
-	if _, err := resolveAutoModel(catalog, header, "/v1/responses", body); err != nil {
+	if _, err := resolveAutoModel(catalog, header, "/v1/responses", body, ""); err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
 	kwargs, _ := body["chat_template_kwargs"].(map[string]any)
@@ -850,12 +898,12 @@ func TestResolveAutoModel_InvalidLevel(t *testing.T) {
 	catalog := fakeCatalog{models: autoTestCatalog(), healthy: allHealthy(autoTestCatalog())}
 	header := http.Header{}
 	header.Set(autoroute.IntelligenceHeader, "101")
-	if _, err := resolveAutoModel(catalog, header, "/v1/chat/completions", map[string]any{"model": "auto"}); err == nil {
+	if _, err := resolveAutoModel(catalog, header, "/v1/chat/completions", map[string]any{"model": "auto"}, ""); err == nil {
 		t.Fatal("expected error for out-of-range intelligence header")
 	}
 
 	body := map[string]any{"model": "auto", "auto_model_options": map[string]any{"intelligence": "high"}}
-	_, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body)
+	_, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", body, "")
 	if err == nil {
 		t.Fatal("expected error for non-numeric body intelligence")
 	}
@@ -893,7 +941,7 @@ func TestResolveAutoModel_LegacyArrayIgnored(t *testing.T) {
 		},
 	}
 
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body)
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, "")
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)
 	}
@@ -910,7 +958,7 @@ func TestResolveAutoModel_LegacyArrayIgnored(t *testing.T) {
 
 func TestResolveAutoModel_EmptyCatalog(t *testing.T) {
 	catalog := fakeCatalog{}
-	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", map[string]any{"model": "auto"}); err == nil {
+	if _, err := resolveAutoModel(catalog, http.Header{}, "/v1/chat/completions", map[string]any{"model": "auto"}, ""); err == nil {
 		t.Fatal("expected error when no model publishes intelligence scores")
 	}
 }
@@ -943,7 +991,7 @@ func TestHandleInputTokens_AutoUsesRouterEffort(t *testing.T) {
 		req.Header.Set(autoroute.IntelligenceHeader, level)
 		rec := httptest.NewRecorder()
 		handleInputTokens(rec, req, "secret-key", func(body map[string]any) (string, error) {
-			return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body)
+			return resolveAutoModel(catalog, req.Header, inputTokensCompletionPath(req.URL.Path), body, "")
 		}, dispatch)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())

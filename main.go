@@ -390,7 +390,7 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 // their current health. Implemented by *manager.EnclaveManager.
 type autoRouteCatalog interface {
 	AutoRouteCatalog() []autoroute.Model
-	HasHealthyEnclave(modelName string) bool
+	AutoRouteStatus(modelName, orgID string) (eligible, healthy bool)
 }
 
 // resolveAutoModel replaces model "auto" with a concrete model and reasoning
@@ -402,8 +402,8 @@ type autoRouteCatalog interface {
 // files only consider multimodal models. The chosen effort is written into
 // body using the model's own reasoning parameters, overriding any effort the
 // client sent, and body["model"] is rewritten. When nothing is healthy the
-// best-fit candidate is still returned so normal serving surfaces the error.
-func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any) (string, error) {
+// best-fit eligible candidate is still returned so normal serving surfaces the error.
+func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any, orgID string) (string, error) {
 	target, err := autoroute.ParseIntelligence(header, body)
 	if err != nil {
 		var validationErr *autoroute.ValidationError
@@ -422,15 +422,26 @@ func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string,
 		return "", manager.ErrInvalidRequest.WithParam("model").WithMessage(manager.ErrMsgAutoNoScores)
 	}
 
-	chosen, healthy := ranked[0], false
+	var chosen autoroute.Candidate
+	eligible, healthy := false, false
 	for i, candidate := range ranked {
-		if catalog.HasHealthyEnclave(candidate.Model.Name) {
+		allowed, available := catalog.AutoRouteStatus(candidate.Model.Name, orgID)
+		if !allowed {
+			continue
+		}
+		if !eligible {
+			chosen, eligible = candidate, true
+		}
+		if available {
 			chosen, healthy = candidate, true
 			if i > 0 {
 				manager.AutoRouteFallbacksTotal.WithLabelValues(chosen.Model.Name).Inc()
 			}
 			break
 		}
+	}
+	if !eligible {
+		return "", manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, "auto")
 	}
 
 	autoroute.ApplyEffort(body, path, chosen)
@@ -554,6 +565,34 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
+		var orgContext *routeContext
+		resolveOrg := func() error {
+			if orgContext != nil {
+				return nil
+			}
+			resolved, lookupErr := routeContextClient.Metadata(r.Context(), apiKey)
+			if lookupErr != nil {
+				if lookupErr.retryAfter != "" {
+					w.Header().Set("Retry-After", lookupErr.retryAfter)
+				}
+				return lookupErr.apiError
+			}
+			orgContext = &resolved
+			return nil
+		}
+		resolveAuto := func(path string, body map[string]any) (string, error) {
+			orgID := ""
+			for _, entry := range em.AutoRouteCatalog() {
+				if model, ok := em.GetModel(entry.Name); ok && model.HasReservations() {
+					if err := resolveOrg(); err != nil {
+						return "", err
+					}
+					orgID = orgContext.OrgID
+					break
+				}
+			}
+			return resolveAutoModel(em, r.Header, path, body, orgID)
+		}
 
 		// Every external inference request is admitted exactly once, after
 		// the served model is known and before priority injection, forwarding,
@@ -567,6 +606,17 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			if admissionErr != nil {
 				admissionErr.write(w)
 				return false
+			}
+			if resolved.OrgID == "" && resolved.RateLimit == nil {
+				if model, ok := em.GetModel(modelName); ok && model.HasReservations() {
+					if err := resolveOrg(); err != nil {
+						writeError(w, asAPIError(err))
+						return false
+					}
+				}
+			}
+			if orgContext != nil {
+				resolved.OrgID = orgContext.OrgID
 			}
 			admission = &resolved
 			hasConfiguredPriority = resolved.overloadExempt()
@@ -584,15 +634,14 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				if _, found := em.GetModel(modelName); !found {
 					return nil, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName)
 				}
-				if routeCtx, lookupErr := routeContextClient.Metadata(ctx, apiKey); lookupErr == nil {
-					ctx = manager.WithCallerOrg(ctx, routeCtx.OrgID)
-				} else {
-					return nil, lookupErr
+				if err := resolveOrg(); err != nil {
+					return nil, err
 				}
+				ctx = manager.WithCallerOrg(ctx, orgContext.OrgID)
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
 			handleInputTokens(w, r, apiKey, func(body map[string]any) (string, error) {
-				return resolveAutoModel(em, r.Header, inputTokensCompletionPath(r.URL.Path), body)
+				return resolveAuto(inputTokensCompletionPath(r.URL.Path), body)
 			}, dispatch)
 			return
 		}
@@ -786,7 +835,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// downstream logic (tool detection, rate limiting, serving)
 				// runs.
 				if modelName == "auto" {
-					resolved, resolveErr := resolveAutoModel(em, r.Header, r.URL.Path, body)
+					resolved, resolveErr := resolveAuto(r.URL.Path, body)
 					if resolveErr != nil {
 						writeError(w, asAPIError(resolveErr))
 						return

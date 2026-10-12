@@ -238,6 +238,10 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request routeContextRequest
 				json.NewDecoder(r.Body).Decode(&request)
+				if request.Model == "" {
+					fmt.Fprintf(w, `{"org_id":%q}`, admissionTestOrg)
+					return
+				}
 				admissions <- request
 				cpCalls.Add(1)
 				priority := ""
@@ -492,6 +496,98 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("metadata calls=%d", calls.Load())
+	}
+}
+
+func TestAdmissionHandlerReservedOnly(t *testing.T) {
+	const testKey = "tk_reserved_test"
+	for _, tc := range []struct {
+		name, org, warmOrg           string
+		auto, shared, jwt, outage    bool
+		denial, status               int
+		wantMetadata, wantAdmissions int64
+	}{
+		{name: "cold owner", org: admissionTestOrg, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "warm owner", org: admissionTestOrg, warmOrg: admissionTestOrg, status: http.StatusOK, wantAdmissions: 1},
+		{name: "other organization", org: "org_other", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
+		{name: "personal key", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
+		{name: "unverified JWT organization", jwt: true, status: http.StatusServiceUnavailable},
+		{name: "cold outage", org: admissionTestOrg, outage: true, status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
+		{name: "warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, outage: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "metadata denial", org: admissionTestOrg, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto owner", org: admissionTestOrg, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto fresh organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
+		{name: "auto shared", shared: true, auto: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto JWT", jwt: true, auto: true, status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var metadata, admissions, backends atomic.Int64
+			var fail, warming atomic.Bool
+			reservationOrg := admissionTestOrg
+			if tc.shared {
+				reservationOrg = ""
+			}
+			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req routeContextRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+					return
+				}
+				if req.Model == "" {
+					metadata.Add(1)
+					if tc.denial != 0 {
+						w.WriteHeader(tc.denial)
+						return
+					}
+				} else {
+					admissions.Add(1)
+					if req.Model != admissionTestModel {
+						t.Errorf("admitted model = %q", req.Model)
+					}
+				}
+				if fail.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				org := tc.org
+				if warming.Load() {
+					org = tc.warmOrg
+				}
+				fmt.Fprintf(w, `{"org_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, org)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backends.Add(1)
+				io.WriteString(w, `{}`)
+			}), reservationOrg, false)
+			if tc.warmOrg != "" {
+				warming.Store(true)
+				handler.warm(testKey, admissionTestModel)
+				warming.Store(false)
+				admissions.Store(0)
+			}
+			fail.Store(tc.outage)
+			key := testKey
+			if tc.jwt {
+				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","org_id":"`+admissionTestOrg+`"}`)
+			}
+			model := admissionTestModel
+			if tc.auto {
+				model = "auto"
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[]}`, model), key))
+			handler.client.refreshes.Wait()
+			wantBackends := int64(0)
+			if tc.status == http.StatusOK {
+				wantBackends = 1
+			}
+			if rec.Code != tc.status || backends.Load() != wantBackends {
+				t.Fatalf("HTTP=%d backend calls=%d: %s", rec.Code, backends.Load(), rec.Body.String())
+			}
+			if metadata.Load() != tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
+				t.Fatalf("metadata calls=%d admission calls=%d", metadata.Load(), admissions.Load())
+			}
+		})
 	}
 }
 

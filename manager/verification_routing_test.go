@@ -39,7 +39,7 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 	}
 
 	valid.attestation.current.Store(&verifiedAttestation{expiresAt: time.Now().Add(-time.Second)})
-	if model.HasHealthyEnclave() {
+	if model.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expired backend reported healthy")
 	}
 	if selected, claim := model.NextEnclavePreferring([]string{"expired", "valid"}, nil); selected != nil || claim != nil {
