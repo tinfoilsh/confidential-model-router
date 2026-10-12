@@ -158,6 +158,11 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 		existing.ServeHTTP(heldResponse, httptest.NewRequest(http.MethodGet, "https://router.example/held", nil))
 	}()
 	waitRenewalSignal(t, heldStarted)
+	tripBreaker(existing)
+	existing.cb.lastFailureNano.Store(now.Add(-cbCooldown - time.Second).UnixNano())
+	if existing.claimProbe() == nil {
+		t.Fatal("expected a claimed recovery probe before renewal")
+	}
 
 	oldDeadline := now.Add(-time.Second)
 	oldState.current.Store(&verifiedAttestation{expiresAt: oldDeadline, verifiedAt: oldVerifiedAt, codeTag: "v1.0.0"})
@@ -171,6 +176,9 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 	}
 	if current.inflight.Load() != 1 || current.cb.Retired() {
 		t.Fatalf("renewal lost active runtime state: inflight=%d retired=%v", current.inflight.Load(), current.cb.Retired())
+	}
+	if current.cb.State() != cbHalfOpen || current.cb.ConsecutiveFailures() != cbFailureThreshold {
+		t.Fatal("renewal reset the claimed recovery probe or its failure count")
 	}
 	updated := oldState.load()
 	if !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(oldVerifiedAt) || updated.codeTag != "v1.0.1" {

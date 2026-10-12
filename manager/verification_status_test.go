@@ -33,11 +33,14 @@ func readVerificationStatus(t *testing.T, model *Model) (modelVerificationStatus
 }
 
 func TestVerificationStatusLifecycle(t *testing.T) {
+	const queueLimit = 4
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now()
 		manager := &EnclaveManager{models: &sync.Map{}}
 		model := &Model{
 			Repo: "tinfoilsh/example", Tag: "v1",
+			Overload:        &config.OverloadConfig{MaxRequestsWaiting: queueLimit},
+			CacheRoute:      &config.CacheRouteConfig{Mode: "shadow"},
 			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, Enclaves: []string{"backend"}}},
 			configuredHosts: []string{"backend", "open", "missing", "harness", "backend"},
 			Enclaves: map[string]*Enclave{
@@ -66,6 +69,9 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 		}
 		if legacy.Repo != model.Repo || legacy.Tag != model.Tag || legacy.Enclaves["backend"].tlsKeyFP != "tls-key" || legacy.Enclaves["backend"].hpkeKey != "hpke-key" {
 			t.Fatalf("existing model fields changed: %s", data)
+		}
+		if legacy.Overload == nil || legacy.Overload.MaxRequestsWaiting != queueLimit || legacy.CacheRoute == nil || legacy.CacheRoute.Mode != model.CacheRoute.Mode {
+			t.Fatalf("existing routing settings changed: %s", data)
 		}
 		registry := prometheus.NewRegistry()
 		registry.MustRegister(manager.VerificationCollector())
