@@ -822,9 +822,9 @@ func (m *Model) CacheRouteSettings() cacheroute.Settings {
 	return cacheroute.SettingsFrom(m.CacheRoute)
 }
 
-// HasHealthyEnclave reports whether the model has at least one enclave whose
-// circuit breaker is currently closed. Used by the auto router to skip
-// models whose backends are all tripped (i.e. effectively down).
+// HasHealthyEnclave reports whether the model has at least one enclave with
+// unexpired attestation and a closed circuit breaker. Used by the auto router
+// to skip models whose backends cannot accept requests.
 func (m *Model) HasHealthyEnclave() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1109,10 +1109,14 @@ func (em *EnclaveManager) refreshKnownEnclaves() {
 
 // StartWorker starts the worker update loop
 func (em *EnclaveManager) StartWorker() {
-	ticker := time.NewTicker(em.refreshInterval)
+	em.runWorker(context.Background())
+}
+
+func (em *EnclaveManager) runWorker(ctx context.Context) {
+	ticker := time.NewTicker(min(em.refreshInterval, attestationRefreshInterval))
 	defer ticker.Stop()
 
-	for ; true; <-ticker.C {
+	for {
 		em.stateMu.Lock()
 		em.errors = []string{} // Clear errors
 		em.stateMu.Unlock()
@@ -1121,6 +1125,11 @@ func (em *EnclaveManager) StartWorker() {
 			em.stateMu.Lock()
 			em.errors = append(em.errors, err.Error())
 			em.stateMu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

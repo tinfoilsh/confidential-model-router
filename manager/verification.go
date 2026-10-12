@@ -59,7 +59,7 @@ func (e *Enclave) attestationRefreshDue(now time.Time, refreshInterval time.Dura
 		return false
 	}
 	return !now.Add(max(attestationRenewalWindow, refreshInterval)).Before(snapshot.expiresAt) ||
-		!now.Before(snapshot.verifiedAt.Add(attestationRefreshInterval))
+		!now.Add(min(refreshInterval, attestationRefreshInterval)).Before(snapshot.verifiedAt.Add(attestationRefreshInterval))
 }
 
 var errAttestationExpired = errors.New("enclave attestation has expired")

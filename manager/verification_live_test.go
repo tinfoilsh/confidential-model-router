@@ -13,8 +13,8 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verify"
 )
 
-// TINFOIL_VERIFIER_TEST_CONFIG opts into read-only verification of a live pool.
-func TestLiveV3Verification(t *testing.T) {
+func loadLiveV3Config(t *testing.T) *config.Config {
+	t.Helper()
 	path := os.Getenv("TINFOIL_VERIFIER_TEST_CONFIG")
 	if path == "" {
 		t.Skip("set TINFOIL_VERIFIER_TEST_CONFIG to a live router config")
@@ -27,6 +27,19 @@ func TestLiveV3Verification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hosts := 0
+	for _, entry := range cfg.Models {
+		hosts += len(entry.Hostnames)
+	}
+	if hosts == 0 {
+		t.Fatal("config contained no enclaves")
+	}
+	return cfg
+}
+
+// TINFOIL_VERIFIER_TEST_CONFIG opts into read-only verification of a live pool.
+func TestLiveV3Verification(t *testing.T) {
+	cfg := loadLiveV3Config(t)
 	verifier, err := verify.NewVerifier()
 	if err != nil {
 		t.Fatal(err)
@@ -97,18 +110,7 @@ func TestLiveV3Verification(t *testing.T) {
 }
 
 func TestLiveV3ManagerRenewal(t *testing.T) {
-	path := os.Getenv("TINFOIL_VERIFIER_TEST_CONFIG")
-	if path == "" {
-		t.Skip("set TINFOIL_VERIFIER_TEST_CONFIG to a live router config")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.FromBytes(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := loadLiveV3Config(t)
 	verifier, err := verify.NewVerifier()
 	if err != nil {
 		t.Fatal(err)

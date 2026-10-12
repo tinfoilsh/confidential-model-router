@@ -343,7 +343,7 @@ func TestAttestationPeriodicVerificationBeforeRenewalWindow(t *testing.T) {
 	}
 	now := time.Now()
 	expiresAt := now.Add(2 * attestationRenewalWindow)
-	verifiedAt := now.Add(-attestationRefreshInterval - time.Second)
+	verifiedAt := now.Add(-attestationRefreshInterval + time.Second)
 	var verificationCalls int
 	em, _, existing := renewalManager(t, server, expiresAt, verifiedAt, func([]byte, []byte, string) (*verify.Verification, error) {
 		verificationCalls++
