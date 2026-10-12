@@ -403,7 +403,7 @@ type autoRouteCatalog interface {
 // body using the model's own reasoning parameters, overriding any effort the
 // client sent, and body["model"] is rewritten. When nothing is healthy the
 // best-fit eligible candidate is still returned so normal serving surfaces the error.
-func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any, orgID string) (string, error) {
+func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any, orgForModel func(string) (string, error)) (string, error) {
 	target, err := autoroute.ParseIntelligence(header, body)
 	if err != nil {
 		var validationErr *autoroute.ValidationError
@@ -425,6 +425,10 @@ func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string,
 	var chosen autoroute.Candidate
 	eligible, healthy := false, false
 	for i, candidate := range ranked {
+		orgID, err := orgForModel(candidate.Model.Name)
+		if err != nil {
+			return "", err
+		}
 		allowed, available := catalog.AutoRouteStatus(candidate.Model.Name, orgID)
 		if !allowed {
 			continue
@@ -566,32 +570,30 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 		var orgContext *routeContext
-		resolveOrg := func() error {
-			if orgContext != nil {
-				return nil
-			}
-			resolved, lookupErr := routeContextClient.Metadata(r.Context(), apiKey)
-			if lookupErr != nil {
-				if lookupErr.retryAfter != "" {
-					w.Header().Set("Retry-After", lookupErr.retryAfter)
+		resolveOrg := func(modelName string) (string, error) {
+			if orgContext == nil {
+				resolved, lookupErr := routeContextClient.Metadata(r.Context(), apiKey)
+				if lookupErr != nil {
+					if lookupErr.retryAfter != "" {
+						w.Header().Set("Retry-After", lookupErr.retryAfter)
+					}
+					return "", lookupErr.apiError
 				}
-				return lookupErr.apiError
+				orgContext = &resolved
 			}
-			orgContext = &resolved
-			return nil
+			if orgContext.unavailable && routeContextClient != nil {
+				cached, _ := routeContextClient.cache.get(routeContextKey(apiKey, modelName))
+				return cached.OrgID, nil
+			}
+			return orgContext.OrgID, nil
 		}
 		resolveAuto := func(path string, body map[string]any) (string, error) {
-			orgID := ""
-			for _, entry := range em.AutoRouteCatalog() {
-				if model, ok := em.GetModel(entry.Name); ok && model.HasReservations() {
-					if err := resolveOrg(); err != nil {
-						return "", err
-					}
-					orgID = orgContext.OrgID
-					break
+			return resolveAutoModel(em, r.Header, path, body, func(modelName string) (string, error) {
+				if model, ok := em.GetModel(modelName); ok && model.HasReservations() {
+					return resolveOrg(modelName)
 				}
-			}
-			return resolveAutoModel(em, r.Header, path, body, orgID)
+				return "", nil
+			})
 		}
 
 		// Every external inference request is admitted exactly once, after
@@ -609,13 +611,15 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 			if resolved.OrgID == "" && resolved.RateLimit == nil {
 				if model, ok := em.GetModel(modelName); ok && model.HasReservations() {
-					if err := resolveOrg(); err != nil {
+					orgID, err := resolveOrg(modelName)
+					if err != nil {
 						writeError(w, asAPIError(err))
 						return false
 					}
+					resolved.OrgID = orgID
 				}
 			}
-			if orgContext != nil {
+			if orgContext != nil && !orgContext.unavailable {
 				resolved.OrgID = orgContext.OrgID
 			}
 			admission = &resolved
@@ -634,10 +638,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				if _, found := em.GetModel(modelName); !found {
 					return nil, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName)
 				}
-				if err := resolveOrg(); err != nil {
+				orgID, err := resolveOrg(modelName)
+				if err != nil {
 					return nil, err
 				}
-				ctx = manager.WithCallerOrg(ctx, orgContext.OrgID)
+				ctx = manager.WithCallerOrg(ctx, orgID)
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
 			handleInputTokens(w, r, apiKey, func(body map[string]any) (string, error) {

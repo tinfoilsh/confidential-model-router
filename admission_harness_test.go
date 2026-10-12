@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
@@ -502,10 +503,10 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 func TestAdmissionHandlerReservedOnly(t *testing.T) {
 	const testKey = "tk_reserved_test"
 	for _, tc := range []struct {
-		name, org, warmOrg           string
-		auto, shared, jwt, outage    bool
-		denial, status               int
-		wantMetadata, wantAdmissions int64
+		name, org, warmOrg                    string
+		auto, shared, unreserved, jwt, outage bool
+		denial, status                        int
+		wantMetadata, wantAdmissions          int64
 	}{
 		{name: "cold owner", org: admissionTestOrg, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "warm owner", org: admissionTestOrg, warmOrg: admissionTestOrg, status: http.StatusOK, wantAdmissions: 1},
@@ -517,18 +518,23 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		{name: "metadata denial", org: admissionTestOrg, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner", org: admissionTestOrg, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto fresh organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
+		{name: "auto warm denial", warmOrg: admissionTestOrg, auto: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1},
 		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
-		{name: "auto shared", shared: true, auto: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto shared", org: "org_other", shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto owner shared spill", org: admissionTestOrg, shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto unreserved", unreserved: true, auto: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto JWT", jwt: true, auto: true, status: http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var metadata, admissions, backends atomic.Int64
 			var fail, warming atomic.Bool
 			reservationOrg := admissionTestOrg
-			if tc.shared {
+			if tc.shared || tc.unreserved {
 				reservationOrg = ""
 			}
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var req routeContextRequest
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					t.Error(err)
@@ -559,6 +565,18 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 				backends.Add(1)
 				io.WriteString(w, `{}`)
 			}), reservationOrg, false)
+			if tc.shared {
+				const reservedHost = "reserved.example.com"
+				model, _ := em.GetModel(admissionTestModel)
+				hosts := []string{reservedHost}
+				for host := range model.Enclaves {
+					hosts = append(hosts, host)
+				}
+				reservations := []config.ReservationConfig{{OrgIDs: []string{admissionTestOrg}, Enclaves: []string{reservedHost}}}
+				if err := manager.ConfigureReservationsForTest(em, admissionTestModel, reservations, hosts); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.warmOrg != "" {
 				warming.Store(true)
 				handler.warm(testKey, admissionTestModel)

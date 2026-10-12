@@ -339,6 +339,32 @@ func TestRouteContextQuotaDetailsDoNotOverrideDecision(t *testing.T) {
 	}
 }
 
+func TestRouteContextMetadataAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		body        string
+		unavailable bool
+	}{
+		{"no organization", http.StatusOK, `{}`, false},
+		{"outage", http.StatusServiceUnavailable, `{}`, true},
+		{"invalid response", http.StatusOK, `not JSON`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			client := newRouteContextClient(server.URL)
+			got, err := client.Metadata(context.Background(), "tk_test")
+			if err != nil || got.OrgID != "" || got.unavailable != tc.unavailable {
+				t.Fatalf("metadata = %+v, %v; want unavailable=%v", got, err, tc.unavailable)
+			}
+		})
+	}
+}
+
 func TestRouteContextMetadataAndJWTClassification(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

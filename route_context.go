@@ -49,6 +49,9 @@ type routeContext struct {
 	Priority  *int            `json:"priority,omitempty"`
 	OrgID     string          `json:"org_id,omitempty"`
 	RateLimit *routeRateLimit `json:"rate_limit,omitempty"`
+
+	// Failed metadata lookups must not replace a cached organization with an empty one.
+	unavailable bool
 }
 
 type routeRateLimit struct {
@@ -111,7 +114,7 @@ func (e *routeContextError) write(w http.ResponseWriter) {
 func routeContextUnavailable(model, reason string) routeContext {
 	manager.RouteContextLookupFailuresTotal.WithLabelValues(model, reason).Inc()
 	log.WithFields(log.Fields{"model": model, "reason": reason}).Debug("route-context lookup unavailable")
-	return routeContext{}
+	return routeContext{unavailable: true}
 }
 
 func newRouteContextClient(controlPlaneURL string) *routeContextClient {
