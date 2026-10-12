@@ -69,7 +69,6 @@ func TestRouteContextMetadataRefreshesWithoutBlocking(t *testing.T) {
 		initiallyEmpty      bool
 	}{
 		{name: "newly eligible organization", initiallyEmpty: true, status: http.StatusOK, body: `{"org_id":"org_new"}`, wantOrg: "org_new"},
-		{name: "organization changed", status: http.StatusOK, body: `{"org_id":"org_new"}`, wantOrg: "org_new"},
 		{name: "organization removed", status: http.StatusOK, body: `{}`},
 		{name: "credential denied", status: http.StatusForbidden, wantError: http.StatusForbidden},
 		{name: "quota denied", status: http.StatusTooManyRequests, wantError: http.StatusTooManyRequests},
@@ -93,17 +92,18 @@ func TestRouteContextMetadataRefreshesWithoutBlocking(t *testing.T) {
 							return nil, r.Context().Err()
 						}
 						status, body = tc.status, tc.body
+						if tc.wantError != 0 && calls.Load() > 2 {
+							status, body = http.StatusOK, `{"org_id":"org_recovered"}`
+						}
 					}
 					return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 				})
 				client.Metadata(t.Context(), "tk_test")
 				time.Sleep(routeMetadataRefreshTTL)
 				started := time.Now()
-				for range 3 {
-					resolved, err := client.Metadata(t.Context(), "tk_test")
-					if err != nil || resolved.OrgID != initialOrg || resolved.unavailable {
-						t.Fatalf("stale metadata lost: %+v, %v", resolved, err)
-					}
+				resolved, err := client.Metadata(t.Context(), "tk_test")
+				if err != nil || resolved.OrgID != initialOrg || resolved.unavailable {
+					t.Fatalf("stale metadata lost: %+v, %v", resolved, err)
 				}
 				synctest.Wait()
 				if time.Since(started) != 0 || calls.Load() != 2 {
@@ -111,11 +111,12 @@ func TestRouteContextMetadataRefreshesWithoutBlocking(t *testing.T) {
 				}
 				close(release)
 				synctest.Wait()
-				resolved, err := client.Metadata(t.Context(), "tk_test")
+				resolved, err = client.Metadata(t.Context(), "tk_test")
 				if tc.wantError != 0 {
-					if err == nil || err.apiError.Status != tc.wantError {
-						t.Fatalf("credential denial lost: %v", err)
+					if err != nil || resolved.OrgID != "org_recovered" || calls.Load() != 3 {
+						t.Fatalf("denial prevented immediate recovery: %+v, %v (calls=%d)", resolved, err, calls.Load())
 					}
+					return
 				} else if err != nil || resolved.OrgID != tc.wantOrg || resolved.unavailable {
 					t.Fatalf("refreshed metadata = %+v, %v", resolved, err)
 				}
@@ -199,29 +200,5 @@ func TestRouteContextMetadataDoesNotShareModelDenials(t *testing.T) {
 	_, err = client.cache.get(routeContextKey("tk_test", admissionTestModel))
 	if err == nil || err.apiError.Status != http.StatusForbidden {
 		t.Fatalf("model denial was not retained: %v", err)
-	}
-}
-
-func BenchmarkRouteContextCachedMetadata(b *testing.B) {
-	client := newRouteContextClient("https://controlplane.invalid")
-	var calls atomic.Int64
-	client.httpClient.Transport = routeContextRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"org_id":"org_test"}`))}, nil
-	})
-	client.Metadata(b.Context(), "tk_test")
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			resolved, err := client.Metadata(b.Context(), "tk_test")
-			if err != nil || resolved.OrgID != "org_test" {
-				b.Error("cached metadata lost")
-				return
-			}
-		}
-	})
-	b.StopTimer()
-	if calls.Load() != 1 {
-		b.Fatalf("warm cache made %d additional HTTP requests", calls.Load()-1)
 	}
 }

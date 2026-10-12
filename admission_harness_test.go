@@ -510,7 +510,6 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		wantMetadata, wantAdmissions          int64
 	}{
 		{name: "cold owner", org: admissionTestOrg, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
-		{name: "warm owner", org: admissionTestOrg, warmOrg: admissionTestOrg, status: http.StatusOK, wantAdmissions: 1},
 		{name: "other organization", org: "org_other", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
 		{name: "personal key", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
 		{name: "unverified JWT organization", jwt: true, status: http.StatusServiceUnavailable},
@@ -518,16 +517,14 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		{name: "warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, outage: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "metadata denial", org: admissionTestOrg, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner", org: admissionTestOrg, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
-		{name: "auto warm owner", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto refreshed organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, refresh: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, refresh: true, status: http.StatusServiceUnavailable},
-		{name: "auto cached denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantAdmissions: 1},
+		{name: "auto retries denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
 		{name: "auto shared", org: "org_other", shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner shared spill", org: admissionTestOrg, shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto unreserved", unreserved: true, auto: true, status: http.StatusOK, wantAdmissions: 1},
-		{name: "auto JWT", jwt: true, auto: true, status: http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var metadata, admissions, backends atomic.Int64

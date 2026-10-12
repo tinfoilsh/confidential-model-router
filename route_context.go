@@ -192,12 +192,12 @@ func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (route
 		return c.fetch(ctx, apiKey, "")
 	}
 	key := routeContextKey(apiKey, "")
-	cached, cachedErr := c.cache.get(key)
+	cached, _ := c.cache.get(key)
 	if time.Since(cached.refreshedAt) < routeMetadataRefreshTTL {
-		return cached, cachedErr
+		return cached, nil
 	}
 	result := c.metadata.DoChan(string(key.credential[:]), func() (any, error) {
-		resolved, err := c.cache.get(key)
+		resolved, _ := c.cache.get(key)
 		if time.Since(resolved.refreshedAt) >= routeMetadataRefreshTTL {
 			select {
 			case c.refreshSlots <- struct{}{}:
@@ -206,26 +206,30 @@ func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (route
 				return routeContextUnavailable("", "busy"), nil
 			}
 			sequence := c.sequence.Add(1)
-			previous, previousErr := resolved, err
-			resolved, err = c.fetch(context.WithoutCancel(ctx), apiKey, "")
+			previous := resolved
+			fetched, err := c.fetch(context.WithoutCancel(ctx), apiKey, "")
+			if err != nil {
+				// Discard the old identity without retaining the denial or
+				// overwriting a newer successful lookup.
+				c.cache.put(key, routeContext{}, nil, sequence)
+				return nil, err
+			}
+			resolved = fetched
 			if resolved.unavailable && !previous.refreshedAt.IsZero() {
-				resolved, err = previous, previousErr
+				resolved = previous
 			}
 			if !resolved.unavailable {
 				resolved.refreshedAt = time.Now()
 				resolved.RateLimit = nil
-				c.cache.put(key, resolved, err, sequence)
+				c.cache.put(key, resolved, nil, sequence)
 			}
-		}
-		if err != nil {
-			return nil, err
 		}
 		return resolved, nil
 	})
 	// Stale metadata stays usable while a single bounded refresh runs. Normal
 	// successful admissions refresh it; their denials can be model-specific.
 	if !cached.refreshedAt.IsZero() {
-		return cached, cachedErr
+		return cached, nil
 	}
 	select {
 	case <-ctx.Done():
