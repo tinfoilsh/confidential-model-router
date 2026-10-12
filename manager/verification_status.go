@@ -133,7 +133,7 @@ func (em *EnclaveManager) VerificationCollector() prometheus.Collector {
 		lastSuccess: prometheus.NewDesc("router_verification_last_success_timestamp_seconds", "Unix timestamp of the last successful attestation, or zero if never verified.", []string{"model", "enclave"}, nil),
 		expiresAt:   prometheus.NewDesc("router_verification_expires_timestamp_seconds", "Authenticated attestation expiration as a Unix timestamp, or zero if never verified.", []string{"model", "enclave"}, nil),
 		lastAttempt: prometheus.NewDesc("router_verification_last_attempt_timestamp_seconds", "Unix timestamp of the last attestation attempt or failed TLS probe, or zero if never attempted.", []string{"model", "enclave"}, nil),
-		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed verification attempts per backend.", []string{"model", "enclave"}, nil),
+		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed attestation verifications and TLS identity probes per backend.", []string{"model", "enclave"}, nil),
 	}
 }
 
