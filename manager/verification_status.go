@@ -10,13 +10,12 @@ import (
 
 const (
 	verificationTLSProbe = "tls_probe"
-	verificationNonce    = "nonce"
 	verificationFetch    = "fetch"
 	verificationVerify   = "verify"
 	verificationKeys     = "keys"
 )
 
-var verificationStages = [...]string{verificationTLSProbe, verificationNonce, verificationFetch, verificationVerify, verificationKeys}
+var verificationStages = [...]string{verificationTLSProbe, verificationFetch, verificationVerify, verificationKeys}
 
 type verificationAttempt struct {
 	lastAttempt time.Time

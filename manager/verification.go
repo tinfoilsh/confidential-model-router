@@ -13,14 +13,17 @@ import (
 )
 
 const (
-	maxAttestationBytes        = 32 << 20
 	attestationRenewalWindow   = 24 * time.Hour
 	attestationRefreshInterval = time.Hour
 	runtimeConfigTimeout       = 30 * time.Second
 )
 
-type attestationVerifier interface {
-	VerifyV3([]byte, []byte, string) (*verify.Verification, error)
+func verifyEnclave(host, repo string) (*verify.Verification, error) {
+	handle, err := enclave.NewHandle(host, repo, nil)
+	if err != nil {
+		return nil, err
+	}
+	return handle.Verify()
 }
 
 type verifiedAttestation struct {

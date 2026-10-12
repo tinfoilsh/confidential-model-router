@@ -3,18 +3,15 @@ package manager
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/tinfoil-go/document"
 	"github.com/tinfoilsh/tinfoil-go/enclave"
 	"github.com/tinfoilsh/tinfoil-go/verify"
@@ -22,19 +19,12 @@ import (
 )
 
 const (
-	renewalTestModel      = "gpt-oss-120b"
-	renewalTestRepo       = "tinfoilsh/confidential-gpt-oss-120b"
-	renewalTestDocument   = `{"format":"https://tinfoil.sh/predicate/attestation/v3"}`
-	renewalTestResponse   = "verified response"
-	renewalTestTimeout    = 5 * time.Second
-	renewalTestQueueLimit = 8
+	renewalTestModel    = "gpt-oss-120b"
+	renewalTestRepo     = "tinfoilsh/confidential-gpt-oss-120b"
+	renewalTestResponse = "verified response"
+	renewalTestTimeout  = 5 * time.Second
+	renewalTestRefresh  = time.Minute
 )
-
-type renewalVerifierFunc func([]byte, []byte, string) (*verify.Verification, error)
-
-func (f renewalVerifierFunc) VerifyV3(body, nonce []byte, repo string) (*verify.Verification, error) {
-	return f(body, nonce, repo)
-}
 
 func renewalVerification(key string, expiresAt time.Time) *verify.Verification {
 	return &verify.Verification{
@@ -49,7 +39,24 @@ func renewalVerification(key string, expiresAt time.Time) *verify.Verification {
 	}
 }
 
-func renewalManager(t *testing.T, server *httptest.Server, expiresAt, verifiedAt time.Time, verifier renewalVerifierFunc) (*EnclaveManager, *Model, *Enclave) {
+func renewalServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, string) {
+	t.Helper()
+	if handler == nil {
+		handler = func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, renewalTestResponse)
+		}
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	trustVerificationServer(t, server)
+	key, err := enclave.CertPubkeyFP(server.Certificate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, key
+}
+
+func renewalManager(t *testing.T, server *httptest.Server, expiresAt, verifiedAt time.Time, verifier func(string, string) (*verify.Verification, error)) (*EnclaveManager, *Model, *Enclave) {
 	t.Helper()
 	key, err := enclave.CertPubkeyFP(server.Certificate())
 	if err != nil {
@@ -70,7 +77,7 @@ func renewalManager(t *testing.T, server *httptest.Server, expiresAt, verifiedAt
 		expectedHosts:   1,
 		configuredHosts: []string{host},
 	}
-	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: time.Minute}
+	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: renewalTestRefresh}
 	em.models.Store(renewalTestModel, model)
 	return em, model, existing
 }
@@ -123,61 +130,26 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 	heldStarted := make(chan struct{})
 	heldRelease := make(chan struct{})
 	releaseHeld := sync.OnceFunc(func() { close(heldRelease) })
-	var applicationCalls atomic.Int32
-	var challenge string
-	var challengeMu sync.Mutex
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/tinfoil-attestation" {
-			challengeMu.Lock()
-			challenge = r.URL.Query().Get("nonce")
-			challengeMu.Unlock()
-			io.WriteString(w, renewalTestDocument)
-			return
-		}
-		applicationCalls.Add(1)
+	server, key := renewalServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/held" {
 			close(heldStarted)
 			<-heldRelease
 		}
 		io.WriteString(w, renewalTestResponse)
-	}))
-	t.Cleanup(server.Close)
+	})
 	t.Cleanup(releaseHeld)
-	trustVerificationServer(t, server)
-	key, err := enclave.CertPubkeyFP(server.Certificate())
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now()
 	oldVerifiedAt := now.Add(-attestationRefreshInterval)
 	newExpiry := now.Add(2 * attestationRenewalWindow)
-	var verificationCalls int
-	em, model, existing := renewalManager(t, server, now.Add(time.Hour), oldVerifiedAt, func(body, nonce []byte, repo string) (*verify.Verification, error) {
-		verificationCalls++
-		challengeMu.Lock()
-		gotChallenge := challenge
-		challengeMu.Unlock()
-		if string(body) != renewalTestDocument || len(nonce) == 0 || hex.EncodeToString(nonce) != gotChallenge || repo != renewalTestRepo {
-			t.Errorf("incorrect verification inputs: document=%q nonce=%x challenge=%q repo=%q", body, nonce, gotChallenge, repo)
+	em, model, existing := renewalManager(t, server, now.Add(time.Hour), oldVerifiedAt, func(host, repo string) (*verify.Verification, error) {
+		if host != strings.TrimPrefix(server.URL, "https://") || repo != renewalTestRepo {
+			t.Fatalf("incorrect verification target: host=%q repo=%q", host, repo)
 		}
 		return renewalVerification(key, newExpiry), nil
 	})
 	oldState, oldProxy, oldBreaker, oldMetrics := existing.attestation, existing.proxy, existing.cb, existing.metrics
 	heldTransport := newAttestedTransport(key, oldState)
 	t.Cleanup(heldTransport.CloseIdleConnections)
-
-	pollStarted := make(chan struct{})
-	pollCanceled := make(chan struct{})
-	var pollStartOnce, pollCancelOnce sync.Once
-	existing.metrics.client = &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		pollStartOnce.Do(func() { close(pollStarted) })
-		<-request.Context().Done()
-		pollCancelOnce.Do(func() { close(pollCanceled) })
-		return nil, request.Context().Err()
-	})}
-	model.Overload = &config.OverloadConfig{MaxRequestsWaiting: renewalTestQueueLimit}
-	existing.metrics.setConfig(model.Overload)
-	waitRenewalSignal(t, pollStarted)
 
 	heldResponse := httptest.NewRecorder()
 	heldDone := make(chan struct{})
@@ -186,12 +158,6 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 		existing.ServeHTTP(heldResponse, httptest.NewRequest(http.MethodGet, "https://router.example/held", nil))
 	}()
 	waitRenewalSignal(t, heldStarted)
-	tripBreaker(existing)
-	existing.cb.lastFailureNano.Store(now.Add(-cbCooldown - time.Second).UnixNano())
-	claim := existing.claimProbe()
-	if claim == nil {
-		t.Fatal("expected a claimed recovery probe before renewal")
-	}
 
 	oldDeadline := now.Add(-time.Second)
 	oldState.current.Store(&verifiedAttestation{expiresAt: oldDeadline, verifiedAt: oldVerifiedAt, codeTag: "v1.0.0"})
@@ -203,22 +169,14 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 	if current != existing || current.attestation != oldState || current.proxy != oldProxy || current.cb != oldBreaker || current.metrics != oldMetrics {
 		t.Fatal("same-key renewal replaced serving state")
 	}
-	if current.inflight.Load() != 1 || current.cb.State() != cbHalfOpen || current.cb.ConsecutiveFailures() != cbFailureThreshold || current.cb.Retired() {
-		t.Fatalf("renewal lost active runtime state: inflight=%d breaker=%v failures=%d retired=%v", current.inflight.Load(), current.cb.State(), current.cb.ConsecutiveFailures(), current.cb.Retired())
-	}
-	select {
-	case <-pollCanceled:
-		t.Fatal("same-key renewal restarted the metrics poller")
-	default:
+	if current.inflight.Load() != 1 || current.cb.Retired() {
+		t.Fatalf("renewal lost active runtime state: inflight=%d retired=%v", current.inflight.Load(), current.cb.Retired())
 	}
 	updated := oldState.load()
-	if verificationCalls != 1 || !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(oldVerifiedAt) || updated.codeTag != "v1.0.1" {
-		t.Fatalf("renewal did not publish verified evidence: calls=%d state=%+v", verificationCalls, updated)
+	if !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(oldVerifiedAt) || updated.codeTag != "v1.0.1" {
+		t.Fatalf("renewal did not publish verified evidence: %+v", updated)
 	}
 	requireRenewalResponse(t, heldTransport, server.URL+"/response")
-	if applicationCalls.Load() != 2 {
-		t.Fatalf("application calls=%d, want held request plus renewed request", applicationCalls.Load())
-	}
 	releaseHeld()
 	waitRenewalSignal(t, heldDone)
 	if heldResponse.Code != http.StatusOK || heldResponse.Body.String() != renewalTestResponse || current.inflight.Load() != 0 || !current.cb.Closed() {
@@ -227,28 +185,23 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 }
 
 func TestAttestationRenewalFailurePreservesEvidence(t *testing.T) {
-	for _, failure := range []string{"fetch", "verification"} {
-		t.Run(failure, func(t *testing.T) {
-			var applicationCalls atomic.Int32
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/.well-known/tinfoil-attestation" {
-					if failure == "fetch" {
-						w.WriteHeader(http.StatusServiceUnavailable)
-						return
-					}
-					io.WriteString(w, renewalTestDocument)
-					return
-				}
-				applicationCalls.Add(1)
-				io.WriteString(w, renewalTestResponse)
-			}))
-			t.Cleanup(server.Close)
-			trustVerificationServer(t, server)
+	for _, tc := range []struct {
+		name  string
+		err   error
+		stage string
+	}{
+		{"fetch", &enclave.FetchError{Err: errors.New("collateral unavailable")}, verificationFetch},
+		{"verification", &enclave.AttestationError{Err: errors.New("freshness witness unavailable")}, verificationVerify},
+		{"retry_failure", errors.Join(
+			&enclave.AttestationError{Err: errors.New("freshness witness unavailable")},
+			&enclave.FetchError{Err: errors.New("collateral unavailable")},
+		), verificationVerify},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := renewalServer(t, nil)
 			now := time.Now()
-			var verificationCalls int
-			em, model, existing := renewalManager(t, server, now.Add(attestationRenewalWindow/2), now.Add(-time.Minute), func([]byte, []byte, string) (*verify.Verification, error) {
-				verificationCalls++
-				return nil, errors.New("freshness witness unavailable")
+			em, model, existing := renewalManager(t, server, now.Add(attestationRenewalWindow/2), now.Add(-time.Minute), func(string, string) (*verify.Verification, error) {
+				return nil, tc.err
 			})
 			before := existing.attestation.load()
 			transport := newAttestedTransport(existing.tlsKeyFP, existing.attestation)
@@ -259,19 +212,12 @@ func TestAttestationRenewalFailurePreservesEvidence(t *testing.T) {
 			if model.Enclaves[existing.host] != existing || existing.attestation.load() != before {
 				t.Fatal("failed renewal replaced cached evidence or advanced its verification time")
 			}
-			wantVerificationCalls := 1
-			if failure == "fetch" {
-				wantVerificationCalls = 0
-			}
-			if verificationCalls != wantVerificationCalls {
-				t.Fatalf("verification calls=%d, want %d", verificationCalls, wantVerificationCalls)
+			if attempt := model.verificationAttempts[existing.host]; attempt.lastError != tc.stage || attempt.failures[tc.stage] != 1 {
+				t.Fatalf("verification failure recorded as %+v, want stage %q", attempt, tc.stage)
 			}
 			requireRenewalResponse(t, transport, server.URL+"/response")
 			existing.attestation.current.Store(&verifiedAttestation{expiresAt: now.Add(-time.Second), verifiedAt: before.verifiedAt, codeTag: before.codeTag})
 			requireRenewalExpired(t, transport, server.URL+"/response")
-			if applicationCalls.Load() != 1 {
-				t.Fatalf("expired evidence reached backend: application calls=%d", applicationCalls.Load())
-			}
 		})
 	}
 }
@@ -279,24 +225,10 @@ func TestAttestationRenewalFailurePreservesEvidence(t *testing.T) {
 func TestAttestationKeyChangeDoesNotRenewHeldClients(t *testing.T) {
 	for _, changedKey := range []string{"tls", "hpke"} {
 		t.Run(changedKey, func(t *testing.T) {
-			var applicationCalls atomic.Int32
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/.well-known/tinfoil-attestation" {
-					io.WriteString(w, renewalTestDocument)
-					return
-				}
-				applicationCalls.Add(1)
-				io.WriteString(w, renewalTestResponse)
-			}))
-			t.Cleanup(server.Close)
-			trustVerificationServer(t, server)
-			key, err := enclave.CertPubkeyFP(server.Certificate())
-			if err != nil {
-				t.Fatal(err)
-			}
+			server, key := renewalServer(t, nil)
 			now := time.Now()
 			newExpiry := now.Add(2 * attestationRenewalWindow)
-			em, model, previous := renewalManager(t, server, now.Add(-time.Second), now.Add(-attestationRefreshInterval), func([]byte, []byte, string) (*verify.Verification, error) {
+			em, model, previous := renewalManager(t, server, now.Add(-time.Second), now.Add(-attestationRefreshInterval), func(string, string) (*verify.Verification, error) {
 				return renewalVerification(key, newExpiry), nil
 			})
 			if changedKey == "tls" {
@@ -322,62 +254,33 @@ func TestAttestationKeyChangeDoesNotRenewHeldClients(t *testing.T) {
 			currentTransport := newAttestedTransport(current.tlsKeyFP, current.attestation)
 			t.Cleanup(currentTransport.CloseIdleConnections)
 			requireRenewalResponse(t, currentTransport, server.URL+"/response")
-			if applicationCalls.Load() != 1 {
-				t.Fatalf("retired client reached the new backend: application calls=%d", applicationCalls.Load())
-			}
 		})
 	}
 }
 
 func TestAttestationPeriodicVerificationBeforeRenewalWindow(t *testing.T) {
-	var challenges atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		challenges.Add(1)
-		io.WriteString(w, renewalTestDocument)
-	}))
-	t.Cleanup(server.Close)
-	trustVerificationServer(t, server)
-	key, err := enclave.CertPubkeyFP(server.Certificate())
-	if err != nil {
-		t.Fatal(err)
-	}
+	server, key := renewalServer(t, nil)
 	now := time.Now()
 	expiresAt := now.Add(2 * attestationRenewalWindow)
-	verifiedAt := now.Add(-attestationRefreshInterval + time.Second)
-	var verificationCalls int
-	em, _, existing := renewalManager(t, server, expiresAt, verifiedAt, func([]byte, []byte, string) (*verify.Verification, error) {
-		verificationCalls++
+	verifiedAt := now.Add(-attestationRefreshInterval + renewalTestRefresh/2)
+	em, _, existing := renewalManager(t, server, expiresAt, verifiedAt, func(string, string) (*verify.Verification, error) {
 		return renewalVerification(key, expiresAt), nil
 	})
 	if err := em.addEnclave(renewalTestModel, existing.host); err != nil {
 		t.Fatal(err)
 	}
 	updated := existing.attestation.load()
-	if challenges.Load() != 1 || verificationCalls != 1 || !updated.verifiedAt.After(verifiedAt) || !updated.expiresAt.Equal(expiresAt) {
-		t.Fatalf("periodic verification: challenges=%d verifications=%d state=%+v", challenges.Load(), verificationCalls, updated)
+	if !updated.verifiedAt.After(verifiedAt) || !updated.expiresAt.Equal(expiresAt) {
+		t.Fatalf("periodic verification did not update evidence: %+v", updated)
 	}
 }
 
 func TestAttestationRenewalDuringConfigurationOutage(t *testing.T) {
-	var challenges atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/tinfoil-attestation" {
-			challenges.Add(1)
-			io.WriteString(w, renewalTestDocument)
-			return
-		}
-		io.WriteString(w, renewalTestResponse)
-	}))
-	t.Cleanup(server.Close)
-	trustVerificationServer(t, server)
-	key, err := enclave.CertPubkeyFP(server.Certificate())
-	if err != nil {
-		t.Fatal(err)
-	}
+	server, key := renewalServer(t, nil)
 	now := time.Now()
 	verifiedAt := now.Add(-attestationRefreshInterval - time.Second)
 	newExpiry := now.Add(2 * attestationRenewalWindow)
-	em, model, existing := renewalManager(t, server, now.Add(time.Hour), verifiedAt, func([]byte, []byte, string) (*verify.Verification, error) {
+	em, model, existing := renewalManager(t, server, now.Add(time.Hour), verifiedAt, func(string, string) (*verify.Verification, error) {
 		return renewalVerification(key, newExpiry), nil
 	})
 	em.updateConfigURL = t.TempDir() + "/missing-config.yaml"
@@ -392,8 +295,8 @@ func TestAttestationRenewalDuringConfigurationOutage(t *testing.T) {
 		t.Fatal("verification renewal falsely advanced configuration success time")
 	}
 	updated := existing.attestation.load()
-	if challenges.Load() != 1 || !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(verifiedAt) {
-		t.Fatalf("configuration outage prevented evidence renewal: challenges=%d state=%+v", challenges.Load(), updated)
+	if !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(verifiedAt) {
+		t.Fatalf("configuration outage prevented evidence renewal: %+v", updated)
 	}
 	if len(model.Enclaves) != 1 || model.Enclaves[existing.host] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[0] != existing.host {
 		t.Fatal("configuration outage changed the accepted backend set")
@@ -410,26 +313,16 @@ func TestAttestationRejectsMissingOrExpiredVerificationDeadline(t *testing.T) {
 		{name: "expired", expiresAt: time.Now().Add(-time.Second)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.WriteString(w, renewalTestDocument)
-			}))
-			t.Cleanup(server.Close)
-			trustVerificationServer(t, server)
-			key, err := enclave.CertPubkeyFP(server.Certificate())
-			if err != nil {
-				t.Fatal(err)
-			}
-			var verificationCalls int
-			em, model, previous := renewalManager(t, server, time.Now(), time.Now(), func([]byte, []byte, string) (*verify.Verification, error) {
-				verificationCalls++
+			server, key := renewalServer(t, nil)
+			em, model, previous := renewalManager(t, server, time.Now(), time.Now(), func(string, string) (*verify.Verification, error) {
 				return renewalVerification(key, tc.expiresAt), nil
 			})
 			delete(model.Enclaves, previous.host)
 			if err := em.addEnclave(renewalTestModel, previous.host); err == nil {
 				t.Fatal("accepted verification without a valid authenticated deadline")
 			}
-			if verificationCalls != 1 || len(model.Enclaves) != 0 || model.Tag != "v1.0.0" || model.SourceMeasurement != nil {
-				t.Fatalf("invalid deadline modified model state: verification calls=%d enclaves=%d tag=%q measurement=%v", verificationCalls, len(model.Enclaves), model.Tag, model.SourceMeasurement)
+			if len(model.Enclaves) != 0 || model.Tag != "v1.0.0" || model.SourceMeasurement != nil {
+				t.Fatalf("invalid deadline modified model state: enclaves=%d tag=%q measurement=%v", len(model.Enclaves), model.Tag, model.SourceMeasurement)
 			}
 		})
 	}

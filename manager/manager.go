@@ -4,15 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -164,7 +162,7 @@ type EnclaveManager struct {
 	initConfigURL             string
 	updateConfigURL           string
 	controlPlaneURL           string
-	verifier                  attestationVerifier
+	verifier                  func(host, repo string) (*verify.Verification, error)
 	billingCollector          *billing.Collector
 	unknownModelReporter      *billing.UnknownModelReporter
 	usageContextSecret        string
@@ -238,49 +236,6 @@ func tlsPublicKeyFP(host string) (string, error) {
 	return tinfoilEnclave.ConnectionCertFP(conn.ConnectionState())
 }
 
-// attestationFetch retrieves the attestation document from a given enclave hostname.
-// This is a local implementation that disables HTTP connection pooling to prevent
-// certificate validation errors when multiple hostnames (e.g., router.inf4.tinfoil.sh
-// and large.inf4.tinfoil.sh) resolve to the same IP address (127.0.0.1:443).
-// Without DisableKeepAlives, Go's HTTP/2 client reuses connections, causing SNI mismatches.
-func attestationFetch(host string, nonce []byte) ([]byte, error) {
-	var u url.URL
-	u.Host = host
-	u.Scheme = "https"
-	u.Path = "/.well-known/tinfoil-attestation"
-	u.RawQuery = url.Values{"nonce": {hex.EncodeToString(nonce)}}.Encode()
-
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || base == nil {
-		return nil, fmt.Errorf("attestation fetching requires an HTTP transport")
-	}
-	transport := base.Clone()
-	transport.DisableKeepAlives = true // Prevents connection reuse across different hostnames
-	defer transport.CloseIdleConnections()
-	httpClient := &http.Client{
-		Timeout:       enclaveVerifyTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-		Transport:     transport,
-	}
-	resp, err := httpClient.Get(u.String())
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("attestation endpoint returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAttestationBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > maxAttestationBytes {
-		return nil, fmt.Errorf("attestation document exceeds %d bytes", maxAttestationBytes)
-	}
-	return body, nil
-}
-
 // addEnclave verifies and adds an enclave to the model enclave pool.
 // If the enclave already exists, replace it if the TLS key fingerprint is different.
 func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
@@ -315,22 +270,21 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	}
 
 	attemptedAt := time.Now()
-	stage := verificationNonce
+	stage := verificationVerify
 	defer func() { em.recordVerification(model, host, attemptedAt, stage, err) }()
-	nonce, err := document.RandomNonce()
-	if err != nil {
-		return fmt.Errorf("failed to generate attestation nonce: %w", err)
-	}
-	stage = verificationFetch
-	remoteAttestation, err := attestationFetch(host, nonce)
-	if err != nil {
-		return fmt.Errorf("failed to fetch remote attestation: %w", err)
-	}
 	// The pinned workload and signed collateral freshness define accepted releases.
 	// Model tag and measurement fields below report verified state; they are not trust anchors.
-	stage = verificationVerify
-	verification, err := em.verifier.VerifyV3(remoteAttestation, nonce, model.Repo)
+	verification, err := em.verifier(host, model.Repo)
 	if err != nil {
+		cause := err
+		// The SDK lists the final retry failure before earlier diagnostics.
+		if joined, ok := err.(interface{ Unwrap() []error }); ok && len(joined.Unwrap()) > 0 {
+			cause = joined.Unwrap()[0]
+		}
+		var fetchError *tinfoilEnclave.FetchError
+		if errors.As(cause, &fetchError) {
+			stage = verificationFetch
+		}
 		return fmt.Errorf("failed to verify remote attestation: %w", err)
 	}
 	verifiedAt := time.Now()
@@ -933,17 +887,12 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
-	verifier, err := verify.NewVerifier()
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize verifier: %v", err)
-	}
-
 	em := &EnclaveManager{
 		models:                    &sync.Map{},
 		initConfigURL:             initConfigURL,
 		updateConfigURL:           updateConfigURL,
 		controlPlaneURL:           controlPlaneURL,
-		verifier:                  verifier,
+		verifier:                  verifyEnclave,
 		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
 		unknownModelReporter:      billing.NewUnknownModelReporter(controlPlaneURL, usageReporterID, usageReporterSecret),
 		usageContextSecret:        usageContextSecret,

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -15,9 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/document"
 	"github.com/tinfoilsh/tinfoil-go/enclave"
-	"github.com/tinfoilsh/tinfoil-go/verify"
 )
 
 func trustVerificationServer(t *testing.T, server *httptest.Server) {
@@ -34,73 +31,36 @@ func trustVerificationServer(t *testing.T, server *httptest.Server) {
 	})
 }
 
-func TestAttestationFetchChallengeAndBounds(t *testing.T) {
-	nonce, err := document.RandomNonce()
-	if err != nil {
-		t.Fatal(err)
-	}
-	const payload = `{"format":"invalid"}`
-	for _, tc := range []struct {
-		name      string
-		status    int
-		body      string
-		wantError bool
-	}{
-		{"ok", http.StatusOK, payload, false},
-		{"error", http.StatusServiceUnavailable, payload, true},
-		{"redirect", http.StatusTemporaryRedirect, payload, true},
-		{"oversized", http.StatusOK, strings.Repeat("x", maxAttestationBytes+1), true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var redirects atomic.Int32
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/redirect-target" {
-					redirects.Add(1)
-					io.WriteString(w, payload)
-					return
-				}
-				if r.URL.Path != "/.well-known/tinfoil-attestation" || r.URL.Query().Get("nonce") != hex.EncodeToString(nonce) {
-					t.Errorf("incorrect attestation challenge: %s", r.URL)
-				}
-				w.Header().Set("Location", "/redirect-target")
-				w.WriteHeader(tc.status)
-				io.WriteString(w, tc.body)
-			}))
-			defer server.Close()
-			trustVerificationServer(t, server)
-			body, err := attestationFetch(strings.TrimPrefix(server.URL, "https://"), nonce)
-			if (err != nil) != tc.wantError {
-				t.Fatalf("fetch error = %v, want error %v", err, tc.wantError)
-			}
-			if redirects.Load() != 0 {
-				t.Fatal("attestation fetch followed a redirect")
-			}
-			if !tc.wantError && string(body) != payload {
-				t.Fatalf("unexpected document: %s", body)
-			}
-		})
-	}
-}
-
 func TestAddEnclaveRejectsUnverifiedDocument(t *testing.T) {
+	var challenges atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		challenges.Add(1)
 		io.WriteString(w, `{"format":"https://tinfoil.sh/predicate/attestation/v3"}`)
 	}))
 	defer server.Close()
 	trustVerificationServer(t, server)
-	verifier, err := verify.NewVerifier()
+	key, err := enclave.CertPubkeyFP(server.Certificate())
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := &Model{Repo: "tinfoilsh/confidential-gpt-oss-120b", Enclaves: map[string]*Enclave{}}
-	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier}
-	em.models.Store("gpt-oss-120b", model)
-	err = em.addEnclave("gpt-oss-120b", strings.TrimPrefix(server.URL, "https://"))
-	if err == nil || !strings.Contains(err.Error(), "failed to verify remote attestation") {
-		t.Fatalf("expected verifier rejection, got %v", err)
-	}
-	if len(model.Enclaves) != 0 || model.SourceMeasurement != nil || model.Tag != "" {
-		t.Fatal("unverified document modified the model")
+	host := strings.TrimPrefix(server.URL, "https://")
+	for _, name := range []string{"new", "expired"} {
+		t.Run(name, func(t *testing.T) {
+			model := &Model{Repo: renewalTestRepo, Enclaves: map[string]*Enclave{}}
+			if name == "expired" {
+				model.Enclaves[host] = &Enclave{tlsKeyFP: key, attestation: newAttestationState(time.Now().Add(-time.Second), time.Now(), "")}
+			}
+			previous := model.Enclaves[host]
+			attempts := challenges.Load()
+			em := &EnclaveManager{models: &sync.Map{}, verifier: verifyEnclave, refreshInterval: time.Minute}
+			em.models.Store(renewalTestModel, model)
+			if err := em.addEnclave(renewalTestModel, host); err == nil || !strings.Contains(err.Error(), "failed to verify remote attestation") {
+				t.Fatalf("expected verifier rejection, got %v", err)
+			}
+			if challenges.Load() == attempts || model.Enclaves[host] != previous || model.SourceMeasurement != nil || model.Tag != "" {
+				t.Fatal("unverified document was accepted or expired evidence skipped verification")
+			}
+		})
 	}
 }
 
@@ -160,35 +120,6 @@ type trackedVerificationBody struct {
 }
 
 func (b *trackedVerificationBody) Close() error { b.closed = true; return nil }
-
-func TestExpiredEnclaveCannotSkipVerification(t *testing.T) {
-	var challenges atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		challenges.Add(1)
-		io.WriteString(w, `{"format":"https://tinfoil.sh/predicate/attestation/v3"}`)
-	}))
-	defer server.Close()
-	trustVerificationServer(t, server)
-	verifier, err := verify.NewVerifier()
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := enclave.CertPubkeyFP(server.Certificate())
-	if err != nil {
-		t.Fatal(err)
-	}
-	host := strings.TrimPrefix(server.URL, "https://")
-	existing := &Enclave{tlsKeyFP: key, attestation: newAttestationState(time.Now().Add(-time.Second), time.Now(), "")}
-	model := &Model{Repo: "tinfoilsh/confidential-gpt-oss-120b", Enclaves: map[string]*Enclave{host: existing}}
-	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: time.Minute}
-	em.models.Store("gpt-oss-120b", model)
-	if err := em.addEnclave("gpt-oss-120b", host); err == nil {
-		t.Fatal("accepted an expired enclave without successful re-verification")
-	}
-	if challenges.Load() != 1 || model.Enclaves[host] != existing {
-		t.Fatal("failed re-verification must preserve the expired entry without authorizing it")
-	}
-}
 
 func TestTLSAddress(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{
