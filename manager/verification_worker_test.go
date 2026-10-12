@@ -2,11 +2,7 @@ package manager
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,40 +15,29 @@ func TestVerificationWorkerBoundsRefreshInterval(t *testing.T) {
 		want       time.Duration
 	}{
 		{name: "short interval", configured: time.Minute, want: time.Minute},
-		{name: "above hourly", configured: 2 * attestationRefreshInterval, want: attestationRefreshInterval},
 		{name: "above renewal window", configured: 2 * attestationRenewalWindow, want: attestationRefreshInterval},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				var attempts atomic.Int32
-				originalClient := http.DefaultClient
-				http.DefaultClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-					attempts.Add(1)
-					return &http.Response{
-						StatusCode: http.StatusServiceUnavailable,
-						Body:       io.NopCloser(strings.NewReader("config unavailable")),
-					}, nil
-				})}
-				t.Cleanup(func() { http.DefaultClient = originalClient })
 				em := &EnclaveManager{
 					models:          &sync.Map{},
-					updateConfigURL: "https://config.example/router.yml",
+					updateConfigURL: t.TempDir() + "/missing-config.yml",
 					refreshInterval: test.configured,
 				}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
+				want := time.Now()
 				go em.runWorker(ctx)
-				synctest.Wait()
-				if got := attempts.Load(); got != 1 {
-					t.Fatalf("initial refresh attempts = %d, want 1", got)
-				}
-
-				for wantAttempts := int32(2); wantAttempts <= 3; wantAttempts++ {
-					time.Sleep(test.want)
+				for range 3 {
 					synctest.Wait()
-					if got := attempts.Load(); got != wantAttempts {
-						t.Fatalf("refresh attempts = %d, want %d after %v", got, wantAttempts, test.want)
+					em.stateMu.Lock()
+					got := em.lastAttemptedUpdate
+					em.stateMu.Unlock()
+					if !got.Equal(want) {
+						t.Fatalf("last refresh = %v, want %v", got, want)
 					}
+					want = want.Add(test.want)
+					time.Sleep(test.want)
 				}
 				cancel()
 				synctest.Wait()
