@@ -2,6 +2,8 @@ package manager
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -32,19 +34,33 @@ func shortVerifyTimeout(t *testing.T, d time.Duration) {
 // blocked on network I/O to an unresponsive host, the model lock must remain
 // available to request routing.
 func TestAddEnclaveNetworkIODoesNotHoldModelLock(t *testing.T) {
-	shortVerifyTimeout(t, 2*time.Second)
-	addr := blackholeListener(t)
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	release := sync.OnceFunc(func() { close(blocked) })
+	var first sync.Once
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first.Do(func() { close(started) })
+		<-blocked
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	trustVerificationServer(t, server)
 
-	model := &Model{Enclaves: map[string]*Enclave{}}
-	em := &EnclaveManager{models: &sync.Map{}}
+	model := &Model{Repo: renewalTestRepo, Enclaves: map[string]*Enclave{}}
+	em := &EnclaveManager{models: &sync.Map{}, verifier: verifyEnclave}
 	em.models.Store("test-model", model)
 
-	done := make(chan error, 1)
-	go func() { done <- em.addEnclave("test-model", addr, nil) }()
+	done := make(chan struct{})
+	var verificationError error
+	go func() {
+		defer close(done)
+		verificationError = em.addEnclave("test-model", strings.TrimPrefix(server.URL, "https://"))
+	}()
+	t.Cleanup(func() { release(); <-done })
 
 	// Let addEnclave reach its network call, then verify the write lock —
 	// the strictest form of "routing can proceed" — is acquirable.
-	time.Sleep(100 * time.Millisecond)
+	waitRenewalSignal(t, started)
 	locked := make(chan struct{})
 	go func() {
 		model.mu.Lock()
@@ -56,16 +72,13 @@ func TestAddEnclaveNetworkIODoesNotHoldModelLock(t *testing.T) {
 	}()
 	select {
 	case <-locked:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(renewalTestTimeout):
 		t.Fatal("model lock held while addEnclave was blocked on network I/O")
 	}
 
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "attestation") {
-			t.Fatalf("expected attestation fetch error, got %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("addEnclave did not return after verify timeout")
+	release()
+	waitRenewalSignal(t, done)
+	if verificationError == nil || !strings.Contains(verificationError.Error(), "attestation") {
+		t.Fatalf("expected attestation fetch error, got %v", verificationError)
 	}
 }

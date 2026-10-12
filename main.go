@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
@@ -496,6 +497,7 @@ func main() {
 		log.Fatal(err)
 	}
 	em.SetDebugMode(*debug)
+	prometheus.MustRegister(em.VerificationCollector())
 	if *debug {
 		log.Warn("debug mode enabled: local development overrides are active; do not use in production")
 	}

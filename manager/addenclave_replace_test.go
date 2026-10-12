@@ -30,7 +30,7 @@ func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
 	em := &EnclaveManager{models: &sync.Map{}}
 	em.models.Store("test-model", model)
 
-	if err := em.addEnclave("test-model", addr, nil); err != nil {
+	if err := em.addEnclave("test-model", addr); err != nil {
 		t.Fatalf("expected the existing enclave to be kept, got error: %v", err)
 	}
 	model.mu.RLock()
