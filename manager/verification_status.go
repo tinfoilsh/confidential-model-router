@@ -2,7 +2,6 @@ package manager
 
 import (
 	"encoding/json"
-	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -10,18 +9,14 @@ import (
 
 const (
 	verificationTLSProbe = "tls_probe"
-	verificationFetch    = "fetch"
 	verificationVerify   = "verify"
-	verificationKeys     = "keys"
 )
-
-var verificationStages = [...]string{verificationTLSProbe, verificationFetch, verificationVerify, verificationKeys}
 
 type verificationAttempt struct {
 	lastAttempt time.Time
 	lastFailure time.Time
 	lastError   string
-	failures    map[string]uint64
+	failures    uint64
 }
 
 type backendVerificationStatus struct {
@@ -31,7 +26,7 @@ type backendVerificationStatus struct {
 	LastAttempt *time.Time `json:"last_attempt,omitempty"`
 	LastFailure *time.Time `json:"last_failure,omitempty"`
 	LastError   string     `json:"last_error,omitempty"`
-	failures    map[string]uint64
+	failures    uint64
 }
 
 type modelVerificationStatus struct {
@@ -48,27 +43,18 @@ type modelVerificationStatus struct {
 func (em *EnclaveManager) recordVerification(model *Model, host string, attemptedAt time.Time, stage string, err error) {
 	model.mu.Lock()
 	defer model.mu.Unlock()
-	if !slices.Contains(model.configuredHosts, host) {
+	attempt, configured := model.configuredHosts[host]
+	if !configured {
 		return
 	}
-	if model.verificationAttempts == nil {
-		model.verificationAttempts = make(map[string]verificationAttempt)
-	}
-	attempt := model.verificationAttempts[host]
 	attempt.lastAttempt = attemptedAt
 	attempt.lastError = ""
 	if err != nil {
-		if !slices.Contains(verificationStages[:], stage) {
-			stage = verificationVerify
-		}
 		attempt.lastFailure = attemptedAt
 		attempt.lastError = stage
-		if attempt.failures == nil {
-			attempt.failures = make(map[string]uint64)
-		}
-		attempt.failures[stage]++
+		attempt.failures++
 	}
-	model.verificationAttempts[host] = attempt
+	model.configuredHosts[host] = attempt
 }
 
 func verificationTimestamp(value time.Time) *time.Time {
@@ -82,21 +68,13 @@ func verificationTimestamp(value time.Time) *time.Time {
 // verificationStatusLocked reads authenticated state at the observation time;
 // local harness connections without attestation do not count as verified.
 func (m *Model) verificationStatusLocked(now time.Time) modelVerificationStatus {
-	status := modelVerificationStatus{ObservedAt: now.UTC(), Hosts: make(map[string]backendVerificationStatus, len(m.configuredHosts))}
-	for _, host := range m.configuredHosts {
-		if _, found := status.Hosts[host]; found {
-			continue
-		}
-		status.Configured++
-		attempt := m.verificationAttempts[host]
+	status := modelVerificationStatus{ObservedAt: now.UTC(), Configured: len(m.configuredHosts), Hosts: make(map[string]backendVerificationStatus, len(m.configuredHosts))}
+	for host, attempt := range m.configuredHosts {
 		backend := backendVerificationStatus{
 			LastAttempt: verificationTimestamp(attempt.lastAttempt),
 			LastFailure: verificationTimestamp(attempt.lastFailure),
 			LastError:   attempt.lastError,
-			failures:    make(map[string]uint64, len(attempt.failures)),
-		}
-		for stage, count := range attempt.failures {
-			backend.failures[stage] = count
+			failures:    attempt.failures,
 		}
 		enclave := m.Enclaves[host]
 		var verified *verifiedAttestation
@@ -155,7 +133,7 @@ func (em *EnclaveManager) VerificationCollector() prometheus.Collector {
 		lastSuccess: prometheus.NewDesc("router_verification_last_success_timestamp_seconds", "Unix timestamp of the last successful attestation, or zero if never verified.", []string{"model", "enclave"}, nil),
 		expiresAt:   prometheus.NewDesc("router_verification_expires_timestamp_seconds", "Authenticated attestation expiration as a Unix timestamp, or zero if never verified.", []string{"model", "enclave"}, nil),
 		lastAttempt: prometheus.NewDesc("router_verification_last_attempt_timestamp_seconds", "Unix timestamp of the last attestation attempt or failed TLS probe, or zero if never attempted.", []string{"model", "enclave"}, nil),
-		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed verification attempts by bounded verification stage.", []string{"model", "enclave", "stage"}, nil),
+		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed verification attempts per backend.", []string{"model", "enclave"}, nil),
 	}
 }
 
@@ -190,9 +168,7 @@ func (c *verificationCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.lastSuccess, prometheus.GaugeValue, verificationUnixTimestamp(backend.LastSuccess), name, host)
 			ch <- prometheus.MustNewConstMetric(c.expiresAt, prometheus.GaugeValue, verificationUnixTimestamp(backend.ExpiresAt), name, host)
 			ch <- prometheus.MustNewConstMetric(c.lastAttempt, prometheus.GaugeValue, verificationUnixTimestamp(backend.LastAttempt), name, host)
-			for _, stage := range verificationStages {
-				ch <- prometheus.MustNewConstMetric(c.failures, prometheus.CounterValue, float64(backend.failures[stage]), name, host, stage)
-			}
+			ch <- prometheus.MustNewConstMetric(c.failures, prometheus.CounterValue, float64(backend.failures), name, host)
 		}
 		return true
 	})

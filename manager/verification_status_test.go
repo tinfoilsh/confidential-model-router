@@ -42,7 +42,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			Overload:        &config.OverloadConfig{MaxRequestsWaiting: queueLimit},
 			CacheRoute:      &config.CacheRouteConfig{Mode: "shadow"},
 			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, Enclaves: []string{"backend"}}},
-			configuredHosts: []string{"backend", "open", "missing", "harness", "backend"},
+			configuredHosts: map[string]verificationAttempt{"backend": {}, "open": {}, "missing": {}, "harness": {}},
 			Enclaves: map[string]*Enclave{
 				"backend": {tlsKeyFP: "tls-key", hpkeKey: "hpke-key", cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v1")},
 				"open":    {cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v2")},
@@ -51,13 +51,14 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 		}
 		model.Enclaves["open"].cb.storeState(cbOpen)
 		manager.models.Store("gpt-oss-120b", model)
-		manager.recordVerification(model, "backend", now, verificationFetch, errors.New("secret upstream error"))
+		manager.recordVerification(model, "backend", now, verificationTLSProbe, errors.New("failed TLS probe"))
+		manager.recordVerification(model, "backend", now, verificationVerify, errors.New("secret upstream error"))
 		status, data := readVerificationStatus(t, model)
 		if status.Configured != 4 || status.Verified != 2 || status.Healthy != 1 || status.Expired != 0 || status.Unverified != 2 || len(status.Hosts) != 4 {
 			t.Fatalf("incorrect pool counts: %+v", status)
 		}
 		_, missingVisible := status.Hosts["missing"]
-		if !missingVisible || status.Hosts["missing"].LastSuccess != nil || status.Hosts["harness"].ExpiresAt != nil || status.Hosts["backend"].LastError != verificationFetch || status.Hosts["open"].CodeTag != "v2" || status.EarliestFreshnessExpiresAt == nil || !status.EarliestFreshnessExpiresAt.Equal(now.Add(time.Minute)) {
+		if !missingVisible || status.Hosts["missing"].LastSuccess != nil || status.Hosts["harness"].ExpiresAt != nil || status.Hosts["backend"].LastError != verificationVerify || status.Hosts["open"].CodeTag != "v2" || status.EarliestFreshnessExpiresAt == nil || !status.EarliestFreshnessExpiresAt.Equal(now.Add(time.Minute)) {
 			t.Fatalf("incorrect authenticated state or failed-attempt details: %+v", status)
 		}
 		if strings.Contains(data, "private-org") || strings.Contains(data, "reservations") || strings.Contains(data, "secret upstream error") {
@@ -101,7 +102,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			`router_verification_backends{model="gpt-oss-120b",state="configured"} 4`,
 			`router_verification_backends{model="gpt-oss-120b",state="verified"} 0`,
 			`router_verification_backends{model="gpt-oss-120b",state="expired"} 2`,
-			`router_verification_failures_total{enclave="backend",model="gpt-oss-120b",stage="fetch"} 1`,
+			`router_verification_failures_total{enclave="backend",model="gpt-oss-120b"} 2`,
 			fmt.Sprintf(`router_verification_last_success_timestamp_seconds{enclave="backend",model="gpt-oss-120b"} %g`, float64(now.Unix())),
 			fmt.Sprintf(`router_verification_expires_timestamp_seconds{enclave="backend",model="gpt-oss-120b"} %g`, float64(now.Add(time.Minute).Unix())),
 			fmt.Sprintf(`router_verification_last_attempt_timestamp_seconds{enclave="backend",model="gpt-oss-120b"} %g`, float64(now.Add(time.Second).Unix())),
@@ -111,10 +112,9 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			}
 		}
 		model.configuredHosts = nil
-		model.verificationAttempts = nil
-		manager.recordVerification(model, "backend", time.Now(), verificationFetch, errors.New("late failure"))
+		manager.recordVerification(model, "backend", time.Now(), verificationVerify, errors.New("late failure"))
 		status, _ = readVerificationStatus(t, model)
-		if status.Configured != 0 || len(status.Hosts) != 0 || len(model.verificationAttempts) != 0 || strings.Contains(scrape(), "enclave=") {
+		if status.Configured != 0 || len(status.Hosts) != 0 || len(model.configuredHosts) != 0 || strings.Contains(scrape(), "enclave=") {
 			t.Fatal("removed hosts remained visible or returned through an in-flight attempt")
 		}
 	})
@@ -124,7 +124,7 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 	const iterations = 100
 	now := time.Now()
 	manager := &EnclaveManager{models: &sync.Map{}}
-	model := &Model{configuredHosts: []string{"backend"}, Enclaves: map[string]*Enclave{"backend": {attestation: newAttestationState(now.Add(time.Hour), now, "v1")}}}
+	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {attestation: newAttestationState(now.Add(time.Hour), now, "v1")}}}
 	manager.models.Store("gpt-oss-120b", model)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(manager.VerificationCollector())
@@ -133,12 +133,12 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 		for range iterations {
 			model.mu.Lock()
 			model.Enclaves["temporary"] = &Enclave{}
-			model.configuredHosts = []string{"backend", "temporary"}
+			model.configuredHosts["temporary"] = verificationAttempt{}
 			model.mu.Unlock()
-			manager.recordVerification(model, "backend", now, verificationFetch, errors.New("unreachable"))
+			manager.recordVerification(model, "backend", now, verificationVerify, errors.New("unreachable"))
 			model.mu.Lock()
 			delete(model.Enclaves, "temporary")
-			model.configuredHosts = []string{"backend"}
+			delete(model.configuredHosts, "temporary")
 			model.mu.Unlock()
 		}
 	})

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -75,7 +77,7 @@ func renewalManager(t *testing.T, server *httptest.Server, expiresAt, verifiedAt
 		Tag:             "v1.0.0",
 		Enclaves:        map[string]*Enclave{host: existing},
 		expectedHosts:   1,
-		configuredHosts: []string{host},
+		configuredHosts: map[string]verificationAttempt{host: {}},
 	}
 	em := &EnclaveManager{models: &sync.Map{}, verifier: verifier, refreshInterval: renewalTestRefresh}
 	em.models.Store(renewalTestModel, model)
@@ -193,41 +195,26 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 }
 
 func TestAttestationRenewalFailurePreservesEvidence(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		err   error
-		stage string
-	}{
-		{"fetch", &enclave.FetchError{Err: errors.New("collateral unavailable")}, verificationFetch},
-		{"verification", &enclave.AttestationError{Err: errors.New("freshness witness unavailable")}, verificationVerify},
-		{"retry_failure", errors.Join(
-			&enclave.AttestationError{Err: errors.New("freshness witness unavailable")},
-			&enclave.FetchError{Err: errors.New("collateral unavailable")},
-		), verificationVerify},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server, _ := renewalServer(t, nil)
-			now := time.Now()
-			em, model, existing := renewalManager(t, server, now.Add(attestationRenewalWindow/2), now.Add(-time.Minute), func(string, string) (*verify.Verification, error) {
-				return nil, tc.err
-			})
-			before := existing.attestation.load()
-			transport := newAttestedTransport(existing.tlsKeyFP, existing.attestation)
-			t.Cleanup(transport.CloseIdleConnections)
-			if err := em.addEnclave(renewalTestModel, existing.host); err == nil {
-				t.Fatal("failed renewal was accepted")
-			}
-			if model.Enclaves[existing.host] != existing || existing.attestation.load() != before {
-				t.Fatal("failed renewal replaced cached evidence or advanced its verification time")
-			}
-			if attempt := model.verificationAttempts[existing.host]; attempt.lastError != tc.stage || attempt.failures[tc.stage] != 1 {
-				t.Fatalf("verification failure recorded as %+v, want stage %q", attempt, tc.stage)
-			}
-			requireRenewalResponse(t, transport, server.URL+"/response")
-			existing.attestation.current.Store(&verifiedAttestation{expiresAt: now.Add(-time.Second), verifiedAt: before.verifiedAt, codeTag: before.codeTag})
-			requireRenewalExpired(t, transport, server.URL+"/response")
-		})
+	server, _ := renewalServer(t, nil)
+	now := time.Now()
+	em, model, existing := renewalManager(t, server, now.Add(attestationRenewalWindow/2), now.Add(-time.Minute), func(string, string) (*verify.Verification, error) {
+		return nil, errors.New("collateral unavailable")
+	})
+	before := existing.attestation.load()
+	transport := newAttestedTransport(existing.tlsKeyFP, existing.attestation)
+	t.Cleanup(transport.CloseIdleConnections)
+	if err := em.addEnclave(renewalTestModel, existing.host); err == nil {
+		t.Fatal("failed renewal was accepted")
 	}
+	if model.Enclaves[existing.host] != existing || existing.attestation.load() != before {
+		t.Fatal("failed renewal replaced cached evidence or advanced its verification time")
+	}
+	if attempt := model.configuredHosts[existing.host]; attempt.lastError != verificationVerify || attempt.failures != 1 {
+		t.Fatalf("verification failure recorded as %+v", attempt)
+	}
+	requireRenewalResponse(t, transport, server.URL+"/response")
+	existing.attestation.current.Store(&verifiedAttestation{expiresAt: now.Add(-time.Second), verifiedAt: before.verifiedAt, codeTag: before.codeTag})
+	requireRenewalExpired(t, transport, server.URL+"/response")
 }
 
 func TestAttestationKeyChangeDoesNotRenewHeldClients(t *testing.T) {
@@ -283,33 +270,65 @@ func TestAttestationPeriodicVerificationBeforeRenewalWindow(t *testing.T) {
 	}
 }
 
-func TestAttestationRenewalDuringConfigurationOutage(t *testing.T) {
+func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
+	const configMode = 0o600
 	server, key := renewalServer(t, nil)
 	now := time.Now()
 	verifiedAt := now.Add(-attestationRefreshInterval - time.Second)
-	newExpiry := now.Add(2 * attestationRenewalWindow)
-	em, model, existing := renewalManager(t, server, now.Add(time.Hour), verifiedAt, func(string, string) (*verify.Verification, error) {
+	newExpiry := now.Add(time.Hour)
+	calls := 0
+	em, model, existing := renewalManager(t, server, now.Add(time.Minute), verifiedAt, func(host, repo string) (*verify.Verification, error) {
+		if host != strings.TrimPrefix(server.URL, "https://") || repo != renewalTestRepo {
+			t.Errorf("verification escaped accepted configuration: %s %s", host, repo)
+		}
+		calls++
 		return renewalVerification(key, newExpiry), nil
 	})
-	em.updateConfigURL = t.TempDir() + "/missing-config.yaml"
-	previousConfigUpdate := now.Add(-time.Minute)
-	em.lastSuccessfulUpdate = previousConfigUpdate
+	model.configuredHosts[existing.host] = verificationAttempt{failures: 1}
+	path := t.TempDir() + "/config.yaml"
+	acceptedConfig := fmt.Sprintf("models:\n  %s:\n    repo: %s\n    enclaves: [%q]\n", renewalTestModel, renewalTestRepo, existing.host)
 	transport := newAttestedTransport(key, existing.attestation)
 	t.Cleanup(transport.CloseIdleConnections)
-	if err := em.sync(); err == nil || !strings.Contains(err.Error(), "failed to fetch config") {
-		t.Fatalf("configuration outage was not reported: %v", err)
+	for _, tc := range []struct {
+		name, config string
+		retained     bool
+	}{
+		{"accepted", acceptedConfig, true},
+		{"unavailable", "", true},
+		{"repository change", strings.NewReplacer(renewalTestRepo, "tinfoilsh/untrusted", existing.host, "untrusted.example").Replace(acceptedConfig), true},
+		{"host removed", fmt.Sprintf("models:\n  %s:\n    repo: %s\n", renewalTestModel, renewalTestRepo), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.config), configMode); err != nil {
+				t.Fatal(err)
+			}
+			em.updateConfigURL = path
+			if tc.config == "" {
+				em.updateConfigURL += ".missing"
+			}
+			beforeConfig, beforeRenewal, beforeCalls := em.lastSuccessfulUpdate, existing.attestation.load(), calls
+			if err := em.sync(); (err != nil) != (tc.config == "") {
+				t.Fatalf("unexpected config fetch result: %v", err)
+			}
+			if (tc.config == "") != em.lastSuccessfulUpdate.Equal(beforeConfig) {
+				t.Fatal("configuration success timestamp does not match fetch result")
+			}
+			if !tc.retained {
+				if calls != beforeCalls || len(model.configuredHosts) != 0 || len(model.Enclaves) != 0 || !existing.cb.Retired() {
+					t.Fatal("removed backend was retained or renewed")
+				}
+				return
+			}
+			updated := existing.attestation.load()
+			if calls != beforeCalls+1 || !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(beforeRenewal.verifiedAt) {
+				t.Fatal("accepted backend did not renew exactly once")
+			}
+			if len(model.Enclaves) != 1 || model.Enclaves[existing.host] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[existing.host].failures != 1 {
+				t.Fatal("renewal changed serving state or lost failure history")
+			}
+			requireRenewalResponse(t, transport, server.URL+"/response")
+		})
 	}
-	if !em.lastSuccessfulUpdate.Equal(previousConfigUpdate) {
-		t.Fatal("verification renewal falsely advanced configuration success time")
-	}
-	updated := existing.attestation.load()
-	if !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(verifiedAt) {
-		t.Fatalf("configuration outage prevented evidence renewal: %+v", updated)
-	}
-	if len(model.Enclaves) != 1 || model.Enclaves[existing.host] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[0] != existing.host {
-		t.Fatal("configuration outage changed the accepted backend set")
-	}
-	requireRenewalResponse(t, transport, server.URL+"/response")
 }
 
 func TestAttestationRejectsMissingOrExpiredVerificationDeadline(t *testing.T) {
