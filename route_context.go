@@ -15,6 +15,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/manager"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	routeContextLookupTimeout = 500 * time.Millisecond
 	routeContextResponseLimit = 64 << 10
 	routeContextMaxRefreshes  = 256
+	routeMetadataRefreshTTL   = time.Minute
 	demotedPriority           = 1
 	decisionAllowed           = "allowed"
 	decisionDemote            = "demote"
@@ -38,6 +40,7 @@ type routeContextClient struct {
 	refreshSlots chan struct{}
 	refreshes    sync.WaitGroup
 	sequence     atomic.Uint64
+	metadata     singleflight.Group
 }
 
 type routeContextRequest struct {
@@ -52,6 +55,7 @@ type routeContext struct {
 
 	// Failed metadata lookups must not replace a cached organization with an empty one.
 	unavailable bool
+	refreshedAt time.Time
 }
 
 type routeRateLimit struct {
@@ -171,7 +175,12 @@ func (c *routeContextClient) refresh(ctx context.Context, apiKey, model string, 
 		defer func() { <-c.refreshSlots }()
 		resolved, err := c.fetch(ctx, apiKey, model)
 		if err != nil || resolved.RateLimit != nil {
+			resolved.refreshedAt = time.Now()
 			c.cache.put(key, resolved, err, sequence)
+			if err == nil {
+				resolved.RateLimit = nil
+				c.cache.put(routeContextKey(apiKey, ""), resolved, nil, sequence)
+			}
 		}
 	})
 }
@@ -179,7 +188,54 @@ func (c *routeContextClient) refresh(ctx context.Context, apiKey, model string, 
 // Metadata deliberately omits model: token counting must never consume an
 // inference admission, including when metadata resolution fails.
 func (c *routeContextClient) Metadata(ctx context.Context, apiKey string) (routeContext, *routeContextError) {
-	return c.fetch(ctx, apiKey, "")
+	if c == nil || apiKey == "" || jwtSubject(apiKey) != "" {
+		return c.fetch(ctx, apiKey, "")
+	}
+	key := routeContextKey(apiKey, "")
+	cached, cachedErr := c.cache.get(key)
+	if time.Since(cached.refreshedAt) < routeMetadataRefreshTTL {
+		return cached, cachedErr
+	}
+	result := c.metadata.DoChan(string(key.credential[:]), func() (any, error) {
+		resolved, err := c.cache.get(key)
+		if time.Since(resolved.refreshedAt) >= routeMetadataRefreshTTL {
+			select {
+			case c.refreshSlots <- struct{}{}:
+				defer func() { <-c.refreshSlots }()
+			default:
+				return routeContextUnavailable("", "busy"), nil
+			}
+			sequence := c.sequence.Add(1)
+			previous, previousErr := resolved, err
+			resolved, err = c.fetch(context.WithoutCancel(ctx), apiKey, "")
+			if resolved.unavailable && !previous.refreshedAt.IsZero() {
+				resolved, err = previous, previousErr
+			}
+			if !resolved.unavailable {
+				resolved.refreshedAt = time.Now()
+				resolved.RateLimit = nil
+				c.cache.put(key, resolved, err, sequence)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		return resolved, nil
+	})
+	// Stale metadata stays usable while a single bounded refresh runs. Normal
+	// successful admissions refresh it; their denials can be model-specific.
+	if !cached.refreshedAt.IsZero() {
+		return cached, cachedErr
+	}
+	select {
+	case <-ctx.Done():
+		return routeContextUnavailable("", "canceled"), nil
+	case fetched := <-result:
+		if fetched.Err != nil {
+			return routeContext{}, fetched.Err.(*routeContextError)
+		}
+		return fetched.Val.(routeContext), nil
+	}
 }
 
 // fetch performs one uncached, non-replayable call and validates the response

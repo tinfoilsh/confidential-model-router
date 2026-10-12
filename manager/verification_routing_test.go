@@ -13,6 +13,9 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 	expired.attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "expired-release")
 	valid := model.Enclaves["valid"]
 	valid.attestation = newAttestationState(time.Now().Add(time.Hour), time.Now(), "valid-release")
+	if model.HasHealthyEnclave(map[string]bool{"expired": true}, nil) {
+		t.Fatal("healthy backend outside the caller's pool masked expired evidence")
+	}
 	model.applyReservations("gpt-oss-120b", []config.ReservationConfig{{OrgIDs: []string{"test-org"}, Enclaves: []string{"expired"}}}, []string{"expired", "valid"})
 
 	for _, open := range []bool{false, true} {

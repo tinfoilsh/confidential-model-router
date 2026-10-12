@@ -495,7 +495,7 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 			t.Fatalf("metadata count: %d %s", rec.Code, rec.Body.String())
 		}
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 1 {
 		t.Fatalf("metadata calls=%d", calls.Load())
 	}
 }
@@ -505,6 +505,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name, org, warmOrg                    string
 		auto, shared, unreserved, jwt, outage bool
+		refresh                               bool
 		denial, status                        int
 		wantMetadata, wantAdmissions          int64
 	}{
@@ -517,10 +518,11 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		{name: "warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, outage: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "metadata denial", org: admissionTestOrg, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner", org: admissionTestOrg, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
-		{name: "auto fresh organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
-		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
-		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
-		{name: "auto warm denial", warmOrg: admissionTestOrg, auto: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1},
+		{name: "auto warm owner", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto refreshed organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, refresh: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, refresh: true, status: http.StatusServiceUnavailable},
+		{name: "auto cached denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantAdmissions: 1},
 		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
 		{name: "auto shared", org: "org_other", shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner shared spill", org: admissionTestOrg, shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
@@ -542,15 +544,15 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 				}
 				if req.Model == "" {
 					metadata.Add(1)
-					if tc.denial != 0 {
-						w.WriteHeader(tc.denial)
-						return
-					}
 				} else {
 					admissions.Add(1)
 					if req.Model != admissionTestModel {
 						t.Errorf("admitted model = %q", req.Model)
 					}
+				}
+				if tc.denial != 0 && !warming.Load() {
+					w.WriteHeader(tc.denial)
+					return
 				}
 				if fail.Load() {
 					w.WriteHeader(http.StatusServiceUnavailable)
@@ -581,6 +583,9 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 				warming.Store(true)
 				handler.warm(testKey, admissionTestModel)
 				warming.Store(false)
+				if tc.refresh {
+					handler.warm(testKey, admissionTestModel)
+				}
 				admissions.Store(0)
 			}
 			fail.Store(tc.outage)
@@ -602,7 +607,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 			if rec.Code != tc.status || backends.Load() != wantBackends {
 				t.Fatalf("HTTP=%d backend calls=%d: %s", rec.Code, backends.Load(), rec.Body.String())
 			}
-			if metadata.Load() != tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
+			if metadata.Load() > tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
 				t.Fatalf("metadata calls=%d admission calls=%d", metadata.Load(), admissions.Load())
 			}
 		})
