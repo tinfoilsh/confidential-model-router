@@ -560,7 +560,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		var cacheRouteSettings cacheroute.Settings
 
 		// Set when the control plane configured a vLLM priority for this
-		// caller; such callers are exempt from overload shedding.
+		// caller; such callers skip the queue and are not shed on overload.
+		// Quota is decided separately and already applied by Lookup.
 		hasConfiguredPriority := false
 
 		// Set when the parsed body requests a streaming response; gates
@@ -623,7 +624,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				resolved.OrgID = orgContext.OrgID
 			}
 			admission = &resolved
-			hasConfiguredPriority = resolved.overloadExempt()
+			hasConfiguredPriority = resolved.skipsQueue()
 			r = r.WithContext(manager.WithCallerOrg(r.Context(), resolved.OrgID))
 			return true
 		}
