@@ -231,8 +231,16 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "realtime", path: "/v1/realtime?model=gpt-oss-120b", model: admissionTestModel, upgrade: true},
 		{name: "realtime default", path: "/v1/realtime?intent=transcription", model: "voxtral-mini-4b-realtime", upgrade: true},
 	}
-	for _, decision := range []string{decisionAllowed, decisionDemote, decisionExempt, decisionRejected} {
-		t.Run(decision, func(t *testing.T) {
+	// Quota decisions and the configured priority are independent grants.
+	// exempt with a priority is what control planes before the split sent;
+	// priority with demote or rejected is what a priority-only organization
+	// gets after it.
+	for _, grant := range []struct{ decision, priority string }{
+		{decisionAllowed, ""}, {decisionDemote, ""}, {decisionRejected, ""},
+		{decisionExempt, "-2"}, {decisionDemote, "-2"}, {decisionRejected, "-2"},
+	} {
+		decision := grant.decision
+		t.Run(decision+"/priority="+grant.priority, func(t *testing.T) {
 			var cpCalls, backendCalls atomic.Int64
 			seen := make(chan admissionBackendRequest, len(cases))
 			admissions := make(chan routeContextRequest, len(cases))
@@ -246,8 +254,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 				admissions <- request
 				cpCalls.Add(1)
 				priority := ""
-				if decision == decisionExempt {
-					priority = `,"priority":-2`
+				if grant.priority != "" {
+					priority = `,"priority":` + grant.priority
 				}
 				reason := ""
 				if decision == decisionDemote || decision == decisionRejected {
@@ -297,7 +305,7 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					}
 					if decision == decisionRejected {
 						if backendCalls.Load() != beforeBackend || rec.Header().Get("Retry-After") != "12" {
-							t.Fatal("rejection reached backend or lost retry hint")
+							t.Fatal("rejection reached backend or lost retry hint: priority must not lift a quota")
 						}
 						return
 					}
@@ -329,11 +337,13 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 						t.Fatal(err)
 					}
 					priority := ""
-					if cacheSaltPaths[r.URL.Path] && decision == decisionDemote {
-						priority = "1"
-					}
-					if cacheSaltPaths[r.URL.Path] && decision == decisionExempt {
-						priority = "-2"
+					if cacheSaltPaths[r.URL.Path] {
+						// The configured priority wins over demotion.
+						if grant.priority != "" {
+							priority = grant.priority
+						} else if decision == decisionDemote {
+							priority = "1"
+						}
 					}
 					if string(body["priority"]) != priority {
 						t.Fatalf("priority=%s, want %q", body["priority"], priority)
@@ -621,13 +631,16 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 	}
 }
 
-func TestAdmissionHandlerOverloadPriorityExemption(t *testing.T) {
+// TestAdmissionHandlerOverloadPriority pins that only the configured priority
+// admits a caller through backend overload: the quota decision, including the
+// legacy exempt value on its own, never does.
+func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 	for _, tc := range []struct {
 		decision, priority string
 		status             int
 	}{
-		{decisionAllowed, "", 503}, {decisionDemote, "", 503},
-		{decisionExempt, "", 200}, {decisionExempt, `,"priority":-1`, 200},
+		{decisionAllowed, "", 503}, {decisionDemote, "", 503}, {decisionExempt, "", 503},
+		{decisionExempt, `,"priority":-1`, 200}, {decisionDemote, `,"priority":-1`, 200},
 		{decisionAllowed, `,"priority":0`, 200},
 	} {
 		t.Run(tc.decision+tc.priority, func(t *testing.T) {
@@ -649,7 +662,7 @@ func TestAdmissionHandlerOverloadPriorityExemption(t *testing.T) {
 				t.Fatal("overload protection lost")
 			}
 			if tc.status == 200 && calls.Load() != 1 {
-				t.Fatal("exempt did not reach backend")
+				t.Fatal("priority caller did not reach backend")
 			}
 		})
 	}

@@ -142,7 +142,7 @@ func assertAdmittedWithoutDecision(t *testing.T, resolved routeContext, err *rou
 	if err != nil {
 		t.Fatalf("lookup outage rejected the request: %v", err)
 	}
-	if resolved.Priority != nil || resolved.OrgID != "" || resolved.RateLimit != nil || resolved.overloadExempt() {
+	if resolved.Priority != nil || resolved.OrgID != "" || resolved.RateLimit != nil || resolved.skipsQueue() {
 		t.Fatalf("lookup outage granted context: %+v", resolved)
 	}
 }

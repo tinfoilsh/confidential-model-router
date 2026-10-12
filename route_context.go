@@ -48,6 +48,10 @@ type routeContextRequest struct {
 	Model  string `json:"model,omitempty"`
 }
 
+// routeContext carries two independent grants from the control plane: Priority
+// (the organization skips queueing: injected vLLM priority and admission
+// through backend overload) and RateLimit (the quota decision). Neither
+// implies the other; a rejected decision wins regardless of Priority.
 type routeContext struct {
 	Priority  *int            `json:"priority,omitempty"`
 	OrgID     string          `json:"org_id,omitempty"`
@@ -87,6 +91,9 @@ func (r *routeRateLimit) valid() bool {
 	}
 	switch r.Decision {
 	case decisionAllowed, decisionExempt:
+		// exempt is what control planes before the priority split sent for
+		// priority organizations, always alongside priority. It is accepted
+		// as allowed so a router can roll ahead of the control plane.
 		return r.Reason == ""
 	case decisionDemote:
 		return r.Reason == rateReasonRequests
@@ -341,7 +348,7 @@ func credentialDenial(resp *http.Response, data []byte) *routeContextError {
 }
 
 // applyRateDecision turns a validated shared-quota rejection into the client
-// response. Demote and exempt are applied later, when the body is rewritten.
+// response. Demotion is applied later, when the body is rewritten.
 func applyRateDecision(model string, decision *routeRateLimit) *routeContextError {
 	if decision.Decision != decisionRejected {
 		return nil
@@ -359,23 +366,28 @@ func applyRateDecision(model string, decision *routeRateLimit) *routeContextErro
 	}
 }
 
-func (r routeContext) overloadExempt() bool {
-	return r.Priority != nil || (r.RateLimit != nil && r.RateLimit.Decision == decisionExempt)
+// skipsQueue reports whether the control plane configured a priority for the
+// caller. Only the priority field carries that grant; the quota decision,
+// including the legacy exempt value, never does.
+func (r routeContext) skipsQueue() bool {
+	return r.Priority != nil
 }
 
 // applyPriority owns the body's vLLM priority field on endpoints whose schema
-// accepts it: client-supplied values are always stripped, then a demotion or a
-// configured organization priority is injected.
+// accepts it: client-supplied values are always stripped, then the configured
+// organization priority or a demotion is injected. A configured priority wins
+// over demotion because the organization asked to skip the queue; hard limits
+// still reject before this point.
 func (r routeContext) applyPriority(body map[string]any, path, model string) {
 	delete(body, "priority")
 	if !cacheSaltPaths[path] || body == nil {
 		return
 	}
-	if r.RateLimit != nil && r.RateLimit.Decision == decisionDemote {
-		body["priority"] = demotedPriority
-		manager.RateLimitDemotionsTotal.WithLabelValues(model).Inc()
-	} else if r.Priority != nil {
+	if r.Priority != nil {
 		body["priority"] = *r.Priority
 		manager.PriorityAssignmentsTotal.WithLabelValues(model).Inc()
+	} else if r.RateLimit != nil && r.RateLimit.Decision == decisionDemote {
+		body["priority"] = demotedPriority
+		manager.RateLimitDemotionsTotal.WithLabelValues(model).Inc()
 	}
 }
