@@ -28,7 +28,6 @@ const (
 	decisionAllowed           = "allowed"
 	decisionDemote            = "demote"
 	decisionRejected          = "rejected"
-	decisionExempt            = "exempt"
 	rateReasonRequests        = "requests"
 	rateReasonTokens          = "tokens"
 )
@@ -90,10 +89,7 @@ func (r *routeRateLimit) valid() bool {
 		return false
 	}
 	switch r.Decision {
-	case decisionAllowed, decisionExempt:
-		// exempt is what control planes before the priority split sent for
-		// priority organizations, always alongside priority. It is accepted
-		// as allowed so a router can roll ahead of the control plane.
+	case decisionAllowed:
 		return r.Reason == ""
 	case decisionDemote:
 		return r.Reason == rateReasonRequests
@@ -367,8 +363,8 @@ func applyRateDecision(model string, decision *routeRateLimit) *routeContextErro
 }
 
 // skipsQueue reports whether the control plane configured a priority for the
-// caller. Only the priority field carries that grant; the quota decision,
-// including the legacy exempt value, never does.
+// caller. Only the priority field carries that grant; the quota decision
+// never does.
 func (r routeContext) skipsQueue() bool {
 	return r.Priority != nil
 }
