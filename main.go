@@ -26,6 +26,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
+	"github.com/tinfoilsh/confidential-model-router/jsonorder"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
@@ -808,6 +809,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					writeError(w, invalidJSONError(err))
 					return
 				}
+				// Re-encoding the body sorts every object's keys; keep the
+				// client's encoding of schemas, whose property order is the
+				// order the model generates fields in.
+				original := jsonorder.Capture(bodyBytes, body)
+				r = r.WithContext(jsonorder.NewContext(r.Context(), original))
 
 				// Pull Tinfoil-specific options blobs off the body in
 				// place. These fields (code_execution_options,
@@ -914,7 +920,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				}
 
 				// Always re-marshal in case there were any changes
-				bodyBytes, err = json.Marshal(body)
+				bodyBytes, err = original.Marshal(body)
 				if err != nil {
 					writeError(w, &manager.ErrServer)
 					return

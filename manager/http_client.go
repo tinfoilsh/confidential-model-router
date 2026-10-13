@@ -3,7 +3,6 @@ package manager
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
+	"github.com/tinfoilsh/confidential-model-router/jsonorder"
 )
 
 // boundHTTPClientForModel picks a host for a caller-driven session (the MCP
@@ -92,7 +92,7 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 // stays stable across iterations while the request shape does (the forced
 // final turn drops tool definitions and re-keys; see toolruntime).
 func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, path string, body map[string]any, headers http.Header) (*http.Response, error) {
-	bodyBytes, err := json.Marshal(body)
+	bodyBytes, err := jsonorder.FromContext(ctx).Marshal(body)
 	if err != nil {
 		return nil, err
 	}
