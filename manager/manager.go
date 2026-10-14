@@ -62,8 +62,9 @@ type Model struct {
 
 	// Derived from Reservations (see applyReservations); replaced wholesale
 	// and never mutated after publish, so safe to return under RLock.
-	reservedByOrg map[string]map[string]bool // org id -> its reserved host set
-	sharedHosts   map[string]bool            // unreserved hosts; nil when no reservations
+	reservedByOrg        map[string]map[string]bool // org id -> its reserved host set
+	sharedHosts          map[string]bool            // unreserved hosts; nil when no reservations
+	reservationOverloads map[string]*config.OverloadConfig
 
 	mu sync.RWMutex
 }
@@ -82,6 +83,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	}
 	byOrg := make(map[string]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
+	overloads := make(map[string]*config.OverloadConfig)
 	for _, res := range reservations {
 		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
 			continue
@@ -102,6 +104,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				}
 				set[host] = true
 				reserved[host] = true
+				overloads[host] = res.Overload
 			}
 			if len(set) == 0 {
 				delete(byOrg, orgID)
@@ -109,6 +112,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
+	m.reservationOverloads = overloads
 	if len(byOrg) == 0 {
 		m.reservedByOrg = nil
 		m.sharedHosts = nil
@@ -123,6 +127,14 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	}
 	m.reservedByOrg = byOrg
 	m.sharedHosts = shared
+}
+
+// overloadForHostLocked resolves the backend policy while m.mu is held.
+func (m *Model) overloadForHostLocked(host string) *config.OverloadConfig {
+	if override := m.reservationOverloads[host]; override != nil {
+		return override
+	}
+	return m.Overload
 }
 
 // HasReservations reports whether any of this model's enclaves are reserved,
@@ -317,7 +329,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		cb:          cb,
 		pricing:     em.ModelPricing,
 	})
-	model.Enclaves[host].updateOverloadConfig(model.Overload)
+	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host))
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
@@ -969,8 +981,8 @@ func (em *EnclaveManager) sync() error {
 			model.Overload = configModel.Overload
 			model.CacheRoute = configModel.CacheRoute
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
-			for _, enclave := range model.Enclaves {
-				enclave.updateOverloadConfig(model.Overload)
+			for host, enclave := range model.Enclaves {
+				enclave.updateOverloadConfig(model.overloadForHostLocked(host))
 			}
 			cacheroute.SetMode(modelName, configModel.CacheRoute)
 			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
