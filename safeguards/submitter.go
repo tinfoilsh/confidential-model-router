@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -90,12 +92,8 @@ func (s *Submitter) Submit(credential, conversationID string, messages []Message
 	if len(conversationID) > maxConversationIDLen {
 		conversationID = ""
 	}
-	if !fitsSubmission(credential, conversationID, messages) {
-		submissionsTotal.WithLabelValues("oversized").Inc()
-		return
-	}
-	body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
-	if err != nil || len(body) > maxSubmissionBytes {
+	body, ok := encodeSubmission(credential, conversationID, messages)
+	if !ok {
 		submissionsTotal.WithLabelValues("oversized").Inc()
 		return
 	}
@@ -109,6 +107,112 @@ func (s *Submitter) Submit(credential, conversationID string, messages []Message
 	default:
 		submissionsTotal.WithLabelValues("dropped").Inc()
 	}
+}
+
+// encodeSubmission serializes the conversation within maxSubmissionBytes,
+// trimming the oldest history when all of it does not fit. It fails only when
+// not even part of the latest turn fits.
+func encodeSubmission(credential, conversationID string, messages []Message) ([]byte, bool) {
+	if fitsSubmission(credential, conversationID, messages) {
+		body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
+		if err == nil && len(body) <= maxSubmissionBytes {
+			return body, true
+		}
+	}
+	messages = trimToFit(credential, conversationID, messages)
+	if len(messages) == 0 {
+		return nil, false
+	}
+	body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
+	if err != nil || len(body) > maxSubmissionBytes {
+		return nil, false
+	}
+	return body, true
+}
+
+// trimToFit returns the newest messages whose encoding fits in a submission.
+// The oldest turns are dropped first and the oldest turn kept is truncated
+// from the front to fill the remaining space, so the latest turns always
+// reach the classifier. It returns nil when nothing fits.
+func trimToFit(credential, conversationID string, messages []Message) []Message {
+	envelope, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []Message{}})
+	if err != nil {
+		return nil
+	}
+	remaining := maxSubmissionBytes - len(envelope)
+	var kept []Message
+	for i := len(messages) - 1; i >= 0; i-- {
+		if len(kept) > 0 {
+			remaining -= len(",")
+		}
+		m, size, ok := fitMessage(messages[i], remaining)
+		if !ok {
+			break
+		}
+		kept = append(kept, m)
+		remaining -= size
+		if len(m.Content) < len(messages[i].Content) {
+			break
+		}
+	}
+	slices.Reverse(kept)
+	return kept
+}
+
+// fitMessage returns m, or m with its content truncated from the front, whose
+// encoding fits in budget bytes, along with that encoded size. ok is false
+// when none of the content fits.
+func fitMessage(m Message, budget int) (Message, int, bool) {
+	if len(m.Role)+len(m.Content)+messageJSONOverhead <= budget {
+		if b, err := json.Marshal(m); err == nil && len(b) <= budget {
+			return m, len(b), true
+		}
+	}
+	empty, err := json.Marshal(Message{Role: m.Role})
+	if err != nil || len(empty) >= budget {
+		return Message{}, 0, false
+	}
+	// Every content byte encodes to at least one byte and a shorter tail
+	// encodes to a suffix of a longer one. Scaling by the observed expansion
+	// usually lands within budget; removing what still overshoots always does.
+	room := budget - len(empty)
+	n := room
+	cut, size, err := encodeTail(m, n)
+	if err == nil && size > budget {
+		n = n * room / (size - len(empty))
+		cut, size, err = encodeTail(m, n)
+	}
+	if err == nil && size > budget {
+		n -= size - budget
+		cut, size, err = encodeTail(m, n)
+	}
+	if err != nil || size > budget || cut.Content == "" {
+		return Message{}, 0, false
+	}
+	// Cloned so the kept tail does not pin the full original content.
+	cut.Content = strings.Clone(cut.Content)
+	return cut, size, true
+}
+
+func encodeTail(m Message, n int) (Message, int, error) {
+	cut := Message{Role: m.Role, Content: tail(m.Content, n)}
+	b, err := json.Marshal(cut)
+	return cut, len(b), err
+}
+
+// tail returns at most n trailing bytes of s without splitting a UTF-8 sequence.
+func tail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	start := len(s) - n
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return s[start:]
 }
 
 // fitsSubmission bounds the input before JSON encoding; the encoded length is

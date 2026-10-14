@@ -73,10 +73,7 @@ func (s *Submitter) Observe(w http.ResponseWriter, r *http.Request, eligible fun
 func (c *Capture) SetMessages(messages []Message) {
 	if c != nil {
 		if !fitsSubmission("", "", messages) {
-			c.overflow = true
-			c.messages = nil
-			submissionsTotal.WithLabelValues("oversized").Inc()
-			return
+			messages = trimToFit("", "", messages)
 		}
 		c.messages = messages
 	}
