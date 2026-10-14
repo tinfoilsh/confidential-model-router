@@ -135,8 +135,8 @@ func (m *enclaveMetrics) configurePolicies(native *config.OverloadConfig, polici
 	if !poll {
 		m.latestCounts = requestCounts{}
 		m.latestCollected = time.Time{}
-		BackendQueueDepth.WithLabelValues(m.model, m.host).Set(0)
-		BackendRunningRequests.WithLabelValues(m.model, m.host).Set(0)
+		BackendQueueDepth.DeleteLabelValues(m.model, m.host)
+		BackendRunningRequests.DeleteLabelValues(m.model, m.host)
 	}
 	m.publishOverloadLocked(wasOverloaded)
 	return poll
@@ -200,14 +200,6 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 		}).Debugf("metrics parse failed: %v", err)
 		return
 	}
-	if !m.supportsSample(counts) {
-		log.WithFields(log.Fields{
-			"model":   m.model,
-			"enclave": m.host,
-		}).Debug("metrics sample missing an enabled overload metric")
-		return
-	}
-
 	log.WithFields(log.Fields{
 		"model":            m.model,
 		"enclave":          m.host,
@@ -224,6 +216,13 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 		BackendRunningRequests.WithLabelValues(m.model, m.host).Set(counts.running)
 	} else {
 		BackendRunningRequests.DeleteLabelValues(m.model, m.host)
+	}
+	if !m.supportsSample(counts) {
+		log.WithFields(log.Fields{
+			"model":   m.model,
+			"enclave": m.host,
+		}).Debug("metrics sample missing an enabled overload metric")
+		return
 	}
 
 	m.updateLatest(counts, time.Now())

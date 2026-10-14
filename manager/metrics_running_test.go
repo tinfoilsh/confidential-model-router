@@ -110,14 +110,16 @@ func TestCombinedOverloadHysteresis(t *testing.T) {
 }
 
 func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
+	previous := requestCounts{waiting: 1, running: runningRequestLimit, hasWaiting: true, hasRunning: true}
 	for _, tc := range []struct {
-		name, body string
-		status     int
+		name, body    string
+		status        int
+		wantTelemetry requestCounts
 	}{
-		{name: "missing running", body: waitingMetricName + " 0\n", status: http.StatusOK},
-		{name: "missing waiting", body: runningMetricName + " 0\n", status: http.StatusOK},
-		{name: "invalid running", body: runningMetricName + " NaN\n", status: http.StatusOK},
-		{name: "HTTP error", body: runningMetricName + " 0\n" + waitingMetricName + " 0\n", status: http.StatusServiceUnavailable},
+		{name: "missing running", body: waitingMetricName + " 0\n", status: http.StatusOK, wantTelemetry: requestCounts{hasWaiting: true}},
+		{name: "missing waiting", body: runningMetricName + " 0\n", status: http.StatusOK, wantTelemetry: requestCounts{hasRunning: true}},
+		{name: "invalid running", body: runningMetricName + " NaN\n", status: http.StatusOK, wantTelemetry: previous},
+		{name: "HTTP error", body: runningMetricName + " 0\n" + waitingMetricName + " 0\n", status: http.StatusServiceUnavailable, wantTelemetry: previous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,9 +131,26 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 				MaxRequestsWaiting: 1, MaxRequestsRunning: runningRequestLimit,
 			})
 			m.client = ts.Client()
-			observeCounts(m, 1, runningRequestLimit)
+			observeCounts(m, previous.waiting, previous.running)
+			waitingGauge := BackendQueueDepth.WithLabelValues(m.model, m.host)
+			runningGauge := BackendRunningRequests.WithLabelValues(m.model, m.host)
+			waitingGauge.Set(previous.waiting)
+			runningGauge.Set(previous.running)
 			counts, collected := m.latestSample()
 			m.scrape(t.Context())
+			telemetry := requestCounts{
+				hasWaiting: BackendQueueDepth.DeleteLabelValues(m.model, m.host),
+				hasRunning: BackendRunningRequests.DeleteLabelValues(m.model, m.host),
+			}
+			if telemetry.hasWaiting {
+				telemetry.waiting = testutil.ToFloat64(waitingGauge)
+			}
+			if telemetry.hasRunning {
+				telemetry.running = testutil.ToFloat64(runningGauge)
+			}
+			if telemetry != tc.wantTelemetry {
+				t.Fatalf("telemetry=%+v, want %+v", telemetry, tc.wantTelemetry)
+			}
 			if got, at := m.latestSample(); got != counts || at != collected {
 				t.Fatalf("failed scrape replaced the last sample: %+v at %v", got, at)
 			}

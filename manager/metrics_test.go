@@ -71,6 +71,8 @@ func TestPolicyReloadReevaluatesSample(t *testing.T) {
 	m.client = server.Client()
 	defer m.shutdown()
 	observe(m, initialLimit+1)
+	BackendQueueDepth.WithLabelValues(m.model, m.host).Set(initialLimit + 1)
+	BackendRunningRequests.WithLabelValues(m.model, m.host).Set(runningRequestLimit)
 	for _, step := range []struct {
 		policy *config.OverloadConfig
 		want   routingTier
@@ -87,6 +89,14 @@ func TestPolicyReloadReevaluatesSample(t *testing.T) {
 		}
 		if !step.policy.Enabled() && (len(m.queueOverloads) != 0 || testutil.ToFloat64(BackendOverloaded.WithLabelValues(m.model, m.host)) != 0) {
 			t.Fatal("disabling the policy retained overload state")
+		}
+		if !step.policy.Enabled() {
+			if BackendQueueDepth.DeleteLabelValues(m.model, m.host) {
+				t.Fatal("disabling polling retained a queue depth series")
+			}
+			if BackendRunningRequests.DeleteLabelValues(m.model, m.host) {
+				t.Fatal("disabling polling retained a running requests series")
+			}
 		}
 	}
 }
