@@ -76,10 +76,11 @@ func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 // pinned to an empty pool.
 func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 	m := newTestModel("a", "b")
+	m.Overload = nil
 	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{
 			{OrgIDs: []string{"org-x"}, Enclaves: []string{"b", "typo-host"}},
-			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}},
+			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}, Overload: &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}},
 		},
 		[]string{"a", "b"},
 	)
@@ -97,6 +98,9 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 	primary, spill, _ = m.ReservationPools("org-y")
 	if len(primary) != 1 || !primary["a"] || spill != nil {
 		t.Fatalf("pools for org-y = (%v, %v), want shared ({a}, nil)", primary, spill)
+	}
+	if m.Enclaves["a"].metrics.configurePolicies(m.Overload, m.spillPoliciesLocked("a")) {
+		t.Fatal("ignored reservation enabled shared-pool metrics polling")
 	}
 }
 

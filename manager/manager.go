@@ -97,7 +97,6 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 			if policy == nil {
 				policy = m.Overload
 			}
-			policies[orgID] = policy
 			set := byOrg[orgID]
 			if set == nil {
 				set = make(map[string]bool, len(res.Enclaves))
@@ -114,7 +113,9 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 			}
 			if len(set) == 0 {
 				delete(byOrg, orgID)
+				continue
 			}
+			policies[orgID] = policy
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
