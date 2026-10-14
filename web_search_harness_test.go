@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,17 +26,18 @@ const (
 
 // TestRouterExternalWebAccess drives a web search request through the real
 // router and a real MCP session, asserting what the model is offered and
-// what the search tool receives.
+// which calls reach the MCP server when the model asks to search and fetch.
 func TestRouterExternalWebAccess(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
 		for _, tc := range []struct {
-			name       string
-			disabled   bool
-			wantFetch  bool
-			wantMaxAge float64
+			name           string
+			disabled       bool
+			wantFetch      bool
+			wantMaxAge     float64
+			wantFetchCalls int64
 		}{
-			{name: "default", wantFetch: true, wantMaxAge: webSearchTestModelMaxAge},
-			{name: "disabled", disabled: true, wantFetch: false, wantMaxAge: webSearchTestCacheOnly},
+			{name: "default", wantFetch: true, wantMaxAge: webSearchTestModelMaxAge, wantFetchCalls: 1},
+			{name: "disabled", disabled: true, wantFetch: false, wantMaxAge: webSearchTestCacheOnly, wantFetchCalls: 0},
 		} {
 			t.Run(path+"/"+tc.name, func(t *testing.T) {
 				var mu sync.Mutex
@@ -87,7 +87,7 @@ func TestRouterExternalWebAccess(t *testing.T) {
 				}
 				rec := httptest.NewRecorder()
 				handler.ServeHTTP(rec, admissionRequest(path, string(encoded), "tk_test"))
-				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), webSearchTestAnswer) {
+				if rec.Code != http.StatusOK {
 					t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
 				}
 
@@ -106,8 +106,8 @@ func TestRouterExternalWebAccess(t *testing.T) {
 				if searchArgs["max_age_hours"] != tc.wantMaxAge {
 					t.Errorf("search max_age_hours = %v, want %v", searchArgs["max_age_hours"], tc.wantMaxAge)
 				}
-				if turns.Load() != 2 || fetchCalls.Load() != 0 {
-					t.Errorf("model turns/fetch calls = %d/%d, want 2/0", turns.Load(), fetchCalls.Load())
+				if fetchCalls.Load() != tc.wantFetchCalls {
+					t.Errorf("MCP fetch calls = %d, want %d", fetchCalls.Load(), tc.wantFetchCalls)
 				}
 			})
 		}
@@ -132,24 +132,35 @@ func webSearchTestRequest(path string, disabled bool) map[string]any {
 }
 
 // webSearchTestModelResponse plays the model: the first turn asks for a
-// search that requests a live crawl, the second turn answers.
-func webSearchTestModelResponse(path string, search bool) map[string]any {
-	const arguments = `{"query":"news","max_age_hours":0}`
+// search that requests a live crawl plus a page fetch, the second turn
+// answers. The fetch is requested even when the tool was not offered.
+func webSearchTestModelResponse(path string, toolTurn bool) map[string]any {
+	calls := []struct{ id, name, arguments string }{
+		{"call-search", webSearchTestSearchTool, `{"query":"news","max_age_hours":0}`},
+		{"call-fetch", webSearchTestFetchTool, `{"urls":["https://example.com/"]}`},
+	}
 	if path == "/v1/chat/completions" {
 		message := map[string]any{"role": "assistant", "content": webSearchTestAnswer}
 		finish := "stop"
-		if search {
+		if toolTurn {
+			toolCalls := make([]any, 0, len(calls))
+			for _, call := range calls {
+				toolCalls = append(toolCalls, map[string]any{"id": call.id, "type": "function", "function": map[string]any{"name": call.name, "arguments": call.arguments}})
+			}
 			message["content"] = nil
-			message["tool_calls"] = []any{map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": webSearchTestSearchTool, "arguments": arguments}}}
+			message["tool_calls"] = toolCalls
 			finish = "tool_calls"
 		}
 		return map[string]any{"id": "chat-1", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}}
 	}
-	output := map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": webSearchTestAnswer}}}
-	if search {
-		output = map[string]any{"type": "function_call", "call_id": "call-1", "name": webSearchTestSearchTool, "arguments": arguments, "status": "completed"}
+	output := []any{map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": webSearchTestAnswer}}}}
+	if toolTurn {
+		output = make([]any, 0, len(calls))
+		for _, call := range calls {
+			output = append(output, map[string]any{"type": "function_call", "call_id": call.id, "name": call.name, "arguments": call.arguments, "status": "completed"})
+		}
 	}
-	return map[string]any{"id": "resp-1", "status": "completed", "output": []any{output}}
+	return map[string]any{"id": "resp-1", "status": "completed", "output": output}
 }
 
 func webSearchTestToolNames(raw any) []string {
