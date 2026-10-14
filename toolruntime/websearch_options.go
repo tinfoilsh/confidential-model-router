@@ -201,6 +201,15 @@ func (o webSearchOptions) applyToSearchArgs(arguments map[string]any) {
 	}
 }
 
+// disabledRouterTools returns the model-facing router tools these options
+// turn off for the request.
+func (o webSearchOptions) disabledRouterTools() map[string]struct{} {
+	if !o.cacheOnly {
+		return nil
+	}
+	return map[string]struct{}{routerFetchToolName: {}}
+}
+
 // applyToFetchArgs merges forwarded options into a `fetch` tool-call argument
 // map. Retrieval-depth, content-mode, category, and date-range knobs are
 // search-only so they are intentionally skipped here; only host-scoped filters
@@ -288,6 +297,15 @@ func parseResponsesWebSearchOptions(routerOpts *RouterOptions, body map[string]a
 		return opts
 	}
 	return webSearchOptions{}
+}
+
+// parseWebSearchOptions parses web search options from wherever the request's
+// API surface carries them.
+func parseWebSearchOptions(path string, routerOpts *RouterOptions, body map[string]any) webSearchOptions {
+	if path == "/v1/responses" {
+		return parseResponsesWebSearchOptions(routerOpts, body)
+	}
+	return parseChatWebSearchOptions(routerOpts, body)
 }
 
 // parseIncludeActionSources reports whether the request opted into OpenAI's

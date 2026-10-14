@@ -44,8 +44,9 @@ func isHarmonyModel(modelName string) bool {
 // each request. Each block is gated on whether its profile is actually
 // active for this request, so models on a code-execution-only chat
 // don't receive web-search guidance for tools they don't have, and
-// vice versa.
-func buildRouterPrompt(harmony bool, activeProfiles []string) *mcp.GetPromptResult {
+// vice versa. tools is the set of model-facing tool names the request
+// exposes, so a block can leave out guidance for a disabled tool.
+func buildRouterPrompt(harmony bool, activeProfiles []string, tools map[string]struct{}) *mcp.GetPromptResult {
 	active := map[string]bool{}
 	for _, name := range activeProfiles {
 		active[name] = true
@@ -58,7 +59,7 @@ func buildRouterPrompt(harmony bool, activeProfiles []string) *mcp.GetPromptResu
 		}
 		messages = append(messages, &mcp.PromptMessage{
 			Role:    "system",
-			Content: &mcp.TextContent{Text: d.Prompt(harmony)},
+			Content: &mcp.TextContent{Text: d.Prompt(harmony, tools)},
 		})
 	}
 
@@ -69,10 +70,13 @@ func buildRouterPrompt(harmony bool, activeProfiles []string) *mcp.GetPromptResu
 }
 
 // webSearchPrompt builds the system prompt for the web_search profile.
-func webSearchPrompt(harmony bool) string {
+func webSearchPrompt(harmony bool, tools map[string]struct{}) string {
 	cite := citations.Instructions
 	if harmony {
 		cite = citations.HarmonyInstructions
+	}
+	if _, ok := tools[routerFetchToolName]; !ok {
+		return fmt.Sprintf("You may use the %s tool when current web information would improve the answer. Opening specific URLs is unavailable, so answer from the search results. %s %s %s", routerSearchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 	}
 	return fmt.Sprintf("You may use the %s and %s tools when current web information would improve the answer. Use %s first to discover sources, then %s specific URLs only when you need deeper detail. %s %s %s", routerSearchToolName, routerFetchToolName, routerSearchToolName, routerFetchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 }
