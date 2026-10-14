@@ -1099,10 +1099,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				fields["max_requests_waiting"] = trip
 				fields["clear_requests_waiting"] = clear
 			}
-			if running, trip, clear, ok := enclave.RunningOverloadState(); ok {
+			if running, trip, ok := enclave.RunningOverloadState(); ok {
 				fields["requests_running"] = running
 				fields["max_requests_running"] = trip
-				fields["clear_requests_running"] = clear
 			}
 			log.WithFields(fields).Warn("rejecting request due to backend overload")
 

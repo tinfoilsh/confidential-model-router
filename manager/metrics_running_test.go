@@ -64,7 +64,7 @@ func TestScrapeRunningOnlyOverload(t *testing.T) {
 	}))
 	defer ts.Close()
 	m := newTestMetrics(strings.TrimPrefix(ts.URL, "https://"), &config.OverloadConfig{
-		MaxRequestsRunning: runningRequestLimit, ClearRequestsRunning: runningRequestLimit - 1, RetryAfterMinutes: 2,
+		MaxRequestsRunning: runningRequestLimit, RetryAfterMinutes: 2,
 	})
 	m.client = ts.Client()
 	for _, count := range []int{runningRequestLimit - 1, runningRequestLimit, runningRequestLimit + 1, runningRequestLimit - 1} {
@@ -78,8 +78,8 @@ func TestScrapeRunningOnlyOverload(t *testing.T) {
 			t.Fatalf("running gauge=%v, want %d", got, count)
 		}
 		enclave := &Enclave{metrics: m}
-		if got, trip, clear, ok := enclave.RunningOverloadState(); !ok || got != float64(count) || trip != runningRequestLimit || clear != runningRequestLimit-1 {
-			t.Fatalf("running log state=(%v, %d, %d, %v)", got, trip, clear, ok)
+		if got, trip, ok := enclave.RunningOverloadState(); !ok || got != float64(count) || trip != runningRequestLimit {
+			t.Fatalf("running log state=(%v, %d, %v)", got, trip, ok)
 		}
 	}
 }
@@ -94,12 +94,14 @@ func TestCombinedOverloadHysteresis(t *testing.T) {
 	}{
 		{0, 3, false},
 		{0, 4, true},
-		{0, 3, true},
+		{0, 3, false},
+		{0, 4, true},
 		{2, 2, true},
 		{1, 2, false},
 		{4, 0, true},
 		{2, 0, true},
-		{1, 3, true},
+		{1, 4, true},
+		{1, 3, false},
 		{1, 2, false},
 	} {
 		observeCounts(m, step.waiting, step.running)
@@ -160,7 +162,7 @@ func TestRunningOverloadReload(t *testing.T) {
 		polling bool
 	}{
 		{"enable running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},
-		{"raise running limit", &config.OverloadConfig{MaxRequestsRunning: 2 * runningRequestLimit}, false, true},
+		{"raise running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit + 1}, false, true},
 		{"lower running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},
 		{"waiting only", &config.OverloadConfig{MaxRequestsWaiting: 1}, false, true},
 		{"restore running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},

@@ -187,7 +187,7 @@ func TestReservationRunningOverloadRouting(t *testing.T) {
 	em, model, cfg := reservationOverloadManager(t, sharedPolicy)
 	em.updateConfigURL = t.TempDir() + "/config.yaml"
 	reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
-	reservedPolicy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, ClearRequestsRunning: runningRequestLimit - 1}
+	reservedPolicy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}
 	reload := func(override *config.OverloadConfig, pool []string) {
 		t.Helper()
 		cfg.Reservations[0].Overload = override
@@ -231,7 +231,7 @@ func TestReservationRunningOverloadRouting(t *testing.T) {
 	}
 	observeCounts(reserved.metrics, 0, runningRequestLimit-1)
 	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != reserved || reject {
-		t.Fatal("reserved backend did not resume serving at its running clear mark")
+		t.Fatal("reserved backend did not resume serving below its running limit")
 	}
 
 	observeCounts(reserved.metrics, 0, runningRequestLimit)

@@ -113,7 +113,6 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 	}
 
 	trip, clear := cfg.Marks()
-	runningTrip, runningClear := cfg.RunningMarks()
 	if cfg.ClearRequestsWaiting != 0 && cfg.ClearRequestsWaiting != clear {
 		log.WithFields(log.Fields{
 			"model":                m.model,
@@ -122,15 +121,6 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 			"resolved_clear":       clear,
 			"max_requests_waiting": trip,
 		}).Warn("clear_requests_waiting out of range, using default")
-	}
-	if cfg.ClearRequestsRunning != 0 && cfg.ClearRequestsRunning != runningClear {
-		log.WithFields(log.Fields{
-			"model":                m.model,
-			"enclave":              m.host,
-			"configured_clear":     cfg.ClearRequestsRunning,
-			"resolved_clear":       runningClear,
-			"max_requests_running": runningTrip,
-		}).Warn("clear_requests_running out of range, using default")
 	}
 
 	// The flag may have been computed under the previous marks. If a fresh
@@ -155,8 +145,7 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		"enclave":                m.host,
 		"max_requests_waiting":   trip,
 		"clear_requests_waiting": clear,
-		"max_requests_running":   runningTrip,
-		"clear_requests_running": runningClear,
+		"max_requests_running":   cfg.MaxRequestsRunning,
 		"retry_after_minutes":    cfg.RetryAfterMinutes,
 	}).Info("starting vLLM metrics polling")
 	go m.run(ctx, defaultMetricsPollInterval)
@@ -328,11 +317,9 @@ func (m *enclaveMetrics) latestSample() (requestCounts, time.Time) {
 // scrapes must elapse before the safety net is dropped.
 const sampleStalenessLimit = 15 * time.Second
 
-// evaluateThresholds updates the overload flag from the latest request counts
-// with hysteresis: trip at the high mark, clear at the lower mark, hold the
-// previous state in between. Without the band, a queue hovering at a single
-// threshold would flap the flag on every poll — and with it the spill and
-// reject decisions that read the flag.
+// evaluateThresholds combines a running-request limit with queue hysteresis.
+// Running load clears below its limit; a tripped overload flag also waits for
+// the queue to reach its clear mark before allowing new requests.
 func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 	cfg := m.currentConfig()
 	if !counts.supports(cfg) {
@@ -340,13 +327,13 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 	}
 
 	trip, clear := cfg.Marks()
-	runningTrip, runningClear := cfg.RunningMarks()
+	runningTrip := cfg.MaxRequestsRunning
 	wasOverloaded := m.overloaded.Load()
 	overloaded := wasOverloaded
 	switch {
 	case (trip > 0 && counts.waiting >= float64(trip)) || (runningTrip > 0 && counts.running >= float64(runningTrip)):
 		overloaded = true
-	case (trip <= 0 || counts.waiting <= float64(clear)) && (runningTrip <= 0 || counts.running <= float64(runningClear)):
+	case (trip <= 0 || counts.waiting <= float64(clear)) && (runningTrip <= 0 || counts.running < float64(runningTrip)):
 		overloaded = false
 	}
 
@@ -363,7 +350,6 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 			"clear_requests_waiting": clear,
 			"requests_running":       counts.running,
 			"max_requests_running":   runningTrip,
-			"clear_requests_running": runningClear,
 			"retry_after_minutes":    cfg.RetryAfterMinutes,
 		}).Warn("overload threshold exceeded")
 		OverloadEventsTotal.WithLabelValues(m.model, m.host).Inc()
@@ -374,7 +360,7 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 			"requests_waiting":       counts.waiting,
 			"clear_requests_waiting": clear,
 			"requests_running":       counts.running,
-			"clear_requests_running": runningClear,
+			"max_requests_running":   runningTrip,
 		}).Info("queue depth back below overload threshold")
 		RecoveryEventsTotal.WithLabelValues(m.model, m.host).Inc()
 	}
@@ -392,8 +378,8 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 // reads the hysteretic overload flag maintained by evaluateThresholds — the
 // same state NextEnclave's preference uses — rather than re-deriving a
 // single-threshold answer, so a tripped backend keeps shedding load until
-// all enabled metrics reach their clear marks. A missing or stale
-// sample fails open.
+// running load falls below its limit and the queue reaches its clear mark.
+// A missing or stale sample fails open.
 func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 	cfg := m.currentConfig()
 	if !cfg.Enabled() {

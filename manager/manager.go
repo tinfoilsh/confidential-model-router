@@ -1121,17 +1121,16 @@ func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
 	return trip, clear, true
 }
 
-// RunningOverloadState exposes the running-request sample and resolved marks
+// RunningOverloadState exposes the running-request sample and limit
 // for rejection logs. A sampled limit is not an atomic admission cap.
-func (e *Enclave) RunningOverloadState() (running float64, trip, clear int, ok bool) {
+func (e *Enclave) RunningOverloadState() (running float64, trip int, ok bool) {
 	if e == nil || e.metrics == nil {
-		return 0, 0, 0, false
+		return 0, 0, false
 	}
 	cfg := e.metrics.currentConfig()
 	if cfg == nil || cfg.MaxRequestsRunning <= 0 {
-		return 0, 0, 0, false
+		return 0, 0, false
 	}
 	counts, _ := e.metrics.latestSample()
-	trip, clear = cfg.RunningMarks()
-	return counts.running, trip, clear, counts.hasRunning
+	return counts.running, cfg.MaxRequestsRunning, counts.hasRunning
 }
