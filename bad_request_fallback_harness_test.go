@@ -25,7 +25,7 @@ func TestRouterBadRequestFallback(t *testing.T) {
 			var originalBody []byte
 			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				admissions.Add(1)
-				io.WriteString(w, `{"org_id":"org_admission_test","vllm_priority":3,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+				io.WriteString(w, `{"org_id":"org_admission_test","priority":3,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				rejected.Add(1)
 				body, _ := io.ReadAll(r.Body)
@@ -40,9 +40,9 @@ func TestRouterBadRequestFallback(t *testing.T) {
 			for host := range model.Enclaves {
 				originalHost = host
 			}
-			want := `{"output":"OK"}`
+			want := `{"output":"OK","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`
 			if streaming {
-				want = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"
+				want = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n"
 			}
 			alternate := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				accepted.Add(1)
@@ -76,6 +76,14 @@ func TestRouterBadRequestFallback(t *testing.T) {
 			}
 			handler.warm("tk_test", admissionTestModel)
 			admissionsBefore := admissions.Load()
+			streamLabel := "non_streaming"
+			if streaming {
+				streamLabel = "streaming"
+			}
+			duration := manager.RequestDurationSeconds.WithLabelValues(admissionTestModel, "spilled", "configured", streamLabel, "ok")
+			promptTokens := manager.RequestPromptTokens.WithLabelValues(admissionTestModel, "spilled", "configured", streamLabel)
+			durationBefore, _ := histogramState(t, duration)
+			promptBefore, tokensBefore := histogramState(t, promptTokens)
 			body := fmt.Sprintf(`{"model":"gpt-oss-120b","input":"Reply OK.","stream":%t,"mm_processor_kwargs":{"max_soft_tokens":280}}`, streaming)
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, admissionRequest("/v1/responses", body, "tk_test"))
@@ -90,6 +98,11 @@ func TestRouterBadRequestFallback(t *testing.T) {
 			}
 			if got := testutil.ToFloat64(manager.ProxySuccessTotal.WithLabelValues(admissionTestModel, alternateHost)); got != 1 {
 				t.Fatalf("accepted request counted %v times", got)
+			}
+			durationAfter, _ := histogramState(t, duration)
+			promptAfter, tokensAfter := histogramState(t, promptTokens)
+			if durationAfter != durationBefore+1 || promptAfter != promptBefore+1 || tokensAfter != tokensBefore+3 {
+				t.Fatalf("fallback metrics lost final pool/priority: duration %d -> %d, prompts %d -> %d, tokens %v -> %v", durationBefore, durationAfter, promptBefore, promptAfter, tokensBefore, tokensAfter)
 			}
 		})
 	}
