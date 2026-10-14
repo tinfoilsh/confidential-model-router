@@ -62,11 +62,22 @@ type enclaveMetrics struct {
 
 	cfgMu      sync.RWMutex
 	cfg        *config.OverloadConfig
+	policies   []*config.OverloadConfig
 	overloaded atomic.Bool
 
 	latestMu        sync.RWMutex
 	latestCounts    requestCounts
 	latestCollected time.Time
+	queueOverloads  map[queueMarks]bool
+}
+
+type queueMarks struct{ trip, clear int }
+
+func (q queueMarks) overloaded(waiting float64, previous bool) bool {
+	if waiting >= float64(q.trip) {
+		return true
+	}
+	return previous && waiting > float64(q.clear)
 }
 
 func newEnclaveMetrics(host, model string) *enclaveMetrics {
@@ -82,6 +93,10 @@ func newEnclaveMetrics(host, model string) *enclaveMetrics {
 // setConfig starts or stops polling based on whether usable overload
 // thresholds are provided.
 func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
+	m.setPolicies(cfg, nil)
+}
+
+func (m *enclaveMetrics) setPolicies(cfg *config.OverloadConfig, policies []*config.OverloadConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -93,13 +108,33 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 
 	m.cfgMu.Lock()
 	m.cfg = cfg
+	m.policies = append([]*config.OverloadConfig{cfg}, policies...)
 	m.cfgMu.Unlock()
+	m.latestMu.Lock()
+	states := make(map[queueMarks]bool)
+	poll := false
+	for _, policy := range m.policies {
+		if !policy.Enabled() {
+			continue
+		}
+		poll = true
+		trip, clear := policy.Marks()
+		if trip > 0 {
+			marks := queueMarks{trip, clear}
+			state := m.queueOverloads[marks]
+			if m.latestCounts.hasWaiting && !m.latestCollected.IsZero() && time.Since(m.latestCollected) <= sampleStalenessLimit {
+				state = marks.overloaded(m.latestCounts.waiting, state)
+			}
+			states[marks] = state
+		}
+	}
+	m.queueOverloads = states
+	m.latestMu.Unlock()
 
-	// A missing block and all non-positive trip marks mean "no overload
-	// evaluation". The reset must cover both: leaving a previously tripped
-	// flag in place with evaluation stopped would de-prefer the enclave in
-	// NextEnclave forever.
-	if !cfg.Enabled() {
+	// Polling is needed for either the native guard or a spillover policy.
+	// Clear the native flag when neither needs metrics, so NextEnclave cannot
+	// keep de-preferring a backend whose guard has been disabled.
+	if !poll {
 		m.overloaded.Store(false)
 		m.updateLatest(requestCounts{}, time.Time{})
 		BackendQueueDepth.WithLabelValues(m.model, m.host).Set(0)
@@ -112,8 +147,11 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 		return
 	}
 
-	trip, clear := cfg.Marks()
-	if cfg.ClearRequestsWaiting != 0 && cfg.ClearRequestsWaiting != clear {
+	var trip, clear int
+	if cfg != nil {
+		trip, clear = cfg.Marks()
+	}
+	if cfg != nil && cfg.ClearRequestsWaiting != 0 && cfg.ClearRequestsWaiting != clear {
 		log.WithFields(log.Fields{
 			"model":                m.model,
 			"enclave":              m.host,
@@ -140,14 +178,7 @@ func (m *enclaveMetrics) setConfig(cfg *config.OverloadConfig) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.wg.Add(1)
-	log.WithFields(log.Fields{
-		"model":                  m.model,
-		"enclave":                m.host,
-		"max_requests_waiting":   trip,
-		"clear_requests_waiting": clear,
-		"max_requests_running":   cfg.MaxRequestsRunning,
-		"retry_after_minutes":    cfg.RetryAfterMinutes,
-	}).Info("starting vLLM metrics polling")
+	log.WithFields(log.Fields{"model": m.model, "enclave": m.host}).Info("starting vLLM metrics polling")
 	go m.run(ctx, defaultMetricsPollInterval)
 }
 
@@ -209,7 +240,7 @@ func (m *enclaveMetrics) scrape(ctx context.Context) {
 		}).Debugf("metrics parse failed: %v", err)
 		return
 	}
-	if !counts.supports(m.currentConfig()) {
+	if !m.supportsSample(counts) {
 		log.WithFields(log.Fields{
 			"model":   m.model,
 			"enclave": m.host,
@@ -296,10 +327,29 @@ func (m *enclaveMetrics) currentConfig() *config.OverloadConfig {
 	return m.cfg
 }
 
+func (m *enclaveMetrics) supportsSample(counts requestCounts) bool {
+	m.cfgMu.RLock()
+	defer m.cfgMu.RUnlock()
+	if len(m.policies) == 0 {
+		return counts.supports(m.cfg)
+	}
+	for _, policy := range m.policies {
+		if policy.Enabled() && !counts.supports(policy) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *enclaveMetrics) updateLatest(counts requestCounts, ts time.Time) {
 	m.latestMu.Lock()
 	m.latestCounts = counts
 	m.latestCollected = ts
+	if counts.hasWaiting {
+		for marks, state := range m.queueOverloads {
+			m.queueOverloads[marks] = marks.overloaded(counts.waiting, state)
+		}
+	}
 	m.latestMu.Unlock()
 }
 
@@ -317,9 +367,8 @@ func (m *enclaveMetrics) latestSample() (requestCounts, time.Time) {
 // scrapes must elapse before the safety net is dropped.
 const sampleStalenessLimit = 15 * time.Second
 
-// evaluateThresholds combines a running-request limit with queue hysteresis.
-// Running load clears below its limit; a tripped overload flag also waits for
-// the queue to reach its clear mark before allowing new requests.
+// evaluateThresholds maintains the backend's native waiting-only guard and
+// observability. Request-specific tiers use their own queue hysteresis.
 func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 	cfg := m.currentConfig()
 	if !counts.supports(cfg) {
@@ -331,9 +380,9 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 	wasOverloaded := m.overloaded.Load()
 	overloaded := wasOverloaded
 	switch {
-	case (trip > 0 && counts.waiting >= float64(trip)) || (runningTrip > 0 && counts.running >= float64(runningTrip)):
+	case trip > 0 && counts.waiting >= float64(trip):
 		overloaded = true
-	case (trip <= 0 || counts.waiting <= float64(clear)) && (runningTrip <= 0 || counts.running < float64(runningTrip)):
+	case trip <= 0 || counts.waiting <= float64(clear):
 		overloaded = false
 	}
 
@@ -378,7 +427,7 @@ func (m *enclaveMetrics) evaluateThresholds(counts requestCounts) {
 // reads the hysteretic overload flag maintained by evaluateThresholds — the
 // same state NextEnclave's preference uses — rather than re-deriving a
 // single-threshold answer, so a tripped backend keeps shedding load until
-// running load falls below its limit and the queue reaches its clear mark.
+// the queue reaches its clear mark.
 // A missing or stale sample fails open.
 func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 	cfg := m.currentConfig()
@@ -405,10 +454,5 @@ func (m *enclaveMetrics) shouldReject() (bool, time.Duration, float64) {
 		return false, 0, waiting
 	}
 
-	minutes := cfg.RetryAfterMinutes
-	if minutes <= 0 {
-		minutes = 1
-	}
-	retryAfter := time.Duration(minutes) * time.Minute
-	return true, retryAfter, waiting
+	return true, overloadRetryAfter(cfg), waiting
 }

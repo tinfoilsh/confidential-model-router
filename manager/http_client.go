@@ -38,8 +38,8 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
-	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill)
+	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
+	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill, policy)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
@@ -146,7 +146,7 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
-	primary, _ := model.ReservationPools(CallerOrgFromContext(ctx))
+	primary, _, _ := model.ReservationPools(CallerOrgFromContext(ctx))
 	return req, settings, model.CacheRoutePoolIn(primary), true
 }
 

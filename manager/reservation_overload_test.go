@@ -88,8 +88,8 @@ func TestReservationOverloadServingAndReplacement(t *testing.T) {
 			if reject, _, _ := shared.ShouldReject(); reject {
 				t.Fatal("shared backend inherited the reserved threshold")
 			}
-			primary, spill := model.ReservationPools(reservationOverloadOrg)
-			if selected, _, reject, _, _ := model.SelectServing(nil, primary, spill); selected != shared || reject {
+			primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
+			if selected, _, reject, _, _ := model.SelectServing(nil, primary, spill, policy); selected != shared || reject {
 				t.Fatalf("reserved overflow selected %v with reject=%v, want eligible shared backend", selected, reject)
 			}
 			if tc.shared != nil {
@@ -180,14 +180,12 @@ func TestReservationOverloadReload(t *testing.T) {
 	}
 }
 
-func TestReservationRunningOverloadRouting(t *testing.T) {
-	sharedPolicy := &config.OverloadConfig{
-		MaxRequestsWaiting: sharedQueueLimit, MaxRequestsRunning: 2 * runningRequestLimit, RetryAfterMinutes: sharedRetryMinutes,
-	}
+func TestReservationTierPolicyReload(t *testing.T) {
+	sharedPolicy := &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit, MaxRequestsRunning: 2 * runningRequestLimit}
 	em, model, cfg := reservationOverloadManager(t, sharedPolicy)
 	em.updateConfigURL = t.TempDir() + "/config.yaml"
 	reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
-	reservedPolicy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}
+	reservedPolicy := &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit, MaxRequestsRunning: runningRequestLimit}
 	reload := func(override *config.OverloadConfig, pool []string) {
 		t.Helper()
 		cfg.Reservations[0].Overload = override
@@ -207,47 +205,40 @@ func TestReservationRunningOverloadRouting(t *testing.T) {
 	for _, enclave := range []*Enclave{reserved, shared} {
 		observeCounts(enclave.metrics, 0, runningRequestLimit)
 	}
-	if reject, retry, waiting := reserved.ShouldReject(); !reject || retry != time.Minute || waiting != 0 {
-		t.Fatalf("reserved verdict=(%v, %v, %v), want overload before queueing", reject, retry, waiting)
+	primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
+	if policy.MaxRequestsRunning != runningRequestLimit {
+		t.Fatal("request did not inherit its reservation policy")
 	}
-	if reject, _, _ := shared.ShouldReject(); reject {
-		t.Fatal("reserved running threshold leaked to shared pool")
-	}
-	if _, _, enabled := reserved.OverloadMarks(); enabled {
-		t.Fatal("running-only override inherited the model's waiting limit")
-	}
-	primary, spill := model.ReservationPools(reservationOverloadOrg)
-	order := []string{reserved.host, shared.host}
-	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != shared || reject {
-		t.Fatalf("running overload selected %v reject=%v, want shared spill", selected, reject)
+	if selected, _, reject, _, _ := model.SelectServing(nil, primary, spill, policy); selected != reserved || reject {
+		t.Fatal("shared native running limit overrode the reserved caller's policy")
 	}
 
-	observeCounts(shared.metrics, 0, float64(sharedPolicy.MaxRequestsRunning))
-	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != reserved || !reject {
-		t.Fatalf("exhausted pools selected %v reject=%v, want reserved rejection", selected, reject)
-	}
-	if selected, _ := model.SelectForDispatchPools(order, primary, spill); selected != reserved {
-		t.Fatal("priority/internal dispatch lost its serve-through-overload policy")
-	}
-	observeCounts(reserved.metrics, 0, runningRequestLimit-1)
-	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != reserved || reject {
-		t.Fatal("reserved backend did not resume serving below its running limit")
-	}
-
-	observeCounts(reserved.metrics, 0, runningRequestLimit)
 	reload(nil, cfg.Hostnames[:1])
-	if reject, _, _ := reserved.ShouldReject(); reject || *reserved.metrics.currentConfig() != *sharedPolicy {
-		t.Fatal("removing override did not restore the model policy and reevaluate running load")
+	_, _, policy = model.ReservationPools(reservationOverloadOrg)
+	if *policy != *sharedPolicy {
+		t.Fatal("removing override did not restore the model policy")
+	}
+	if tier, _ := shared.metrics.tier(policy); tier != tierPreferred {
+		t.Fatal("reload did not reclassify the existing sample")
+	}
+
+	cfg.Overload = nil
+	reload(reservedPolicy, cfg.Hostnames[:1])
+	if !pollingActive(shared.metrics) {
+		t.Fatal("shared spillover must poll even without a native guard")
+	}
+	observeCounts(shared.metrics, reservedQueueLimit, 0)
+	if tier, _ := shared.metrics.tier(reservedPolicy); tier != tierOverloaded {
+		t.Fatal("shared metrics did not enforce the caller's queue policy")
 	}
 	reload(reservedPolicy, cfg.Hostnames[1:])
-	for i, enclave := range []*Enclave{reserved, shared} {
-		observeCounts(enclave.metrics, 0, runningRequestLimit)
-		if reject, _, _ := enclave.ShouldReject(); reject != (i == 1) {
-			t.Fatalf("backend %d did not adopt its new pool's running threshold", i)
-		}
+	primary, spill, policy = model.ReservationPools(reservationOverloadOrg)
+	if !primary[shared.host] || !spill[reserved.host] || !pollingActive(reserved.metrics) {
+		t.Fatal("moving the reservation lost spillover polling or pool membership")
 	}
 	reload(&config.OverloadConfig{}, cfg.Hostnames[1:])
-	if reject, _, _ := shared.ShouldReject(); reject || pollingActive(shared.metrics) {
-		t.Fatal("explicit empty override did not disable both limits")
+	_, _, policy = model.ReservationPools(reservationOverloadOrg)
+	if policy.Enabled() || pollingActive(shared.metrics) || pollingActive(reserved.metrics) {
+		t.Fatal("empty policy did not disable tiers and unused polling")
 	}
 }

@@ -1012,10 +1012,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		// Reuse the admission context for reservation selection.
-		var poolPrimary, poolSpill map[string]bool
-		if model.HasReservations() {
-			poolPrimary, poolSpill = model.ReservationPools(admission.OrgID)
-		}
+		poolPrimary, poolSpill, overloadPolicy := model.ReservationPools(admission.OrgID)
 
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its
@@ -1042,17 +1039,17 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			waiting    float64
 		)
 		if hasConfiguredPriority {
-			// Configured-priority callers have no 429 path: like internal
+			// Configured-priority callers bypass overload rejection: like internal
 			// dispatches they serve through overload at the warmest host,
 			// where their injected priority jumps the backend queue.
-			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill)
+			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
 			if enclave != nil && probeClaim == nil {
-				if ov, _, _ := enclave.ShouldReject(); ov {
+				if ov, _, _ := enclave.ShouldRejectFor(overloadPolicy); ov {
 					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
 				}
 			}
 		} else {
-			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
+			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
 		}
 		if enclave == nil {
 			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
@@ -1074,7 +1071,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					log.WithFields(log.Fields{
 						"model":   modelName,
 						"enclave": enclave.String(),
-					}).Debug("reserved pool exhausted; spilling to shared pool")
+					}).Debug("spilling to preferred shared capacity")
 				}
 			}
 			manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
@@ -1095,13 +1092,14 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			// With hysteresis, requests_waiting can sit below the trip mark
 			// while the queue drains; log the marks so an in-band reject
 			// doesn't read as a contradiction.
-			if trip, clear, ok := enclave.OverloadMarks(); ok {
+			trip, clear, ok := enclave.OverloadMarks()
+			if overloadPolicy.Tiered() {
+				trip, clear = overloadPolicy.Marks()
+				ok = trip > 0
+			}
+			if ok {
 				fields["max_requests_waiting"] = trip
 				fields["clear_requests_waiting"] = clear
-			}
-			if running, trip, ok := enclave.RunningOverloadState(); ok {
-				fields["requests_running"] = running
-				fields["max_requests_running"] = trip
 			}
 			log.WithFields(fields).Warn("rejecting request due to backend overload")
 

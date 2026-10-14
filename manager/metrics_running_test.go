@@ -57,10 +57,10 @@ vllm:num_requests_waiting{model_name="gpt-oss-120b"} 0
 	}
 }
 
-func TestScrapeRunningOnlyOverload(t *testing.T) {
+func TestScrapeRunningPreference(t *testing.T) {
 	var running atomic.Int64
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "%s %d\n", runningMetricName, running.Load())
+		fmt.Fprintf(w, "%s %d\n%s 0\n", runningMetricName, running.Load(), waitingMetricName)
 	}))
 	defer ts.Close()
 	m := newTestMetrics(strings.TrimPrefix(ts.URL, "https://"), &config.OverloadConfig{
@@ -71,15 +71,18 @@ func TestScrapeRunningOnlyOverload(t *testing.T) {
 		running.Store(int64(count))
 		m.scrape(t.Context())
 		reject, retry, waiting := m.shouldReject()
-		if reject != (count >= runningRequestLimit) || waiting != 0 || (reject && retry != 2*time.Minute) {
+		if reject || waiting != 0 || retry != 0 {
 			t.Fatalf("running=%d: reject=%v retry=%v waiting=%v", count, reject, retry, waiting)
 		}
 		if got := testutil.ToFloat64(BackendRunningRequests.WithLabelValues(m.model, m.host)); got != float64(count) {
 			t.Fatalf("running gauge=%v, want %d", got, count)
 		}
-		enclave := &Enclave{metrics: m}
-		if got, trip, ok := enclave.RunningOverloadState(); !ok || got != float64(count) || trip != runningRequestLimit {
-			t.Fatalf("running log state=(%v, %d, %v)", got, trip, ok)
+		want := tierPreferred
+		if count >= runningRequestLimit {
+			want = tierBusy
+		}
+		if tier, _ := m.tier(m.currentConfig()); tier != want {
+			t.Fatalf("running=%d tier=%v, want %v", count, tier, want)
 		}
 	}
 }
@@ -93,14 +96,14 @@ func TestCombinedOverloadHysteresis(t *testing.T) {
 		reject           bool
 	}{
 		{0, 3, false},
-		{0, 4, true},
+		{0, 4, false},
 		{0, 3, false},
-		{0, 4, true},
-		{2, 2, true},
+		{0, 4, false},
+		{2, 2, false},
 		{1, 2, false},
 		{4, 0, true},
 		{2, 0, true},
-		{1, 4, true},
+		{1, 4, false},
 		{1, 3, false},
 		{1, 2, false},
 	} {
@@ -131,7 +134,7 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 				MaxRequestsWaiting: 1, MaxRequestsRunning: runningRequestLimit,
 			})
 			m.client = ts.Client()
-			observeCounts(m, 0, runningRequestLimit)
+			observeCounts(m, 1, runningRequestLimit)
 			counts, collected := m.latestSample()
 			m.scrape(t.Context())
 			if got, at := m.latestSample(); got != counts || at != collected {
@@ -161,11 +164,11 @@ func TestRunningOverloadReload(t *testing.T) {
 		reject  bool
 		polling bool
 	}{
-		{"enable running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},
+		{"enable running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
 		{"raise running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit + 1}, false, true},
-		{"lower running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},
+		{"lower running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
 		{"waiting only", &config.OverloadConfig{MaxRequestsWaiting: 1}, false, true},
-		{"restore running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, true, true},
+		{"restore running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
 		{"disable both", &config.OverloadConfig{}, false, false},
 		{"reenable needs a sample", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
 	} {

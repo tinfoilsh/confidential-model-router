@@ -23,6 +23,10 @@ func newTestMetrics(host string, cfg *config.OverloadConfig) *enclaveMetrics {
 	m.cfgMu.Lock()
 	m.cfg = cfg
 	m.cfgMu.Unlock()
+	if cfg != nil && cfg.MaxRequestsWaiting > 0 {
+		trip, clear := cfg.Marks()
+		m.queueOverloads = map[queueMarks]bool{{trip, clear}: false}
+	}
 	return m
 }
 

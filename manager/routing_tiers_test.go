@@ -1,0 +1,221 @@
+package manager
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tinfoilsh/confidential-model-router/config"
+)
+
+func TestTierRequiresWaitingAndRunningSamples(t *testing.T) {
+	policy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}
+	m := newTestMetrics("sample.example", policy)
+	for _, tc := range []struct {
+		counts requestCounts
+		want   routingTier
+	}{
+		{requestCounts{}, tierUnknown},
+		{requestCounts{hasRunning: true}, tierUnknown},
+		{requestCounts{hasWaiting: true}, tierUnknown},
+		{requestCounts{hasWaiting: true, hasRunning: true}, tierPreferred},
+		{requestCounts{waiting: reservedQueueLimit, hasWaiting: true, hasRunning: true}, tierBusy},
+	} {
+		m.updateLatest(tc.counts, time.Now())
+		if tier, _ := m.tier(policy); tier != tc.want {
+			t.Fatalf("counts=%+v tier=%v, want %v", tc.counts, tier, tc.want)
+		}
+	}
+}
+
+func TestSpilloverScrapeWithoutNativeGuard(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s %d\n%s 0\n", waitingMetricName, reservedQueueLimit, runningMetricName)
+	}))
+	defer server.Close()
+	policy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
+	m := newTestMetrics(strings.TrimPrefix(server.URL, "https://"), nil)
+	m.client = server.Client()
+	m.setPolicies(nil, []*config.OverloadConfig{policy})
+	defer m.shutdown()
+	m.scrape(t.Context())
+	if tier, _ := m.tier(policy); tier != tierOverloaded {
+		t.Fatal("shared scrape did not classify load for its spillover caller")
+	}
+	if reject, _, _ := m.shouldReject(); reject {
+		t.Fatal("spillover policy enabled the disabled native guard")
+	}
+}
+
+func newTieredTestModel() *Model {
+	m := newTestModel("warm", "sibling", "shared", "other-reserved")
+	m.Overload = &config.OverloadConfig{MaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
+	reserved := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
+	m.applyReservations("gpt-oss-120b", []config.ReservationConfig{
+		{OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"}, Overload: reserved},
+		{OrgIDs: []string{"other-org"}, Enclaves: []string{"other-reserved"}},
+	}, []string{"warm", "sibling", "shared", "other-reserved"})
+	for host, enclave := range m.Enclaves {
+		enclave.metrics = newTestMetrics(host, m.overloadForHostLocked(host))
+		observeCounts(enclave.metrics, 0, 0)
+	}
+	return m
+}
+
+func TestTieredSelection(t *testing.T) {
+	type load struct{ waiting, running float64 }
+	preferred := load{running: runningRequestLimit - 1}
+	busy := load{running: runningRequestLimit}
+	queued := load{waiting: reservedQueueLimit}
+	for _, tc := range []struct {
+		name                  string
+		warm, sibling, shared load
+		public                bool
+		unknown               []string
+		want                  string
+		reject                bool
+	}{
+		{name: "affinity within reserved tier zero", warm: preferred, sibling: preferred, shared: preferred, want: "warm"},
+		{name: "tier zero beats warm tier one", warm: busy, sibling: preferred, shared: preferred, want: "sibling"},
+		{name: "shared tier zero beats reserved tier one", warm: busy, sibling: busy, shared: preferred, want: "shared"},
+		{name: "reserved tier one beats shared tier one", warm: busy, sibling: busy, shared: busy, want: "warm"},
+		{name: "shared uses reserved running limit", warm: busy, sibling: busy, shared: load{running: 2*runningRequestLimit - 1}, want: "warm"},
+		{name: "shared tier one beats reserved tier two", warm: queued, sibling: queued, shared: busy, want: "shared"},
+		{name: "all tier two reject", warm: queued, sibling: queued, shared: queued, want: "warm", reject: true},
+		{name: "reserved waiting policy follows spillover", warm: queued, sibling: queued, shared: load{waiting: sharedQueueLimit - 1}, want: "warm", reject: true},
+		{name: "public uses shared running limit", public: true, shared: load{running: 2*runningRequestLimit - 1}, want: "shared"},
+		{name: "public may serve at running limit", public: true, shared: load{running: 2 * runningRequestLimit}, want: "shared"},
+		{name: "public may serve below queue limit", public: true, shared: load{waiting: sharedQueueLimit - 1}, want: "shared"},
+		{name: "public cannot escape queue limit into reserved", public: true, shared: load{waiting: sharedQueueLimit}, want: "shared", reject: true},
+		{name: "unknown cannot claim tier zero", unknown: []string{"warm", "sibling"}, shared: preferred, want: "shared"},
+		{name: "known busy beats unknown shared", warm: busy, sibling: busy, unknown: []string{"shared"}, want: "warm"},
+		{name: "known busy shared beats unknown reserved", unknown: []string{"warm", "sibling"}, shared: busy, want: "shared"},
+		{name: "all unknown fail open", unknown: []string{"warm", "sibling", "shared"}, want: "warm"},
+		{name: "unknown public cannot use reserved", public: true, unknown: []string{"shared"}, want: "shared"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTieredTestModel()
+			for host, load := range map[string]load{"warm": tc.warm, "sibling": tc.sibling, "shared": tc.shared} {
+				observeCounts(m.Enclaves[host].metrics, load.waiting, load.running)
+			}
+			for _, host := range tc.unknown {
+				metrics := m.Enclaves[host].metrics
+				counts, _ := metrics.latestSample()
+				metrics.updateLatest(counts, time.Now().Add(-sampleStalenessLimit-time.Second))
+			}
+			org := reservationOverloadOrg
+			if tc.public {
+				org = "public-org"
+			}
+			primary, spill, policy := m.ReservationPools(org)
+			order := []string{"other-reserved", "warm", "sibling", "shared"}
+			selected, claim, reject, retry, _ := m.SelectServing(order, primary, spill, policy)
+			if selected == nil || selected.host != tc.want || claim != nil || reject != tc.reject {
+				t.Fatalf("selected=%v claim=%v reject=%v, want %s reject=%v", selected, claim, reject, tc.want, tc.reject)
+			}
+			if reject && retry != time.Minute {
+				t.Fatalf("retry=%v, want default one minute", retry)
+			}
+			if reject, _, _ := selected.ShouldRejectFor(policy); reject != tc.reject {
+				t.Fatal("priority overload accounting disagrees with request policy")
+			}
+			if dispatched, _ := m.SelectForDispatchPools(order, primary, spill, policy); dispatched != selected {
+				t.Fatal("internal/priority dispatch did not use the same tier order")
+			}
+		})
+	}
+}
+
+func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
+	m := newTieredTestModel()
+	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	order := []string{"warm", "sibling"}
+	cap := 0
+	m.CacheRoute = &config.CacheRouteConfig{MaxInflightDelta: &cap}
+	m.Enclaves["warm"].inflight.Store(1)
+	if selected, _, _, _, _ := m.SelectServing(order, primary, spill, policy); selected.host != "sibling" {
+		t.Fatal("affinity bypassed the local in-flight cap")
+	}
+	for _, host := range []string{"warm", "sibling"} {
+		e := m.Enclaves[host]
+		e.attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "expired-release")
+		e.cb.storeState(cbOpen)
+		e.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	}
+	if selected, claim, _, _, _ := m.SelectServing(order, primary, spill, policy); selected.host != "shared" || claim != nil {
+		t.Fatal("expired evidence was selected or claimed for a probe")
+	}
+	m.Enclaves["shared"].attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "expired-release")
+	if selected, _, _, _, _ := m.SelectServing(order, primary, spill, policy); selected != nil {
+		t.Fatal("unavailable caller pools escaped to another organization's reservation")
+	}
+}
+
+func TestTieredRecoveryProbes(t *testing.T) {
+	for _, claimProbes := range []bool{false, true} {
+		m := newTieredTestModel()
+		primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+		probe := m.Enclaves["warm"]
+		probe.cb.storeState(cbOpen)
+		probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+		observeCounts(probe.metrics, reservedQueueLimit, runningRequestLimit)
+		selected, claim := m.selectForDispatchPools([]string{"warm", "sibling"}, claimProbes, primary, spill, policy)
+		if claimProbes {
+			if selected != probe || claim == nil {
+				t.Fatal("recovery probe did not bypass tier rejection")
+			}
+		} else if selected.host != "sibling" || claim != nil {
+			t.Fatal("dispatch without breaker outcomes claimed a probe")
+		}
+	}
+	m := newTieredTestModel()
+	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	shared := m.Enclaves["shared"]
+	shared.cb.storeState(cbOpen)
+	shared.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
+	if selected, claim, _, _, _ := m.SelectServing([]string{"warm"}, primary, spill, policy); selected.host != "warm" || claim != nil {
+		t.Fatal("shared recovery probe displaced available reserved tier zero")
+	}
+}
+
+func TestTierPoliciesKeepIndependentQueueRecovery(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(http.NotFound))
+	defer server.Close()
+	shared := &config.OverloadConfig{MaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
+	reserved := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit, RetryAfterMinutes: sharedRetryMinutes}
+	m := newTestMetrics(strings.TrimPrefix(server.URL, "https://"), shared)
+	m.client = server.Client()
+	defer m.shutdown()
+	m.setPolicies(shared, []*config.OverloadConfig{reserved})
+	for _, step := range []struct {
+		waiting          float64
+		shared, reserved routingTier
+	}{
+		{sharedQueueLimit, tierOverloaded, tierOverloaded},
+		{sharedQueueLimit - 1, tierOverloaded, tierOverloaded},
+		{sharedQueueLimit / 2, tierBusy, tierOverloaded},
+		{0, tierPreferred, tierPreferred},
+		{sharedQueueLimit - 1, tierBusy, tierOverloaded},
+	} {
+		observeCounts(m, step.waiting, 0)
+		m.setPolicies(shared, []*config.OverloadConfig{reserved})
+		for _, check := range []struct {
+			policy *config.OverloadConfig
+			want   routingTier
+		}{{shared, step.shared}, {reserved, step.reserved}} {
+			if tier, _ := m.tier(check.policy); tier != check.want {
+				t.Fatalf("waiting=%v policy=%+v tier=%v, want %v", step.waiting, check.policy, tier, check.want)
+			}
+		}
+	}
+	if reject, retry, _ := (&Enclave{metrics: m}).ShouldRejectFor(reserved); !reject || retry != sharedRetryMinutes*time.Minute {
+		t.Fatal("request did not retain its own retry policy")
+	}
+	m.setPolicies(shared, nil)
+	if len(m.queueOverloads) != 1 {
+		t.Fatal("removed policies retained hysteresis state")
+	}
+}

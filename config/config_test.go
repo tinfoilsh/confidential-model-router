@@ -1,10 +1,39 @@
 package config
 
 import (
+	"fmt"
 	"testing"
 
 	"gopkg.in/yaml.v2"
 )
+
+func TestReservationTierPolicyConsistency(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second, third string
+		wantErr                    bool
+	}{
+		{name: "same tier policy", first: "{max_requests_running: 3}", second: "{max_requests_running: 3}", third: "{max_requests_running: 3}"},
+		{name: "inherited tier policy", first: "null", second: "{max_requests_running: 6, max_requests_waiting: 12}", third: "null"},
+		{name: "conflicting limits", first: "{max_requests_running: 3}", second: "{max_requests_running: 6}", third: "null", wantErr: true},
+		{name: "conflicting earlier queue policy", first: "{max_requests_waiting: 1}", second: "{}", third: "{max_requests_running: 3}", wantErr: true},
+		{name: "legacy per-backend limits", first: "{max_requests_waiting: 1}", second: "{max_requests_waiting: 12}", third: "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf(`models:
+  gpt-oss-120b:
+    overload: {max_requests_running: 6, max_requests_waiting: 12}
+    enclaves: [a.example, b.example, c.example]
+    reservations:
+      - {org_ids: [example-org], enclaves: [a.example], overload: %s}
+      - {org_ids: [example-org], enclaves: [b.example], overload: %s}
+      - {org_ids: [example-org], enclaves: [c.example], overload: %s}
+`, tc.first, tc.second, tc.third)
+			if _, err := FromBytes([]byte(data)); (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 // A legacy rate_limit block must load like any other unknown field so a new
 // router can serve from the same runtime YAML as the old fleet it replaces.

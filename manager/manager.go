@@ -65,6 +65,7 @@ type Model struct {
 	reservedByOrg        map[string]map[string]bool // org id -> its reserved host set
 	sharedHosts          map[string]bool            // unreserved hosts; nil when no reservations
 	reservationOverloads map[string]*config.OverloadConfig
+	policiesByOrg        map[string]*config.OverloadConfig
 
 	mu sync.RWMutex
 }
@@ -84,6 +85,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	byOrg := make(map[string]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
 	overloads := make(map[string]*config.OverloadConfig)
+	policies := make(map[string]*config.OverloadConfig)
 	for _, res := range reservations {
 		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
 			continue
@@ -92,6 +94,11 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 			if orgID == "" {
 				continue
 			}
+			policy := res.Overload
+			if policy == nil {
+				policy = m.Overload
+			}
+			policies[orgID] = policy
 			set := byOrg[orgID]
 			if set == nil {
 				set = make(map[string]bool, len(res.Enclaves))
@@ -113,6 +120,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
 	m.reservationOverloads = overloads
+	m.policiesByOrg = policies
 	if len(byOrg) == 0 {
 		m.reservedByOrg = nil
 		m.sharedHosts = nil
@@ -145,23 +153,21 @@ func (m *Model) HasReservations() bool {
 	return len(m.reservedByOrg) > 0
 }
 
-// ReservationPools returns the caller's pool filters: primary is the host
-// set selection must draw from, spill what it may widen to when the primary
-// is exhausted. A reserved org gets its hosts + shared spill; everyone else
-// gets the shared hosts with no spill — reserved capacity is exclusive. Both
-// nil when the model has no reservations.
-func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) {
+// ReservationPools snapshots the caller's pool filters and policy. Reserved
+// callers get their hosts plus shared spillover; everyone else gets shared
+// hosts only. Both filters are nil when the model has no reservations.
+func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool, policy *config.OverloadConfig) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.reservedByOrg) == 0 {
-		return nil, nil
+		return nil, nil, m.Overload
 	}
 	if orgID != "" {
 		if hosts, ok := m.reservedByOrg[orgID]; ok {
-			return hosts, m.sharedHosts
+			return hosts, m.sharedHosts, m.policiesByOrg[orgID]
 		}
 	}
-	return m.sharedHosts, nil
+	return m.sharedHosts, nil, m.Overload
 }
 
 type EnclaveManager struct {
@@ -329,7 +335,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		cb:          cb,
 		pricing:     em.ModelPricing,
 	})
-	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host))
+	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host), model.spillPoliciesLocked(host))
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
@@ -576,15 +582,18 @@ func (m *Model) SelectForDispatch(order []string) (*Enclave, *ProbeClaim) {
 	return m.selectForDispatch(order, true, nil)
 }
 
-// SelectForDispatchPools picks like SelectForDispatch over the caller's
-// reservation pools: primary first, spill only when every primary candidate
-// is overloaded or unhealthy. Both exhausted serves through overload at the
-// primary pick (no-429 contract).
-func (m *Model) SelectForDispatchPools(order []string, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.selectForDispatchPools(order, true, primary, spill)
+// SelectForDispatchPools follows the caller's tier order when enabled, or
+// primary-first queue guards otherwise. Internal and configured-priority
+// dispatches serve through overload when all eligible backends are tier 2.
+func (m *Model) SelectForDispatchPools(order []string, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim) {
+	return m.selectForDispatchPools(order, true, primary, spill, policy)
 }
 
-func (m *Model) selectForDispatchPools(order []string, claimProbes bool, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
+func (m *Model) selectForDispatchPools(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim) {
+	if policy.Tiered() {
+		enclave, claim, _, _, _ := m.selectTiered(order, claimProbes, primary, spill, policy)
+		return enclave, claim
+	}
 	enclave, claim := m.selectForDispatch(order, claimProbes, primary)
 	// A claimed probe must be dispatched.
 	if len(spill) == 0 || claim != nil {
@@ -652,13 +661,14 @@ func (m *Model) selectForDispatch(order []string, claimProbes bool, allowed map[
 	return enclave, nil
 }
 
-// SelectServing picks the serving enclave for a public proxied request: the
-// overload skip loop over the caller's primary pool, widening to spill only
-// when every primary candidate is overloaded or unhealthy (nil primary =
-// all enclaves, no reservations). A nil enclave means 503; overloaded=true
-// is the 429 verdict with retryAfter/waiting; a non-nil ProbeClaim must
+// SelectServing follows the caller's tier order when enabled, or the legacy
+// primary-first queue guards otherwise. A nil enclave means unavailable;
+// overloaded=true means HTTP 503 with Retry-After. A non-nil ProbeClaim must
 // travel with the dispatched request.
-func (m *Model) SelectServing(order []string, primary, spill map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
+func (m *Model) SelectServing(order []string, primary, spill map[string]bool, policy *config.OverloadConfig) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
+	if policy.Tiered() {
+		return m.selectTiered(order, true, primary, spill, policy)
+	}
 	enclave, claim, overloaded, retryAfter, waiting = m.selectServingFrom(order, primary)
 	// A claimed probe must be dispatched. Breaker-open last resorts do
 	// spill: an all-dead reserved pool should fail over to shared capacity,
@@ -982,7 +992,7 @@ func (em *EnclaveManager) sync() error {
 			model.CacheRoute = configModel.CacheRoute
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for host, enclave := range model.Enclaves {
-				enclave.updateOverloadConfig(model.overloadForHostLocked(host))
+				enclave.updateOverloadConfig(model.overloadForHostLocked(host), model.spillPoliciesLocked(host))
 			}
 			cacheroute.SetMode(modelName, configModel.CacheRoute)
 			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
@@ -1063,11 +1073,11 @@ func (em *EnclaveManager) runWorker(ctx context.Context) {
 	}
 }
 
-func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig) {
+func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig, policies []*config.OverloadConfig) {
 	if e == nil || e.metrics == nil {
 		return
 	}
-	e.metrics.setConfig(cfg)
+	e.metrics.setPolicies(cfg, policies)
 }
 
 // shutdown stops the enclave's background polling and drops its per-enclave
@@ -1119,18 +1129,4 @@ func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
 	}
 	trip, clear = cfg.Marks()
 	return trip, clear, true
-}
-
-// RunningOverloadState exposes the running-request sample and limit
-// for rejection logs. A sampled limit is not an atomic admission cap.
-func (e *Enclave) RunningOverloadState() (running float64, trip int, ok bool) {
-	if e == nil || e.metrics == nil {
-		return 0, 0, false
-	}
-	cfg := e.metrics.currentConfig()
-	if cfg == nil || cfg.MaxRequestsRunning <= 0 {
-		return 0, 0, false
-	}
-	counts, _ := e.metrics.latestSample()
-	return counts.running, cfg.MaxRequestsRunning, counts.hasRunning
 }

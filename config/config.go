@@ -33,8 +33,8 @@ type CacheRouteConfig struct {
 }
 
 // ReservationConfig dedicates a subset of a model's enclaves to the listed
-// orgs: only their traffic may use those enclaves, spilling to the shared
-// pool when they are overloaded or unhealthy.
+// orgs: only their traffic may use those enclaves. Shared capacity can serve
+// spillover according to the caller's routing policy.
 type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
@@ -60,21 +60,25 @@ type Model struct {
 // the flag clears only once the queue drains back down to it, so a backend
 // hovering around the trip mark doesn't flap in and out of overload on every
 // poll. Zero deliberately means omitted (the default of half the trip mark
-// applies), so the smallest expressible clear mark is 1 — clear once at most
-// one request is waiting. Queue depths are integral, so setting the clear
+// applies); a trip mark of 1 therefore clears only when the queue is empty.
+// Queue depths are integral, so setting the clear
 // mark to MaxRequestsWaiting-1 disables hysteresis.
 type OverloadConfig struct {
 	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
 	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
-	// Either positive limit can trip overload. Recovery requires running
-	// requests below their limit and waiting requests at their clear mark.
-	// Backend metrics are sampled, so this is not a strict admission cap.
+	// A positive running limit enables request-specific routing tiers. It
+	// is a soft preference; only the waiting limit rejects ordinary traffic.
+	// Samples are not atomic admission caps. See docs/routing.md.
 	MaxRequestsRunning int `yaml:"max_requests_running,omitempty"`
 	RetryAfterMinutes  int `yaml:"retry_after_minutes"`
 }
 
 func (c *OverloadConfig) Enabled() bool {
 	return c != nil && (c.MaxRequestsWaiting > 0 || c.MaxRequestsRunning > 0)
+}
+
+func (c *OverloadConfig) Tiered() bool {
+	return c != nil && c.MaxRequestsRunning > 0
 }
 
 // Marks returns the overload trip and clear thresholds. When
@@ -100,6 +104,27 @@ func FromBytes(data []byte) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
+	}
+	for name, model := range config.Models {
+		byOrg := make(map[string][]OverloadConfig)
+		for _, reservation := range model.Reservations {
+			policy := model.Overload
+			if reservation.Overload != nil {
+				policy = reservation.Overload
+			}
+			var resolved OverloadConfig
+			if policy != nil {
+				resolved = *policy
+			}
+			for _, org := range reservation.OrgIDs {
+				for _, previous := range byOrg[org] {
+					if (previous.Tiered() || resolved.Tiered()) && previous != resolved {
+						return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
+					}
+				}
+				byOrg[org] = append(byOrg[org], resolved)
+			}
+		}
 	}
 
 	return &config, nil

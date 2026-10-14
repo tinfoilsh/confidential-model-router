@@ -62,7 +62,7 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 			enclave.metrics.updateLatest(counts, time.Now())
 			enclave.metrics.evaluateThresholds(counts)
 		} else {
-			enclave.updateOverloadConfig(nil)
+			enclave.updateOverloadConfig(nil, nil)
 		}
 	}
 	if org != "" {
