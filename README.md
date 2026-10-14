@@ -28,6 +28,9 @@ Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.s
 - **[safeguards/](safeguards/)**: Asynchronous acceptable-use checks for first-party chat
 - **[billing/](billing/)**: Usage reporting
 
+Replica compatibility failures and rollout guidance are described in
+[Upstream rejection containment](docs/upstream-failover.md).
+
 ## Reporting Vulnerabilities
 
 Please report security vulnerabilities by either:

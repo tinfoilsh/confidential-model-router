@@ -18,6 +18,14 @@ import (
 // against a local upstream when attested enclaves are unreachable, and is
 // compiled only under the localharness build tag.
 func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptest.Server) error {
+	return installFakeEnclaveForTest(em, modelName, ts, true)
+}
+
+func AddFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptest.Server) error {
+	return installFakeEnclaveForTest(em, modelName, ts, false)
+}
+
+func installFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptest.Server, replace bool) error {
 	model, ok := em.GetModel(modelName)
 	if !ok {
 		return fmt.Errorf("model %s not configured", modelName)
@@ -34,9 +42,11 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 	}
 	cb := newCircuitBreaker()
 	model.mu.Lock()
-	for existing, e := range model.Enclaves {
-		e.shutdown()
-		delete(model.Enclaves, existing)
+	if replace {
+		for existing, e := range model.Enclaves {
+			e.shutdown()
+			delete(model.Enclaves, existing)
+		}
 	}
 	model.installEnclaveLocked(host, &Enclave{
 		host:      host,

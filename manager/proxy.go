@@ -183,12 +183,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		cb.RecordFailure()
 		publishBreakerState(modelName, host, cb)
 	}
-	recordSuccess := func() {
-		cb.RecordSuccess()
-		ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
-		publishBreakerState(modelName, host, cb)
-	}
-
 	transport := &slowHeaderTripper{
 		base:    newAttestedTransport(publicKeyFP, attestation),
 		timeout: responseHeaderTimeout,
@@ -262,10 +256,14 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		if resp.StatusCode >= 500 {
-			recordFailure(httpFailureReason(resp.StatusCode))
-		} else {
-			recordSuccess()
+		recordHTTPOutcome(modelName, host, cb, resp)
+		if fallback, _ := resp.Request.Context().Value(badRequestFallbackKey{}).(*badRequestFallback); fallback != nil {
+			failed := &Enclave{host: host, modelName: modelName, cb: cb}
+			if alternate, replacement := fallback.model.retryBadRequest(failed, resp, fallback.order); replacement != nil {
+				fallback.onFallback(alternate)
+				*resp = *replacement
+				return alternate.proxy.ModifyResponse(resp)
+			}
 		}
 
 		// Extract request details that we'll need for billing

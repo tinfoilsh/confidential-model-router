@@ -28,6 +28,7 @@ type circuitBreaker struct {
 	state               atomic.Int32
 	consecutiveFailures atomic.Int64
 	lastFailureNano     atomic.Int64
+	quarantined         atomic.Bool
 	// probeGen counts probe claims; an AbortProbe caller must present the
 	// token of the current claim, so a stale holder cannot release a probe
 	// it no longer owns.
@@ -41,7 +42,16 @@ func newCircuitBreaker() *circuitBreaker {
 }
 
 func (cb *circuitBreaker) loadState() cbState {
+	if cb.quarantined.Load() {
+		return cbOpen
+	}
 	return cbState(cb.state.Load())
+}
+
+// Quarantine excludes an incompatible enclave until its verified instance is
+// replaced. Successes from other request shapes cannot establish compatibility.
+func (cb *circuitBreaker) Quarantine() bool {
+	return cb.quarantined.CompareAndSwap(false, true)
 }
 
 func (cb *circuitBreaker) storeState(s cbState) {
@@ -52,7 +62,7 @@ func (cb *circuitBreaker) casState(old, new cbState) bool {
 	return cb.state.CompareAndSwap(int32(old), int32(new))
 }
 
-// RecordSuccess resets the circuit breaker to the closed state.
+// RecordSuccess resets ordinary failures; compatibility quarantine is retained.
 func (cb *circuitBreaker) RecordSuccess() {
 	cb.consecutiveFailures.Store(0)
 	cb.storeState(cbClosed)
@@ -79,7 +89,7 @@ func (cb *circuitBreaker) Closed() bool {
 // resolving it via RecordSuccess or RecordFailure — or AbortProbe with the
 // token if the probe is cancelled before the backend answers.
 func (cb *circuitBreaker) ClaimProbe() (uint64, bool) {
-	if cb.loadState() != cbOpen {
+	if cb.quarantined.Load() || cb.loadState() != cbOpen {
 		return 0, false
 	}
 	last := time.Unix(0, cb.lastFailureNano.Load())
@@ -87,6 +97,10 @@ func (cb *circuitBreaker) ClaimProbe() (uint64, bool) {
 		return 0, false
 	}
 	if !cb.casState(cbOpen, cbHalfOpen) {
+		return 0, false
+	}
+	if cb.quarantined.Load() {
+		cb.storeState(cbOpen)
 		return 0, false
 	}
 	return cb.probeGen.Add(1), true
