@@ -76,7 +76,7 @@ func webSearchPrompt(harmony bool, tools map[string]struct{}) string {
 		cite = citations.HarmonyInstructions
 	}
 	if _, ok := tools[routerFetchToolName]; !ok {
-		return fmt.Sprintf("You may use the %s tool when current web information would improve the answer. Opening specific URLs is unavailable, so answer from the search results. %s %s %s", routerSearchToolName, cite, toolEconomyInstructions, toolOutputWarning)
+		return fmt.Sprintf("You may use the %s tool when current web information would improve the answer. Page content in search results comes from a cache and may not reflect the latest version of a page. Opening specific URLs is unavailable, so answer from the search results. %s %s %s", routerSearchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 	}
 	return fmt.Sprintf("You may use the %s and %s tools when current web information would improve the answer. Use %s first to discover sources, then %s specific URLs only when you need deeper detail. %s %s %s", routerSearchToolName, routerFetchToolName, routerSearchToolName, routerFetchToolName, cite, toolEconomyInstructions, toolOutputWarning)
 }
