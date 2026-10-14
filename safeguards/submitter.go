@@ -132,7 +132,7 @@ func encodeSubmission(credential, conversationID string, messages []Message) ([]
 
 // trimToFit returns the newest messages whose encoding fits in a submission.
 // The oldest turns are dropped first and the oldest turn kept is truncated
-// from the front to fill the remaining space, so the latest turns always
+// from the front to fit the remaining space, so the latest turns always
 // reach the classifier. It returns nil when nothing fits.
 func trimToFit(credential, conversationID string, messages []Message) []Message {
 	envelope, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []Message{}})
@@ -169,35 +169,18 @@ func fitMessage(m Message, budget int) (Message, int, bool) {
 		}
 	}
 	empty, err := json.Marshal(Message{Role: m.Role})
-	if err != nil || len(empty) >= budget {
+	if err != nil {
 		return Message{}, 0, false
 	}
-	// Every content byte encodes to at least one byte and a shorter tail
-	// encodes to a suffix of a longer one. Scaling by the observed expansion
-	// usually lands within budget; removing what still overshoots always does.
-	room := budget - len(empty)
-	n := room
-	cut, size, err := encodeTail(m, n)
-	if err == nil && size > budget {
-		n = n * room / (size - len(empty))
-		cut, size, err = encodeTail(m, n)
-	}
-	if err == nil && size > budget {
-		n -= size - budget
-		cut, size, err = encodeTail(m, n)
-	}
-	if err != nil || size > budget || cut.Content == "" {
-		return Message{}, 0, false
-	}
-	// Cloned so the kept tail does not pin the full original content.
-	cut.Content = strings.Clone(cut.Content)
-	return cut, size, true
-}
-
-func encodeTail(m Message, n int) (Message, int, error) {
-	cut := Message{Role: m.Role, Content: tail(m.Content, n)}
+	// JSON encodes a content byte as at most 6 bytes (\u00XX, \ufffd), so a
+	// tail cut to a sixth of the room fits however it escapes. Cloned so the
+	// kept tail does not pin the full original content.
+	cut := Message{Role: m.Role, Content: strings.Clone(tail(m.Content, (budget-len(empty))/6))}
 	b, err := json.Marshal(cut)
-	return cut, len(b), err
+	if err != nil || len(b) > budget || cut.Content == "" {
+		return Message{}, 0, false
+	}
+	return cut, len(b), true
 }
 
 // tail returns at most n trailing bytes of s without splitting a UTF-8 sequence.

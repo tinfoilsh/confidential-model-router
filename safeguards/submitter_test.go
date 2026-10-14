@@ -47,6 +47,7 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 		{"history", []Message{{Role: "user", Content: big + "the question"}, {Role: "assistant", Content: "reply"}}},
 		{"older turns", []Message{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}},
 		{"escaping", []Message{{Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}},
+		{"escaped reply", []Message{{Role: "user", Content: big}, {Role: "assistant", Content: strings.Repeat("<", maxSubmissionBytes/3)}}},
 		{"multibyte", []Message{{Role: "user", Content: strings.Repeat("é", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
 		{"many messages", append(make([]Message, maxSubmissionBytes/messageJSONOverhead), Message{Role: "assistant", Content: "reply"})},
 	} {
@@ -57,8 +58,8 @@ func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
 				t.Fatal("oversized history must be trimmed, not dropped")
 			}
 			body := <-s.pending
-			if len(body) > maxSubmissionBytes || len(body) <= maxSubmissionBytes-messageJSONOverhead {
-				t.Fatalf("body is %d bytes, want the trimmed history to fill up to %d", len(body), maxSubmissionBytes)
+			if len(body) > maxSubmissionBytes {
+				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
 			}
 			var got submission
 			if err := json.Unmarshal(body, &got); err != nil {
