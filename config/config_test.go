@@ -14,7 +14,12 @@ func TestReservationTierPolicyConsistency(t *testing.T) {
 	}{
 		{name: "same tier policy", first: "{max_requests_running: 3}", second: "{max_requests_running: 3}", third: "{max_requests_running: 3}"},
 		{name: "inherited tier policy", first: "null", second: "{max_requests_running: 6, max_requests_waiting: 12}", third: "null"},
+		{name: "equivalent defaults", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 2, retry_after_minutes: 1}", third: "{max_requests_waiting: 4, clear_requests_waiting: 4, retry_after_minutes: -1}"},
+		{name: "disabled queue settings", first: "{max_requests_running: 3}", second: "{max_requests_running: 3, clear_requests_waiting: 2, retry_after_minutes: 2}", third: "{max_requests_running: 3, max_requests_waiting: -1}"},
+		{name: "disabled policies", first: "{}", second: "{max_requests_running: -1, max_requests_waiting: -1}", third: "{clear_requests_waiting: 2, retry_after_minutes: 2}"},
 		{name: "conflicting limits", first: "{max_requests_running: 3}", second: "{max_requests_running: 6}", third: "null", wantErr: true},
+		{name: "conflicting clear marks", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 1}", third: "{max_requests_waiting: 4}", wantErr: true},
+		{name: "conflicting retry delays", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, retry_after_minutes: 2}", third: "{max_requests_waiting: 4}", wantErr: true},
 		{name: "conflicting earlier queue policy", first: "{max_requests_waiting: 1}", second: "{}", third: "{max_requests_running: 3}", wantErr: true},
 		{name: "conflicting queue policies", wantErr: true, first: "{max_requests_waiting: 1}", second: "{max_requests_waiting: 12}", third: "{}"},
 	} {

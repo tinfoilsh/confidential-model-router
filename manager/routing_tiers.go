@@ -54,14 +54,6 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float
 	return tierBusy, counts.waiting
 }
 
-func overloadRetryAfter(policy *config.OverloadConfig) time.Duration {
-	minutes := policy.RetryAfterMinutes
-	if minutes <= 0 {
-		minutes = 1
-	}
-	return time.Duration(minutes) * time.Minute
-}
-
 // SelectServing ranks closed backends by the request's tier, then pool, then
 // affinity. Unknown load fails open only after known usable capacity. Due
 // recovery probes and the all-breakers-open last resort retain their bypass.
@@ -107,7 +99,7 @@ func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill m
 			}
 			enclave := m.pickTierLocked(order, candidates)
 			if routingTier(tier) == tierOverloaded {
-				return enclave, nil, true, overloadRetryAfter(policy), waiting[enclave]
+				return enclave, nil, true, policy.RetryAfter(), waiting[enclave]
 			}
 			if routingTier(tier) == tierUnknown {
 				OverloadFailOpenTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -90,6 +91,28 @@ func (c *OverloadConfig) Marks() (trip, clear int) {
 	return trip, clear
 }
 
+const defaultRetryAfterMinutes = 1
+
+func (c *OverloadConfig) normalized() OverloadConfig {
+	var resolved OverloadConfig
+	if c == nil {
+		return resolved
+	}
+	resolved.MaxRequestsRunning = max(c.MaxRequestsRunning, 0)
+	if c.MaxRequestsWaiting > 0 {
+		resolved.MaxRequestsWaiting, resolved.ClearRequestsWaiting = c.Marks()
+		resolved.RetryAfterMinutes = c.RetryAfterMinutes
+		if resolved.RetryAfterMinutes <= 0 {
+			resolved.RetryAfterMinutes = defaultRetryAfterMinutes
+		}
+	}
+	return resolved
+}
+
+func (c *OverloadConfig) RetryAfter() time.Duration {
+	return time.Duration(c.normalized().RetryAfterMinutes) * time.Minute
+}
+
 // Config represents the configuration structure matching config.yml
 type Config struct {
 	Models map[string]Model `yaml:"models"`
@@ -108,10 +131,7 @@ func FromBytes(data []byte) (*Config, error) {
 			if reservation.Overload != nil {
 				policy = reservation.Overload
 			}
-			var resolved OverloadConfig
-			if policy != nil {
-				resolved = *policy
-			}
+			resolved := policy.normalized()
 			for _, org := range reservation.OrgIDs {
 				if previous, ok := byOrg[org]; ok && previous != resolved {
 					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
