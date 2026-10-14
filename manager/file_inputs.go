@@ -127,7 +127,7 @@ func (em *EnclaveManager) ConvertFile(
 	// outcome strands the breaker half-open until restart. Reservation
 	// pools apply via the caller org in ctx.
 	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
-	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill, policy)
+	enclave, _, _, _, _ := model.SelectServing(nil, false, primary, spill, policy)
 	if enclave == nil {
 		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)
 	}

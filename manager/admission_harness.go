@@ -51,16 +51,17 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 	}
 	model.mu.Lock()
 	defer model.mu.Unlock()
+	model.Overload = nil
+	if overloaded {
+		model.Overload = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+	}
 	hosts := make([]string, 0, len(model.Enclaves))
 	for host, enclave := range model.Enclaves {
 		hosts = append(hosts, host)
 		if overloaded {
-			enclave.metrics.cfgMu.Lock()
-			enclave.metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
-			enclave.metrics.cfgMu.Unlock()
+			enclave.metrics.configurePolicies(model.Overload, nil)
 			counts := requestCounts{waiting: 2, hasWaiting: true}
 			enclave.metrics.updateLatest(counts, time.Now())
-			enclave.metrics.evaluateThresholds(counts)
 		} else {
 			enclave.updateOverloadConfig(nil, nil)
 		}

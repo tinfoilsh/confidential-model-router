@@ -385,18 +385,7 @@ var (
 	OverloadFailOpenTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_overload_failopen_total",
-			Help: "Requests admitted because the enclave's overload sample was stale (guard failed open)",
-		},
-		[]string{"model", "enclave"},
-	)
-
-	// OverloadSkipsTotal counts selection moving off an overloaded enclave
-	// to the next candidate — including moves off a cache-aware pick, which
-	// otherwise register only as repeat_cold cache misses.
-	OverloadSkipsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "router_overload_skips_total",
-			Help: "Times replica selection skipped an overloaded enclave and moved to the next candidate",
+			Help: "Requests admitted because the enclave's overload sample was missing or stale (guard failed open)",
 		},
 		[]string{"model", "enclave"},
 	)

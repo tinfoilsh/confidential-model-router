@@ -25,7 +25,7 @@ func (m *Model) spillPoliciesLocked(host string) []*config.OverloadConfig {
 	}
 	var policies []*config.OverloadConfig
 	for _, policy := range m.policiesByOrg {
-		if policy.Tiered() {
+		if policy.Enabled() {
 			policies = append(policies, policy)
 		}
 	}
@@ -33,11 +33,14 @@ func (m *Model) spillPoliciesLocked(host string) []*config.OverloadConfig {
 }
 
 func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float64) {
-	m.latestMu.RLock()
-	defer m.latestMu.RUnlock()
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
+	if !policy.Enabled() {
+		return tierPreferred, 0
+	}
 	counts := m.latestCounts
 	if m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
-		!counts.supports(policy) || !counts.hasWaiting {
+		!counts.supports(policy) {
 		return tierUnknown, counts.waiting
 	}
 	trip, clear := policy.Marks()
@@ -45,26 +48,10 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float
 	if trip > 0 && marks.overloaded(counts.waiting, m.queueOverloads[marks]) {
 		return tierOverloaded, counts.waiting
 	}
-	if counts.waiting == 0 && counts.running < float64(policy.MaxRequestsRunning) {
+	if counts.waiting == 0 && (policy.MaxRequestsRunning <= 0 || counts.running < float64(policy.MaxRequestsRunning)) {
 		return tierPreferred, counts.waiting
 	}
 	return tierBusy, counts.waiting
-}
-
-// ShouldRejectFor uses the caller's tier policy across both pools. Queue-only
-// configurations retain their per-backend guard.
-func (e *Enclave) ShouldRejectFor(policy *config.OverloadConfig) (bool, time.Duration, float64) {
-	if !policy.Tiered() {
-		return e.ShouldReject()
-	}
-	if e == nil || e.metrics == nil || !e.breakerClosed() {
-		return false, 0, 0
-	}
-	tier, waiting := e.metrics.tier(policy)
-	if tier != tierOverloaded {
-		return false, 0, waiting
-	}
-	return true, overloadRetryAfter(policy), waiting
 }
 
 func overloadRetryAfter(policy *config.OverloadConfig) time.Duration {
@@ -75,10 +62,10 @@ func overloadRetryAfter(policy *config.OverloadConfig) time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
-// selectTiered ranks closed backends by the request's tier, then pool, then
+// SelectServing ranks closed backends by the request's tier, then pool, then
 // affinity. Unknown load fails open only after known usable capacity. Due
 // recovery probes and the all-breakers-open last resort retain their bypass.
-func (m *Model) selectTiered(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	pools := []map[string]bool{primary}

@@ -64,39 +64,27 @@ func reservationOverloadManager(t *testing.T, sharedPolicy *config.OverloadConfi
 	return em, model, cfg
 }
 
-func TestReservationOverloadServingAndReplacement(t *testing.T) {
+func TestReservationPolicySurvivesReplacement(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		shared *config.OverloadConfig
+		policy *config.OverloadConfig
 	}{
-		{"model default", &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit, ClearRequestsWaiting: sharedQueueLimit / 2, RetryAfterMinutes: sharedRetryMinutes}},
-		{"no model default", nil},
+		{"disabled shared guard", nil},
+		{"shared queue policy", &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			em, model, cfg := reservationOverloadManager(t, tc.shared)
-			reserved := model.Enclaves[cfg.Hostnames[0]]
-			shared := model.Enclaves[cfg.Hostnames[1]]
+			em, model, cfg := reservationOverloadManager(t, tc.policy)
+			reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
 			for _, enclave := range []*Enclave{reserved, shared} {
 				observe(enclave.metrics, reservedQueueLimit)
 			}
-			if reject, retry, _ := reserved.ShouldReject(); !reject || retry != time.Minute {
-				t.Fatalf("reserved verdict = (%v, %v), want rejection with independent default retry", reject, retry)
-			}
-			if trip, clear, ok := reserved.OverloadMarks(); !ok || trip != reservedQueueLimit || clear != 0 {
-				t.Fatalf("reserved marks = (%d, %d, %v), want (1, 0, true)", trip, clear, ok)
-			}
-			if reject, _, _ := shared.ShouldReject(); reject {
-				t.Fatal("shared backend inherited the reserved threshold")
-			}
 			primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
-			if selected, _, reject, _, _ := model.SelectServing(nil, primary, spill, policy); selected != shared || reject {
-				t.Fatalf("reserved overflow selected %v with reject=%v, want eligible shared backend", selected, reject)
+			if selected, _, reject, retry, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || !reject || retry != time.Minute {
+				t.Fatal("reserved queue policy must apply to both pools even without a running limit")
 			}
-			if tc.shared != nil {
-				observe(shared.metrics, sharedQueueLimit)
-				if reject, retry, _ := shared.ShouldReject(); !reject || retry != sharedRetryMinutes*time.Minute {
-					t.Fatalf("shared verdict = (%v, %v), want model threshold and retry", reject, retry)
-				}
+			public, _, publicPolicy := model.ReservationPools("public-org")
+			if selected, _, reject, _, _ := model.SelectServing(nil, true, public, nil, publicPolicy); selected != shared || reject {
+				t.Fatal("reserved policy affected the public caller")
 			}
 
 			model.mu.Lock()
@@ -110,7 +98,7 @@ func TestReservationOverloadServingAndReplacement(t *testing.T) {
 				t.Fatal("replacement did not retire the previous enclave")
 			}
 			observe(replacement.metrics, reservedQueueLimit)
-			if reject, retry, _ := replacement.ShouldReject(); !reject || retry != time.Minute {
+			if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != replacement || !reject {
 				t.Fatal("replacement lost the reserved overload policy")
 			}
 		})
@@ -164,16 +152,16 @@ func TestReservationOverloadReload(t *testing.T) {
 				if model.Enclaves[enclave.host] != enclave {
 					t.Fatal("configuration refresh replaced a stable enclave")
 				}
-				trip, _, enabled := enclave.OverloadMarks()
-				if trip != tc.want[i] || enabled != (tc.want[i] > 0) {
-					t.Fatalf("backend %d marks = (%d, %v), want (%d, %v)", i, trip, enabled, tc.want[i], tc.want[i] > 0)
+				policy := model.overloadForHostLocked(enclave.host)
+				var trip int
+				if policy != nil {
+					trip = policy.MaxRequestsWaiting
 				}
-				wantReject := tc.want[i] == reservedQueueLimit
-				if reject, _, _ := enclave.ShouldReject(); reject != wantReject {
-					t.Fatalf("backend %d reject=%v after reload, want %v", i, reject, wantReject)
+				if trip != tc.want[i] {
+					t.Fatalf("backend %d queue limit=%d, want %d", i, trip, tc.want[i])
 				}
-				if !enabled && (pollingActive(enclave.metrics) || enclave.metrics.overloaded.Load()) {
-					t.Fatal("disabled override retained polling or overloaded state")
+				if tier, _ := enclave.metrics.tier(policy); (tier == tierOverloaded) != (tc.want[i] == reservedQueueLimit) {
+					t.Fatalf("backend %d tier=%v after reload, queue limit=%d", i, tier, tc.want[i])
 				}
 			}
 		})
@@ -209,7 +197,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 	if policy.MaxRequestsRunning != runningRequestLimit {
 		t.Fatal("request did not inherit its reservation policy")
 	}
-	if selected, _, reject, _, _ := model.SelectServing(nil, primary, spill, policy); selected != reserved || reject {
+	if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || reject {
 		t.Fatal("shared native running limit overrode the reserved caller's policy")
 	}
 

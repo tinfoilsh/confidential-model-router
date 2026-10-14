@@ -16,7 +16,7 @@ func TestReservationTierPolicyConsistency(t *testing.T) {
 		{name: "inherited tier policy", first: "null", second: "{max_requests_running: 6, max_requests_waiting: 12}", third: "null"},
 		{name: "conflicting limits", first: "{max_requests_running: 3}", second: "{max_requests_running: 6}", third: "null", wantErr: true},
 		{name: "conflicting earlier queue policy", first: "{max_requests_waiting: 1}", second: "{}", third: "{max_requests_running: 3}", wantErr: true},
-		{name: "legacy per-backend limits", first: "{max_requests_waiting: 1}", second: "{max_requests_waiting: 12}", third: "{}"},
+		{name: "conflicting queue policies", wantErr: true, first: "{max_requests_waiting: 1}", second: "{max_requests_waiting: 12}", third: "{}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := fmt.Sprintf(`models:

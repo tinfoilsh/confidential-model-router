@@ -19,7 +19,6 @@ const runningRequestLimit = 4
 func observeCounts(m *enclaveMetrics, waiting, running float64) {
 	counts := requestCounts{waiting: waiting, running: running, hasWaiting: true, hasRunning: true}
 	m.updateLatest(counts, time.Now())
-	m.evaluateThresholds(counts)
 }
 
 func TestExtractRequestCounts(t *testing.T) {
@@ -70,10 +69,6 @@ func TestScrapeRunningPreference(t *testing.T) {
 	for _, count := range []int{runningRequestLimit - 1, runningRequestLimit, runningRequestLimit + 1, runningRequestLimit - 1} {
 		running.Store(int64(count))
 		m.scrape(t.Context())
-		reject, retry, waiting := m.shouldReject()
-		if reject || waiting != 0 || retry != 0 {
-			t.Fatalf("running=%d: reject=%v retry=%v waiting=%v", count, reject, retry, waiting)
-		}
 		if got := testutil.ToFloat64(BackendRunningRequests.WithLabelValues(m.model, m.host)); got != float64(count) {
 			t.Fatalf("running gauge=%v, want %d", got, count)
 		}
@@ -81,7 +76,7 @@ func TestScrapeRunningPreference(t *testing.T) {
 		if count >= runningRequestLimit {
 			want = tierBusy
 		}
-		if tier, _ := m.tier(m.currentConfig()); tier != want {
+		if tier, _ := m.tier(m.nativePolicy); tier != want {
 			t.Fatalf("running=%d tier=%v, want %v", count, tier, want)
 		}
 	}
@@ -108,8 +103,8 @@ func TestCombinedOverloadHysteresis(t *testing.T) {
 		{1, 2, false},
 	} {
 		observeCounts(m, step.waiting, step.running)
-		if reject, _, _ := m.shouldReject(); reject != step.reject {
-			t.Fatalf("waiting=%v running=%v reject=%v, want %v", step.waiting, step.running, reject, step.reject)
+		if tier, _ := m.tier(m.nativePolicy); (tier == tierOverloaded) != step.reject {
+			t.Fatalf("waiting=%v running=%v reject=%v, want %v", step.waiting, step.running, tier == tierOverloaded, step.reject)
 		}
 	}
 }
@@ -140,50 +135,29 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 			if got, at := m.latestSample(); got != counts || at != collected {
 				t.Fatalf("failed scrape replaced the last sample: %+v at %v", got, at)
 			}
-			if reject, _, _ := m.shouldReject(); !reject {
+			if tier, _ := m.tier(m.nativePolicy); tier != tierOverloaded {
 				t.Fatal("failed scrape cleared a fresh overload observation")
 			}
 			m.updateLatest(counts, time.Now().Add(-sampleStalenessLimit-time.Second))
-			if reject, _, _ := m.shouldReject(); reject {
+			if tier, _ := m.tier(m.nativePolicy); tier != tierUnknown {
 				t.Fatal("stale running sample did not fail open")
 			}
 		})
 	}
 }
 
-func TestRunningOverloadReload(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(http.NotFound))
-	defer ts.Close()
-	m := newTestMetrics(strings.TrimPrefix(ts.URL, "https://"), &config.OverloadConfig{MaxRequestsWaiting: 1})
-	m.client = ts.Client()
-	defer m.shutdown()
+func TestRunningPolicyReload(t *testing.T) {
+	m := newTestMetrics("reload.example", &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit})
 	observeCounts(m, 0, runningRequestLimit)
-	for _, tc := range []struct {
-		name    string
-		cfg     *config.OverloadConfig
-		reject  bool
-		polling bool
-	}{
-		{"enable running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
-		{"raise running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit + 1}, false, true},
-		{"lower running limit", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
-		{"waiting only", &config.OverloadConfig{MaxRequestsWaiting: 1}, false, true},
-		{"restore running", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
-		{"disable both", &config.OverloadConfig{}, false, false},
-		{"reenable needs a sample", &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}, false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m.setConfig(tc.cfg)
-			if reject, _, _ := m.shouldReject(); reject != tc.reject || pollingActive(m) != tc.polling {
-				t.Fatalf("reject=%v polling=%v, want %v %v", reject, pollingActive(m), tc.reject, tc.polling)
-			}
-		})
-	}
-
-	m.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 1})
-	observe(m, 1)
-	m.setConfig(&config.OverloadConfig{MaxRequestsRunning: runningRequestLimit})
-	if reject, _, _ := m.shouldReject(); reject || m.overloaded.Load() {
-		t.Fatal("running policy reused a waiting-only overload decision without a running sample")
+	for _, limit := range []int{runningRequestLimit, runningRequestLimit + 1, runningRequestLimit} {
+		policy := &config.OverloadConfig{MaxRequestsRunning: limit}
+		m.configurePolicies(policy, nil)
+		want := tierBusy
+		if limit > runningRequestLimit {
+			want = tierPreferred
+		}
+		if tier, _ := m.tier(policy); tier != want {
+			t.Fatalf("running limit=%d tier=%v, want %v", limit, tier, want)
+		}
 	}
 }

@@ -66,8 +66,8 @@ type Model struct {
 type OverloadConfig struct {
 	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
 	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
-	// A positive running limit enables request-specific routing tiers. It
-	// is a soft preference; only the waiting limit rejects ordinary traffic.
+	// Running load sets a soft tier preference; only the waiting limit
+	// rejects ordinary traffic. Zero disables the running threshold.
 	// Samples are not atomic admission caps. See docs/routing.md.
 	MaxRequestsRunning int `yaml:"max_requests_running,omitempty"`
 	RetryAfterMinutes  int `yaml:"retry_after_minutes"`
@@ -75,10 +75,6 @@ type OverloadConfig struct {
 
 func (c *OverloadConfig) Enabled() bool {
 	return c != nil && (c.MaxRequestsWaiting > 0 || c.MaxRequestsRunning > 0)
-}
-
-func (c *OverloadConfig) Tiered() bool {
-	return c != nil && c.MaxRequestsRunning > 0
 }
 
 // Marks returns the overload trip and clear thresholds. When
@@ -106,7 +102,7 @@ func FromBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
 	}
 	for name, model := range config.Models {
-		byOrg := make(map[string][]OverloadConfig)
+		byOrg := make(map[string]OverloadConfig)
 		for _, reservation := range model.Reservations {
 			policy := model.Overload
 			if reservation.Overload != nil {
@@ -117,12 +113,10 @@ func FromBytes(data []byte) (*Config, error) {
 				resolved = *policy
 			}
 			for _, org := range reservation.OrgIDs {
-				for _, previous := range byOrg[org] {
-					if (previous.Tiered() || resolved.Tiered()) && previous != resolved {
-						return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
-					}
+				if previous, ok := byOrg[org]; ok && previous != resolved {
+					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
 				}
-				byOrg[org] = append(byOrg[org], resolved)
+				byOrg[org] = resolved
 			}
 		}
 	}

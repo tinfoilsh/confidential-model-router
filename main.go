@@ -1031,26 +1031,12 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 		}
 
-		var (
-			enclave    *manager.Enclave
-			probeClaim *manager.ProbeClaim
-			overloaded bool
-			retryAfter time.Duration
-			waiting    float64
-		)
-		if hasConfiguredPriority {
-			// Configured-priority callers bypass overload rejection: like internal
-			// dispatches they serve through overload at the warmest host,
-			// where their injected priority jumps the backend queue.
-			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
-			if enclave != nil && probeClaim == nil {
-				if ov, _, _ := enclave.ShouldRejectFor(overloadPolicy); ov {
-					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
-				}
-			}
-		} else {
-			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
+		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServing(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
+		if hasConfiguredPriority && overloaded {
+			manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
+			overloaded = false
 		}
+
 		if enclave == nil {
 			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
@@ -1092,15 +1078,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			// With hysteresis, requests_waiting can sit below the trip mark
 			// while the queue drains; log the marks so an in-band reject
 			// doesn't read as a contradiction.
-			trip, clear, ok := enclave.OverloadMarks()
-			if overloadPolicy.Tiered() {
-				trip, clear = overloadPolicy.Marks()
-				ok = trip > 0
-			}
-			if ok {
-				fields["max_requests_waiting"] = trip
-				fields["clear_requests_waiting"] = clear
-			}
+			trip, clear := overloadPolicy.Marks()
+			fields["max_requests_waiting"] = trip
+			fields["clear_requests_waiting"] = clear
 			log.WithFields(fields).Warn("rejecting request due to backend overload")
 
 			// Record rejection metrics

@@ -27,7 +27,7 @@ func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName
 
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
-// Model.SelectForDispatch) — and builds its attested client. Reservation
+// Model.SelectServing) — and builds its attested client. Reservation
 // pools apply via the caller org in ctx (see WithCallerOrg); no org means
 // the shared pool. A non-nil ProbeClaim must travel with the dispatched
 // request (see ProbeClaim); claimProbes must be false for callers that
@@ -39,7 +39,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 	}
 
 	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
-	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill, policy)
+	enclave, claim, _, _, _ := model.SelectServing(order, claimProbes, primary, spill, policy)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}

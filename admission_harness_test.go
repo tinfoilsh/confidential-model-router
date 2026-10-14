@@ -119,8 +119,9 @@ func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
 			t.Fatalf("overloaded=%v: HTTP=%d backend calls=%d: %s", overloaded, rec.Code, backends.Load()-before, rec.Body.String())
 		}
 		model, _ := em.GetModel(admissionTestModel)
-		for host, enclave := range model.Enclaves {
-			if _, _, configured := enclave.OverloadMarks(); configured != overloaded {
+		_, _, policy := model.ReservationPools("")
+		for host := range model.Enclaves {
+			if configured := policy.Enabled(); configured != overloaded {
 				t.Fatalf("overloaded=%v: thresholds configured=%v", overloaded, configured)
 			}
 			if !overloaded && testutil.ToFloat64(manager.BackendOverloaded.WithLabelValues(admissionTestModel, host)) != 0 {
