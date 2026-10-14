@@ -69,7 +69,7 @@ func renewalManager(t *testing.T, server *httptest.Server, expiresAt, verifiedAt
 	existing.modelName = renewalTestModel
 	existing.tlsKeyFP = key
 	existing.predicate = measurement.SevGuestV2
-	existing.attestation = newAttestationState(expiresAt, verifiedAt, "v1.0.0")
+	existing.attestation = newAttestationState(verifiedAttestation{expiresAt: expiresAt, verifiedAt: verifiedAt, codeTag: "v1.0.0"})
 	existing.proxy = newProxy(host, key, renewalTestModel, nil, existing.cb, existing.attestation)
 	t.Cleanup(existing.shutdown)
 	model := &Model{
@@ -284,9 +284,10 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 		calls++
 		return renewalVerification(key, newExpiry), nil
 	})
+	model.ConfigRef = registryTestRef
 	model.configuredHosts[existing.host] = verificationAttempt{failures: 1}
 	path := t.TempDir() + "/config.yaml"
-	acceptedConfig := fmt.Sprintf("models:\n  %s:\n    repo: %s\n    enclaves: [%q]\n", renewalTestModel, renewalTestRepo, existing.host)
+	acceptedConfig := fmt.Sprintf("models:\n  %s:\n    repo: %s\n    config_ref: %s\n    enclaves: [%q]\n", renewalTestModel, renewalTestRepo, registryTestRef, existing.host)
 	transport := newAttestedTransport(key, existing.attestation)
 	t.Cleanup(transport.CloseIdleConnections)
 	for _, tc := range []struct {
@@ -296,7 +297,10 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 		{"accepted", acceptedConfig, true},
 		{"unavailable", "", true},
 		{"repository change", strings.NewReplacer(renewalTestRepo, "tinfoilsh/untrusted", existing.host, "untrusted.example").Replace(acceptedConfig), true},
-		{"host removed", fmt.Sprintf("models:\n  %s:\n    repo: %s\n", renewalTestModel, renewalTestRepo), false},
+		{"registry change", strings.NewReplacer(registryTestRef, "tinfoil/untrusted", existing.host, "untrusted.example").Replace(acceptedConfig), true},
+		{"registry removed", strings.ReplaceAll(acceptedConfig, "    config_ref: "+registryTestRef+"\n", ""), true},
+		{"repository removed", strings.ReplaceAll(acceptedConfig, "    repo: "+renewalTestRepo+"\n", ""), true},
+		{"host removed", fmt.Sprintf("models:\n  %s:\n    repo: %s\n    config_ref: %s\n", renewalTestModel, renewalTestRepo, registryTestRef), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.config), configMode); err != nil {
@@ -323,7 +327,7 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 			if calls != beforeCalls+1 || !updated.expiresAt.Equal(newExpiry) || !updated.verifiedAt.After(beforeRenewal.verifiedAt) {
 				t.Fatal("accepted backend did not renew exactly once")
 			}
-			if len(model.Enclaves) != 1 || model.Enclaves[existing.host] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[existing.host].failures != 1 {
+			if model.Repo != renewalTestRepo || model.ConfigRef != registryTestRef || len(model.Enclaves) != 1 || model.Enclaves[existing.host] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[existing.host].failures != 1 {
 				t.Fatal("renewal changed serving state or lost failure history")
 			}
 			requireRenewalResponse(t, transport, server.URL+"/response")
@@ -352,5 +356,29 @@ func TestAttestationRejectsMissingOrExpiredVerificationDeadline(t *testing.T) {
 				t.Fatalf("invalid deadline modified model state: enclaves=%d tag=%q measurement=%v", len(model.Enclaves), model.Tag, model.SourceMeasurement)
 			}
 		})
+	}
+}
+
+func TestRuntimeConfigCannotAddRegistryTrust(t *testing.T) {
+	const configMode = 0o600
+	server, key := renewalServer(t, nil)
+	now := time.Now()
+	em, model, backend := renewalManager(t, server, now.Add(time.Hour), now, func(host, reference string) (*verify.Verification, error) {
+		if reference != renewalTestRepo || host != strings.TrimPrefix(server.URL, "https://") {
+			t.Fatalf("runtime config changed the verification target: %s %s", host, reference)
+		}
+		return renewalVerification(key, now.Add(2*time.Hour)), nil
+	})
+	path := t.TempDir() + "/config.yaml"
+	runtimeConfig := fmt.Sprintf("models:\n  %s:\n    repo: %s\n    config_ref: %s\n    enclaves: [untrusted.example]\n", renewalTestModel, renewalTestRepo, registryTestRef)
+	if err := os.WriteFile(path, []byte(runtimeConfig), configMode); err != nil {
+		t.Fatal(err)
+	}
+	em.updateConfigURL = path
+	if err := em.sync(); err != nil {
+		t.Fatal(err)
+	}
+	if model.ConfigRef != "" || len(model.Enclaves) != 1 || model.Enclaves[backend.host] != backend || !backend.attestation.load().expiresAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatal("runtime config added trust or prevented the accepted backend from renewing")
 	}
 }

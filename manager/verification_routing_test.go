@@ -10,9 +10,9 @@ import (
 func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 	model := newTestModel("expired", "valid")
 	expired := model.Enclaves["expired"]
-	expired.attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "expired-release")
+	expired.attestation = newAttestationState(verifiedAttestation{expiresAt: time.Now().Add(-time.Second), verifiedAt: time.Now(), codeTag: "expired-release"})
 	valid := model.Enclaves["valid"]
-	valid.attestation = newAttestationState(time.Now().Add(time.Hour), time.Now(), "valid-release")
+	valid.attestation = newAttestationState(verifiedAttestation{expiresAt: time.Now().Add(time.Hour), verifiedAt: time.Now(), codeTag: "valid-release"})
 	if model.HasHealthyEnclave(map[string]bool{"expired": true}, nil) {
 		t.Fatal("healthy backend outside the caller's pool masked expired evidence")
 	}

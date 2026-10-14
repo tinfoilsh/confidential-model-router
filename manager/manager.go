@@ -47,6 +47,7 @@ type Enclave struct {
 
 type Model struct {
 	Repo              string                   `json:"repo"`
+	ConfigRef         string                   `json:"config_ref,omitempty"`
 	Tag               string                   `json:"tag"`
 	SourceMeasurement *measurement.Measurement `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
@@ -283,7 +284,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	defer func() { em.recordVerification(model, host, attemptedAt, verificationVerify, err) }()
 	// The pinned workload and signed collateral freshness define accepted releases.
 	// Model tag and measurement fields below report verified state; they are not trust anchors.
-	verification, err := em.verifier(host, model.Repo)
+	verification, err := em.verifyBackend(host, model)
 	if err != nil {
 		return fmt.Errorf("failed to verify remote attestation: %w", err)
 	}
@@ -311,7 +312,12 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	model.Tag = verification.CodeTag
 	model.SourceMeasurement = verification.CodeMeasurement
 
-	state := newAttestationState(verification.FreshnessExpiresAt, verifiedAt, verification.CodeTag)
+	snapshot := verifiedAttestation{expiresAt: verification.FreshnessExpiresAt, verifiedAt: verifiedAt, codeTag: verification.CodeTag, measurement: verification.CodeMeasurement}
+	if verification.Config != nil {
+		snapshot.configName = verification.Config.Name
+		snapshot.configDigest = verification.Config.Digest
+	}
+	state := newAttestationState(snapshot)
 	if current, ok := model.Enclaves[host]; ok && current.tlsKeyFP == tlsKey && current.hpkeKey == hpkeKey && current.predicate == verification.EnclaveMeasurement.Type && current.attestation != nil {
 		current.attestation.current.Store(state.load())
 		return nil
@@ -917,6 +923,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	model := &Model{
 		Repo:              modelConfig.Repo,
+		ConfigRef:         modelConfig.ConfigRef,
 		Tag:               "",
 		SourceMeasurement: nil,
 		Enclaves:          make(map[string]*Enclave),
@@ -970,9 +977,9 @@ func (em *EnclaveManager) sync() error {
 				return true
 			}
 
-			// If the repo has changed, display a warning.
-			if model.Repo != configModel.Repo {
-				log.Errorf("repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
+			// Trust anchors can only change through a router release.
+			if model.Repo != configModel.Repo || model.ConfigRef != configModel.ConfigRef {
+				log.Errorf("trust anchors changed for model %s. Publish a new release and update this router if you want the change to take effect.", modelName)
 				return true
 			}
 			log.Tracef("Updating config for model %s", modelName)

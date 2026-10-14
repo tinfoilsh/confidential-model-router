@@ -2,6 +2,7 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/tinfoil-go/enclave"
 	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
 
 const (
@@ -26,10 +28,48 @@ func verifyEnclave(host, repo string) (*verify.Verification, error) {
 	return handle.Verify()
 }
 
+func (em *EnclaveManager) verifyBackend(host string, model *Model) (*verify.Verification, error) {
+	var failures []error
+	for _, anchor := range []struct {
+		reference string
+		registry  bool
+	}{
+		{reference: model.Repo},
+		{reference: model.ConfigRef, registry: true},
+	} {
+		if anchor.reference == "" {
+			continue
+		}
+		verified, err := em.verifier(host, anchor.reference)
+		if err == nil {
+			// The SDK selects the collateral flow from the document. A matching
+			// name in the other authority must not satisfy this trust anchor.
+			if anchor.registry {
+				if verified.Config == nil || verified.Config.Source != verify.SourceEndorsement {
+					err = fmt.Errorf("config_ref requires an endorsed registry config")
+				}
+			} else if verified.Config != nil {
+				err = fmt.Errorf("repo requires repository-backed attestation")
+			}
+			if err == nil {
+				return verified, nil
+			}
+		}
+		failures = append(failures, fmt.Errorf("verifying %s: %w", anchor.reference, err))
+	}
+	if len(failures) == 0 {
+		return nil, fmt.Errorf("no backend trust anchors configured")
+	}
+	return nil, errors.Join(failures...)
+}
+
 type verifiedAttestation struct {
-	expiresAt  time.Time
-	verifiedAt time.Time
-	codeTag    string
+	expiresAt    time.Time
+	verifiedAt   time.Time
+	codeTag      string
+	measurement  *measurement.Measurement
+	configName   string
+	configDigest string
 }
 
 // Each state belongs to one verified key pair. Renewals can update existing
@@ -38,9 +78,9 @@ type attestationState struct {
 	current atomic.Pointer[verifiedAttestation]
 }
 
-func newAttestationState(expiresAt, verifiedAt time.Time, codeTag string) *attestationState {
+func newAttestationState(snapshot verifiedAttestation) *attestationState {
 	s := &attestationState{}
-	s.current.Store(&verifiedAttestation{expiresAt: expiresAt, verifiedAt: verifiedAt, codeTag: codeTag})
+	s.current.Store(&snapshot)
 	return s
 }
 

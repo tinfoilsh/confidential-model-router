@@ -44,8 +44,8 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, Enclaves: []string{"backend"}}},
 			configuredHosts: map[string]verificationAttempt{"backend": {}, "open": {}, "missing": {}, "harness": {}},
 			Enclaves: map[string]*Enclave{
-				"backend": {tlsKeyFP: "tls-key", hpkeKey: "hpke-key", cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v1")},
-				"open":    {cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v2")},
+				"backend": {tlsKeyFP: "tls-key", hpkeKey: "hpke-key", cb: newCircuitBreaker(), attestation: newAttestationState(verifiedAttestation{expiresAt: now.Add(time.Minute), verifiedAt: now, codeTag: "v1"})},
+				"open":    {cb: newCircuitBreaker(), attestation: newAttestationState(verifiedAttestation{expiresAt: now.Add(time.Minute), verifiedAt: now, codeTag: "v2"})},
 				"harness": {},
 			},
 		}
@@ -124,7 +124,7 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 	const iterations = 100
 	now := time.Now()
 	manager := &EnclaveManager{models: &sync.Map{}}
-	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {attestation: newAttestationState(now.Add(time.Hour), now, "v1")}}}
+	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {attestation: newAttestationState(verifiedAttestation{expiresAt: now.Add(time.Hour), verifiedAt: now, codeTag: "v1"})}}}
 	manager.models.Store("gpt-oss-120b", model)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(manager.VerificationCollector())
