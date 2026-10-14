@@ -23,6 +23,12 @@ live updates may change the model's enclave list and routing settings only when
 both anchors match. Upgrade the control-plane config validator before publishing
 `config_ref` in the live config.
 
+For a mixed-pool rollout, publish the live config with both anchors first;
+existing repository-only routers ignore `config_ref` and keep serving the classic
+backends. Release the router with those same bundled anchors, then add registry
+backends once every router supports them. Switch to registry-only trust through
+another coordinated router release and live config update after migration.
+
 The router's own `tinfoil-config.yml` and firmware release flow are independent
 of backend verification. Backend status includes the authenticated `config_name`
 and `config_digest` for registry deployments. Their `code_tag` identifies the
