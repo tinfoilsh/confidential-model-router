@@ -114,8 +114,8 @@ func (s *Submitter) Submit(credential, conversationID string, messages []Message
 // not even part of the latest turn fits.
 func encodeSubmission(credential, conversationID string, messages []Message) ([]byte, bool) {
 	if fitsSubmission(credential, conversationID, messages) {
-		body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
-		if err == nil && len(body) <= maxSubmissionBytes {
+		body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
+		if len(body) <= maxSubmissionBytes {
 			return body, true
 		}
 	}
@@ -123,8 +123,8 @@ func encodeSubmission(credential, conversationID string, messages []Message) ([]
 	if len(messages) == 0 {
 		return nil, false
 	}
-	body, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
-	if err != nil || len(body) > maxSubmissionBytes {
+	body, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: messages})
+	if len(body) > maxSubmissionBytes {
 		return nil, false
 	}
 	return body, true
@@ -135,10 +135,7 @@ func encodeSubmission(credential, conversationID string, messages []Message) ([]
 // from the front to fit the remaining space, so the latest turns always
 // reach the classifier. It returns nil when nothing fits.
 func trimToFit(credential, conversationID string, messages []Message) []Message {
-	envelope, err := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []Message{}})
-	if err != nil {
-		return nil
-	}
+	envelope, _ := json.Marshal(submission{Credential: credential, ConversationID: conversationID, Messages: []Message{}})
 	remaining := maxSubmissionBytes - len(envelope)
 	var kept []Message
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -164,20 +161,17 @@ func trimToFit(credential, conversationID string, messages []Message) []Message 
 // when none of the content fits.
 func fitMessage(m Message, budget int) (Message, int, bool) {
 	if len(m.Role)+len(m.Content)+messageJSONOverhead <= budget {
-		if b, err := json.Marshal(m); err == nil && len(b) <= budget {
+		if b, _ := json.Marshal(m); len(b) <= budget {
 			return m, len(b), true
 		}
 	}
-	empty, err := json.Marshal(Message{Role: m.Role})
-	if err != nil {
-		return Message{}, 0, false
-	}
+	empty, _ := json.Marshal(Message{Role: m.Role})
 	// JSON encodes a content byte as at most 6 bytes (\u00XX, \ufffd), so a
 	// tail cut to a sixth of the room fits however it escapes. Cloned so the
 	// kept tail does not pin the full original content.
 	cut := Message{Role: m.Role, Content: strings.Clone(tail(m.Content, (budget-len(empty))/6))}
-	b, err := json.Marshal(cut)
-	if err != nil || len(b) > budget || cut.Content == "" {
+	b, _ := json.Marshal(cut)
+	if len(b) > budget || cut.Content == "" {
 		return Message{}, 0, false
 	}
 	return cut, len(b), true
