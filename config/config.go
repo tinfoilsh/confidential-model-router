@@ -38,6 +38,8 @@ type CacheRouteConfig struct {
 type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
+	// A nil block inherits the model policy; a present block replaces it.
+	Overload *OverloadConfig `yaml:"overload,omitempty" json:"overload,omitempty"`
 }
 
 // Model represents the configuration for a single model. Admission policy is

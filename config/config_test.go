@@ -2,6 +2,8 @@ package config
 
 import (
 	"testing"
+
+	"gopkg.in/yaml.v2"
 )
 
 // A legacy rate_limit block must load like any other unknown field so a new
@@ -151,5 +153,37 @@ models:
 	}
 	if cfg.Models["plain"].Reservations != nil {
 		t.Fatal("absent reservations must stay nil")
+	}
+}
+
+func TestReservationOverloadParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name, block string
+		want        *OverloadConfig
+	}{
+		{name: "omitted"},
+		{name: "null", block: "        overload: null\n"},
+		{name: "empty", block: "        overload: {}\n", want: &OverloadConfig{}},
+		{name: "disabled", block: "        overload: {max_requests_waiting: 0}\n", want: &OverloadConfig{}},
+		{name: "independent defaults", block: "        overload: {max_requests_waiting: 1}\n", want: &OverloadConfig{MaxRequestsWaiting: 1}},
+		{name: "all fields", block: "        overload: {max_requests_waiting: 3, clear_requests_waiting: 1, retry_after_minutes: 2}\n", want: &OverloadConfig{MaxRequestsWaiting: 3, ClearRequestsWaiting: 1, RetryAfterMinutes: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    enclaves: [a.example]\n    overload: {max_requests_waiting: 14, clear_requests_waiting: 7, retry_after_minutes: 3}\n    reservations:\n      - org_ids: [org_test]\n        enclaves: [a.example]\n" + tc.block)
+			for round := range 2 {
+				cfg, err := FromBytes(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := cfg.Models["gpt-oss-120b"].Reservations[0].Overload
+				if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+					t.Fatalf("round %d: reservation overload = %+v, want %+v", round, got, tc.want)
+				}
+				data, err = yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
