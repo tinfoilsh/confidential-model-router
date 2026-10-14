@@ -166,11 +166,18 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 }
 
 func TestRunningPolicyReload(t *testing.T) {
-	m := newTestMetrics("reload.example", &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit})
+	server := httptest.NewTLSServer(http.HandlerFunc(http.NotFound))
+	defer server.Close()
+	m := newTestMetrics(strings.TrimPrefix(server.URL, "https://"), &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit})
+	m.client = server.Client()
+	defer m.shutdown()
 	observeCounts(m, 0, runningRequestLimit)
 	for _, limit := range []int{runningRequestLimit, runningRequestLimit + 1, runningRequestLimit} {
 		policy := &config.OverloadConfig{MaxRequestsRunning: limit}
-		m.configurePolicies(policy, nil)
+		m.setPolicies(policy, nil)
+		if !pollingActive(m) {
+			t.Fatal("running-only policy did not start polling")
+		}
 		want := tierBusy
 		if limit > runningRequestLimit {
 			want = tierPreferred
@@ -178,5 +185,9 @@ func TestRunningPolicyReload(t *testing.T) {
 		if tier, _ := m.tier(policy); tier != want {
 			t.Fatalf("running limit=%d tier=%v, want %v", limit, tier, want)
 		}
+	}
+	m.setPolicies(nil, nil)
+	if pollingActive(m) {
+		t.Fatal("disabling the running policy did not stop polling")
 	}
 }
