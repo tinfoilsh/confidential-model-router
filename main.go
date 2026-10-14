@@ -924,6 +924,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				r.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+				}
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
 					// Streaming tool requests feed the same first-token SLA
@@ -943,8 +946,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart)
 						}()
 					} else {
+						sw := &responseStatusWriter{ResponseWriter: w}
+						tw = sw
 						defer func() {
-							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, 0, !toolServed, requestStart)
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, sw.status, !toolServed, requestStart)
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
@@ -1135,9 +1140,35 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// Per-request token counts surface only in the proxy's usage
 		// handler; carry the labels resolved here to it.
 		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+		var lw *latencyWriter
+		r = r.WithContext(model.WithBadRequestFallback(r.Context(), cacheRouteOrder, func(alternate *manager.Enclave) {
+			enclave = alternate
+			w.Header().Set("Tinfoil-Enclave", alternate.String())
+			primary, spill := model.ReservationPools(admission.OrgID)
+			poolLabel = "none"
+			if primary != nil {
+				poolLabel = "shared"
+				if spill != nil {
+					poolLabel = "reserved"
+					if !primary[alternate.String()] {
+						poolLabel = "spilled"
+					}
+				}
+				manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
+			}
+			if lw != nil {
+				lw.enclave, lw.pool = alternate.String(), poolLabel
+				initNoFirstTokenSeries(modelName, lw.enclave, lw.pool, lw.class)
+			}
+			if cacheRouteDecision != nil {
+				cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, alternate.String(), cacheRouteSettings)
+			} else if cacheRouteReq != nil {
+				cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(primary), alternate.String(), cacheRouteSettings)
+			}
+		}))
 
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
-			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
+			lw = newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
 			// finish must run via defer: a backend that dies mid-stream
 			// unwinds ServeHTTP with http.ErrAbortHandler, and that request
 			// must still be counted as failed-before-first-token. served
@@ -1160,10 +1191,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 		served := false
+		sw := &responseStatusWriter{ResponseWriter: w}
 		defer func() {
-			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart)
+			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, sw.status, !served, requestStart)
 		}()
-		enclave.ServeHTTP(w, r)
+		enclave.ServeHTTP(sw, r)
 		served = true
 	})
 }

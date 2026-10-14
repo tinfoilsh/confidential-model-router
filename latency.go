@@ -51,9 +51,8 @@ func requestOutcome(ctx context.Context, status int, aborted bool) string {
 // observeRequestDuration feeds the end-to-end duration histogram. It must
 // run deferred, like latencyWriter.finish: a mid-stream backend death
 // unwinds the handler with http.ErrAbortHandler and that request's
-// duration must still be recorded. Non-streaming paths have no writer
-// wrapper and pass status 0: their outcome classifies from context and
-// abort state only, so a relayed backend error still lands in "ok".
+// duration must still be recorded. Both streaming and non-streaming paths
+// supply the final client-visible HTTP status.
 func observeRequestDuration(ctx context.Context, model, pool, class string, streaming bool, status int, aborted bool, start time.Time) {
 	stream := "non_streaming"
 	if streaming {
@@ -62,6 +61,29 @@ func observeRequestDuration(ctx context.Context, model, pool, class string, stre
 	manager.RequestDurationSeconds.
 		WithLabelValues(model, pool, class, stream, requestOutcome(ctx, status, aborted)).
 		Observe(time.Since(start).Seconds())
+}
+
+type responseStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusWriter) WriteHeader(status int) {
+	if w.status < http.StatusOK {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStatusWriter) Write(body []byte) (int, error) {
+	if w.status < http.StatusOK {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *responseStatusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // latencyWriter wraps http.ResponseWriter to observe streaming latency:

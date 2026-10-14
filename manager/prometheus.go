@@ -246,7 +246,7 @@ var (
 	ProxySuccessTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_proxy_success_total",
-			Help: "Total number of successful proxy responses (status < 500)",
+			Help: "Total number of successful proxy responses (status < 400)",
 		},
 		[]string{"model", "enclave"},
 	)
@@ -254,7 +254,8 @@ var (
 	// ProxyFailureTotal tracks failed proxy responses and transport errors per enclave.
 	// The "reason" label classifies the failure: timeout, tls_mismatch, connection_refused,
 	// connection_reset, dns_error, tls_error, transport_error, http_<status>, or
-	// canceled_after_slow. These are all inputs to the circuit breaker.
+	// canceled_after_slow. Client errors are counted without tripping the
+	// breaker unless another replica accepts the same rejected request.
 	// canceled_after_slow is the one cancellation that counts: headers never
 	// arrived within responseHeaderTimeout, then the client gave up. Ordinary
 	// cancellations stay on ClientCancellationsTotal only; slow-header
@@ -262,7 +263,7 @@ var (
 	ProxyFailureTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "router_proxy_failure_total",
-			Help: "Total number of failed proxy responses (status >= 500, transport error, or cancel after slow headers)",
+			Help: "Total number of failed proxy responses (status >= 400, transport error, or cancel after slow headers)",
 		},
 		[]string{"model", "enclave", "reason"},
 	)
@@ -296,15 +297,12 @@ var (
 	// router, from arrival to the last byte written. Unlike the TTFT and
 	// first-token histograms this covers non-streaming requests too, so
 	// e2e latency budgets (e.g. a caller's client-side timeout) can be
-	// evaluated per pool and priority for every request mode. Streaming
-	// outcomes classify the response status via the latency writer;
-	// non-streaming requests are observed without a writer wrapper, so
-	// their outcome is context/abort state only — never http_4xx, and a
-	// relayed backend error status lands in "ok".
+	// evaluated per pool and priority for every request mode. Both streaming
+	// and non-streaming outcomes include the final response status.
 	RequestDurationSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "router_request_duration_seconds",
-			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome (status-classified only for streaming)",
+			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome",
 			Buckets: []float64{0.25, 0.5, 1, 2, 5, 7.5, 10, 15, 20, 30, 45, 60, 120, 300, 600},
 		},
 		[]string{"model", "pool", "priority", "stream", "outcome"},

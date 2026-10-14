@@ -475,7 +475,7 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool, allowed map[
 	all := make([]*Enclave, 0, len(m.Enclaves))
 	var closed, preferred []*Enclave
 	for _, enclave := range m.Enclaves {
-		if !enclave.attestationValid(time.Now()) {
+		if !enclave.attestationValid(time.Now()) || (enclave.cb != nil && enclave.cb.quarantined.Load()) {
 			continue
 		}
 		if allowed != nil && !allowed[enclave.host] {
@@ -530,7 +530,7 @@ func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, clai
 	if claimProbes {
 		m.mu.RLock()
 		for _, enclave := range m.Enclaves {
-			if !enclave.attestationValid(time.Now()) {
+			if !enclave.attestationValid(time.Now()) || (enclave.cb != nil && enclave.cb.quarantined.Load()) {
 				continue
 			}
 			if allowed != nil && !allowed[enclave.host] {
@@ -737,7 +737,7 @@ func (m *Model) CacheRoutePoolIn(allowed map[string]bool) cacheroute.Pool {
 	}
 	pool := cacheroute.Pool{Size: size}
 	for _, enclave := range m.Enclaves {
-		if !enclave.attestationValid(time.Now()) {
+		if !enclave.attestationValid(time.Now()) || (enclave.cb != nil && enclave.cb.quarantined.Load()) {
 			continue
 		}
 		if allowed != nil && !allowed[enclave.host] {
@@ -753,7 +753,7 @@ func (m *Model) CacheRoutePoolIn(allowed map[string]bool) cacheroute.Pool {
 	}
 	if len(pool.Candidates) == 0 {
 		for _, enclave := range m.Enclaves {
-			if !enclave.attestationValid(time.Now()) {
+			if !enclave.attestationValid(time.Now()) || (enclave.cb != nil && enclave.cb.quarantined.Load()) {
 				continue
 			}
 			if allowed != nil && !allowed[enclave.host] {

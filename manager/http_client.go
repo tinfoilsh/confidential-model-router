@@ -81,7 +81,17 @@ func (em *EnclaveManager) DoModelRequest(ctx context.Context, modelName, path st
 	if err != nil {
 		return nil, err
 	}
-	return postToEnclave(ctx, client, enclave, path, body, headers, claim)
+	resp, err := postToEnclave(ctx, client, enclave, path, body, headers, claim)
+	if err != nil {
+		return nil, err
+	}
+	if model, ok := em.GetModel(modelName); ok {
+		if alternate, replacement := model.retryBadRequest(enclave, resp, nil); replacement != nil {
+			recordHTTPOutcome(alternate.modelName, alternate.host, alternate.cb, replacement)
+			return replacement, nil
+		}
+	}
+	return resp, nil
 }
 
 // DoModelRequestJSON marshals and dispatches a parsed request body the way
@@ -114,6 +124,12 @@ func (em *EnclaveManager) DoModelRequestJSON(ctx context.Context, modelName, pat
 	resp, err := postToEnclave(ctx, client, enclave, path, bodyBytes, headers, claim)
 	if err != nil {
 		return nil, err
+	}
+	if model, ok := em.GetModel(modelName); ok {
+		if alternate, replacement := model.retryBadRequest(enclave, resp, order); replacement != nil {
+			enclave, resp = alternate, replacement
+			recordHTTPOutcome(enclave.modelName, enclave.host, enclave.cb, resp)
+		}
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		if decision != nil {
@@ -173,6 +189,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	} else if ok {
 		req.Header.Set("Authorization", authorization)
 	}
+	req = req.WithContext(WithProbeClaim(req.Context(), claim))
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
@@ -195,20 +212,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		}
 		return nil, err
 	}
-	if resp.StatusCode >= 500 {
-		ProxyFailureTotal.WithLabelValues(enclave.modelName, enclave.host, httpFailureReason(resp.StatusCode)).Inc()
-		if enclave.cb != nil {
-			enclave.cb.RecordFailure()
-		}
-	} else {
-		ProxySuccessTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
-		if enclave.cb != nil {
-			enclave.cb.RecordSuccess()
-		}
-	}
-	if enclave.cb != nil {
-		publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
-	}
+	recordHTTPOutcome(enclave.modelName, enclave.host, enclave.cb, resp)
 	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
 	return resp, nil
 }
