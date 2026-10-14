@@ -312,7 +312,7 @@ func TestSelectForDispatch(t *testing.T) {
 
 	m.Enclaves["b"].metrics.overloaded.Store(true)
 	m.Enclaves["b"].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
-	m.Enclaves["b"].metrics.updateLatest(5, time.Now())
+	m.Enclaves["b"].metrics.updateLatest(requestCounts{waiting: 5, hasWaiting: true}, time.Now())
 	if got, _ := m.SelectForDispatch(order); got == nil || got.host != "c" {
 		t.Fatalf("pick with b overloaded = %v, want spill to c", got)
 	}
@@ -320,7 +320,7 @@ func TestSelectForDispatch(t *testing.T) {
 	for _, h := range []string{"a", "c"} {
 		m.Enclaves[h].metrics.overloaded.Store(true)
 		m.Enclaves[h].metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
-		m.Enclaves[h].metrics.updateLatest(5, time.Now())
+		m.Enclaves[h].metrics.updateLatest(requestCounts{waiting: 5, hasWaiting: true}, time.Now())
 	}
 	if got, _ := m.SelectForDispatch(order); got == nil {
 		t.Fatal("all-overloaded dispatch must still return an enclave")
@@ -390,6 +390,7 @@ func TestShutdownDropsEnclaveGaugeSeries(t *testing.T) {
 	e := newTestEnclave("gauge-drop-host")
 	e.modelName = "gauge-drop-model"
 	BackendQueueDepth.WithLabelValues(e.modelName, e.host).Set(3)
+	BackendRunningRequests.WithLabelValues(e.modelName, e.host).Set(2)
 	BackendOverloaded.WithLabelValues(e.modelName, e.host).Set(1)
 	CircuitBreakerState.WithLabelValues(e.modelName, e.host).Set(0)
 
@@ -398,6 +399,9 @@ func TestShutdownDropsEnclaveGaugeSeries(t *testing.T) {
 	// DeleteLabelValues reports false when the series is already gone.
 	if BackendQueueDepth.DeleteLabelValues(e.modelName, e.host) {
 		t.Fatal("queue depth series survived shutdown")
+	}
+	if BackendRunningRequests.DeleteLabelValues(e.modelName, e.host) {
+		t.Fatal("running requests series survived shutdown")
 	}
 	if BackendOverloaded.DeleteLabelValues(e.modelName, e.host) {
 		t.Fatal("overloaded series survived shutdown")
@@ -499,7 +503,7 @@ func makeOverloaded(e *Enclave) {
 	e.metrics.cfgMu.Lock()
 	e.metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
 	e.metrics.cfgMu.Unlock()
-	e.metrics.updateLatest(5, time.Now())
+	e.metrics.updateLatest(requestCounts{waiting: 5, hasWaiting: true}, time.Now())
 	e.metrics.overloaded.Store(true)
 }
 

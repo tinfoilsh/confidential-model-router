@@ -28,8 +28,9 @@ func newTestMetrics(host string, cfg *config.OverloadConfig) *enclaveMetrics {
 
 // observe simulates one scrape: record the sample as fresh and evaluate.
 func observe(m *enclaveMetrics, waiting float64) {
-	m.updateLatest(waiting, time.Now())
-	m.evaluateThresholds(waiting)
+	counts := requestCounts{waiting: waiting, hasWaiting: true}
+	m.updateLatest(counts, time.Now())
+	m.evaluateThresholds(counts)
 }
 
 func TestEvaluateThresholds_Hysteresis(t *testing.T) {
@@ -357,7 +358,7 @@ func TestShouldReject_FailsOpen(t *testing.T) {
 	// Tripped flag but stale sample: fail open.
 	m = newTestMetrics("open-stale-host", &config.OverloadConfig{MaxRequestsWaiting: 16})
 	observe(m, 16)
-	m.updateLatest(16, time.Now().Add(-sampleStalenessLimit-time.Second))
+	m.updateLatest(requestCounts{waiting: 16, hasWaiting: true}, time.Now().Add(-sampleStalenessLimit-time.Second))
 	if reject, _, _ := m.shouldReject(); reject {
 		t.Fatal("expected allow with a stale sample even while flagged overloaded")
 	}

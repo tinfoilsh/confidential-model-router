@@ -58,8 +58,9 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 			enclave.metrics.cfgMu.Lock()
 			enclave.metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
 			enclave.metrics.cfgMu.Unlock()
-			enclave.metrics.updateLatest(2, time.Now())
-			enclave.metrics.evaluateThresholds(2)
+			counts := requestCounts{waiting: 2, hasWaiting: true}
+			enclave.metrics.updateLatest(counts, time.Now())
+			enclave.metrics.evaluateThresholds(counts)
 		} else {
 			enclave.updateOverloadConfig(nil)
 		}

@@ -167,6 +167,8 @@ func TestReservationOverloadParsing(t *testing.T) {
 		{name: "disabled", block: "        overload: {max_requests_waiting: 0}\n", want: &OverloadConfig{}},
 		{name: "independent defaults", block: "        overload: {max_requests_waiting: 1}\n", want: &OverloadConfig{MaxRequestsWaiting: 1}},
 		{name: "all fields", block: "        overload: {max_requests_waiting: 3, clear_requests_waiting: 1, retry_after_minutes: 2}\n", want: &OverloadConfig{MaxRequestsWaiting: 3, ClearRequestsWaiting: 1, RetryAfterMinutes: 2}},
+		{name: "running only", block: "        overload: {max_requests_running: 4, clear_requests_running: 3}\n", want: &OverloadConfig{MaxRequestsRunning: 4, ClearRequestsRunning: 3}},
+		{name: "both limits", block: "        overload: {max_requests_waiting: 1, max_requests_running: 4, retry_after_minutes: 2}\n", want: &OverloadConfig{MaxRequestsWaiting: 1, MaxRequestsRunning: 4, RetryAfterMinutes: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := []byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    enclaves: [a.example]\n    overload: {max_requests_waiting: 14, clear_requests_waiting: 7, retry_after_minutes: 3}\n    reservations:\n      - org_ids: [org_test]\n        enclaves: [a.example]\n" + tc.block)
@@ -182,6 +184,38 @@ func TestReservationOverloadParsing(t *testing.T) {
 				data, err = yaml.Marshal(cfg)
 				if err != nil {
 					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestOverloadRunningConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cfg       *OverloadConfig
+		enabled   bool
+		wantClear int
+	}{
+		{name: "omitted"},
+		{name: "disabled", cfg: &OverloadConfig{}},
+		{name: "negative disables", cfg: &OverloadConfig{MaxRequestsRunning: -1}},
+		{name: "waiting only", cfg: &OverloadConfig{MaxRequestsWaiting: 1}, enabled: true},
+		{name: "default clear", cfg: &OverloadConfig{MaxRequestsRunning: 4}, enabled: true, wantClear: 2},
+		{name: "odd default", cfg: &OverloadConfig{MaxRequestsRunning: 5}, enabled: true, wantClear: 2},
+		{name: "explicit clear", cfg: &OverloadConfig{MaxRequestsRunning: 4, ClearRequestsRunning: 3}, enabled: true, wantClear: 3},
+		{name: "invalid clear", cfg: &OverloadConfig{MaxRequestsRunning: 4, ClearRequestsRunning: 4}, enabled: true, wantClear: 2},
+		{name: "negative clear", cfg: &OverloadConfig{MaxRequestsRunning: 4, ClearRequestsRunning: -1}, enabled: true, wantClear: 2},
+		{name: "one clears at zero", cfg: &OverloadConfig{MaxRequestsRunning: 1}, enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.Enabled(); got != tc.enabled {
+				t.Fatalf("Enabled() = %v, want %v", got, tc.enabled)
+			}
+			if tc.cfg != nil {
+				trip, clear := tc.cfg.RunningMarks()
+				if trip != tc.cfg.MaxRequestsRunning || clear != tc.wantClear {
+					t.Fatalf("RunningMarks() = (%d, %d), want (%d, %d)", trip, clear, tc.cfg.MaxRequestsRunning, tc.wantClear)
 				}
 			}
 		})

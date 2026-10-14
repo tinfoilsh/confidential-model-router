@@ -66,7 +66,16 @@ type Model struct {
 type OverloadConfig struct {
 	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
 	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
+	// Running requests use the same trip/clear semantics. Either positive
+	// limit can trip overload; all enabled limits must clear for recovery.
+	// Backend metrics are sampled, so this is not a strict admission cap.
+	MaxRequestsRunning   int `yaml:"max_requests_running,omitempty"`
+	ClearRequestsRunning int `yaml:"clear_requests_running,omitempty"`
 	RetryAfterMinutes    int `yaml:"retry_after_minutes"`
+}
+
+func (c *OverloadConfig) Enabled() bool {
+	return c != nil && (c.MaxRequestsWaiting > 0 || c.MaxRequestsRunning > 0)
 }
 
 // Marks returns the overload trip and clear thresholds. When
@@ -76,6 +85,15 @@ type OverloadConfig struct {
 func (c *OverloadConfig) Marks() (trip, clear int) {
 	trip = c.MaxRequestsWaiting
 	clear = c.ClearRequestsWaiting
+	if clear <= 0 || clear >= trip {
+		clear = trip / 2
+	}
+	return trip, clear
+}
+
+func (c *OverloadConfig) RunningMarks() (trip, clear int) {
+	trip = c.MaxRequestsRunning
+	clear = c.ClearRequestsRunning
 	if clear <= 0 || clear >= trip {
 		clear = trip / 2
 	}

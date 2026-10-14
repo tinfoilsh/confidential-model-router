@@ -1088,6 +1088,7 @@ func (e *Enclave) shutdown() {
 		e.cb.Retire()
 	}
 	BackendQueueDepth.DeleteLabelValues(e.modelName, e.host)
+	BackendRunningRequests.DeleteLabelValues(e.modelName, e.host)
 	BackendOverloaded.DeleteLabelValues(e.modelName, e.host)
 	CircuitBreakerState.DeleteLabelValues(e.modelName, e.host)
 }
@@ -1106,8 +1107,8 @@ func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {
 	return e.metrics.shouldReject()
 }
 
-// OverloadMarks returns the resolved overload trip and clear marks for this
-// enclave, or ok=false when no usable overload thresholds are configured.
+// OverloadMarks returns the resolved waiting-request trip and clear marks for
+// this enclave, or ok=false when no usable waiting threshold is configured.
 func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
 	if e == nil || e.metrics == nil {
 		return 0, 0, false
@@ -1118,4 +1119,19 @@ func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
 	}
 	trip, clear = cfg.Marks()
 	return trip, clear, true
+}
+
+// RunningOverloadState exposes the running-request sample and resolved marks
+// for rejection logs. A sampled limit is not an atomic admission cap.
+func (e *Enclave) RunningOverloadState() (running float64, trip, clear int, ok bool) {
+	if e == nil || e.metrics == nil {
+		return 0, 0, 0, false
+	}
+	cfg := e.metrics.currentConfig()
+	if cfg == nil || cfg.MaxRequestsRunning <= 0 {
+		return 0, 0, 0, false
+	}
+	counts, _ := e.metrics.latestSample()
+	trip, clear = cfg.RunningMarks()
+	return counts.running, trip, clear, counts.hasRunning
 }

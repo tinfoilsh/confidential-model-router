@@ -103,6 +103,14 @@ var (
 		[]string{"model", "enclave"},
 	)
 
+	BackendRunningRequests = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_backend_running_requests",
+			Help: "Current number of requests running in the backend engine",
+		},
+		[]string{"model", "enclave"},
+	)
+
 	// BackendOverloaded tracks whether a backend is currently in overload state (1=overloaded, 0=healthy)
 	BackendOverloaded = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{

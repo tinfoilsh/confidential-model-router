@@ -179,3 +179,75 @@ func TestReservationOverloadReload(t *testing.T) {
 		})
 	}
 }
+
+func TestReservationRunningOverloadRouting(t *testing.T) {
+	sharedPolicy := &config.OverloadConfig{
+		MaxRequestsWaiting: sharedQueueLimit, MaxRequestsRunning: 2 * runningRequestLimit, RetryAfterMinutes: sharedRetryMinutes,
+	}
+	em, model, cfg := reservationOverloadManager(t, sharedPolicy)
+	em.updateConfigURL = t.TempDir() + "/config.yaml"
+	reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
+	reservedPolicy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, ClearRequestsRunning: runningRequestLimit - 1}
+	reload := func(override *config.OverloadConfig, pool []string) {
+		t.Helper()
+		cfg.Reservations[0].Overload = override
+		cfg.Reservations[0].Enclaves = pool
+		data, err := yaml.Marshal(config.Config{Models: map[string]config.Model{renewalTestModel: cfg}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(em.updateConfigURL, data, reservationConfigMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := em.sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reload(reservedPolicy, cfg.Hostnames[:1])
+	for _, enclave := range []*Enclave{reserved, shared} {
+		observeCounts(enclave.metrics, 0, runningRequestLimit)
+	}
+	if reject, retry, waiting := reserved.ShouldReject(); !reject || retry != time.Minute || waiting != 0 {
+		t.Fatalf("reserved verdict=(%v, %v, %v), want overload before queueing", reject, retry, waiting)
+	}
+	if reject, _, _ := shared.ShouldReject(); reject {
+		t.Fatal("reserved running threshold leaked to shared pool")
+	}
+	if _, _, enabled := reserved.OverloadMarks(); enabled {
+		t.Fatal("running-only override inherited the model's waiting limit")
+	}
+	primary, spill := model.ReservationPools(reservationOverloadOrg)
+	order := []string{reserved.host, shared.host}
+	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != shared || reject {
+		t.Fatalf("running overload selected %v reject=%v, want shared spill", selected, reject)
+	}
+
+	observeCounts(shared.metrics, 0, float64(sharedPolicy.MaxRequestsRunning))
+	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != reserved || !reject {
+		t.Fatalf("exhausted pools selected %v reject=%v, want reserved rejection", selected, reject)
+	}
+	if selected, _ := model.SelectForDispatchPools(order, primary, spill); selected != reserved {
+		t.Fatal("priority/internal dispatch lost its serve-through-overload policy")
+	}
+	observeCounts(reserved.metrics, 0, runningRequestLimit-1)
+	if selected, _, reject, _, _ := model.SelectServing(order, primary, spill); selected != reserved || reject {
+		t.Fatal("reserved backend did not resume serving at its running clear mark")
+	}
+
+	observeCounts(reserved.metrics, 0, runningRequestLimit)
+	reload(nil, cfg.Hostnames[:1])
+	if reject, _, _ := reserved.ShouldReject(); reject || *reserved.metrics.currentConfig() != *sharedPolicy {
+		t.Fatal("removing override did not restore the model policy and reevaluate running load")
+	}
+	reload(reservedPolicy, cfg.Hostnames[1:])
+	for i, enclave := range []*Enclave{reserved, shared} {
+		observeCounts(enclave.metrics, 0, runningRequestLimit)
+		if reject, _, _ := enclave.ShouldReject(); reject != (i == 1) {
+			t.Fatalf("backend %d did not adopt its new pool's running threshold", i)
+		}
+	}
+	reload(&config.OverloadConfig{}, cfg.Hostnames[1:])
+	if reject, _, _ := shared.ShouldReject(); reject || pollingActive(shared.metrics) {
+		t.Fatal("explicit empty override did not disable both limits")
+	}
+}
