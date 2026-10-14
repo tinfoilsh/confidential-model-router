@@ -30,8 +30,9 @@ with `Retry-After` from the caller's policy (default: one minute). Configured
 priority requests and internal dispatches use the same selection but serve
 through overload.
 
-vLLM metrics are polled every second, including on shared hosts needed for
-spillover. These sampled thresholds are not atomic concurrency caps. For an
+vLLM metrics are polled at a nominal one-second interval, including on shared
+hosts needed for spillover. Slow scrapes reduce that cadence. These sampled
+thresholds are not atomic concurrency caps. For an
 enabled policy, missing/incomplete samples or samples older than 15 seconds
 are **unknown**, never tier 0. Known tier 0 and tier 1 candidates win first;
 otherwise unknown candidates fail open, reserved before shared. Disabled
