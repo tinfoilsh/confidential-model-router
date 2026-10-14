@@ -28,6 +28,8 @@ Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.s
 - **[safeguards/](safeguards/)**: Asynchronous acceptable-use checks for first-party chat
 - **[billing/](billing/)**: Usage reporting
 
+Pool selection and overload settings are described in [Routing](docs/routing.md).
+
 ## Reporting Vulnerabilities
 
 Please report security vulnerabilities by either:
