@@ -20,13 +20,15 @@ type verificationAttempt struct {
 }
 
 type backendVerificationStatus struct {
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	CodeTag     string     `json:"code_tag,omitempty"`
-	LastAttempt *time.Time `json:"last_attempt,omitempty"`
-	LastFailure *time.Time `json:"last_failure,omitempty"`
-	LastError   string     `json:"last_error,omitempty"`
-	failures    uint64
+	LastSuccess  *time.Time `json:"last_success,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	CodeTag      string     `json:"code_tag,omitempty"`
+	ConfigName   string     `json:"config_name,omitempty"`
+	ConfigDigest string     `json:"config_digest,omitempty"`
+	LastAttempt  *time.Time `json:"last_attempt,omitempty"`
+	LastFailure  *time.Time `json:"last_failure,omitempty"`
+	LastError    string     `json:"last_error,omitempty"`
+	failures     uint64
 }
 
 type modelVerificationStatus struct {
@@ -88,6 +90,8 @@ func (m *Model) verificationStatusLocked(now time.Time) modelVerificationStatus 
 			backend.LastSuccess = verificationTimestamp(verified.verifiedAt)
 			backend.ExpiresAt = verificationTimestamp(verified.expiresAt)
 			backend.CodeTag = verified.codeTag
+			backend.ConfigName = verified.configName
+			backend.ConfigDigest = verified.configDigest
 			if !now.Before(verified.expiresAt) {
 				status.Expired++
 			} else {

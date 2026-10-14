@@ -46,9 +46,9 @@ func TestAddEnclaveRejectsUnverifiedDocument(t *testing.T) {
 	host := strings.TrimPrefix(server.URL, "https://")
 	for _, name := range []string{"new", "expired"} {
 		t.Run(name, func(t *testing.T) {
-			model := &Model{Repo: renewalTestRepo, Enclaves: map[string]*Enclave{}}
+			model := &Model{Repo: renewalTestRepo, ConfigRef: registryTestRef, Enclaves: map[string]*Enclave{}}
 			if name == "expired" {
-				model.Enclaves[host] = &Enclave{tlsKeyFP: key, attestation: newAttestationState(time.Now().Add(-time.Second), time.Now(), "")}
+				model.Enclaves[host] = &Enclave{tlsKeyFP: key, attestation: newAttestationState(verifiedAttestation{expiresAt: time.Now().Add(-time.Second), verifiedAt: time.Now()})}
 			}
 			previous := model.Enclaves[host]
 			attempts := challenges.Load()
@@ -76,7 +76,7 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := newAttestedTransport(key, newAttestationState(time.Now().Add(time.Hour), time.Now(), ""))
+	transport := newAttestedTransport(key, newAttestationState(verifiedAttestation{expiresAt: time.Now().Add(time.Hour), verifiedAt: time.Now()}))
 	defer transport.CloseIdleConnections()
 	request, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	response, err := transport.RoundTrip(request)
@@ -102,7 +102,7 @@ func TestAttestedTransportEnforcesKeyAndExpiration(t *testing.T) {
 		t.Fatalf("expired evidence classified as %q", got)
 	}
 
-	wrongKey := newAttestedTransport(strings.Repeat("0", len(key)), newAttestationState(time.Now().Add(time.Hour), time.Now(), ""))
+	wrongKey := newAttestedTransport(strings.Repeat("0", len(key)), newAttestationState(verifiedAttestation{expiresAt: time.Now().Add(time.Hour), verifiedAt: time.Now()}))
 	defer wrongKey.CloseIdleConnections()
 	request, _ = http.NewRequest(http.MethodGet, server.URL, nil)
 	_, err = wrongKey.RoundTrip(request)

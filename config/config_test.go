@@ -1,10 +1,54 @@
 package config
 
 import (
+	"crypto/sha256"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v2"
 )
+
+func TestBackendTrustConfig(t *testing.T) {
+	const registryRef = "tinfoil/confidential-gpt-oss-120b"
+	for _, tc := range []struct {
+		name, fields, repo, configRef string
+	}{
+		{"repository", "repo: org/repo", "org/repo", ""},
+		{"pinned repository", "repo: org/repo@v1", "org/repo@v1", ""},
+		{"registry", "config_ref: " + registryRef, "", registryRef},
+		{"both", "repo: org/repo\n    config_ref: " + registryRef, "org/repo", registryRef},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    " + tc.fields + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := cfg.Models["gpt-oss-120b"]
+			if model.Repo != tc.repo || model.ConfigRef != tc.configRef {
+				t.Fatalf("unexpected trust anchors: %+v", model)
+			}
+		})
+	}
+	for _, fields := range []string{
+		"enclaves: []",
+		"repo: ' '",
+		"repo: https://github.com/org/repo",
+		"config_ref: /" + registryRef,
+		"config_ref: " + registryRef + "/v1",
+		"config_ref: " + registryRef + "@v1",
+		"config_ref: " + registryRef + "@sha256:" + strings.Repeat("a", sha256.Size*2),
+		"config_ref: https://api.tinfoil.sh/" + registryRef,
+		"config_ref: tinfoil/Project",
+		"config_ref: '" + registryRef + " '",
+		"repo: org/repo\n    config_ref: invalid",
+	} {
+		t.Run(fields, func(t *testing.T) {
+			if _, err := FromBytes([]byte("models:\n  gpt-oss-120b:\n    " + fields + "\n")); err == nil {
+				t.Fatalf("accepted invalid trust configuration: %s", fields)
+			}
+		})
+	}
+}
 
 // A legacy rate_limit block must load like any other unknown field so a new
 // router can serve from the same runtime YAML as the old fleet it replaces.

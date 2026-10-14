@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	configendorsement "github.com/tinfoilsh/tinfoil-go/endorsement/config"
+	"github.com/tinfoilsh/tinfoil-go/verify"
 	"gopkg.in/yaml.v2"
 )
 
@@ -47,10 +49,30 @@ type ReservationConfig struct {
 // like any other unknown key.
 type Model struct {
 	Repo         string              `yaml:"repo"`
+	ConfigRef    string              `yaml:"config_ref,omitempty"`
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
+}
+
+// validateTrust requires at least one workload identity. Registry references
+// authorize a project across its approved revisions, without revision or digest pins.
+func (m Model) validateTrust() error {
+	if m.Repo == "" && m.ConfigRef == "" {
+		return fmt.Errorf("repo or config_ref is required")
+	}
+	if m.Repo != "" {
+		if _, _, _, err := verify.ParseReference(m.Repo); err != nil {
+			return fmt.Errorf("invalid repo: %w", err)
+		}
+	}
+	if m.ConfigRef != "" {
+		if err := configendorsement.ValidateIdentity("/" + m.ConfigRef); err != nil {
+			return fmt.Errorf("config_ref must be namespace/project without a revision or digest: %w", err)
+		}
+	}
+	return nil
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
@@ -92,6 +114,11 @@ func FromBytes(data []byte) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
+	}
+	for name, model := range config.Models {
+		if err := model.validateTrust(); err != nil {
+			return nil, fmt.Errorf("model %q: %w", name, err)
+		}
 	}
 
 	return &config, nil
