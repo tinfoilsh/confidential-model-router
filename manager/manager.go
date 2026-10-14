@@ -312,7 +312,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	model.Tag = verification.CodeTag
 	model.SourceMeasurement = verification.CodeMeasurement
 
-	snapshot := verifiedAttestation{expiresAt: verification.FreshnessExpiresAt, verifiedAt: verifiedAt, codeTag: verification.CodeTag}
+	snapshot := verifiedAttestation{expiresAt: verification.FreshnessExpiresAt, verifiedAt: verifiedAt, codeTag: verification.CodeTag, measurement: verification.CodeMeasurement}
 	if verification.Config != nil {
 		snapshot.configName = verification.Config.Name
 		snapshot.configDigest = verification.Config.Digest

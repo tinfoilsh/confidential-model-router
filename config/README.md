@@ -33,3 +33,6 @@ The router's own `tinfoil-config.yml` and firmware release flow are independent
 of backend verification. Backend status includes the authenticated `config_name`
 and `config_digest` for registry deployments. Their `code_tag` identifies the
 runtime release; for classic backends it identifies the repository release.
+Each backend also reports its verified `measurement`. Use these per-backend
+fields to inspect a mixed pool; the legacy model-level `tag` and `measurement`
+describe only the most recently verified backend.

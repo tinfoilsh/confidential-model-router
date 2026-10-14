@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
 
 const (
@@ -20,14 +21,15 @@ type verificationAttempt struct {
 }
 
 type backendVerificationStatus struct {
-	LastSuccess  *time.Time `json:"last_success,omitempty"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	CodeTag      string     `json:"code_tag,omitempty"`
-	ConfigName   string     `json:"config_name,omitempty"`
-	ConfigDigest string     `json:"config_digest,omitempty"`
-	LastAttempt  *time.Time `json:"last_attempt,omitempty"`
-	LastFailure  *time.Time `json:"last_failure,omitempty"`
-	LastError    string     `json:"last_error,omitempty"`
+	LastSuccess  *time.Time               `json:"last_success,omitempty"`
+	ExpiresAt    *time.Time               `json:"expires_at,omitempty"`
+	CodeTag      string                   `json:"code_tag,omitempty"`
+	Measurement  *measurement.Measurement `json:"measurement,omitempty"`
+	ConfigName   string                   `json:"config_name,omitempty"`
+	ConfigDigest string                   `json:"config_digest,omitempty"`
+	LastAttempt  *time.Time               `json:"last_attempt,omitempty"`
+	LastFailure  *time.Time               `json:"last_failure,omitempty"`
+	LastError    string                   `json:"last_error,omitempty"`
 	failures     uint64
 }
 
@@ -90,6 +92,7 @@ func (m *Model) verificationStatusLocked(now time.Time) modelVerificationStatus 
 			backend.LastSuccess = verificationTimestamp(verified.verifiedAt)
 			backend.ExpiresAt = verificationTimestamp(verified.expiresAt)
 			backend.CodeTag = verified.codeTag
+			backend.Measurement = verified.measurement
 			backend.ConfigName = verified.configName
 			backend.ConfigDigest = verified.configDigest
 			if !now.Before(verified.expiresAt) {

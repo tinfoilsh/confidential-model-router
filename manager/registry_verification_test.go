@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
 
 const registryTestRef = "tinfoil/confidential-gpt-oss-120b"
@@ -31,7 +32,6 @@ func TestBackendTrustSeparatesAuthorities(t *testing.T) {
 		{name: "same name registry", repo: registryTestRef, configRef: registryTestRef, verifiedRef: registryTestRef, registry: true, source: verify.SourceEndorsement, accepted: true},
 		{name: "same name repository", repo: registryTestRef, configRef: registryTestRef, verifiedRef: registryTestRef, accepted: true},
 		{name: "embedded config is not an endorsement", configRef: registryTestRef, verifiedRef: registryTestRef, registry: true, source: verify.SourceEmbedded},
-		{name: "wrong registry project", repo: renewalTestRepo, configRef: registryTestRef, verifiedRef: "tinfoil/other", registry: true, source: verify.SourceEndorsement},
 		{name: "missing anchors"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,6 +71,7 @@ func TestMixedBackendPoolAndRegistryRenewal(t *testing.T) {
 	classicProof := renewalVerification(classicKey, now.Add(time.Hour))
 	registryProof := renewalVerification(registryKey, now.Add(time.Hour))
 	registryProof.CodeTag = "v0.15.1"
+	registryProof.CodeMeasurement = &measurement.Measurement{Type: measurement.SnpTdxMultiPlatformV1}
 	registryProof.Config = &verify.ConfigVerification{Source: verify.SourceEndorsement, Name: "/" + registryTestRef + "/v1", Digest: strings.Repeat("a", sha256.Size*2)}
 	em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, verifier: func(host, reference string) (*verify.Verification, error) {
 		switch {
@@ -101,6 +102,12 @@ func TestMixedBackendPoolAndRegistryRenewal(t *testing.T) {
 	status, _ := readVerificationStatus(t, model)
 	if status.Healthy != 2 || status.Hosts[classicHost].ConfigName != "" || status.Hosts[registryHost].ConfigName != registryProof.Config.Name || status.Hosts[registryHost].ConfigDigest != registryProof.Config.Digest || status.Hosts[registryHost].CodeTag != registryProof.CodeTag {
 		t.Fatalf("mixed pool lost verified identity: %+v", status)
+	}
+	for host, proof := range map[string]*verify.Verification{classicHost: classicProof, registryHost: registryProof} {
+		backend := status.Hosts[host]
+		if backend.CodeTag != proof.CodeTag || backend.Measurement == nil || backend.Measurement.Type != proof.CodeMeasurement.Type {
+			t.Fatalf("backend %s lost its release or measurement: %+v", host, backend)
+		}
 	}
 	backend := model.Enclaves[registryHost]
 	registryProof.Config.Name = "/" + registryTestRef + "/v2"

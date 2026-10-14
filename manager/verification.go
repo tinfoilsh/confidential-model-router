@@ -11,6 +11,7 @@ import (
 
 	"github.com/tinfoilsh/tinfoil-go/enclave"
 	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
 
 const (
@@ -66,6 +67,7 @@ type verifiedAttestation struct {
 	expiresAt    time.Time
 	verifiedAt   time.Time
 	codeTag      string
+	measurement  *measurement.Measurement
 	configName   string
 	configDigest string
 }
