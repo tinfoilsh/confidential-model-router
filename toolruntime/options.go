@@ -61,9 +61,11 @@ type RouterOptions struct {
 // malformed shape returns an error so the router responds 400 with a
 // clear message instead of deferring to the orchestrator.
 //
-// web_search_options and pii_check_options have no validation surface
-// today; their presence and (for web_search) inner payload are lifted
-// into typed wrappers and the body field is stripped.
+// web_search_options and pii_check_options are lifted into typed
+// wrappers and the body field is stripped. The only web search setting
+// validated here is external_web_access, on web_search_options and on
+// Responses web_search tools, so a malformed opt-out of live web access
+// is rejected rather than ignored.
 func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 	opts := &RouterOptions{}
 
@@ -78,8 +80,15 @@ func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 
 	if raw, ok := body[fieldWebSearchOptions]; ok {
 		ws, _ := raw.(map[string]any)
+		if err := validateExternalWebAccess(ws, fieldWebSearchOptions); err != nil {
+			return nil, err
+		}
 		opts.WebSearch = &WebSearchOptions{Raw: ws}
 		delete(body, fieldWebSearchOptions)
+	}
+
+	if err := validateWebSearchTools(body); err != nil {
+		return nil, err
 	}
 
 	if _, ok := body[fieldPIICheckOptions]; ok {
@@ -153,6 +162,36 @@ func parseUploads(raw any) ([]UploadedFile, error) {
 		out[i] = u
 	}
 	return out, nil
+}
+
+// validateExternalWebAccess rejects a non-boolean external_web_access on the
+// web search settings found at param. Absent and null both mean the default.
+func validateExternalWebAccess(settings map[string]any, param string) error {
+	raw := settings[fieldExternalWebAccess]
+	if raw == nil {
+		return nil
+	}
+	if _, ok := raw.(bool); !ok {
+		return optionsParamError(param+"."+fieldExternalWebAccess, "must be a boolean")
+	}
+	return nil
+}
+
+// validateWebSearchTools applies validateExternalWebAccess to every
+// Responses web_search tool entry.
+func validateWebSearchTools(body map[string]any) error {
+	toolType := descriptorForProfile(WebSearch.Name).ResponsesToolType
+	tools, _ := body["tools"].([]any)
+	for i, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		if stringValue(tool["type"]) != toolType {
+			continue
+		}
+		if err := validateExternalWebAccess(tool, fmt.Sprintf("tools[%d]", i)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func stringField(m map[string]any, key string) string {

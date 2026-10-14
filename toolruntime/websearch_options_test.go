@@ -439,6 +439,44 @@ func TestApplyToSearchArgs_RespectsModelOverridesForNewFields(t *testing.T) {
 	}
 }
 
+func TestExternalWebAccess_FalseForcesCacheOnlySearch(t *testing.T) {
+	const modelMaxAge = 0
+	cases := []struct {
+		name string
+		opts webSearchOptions
+		want int
+	}{
+		{
+			name: "chat disabled",
+			opts: extractAndParseChat(t, map[string]any{
+				"web_search_options": map[string]any{"external_web_access": false, "max_age_hours": float64(720)},
+			}),
+			want: maxAgeHoursCacheOnly,
+		},
+		{
+			name: "responses disabled",
+			opts: extractAndParseResponses(t, map[string]any{
+				"tools": []any{map[string]any{"type": "web_search", "external_web_access": false, "max_age_hours": float64(720)}},
+			}),
+			want: maxAgeHoursCacheOnly,
+		},
+		{
+			name: "explicitly enabled",
+			opts: extractAndParseChat(t, map[string]any{
+				"web_search_options": map[string]any{"external_web_access": true},
+			}),
+			want: modelMaxAge,
+		},
+	}
+	for _, tc := range cases {
+		args := map[string]any{"query": "news", "max_age_hours": modelMaxAge}
+		applyWebSearchOptionsToToolCall(routerSearchToolName, args, tc.opts)
+		if args["max_age_hours"] != tc.want {
+			t.Errorf("%s: max_age_hours = %v, want %d", tc.name, args["max_age_hours"], tc.want)
+		}
+	}
+}
+
 func TestApplyToFetchArgs_ForwardsExcludedDomainsOnly(t *testing.T) {
 	zero := 0
 	opts := webSearchOptions{

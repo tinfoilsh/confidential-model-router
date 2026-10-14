@@ -14,8 +14,8 @@ import (
 //
 // Invariants the registry enforces at construction time:
 //   - Every session corresponds to exactly one profile.
-//   - Every tool advertised by any session is reachable via
-//     sessionFor(name).
+//   - Every tool advertised by any session, except those the request
+//     disabled, is reachable via sessionFor(name).
 //   - No two profiles advertise a tool with the same name (conflicts
 //     are fatal at Handle() time so mis-configured deployments surface
 //     loud errors instead of routing tool calls non-deterministically).
@@ -55,9 +55,13 @@ type sessionEntry struct {
 // dial argument is injected so tests can drive the registry without
 // standing up real MCP servers; production callers pass
 // connectOneToolSession which is the real attested-dial path.
+//
+// disabledTools lists model-facing tool names to leave out entirely: the
+// model never sees them and the router has no route to dispatch them.
 func buildSessionRegistry(
 	ctx context.Context,
 	profiles []Profile,
+	disabledTools map[string]struct{},
 	dial func(context.Context, Profile) (*mcp.ClientSession, error),
 ) (*sessionRegistry, error) {
 	r := &sessionRegistry{
@@ -83,8 +87,12 @@ func buildSessionRegistry(
 			return nil, fmt.Errorf("profile %q list_tools: %w", profile.Name, err)
 		}
 
+		tools := make([]*mcp.Tool, 0, len(toolsResult.Tools))
 		for _, tool := range toolsResult.Tools {
 			outwardName := outwardRouterToolName(profile.Name, tool.Name)
+			if _, disabled := disabledTools[outwardName]; disabled {
+				continue
+			}
 			if existing, clash := r.byTool[outwardName]; clash {
 				// We deliberately fail LOUD on overlapping tool names
 				// rather than silently routing to whichever session
@@ -102,14 +110,15 @@ func buildSessionRegistry(
 			r.byTool[outwardName] = session
 			r.dispatchByTool[outwardName] = tool.Name
 			r.owned[outwardName] = struct{}{}
+			tools = append(tools, tool)
 		}
 
 		r.entries = append(r.entries, sessionEntry{
 			profile: profile,
 			session: session,
-			tools:   toolsResult.Tools,
+			tools:   tools,
 		})
-		for _, tool := range toolsResult.Tools {
+		for _, tool := range tools {
 			r.tools = append(r.tools, outwardRouterTool(profile.Name, tool))
 		}
 	}

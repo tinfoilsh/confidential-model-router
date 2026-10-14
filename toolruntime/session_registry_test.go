@@ -87,7 +87,7 @@ func TestSessionRegistryRoutesTwoProfilesToSeparateSessions(t *testing.T) {
 		"fake_profile": fakeSession,
 	})
 
-	r, err := buildSessionRegistry(context.Background(), profiles, dial)
+	r, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err != nil {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}
@@ -127,6 +127,33 @@ func TestSessionRegistryRoutesTwoProfilesToSeparateSessions(t *testing.T) {
 	}
 }
 
+// TestSessionRegistryLeavesOutDisabledTools pins that a disabled tool is
+// neither shown to the model nor routable, so a call to it can never reach
+// the MCP server.
+func TestSessionRegistryLeavesOutDisabledTools(t *testing.T) {
+	searchSession := startTestMCPServer(t, "websearch", mcpSearchToolName, mcpFetchToolName)
+	dial := dialFromMap(map[string]*mcp.ClientSession{WebSearch.Name: searchSession})
+	disabled := map[string]struct{}{routerFetchToolName: {}}
+
+	r, err := buildSessionRegistry(context.Background(), []Profile{WebSearch}, disabled, dial)
+	if err != nil {
+		t.Fatalf("buildSessionRegistry: %v", err)
+	}
+
+	if _, ok := r.sessionFor(routerFetchToolName); ok {
+		t.Errorf("sessionFor(%q) must not route a disabled tool", routerFetchToolName)
+	}
+	if _, ok := r.ownedTools()[routerFetchToolName]; ok {
+		t.Errorf("ownedTools must not include disabled %q", routerFetchToolName)
+	}
+	if _, ok := ownedToolNames(r.allTools())[routerFetchToolName]; ok {
+		t.Errorf("allTools must not advertise disabled %q", routerFetchToolName)
+	}
+	if got, ok := r.sessionFor(routerSearchToolName); !ok || got != searchSession {
+		t.Errorf("sessionFor(%q) = %v, %v; want the websearch session", routerSearchToolName, got, ok)
+	}
+}
+
 // TestSessionRegistryFailsLoudOnToolNameConflict pins the
 // fail-loud-on-config-error invariant: if two active profiles
 // advertise the same tool name, construction returns an error
@@ -146,7 +173,7 @@ func TestSessionRegistryFailsLoudOnToolNameConflict(t *testing.T) {
 		"shadow":  secondSession,
 	})
 
-	r, err := buildSessionRegistry(context.Background(), profiles, dial)
+	r, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err == nil {
 		t.Fatalf("expected conflict error, got registry with profiles %v", r.profileNames())
 	}
@@ -179,7 +206,7 @@ func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 		}
 	}
 
-	r, err := buildSessionRegistry(context.Background(), profiles, dial)
+	r, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err == nil {
 		t.Fatalf("expected dial error, got registry")
 	}
@@ -202,7 +229,7 @@ func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 // auto-continue-only path: the router may need toolruntime even when no
 // MCP-backed profile is active.
 func TestSessionRegistryEmptyProfilesBuildsEmptyRegistry(t *testing.T) {
-	r, err := buildSessionRegistry(context.Background(), nil, func(context.Context, Profile) (*mcp.ClientSession, error) {
+	r, err := buildSessionRegistry(context.Background(), nil, nil, func(context.Context, Profile) (*mcp.ClientSession, error) {
 		t.Fatal("dial should not be invoked for empty profile list")
 		return nil, nil
 	})
@@ -223,7 +250,7 @@ func TestSessionRegistryCloseAllIsIdempotent(t *testing.T) {
 	profiles := []Profile{{Name: "only", ToolServerModel: "only"}}
 	dial := dialFromMap(map[string]*mcp.ClientSession{"only": session})
 
-	r, err := buildSessionRegistry(context.Background(), profiles, dial)
+	r, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err != nil {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}

@@ -27,8 +27,9 @@ type Descriptor struct {
 	// (model-facing) name. Entries not in the map keep their name.
 	Aliases map[string]string
 
-	// System prompt injected when active
-	Prompt func(harmony bool) string
+	// System prompt injected when active. tools is the set of model-facing
+	// tool names available to the request.
+	Prompt func(harmony bool, tools map[string]struct{}) string
 
 	// Lifts per-request options from RouterOptions onto the session registry as mcp.Meta
 	AttachMeta func(*sessionRegistry, *RouterOptions)
@@ -65,7 +66,7 @@ var profiles = []Descriptor{
 		Profile:           CodeExecution,
 		ResponsesToolType: "code_execution",
 		OptionsActive:     func(o *RouterOptions) bool { return o.CodeExecution != nil },
-		Prompt:            func(harmony bool) string { return codeExecutionInstructions },
+		Prompt:            func(bool, map[string]struct{}) string { return codeExecutionInstructions },
 		AttachMeta:        attachCodeExecutionMeta,
 	},
 }
