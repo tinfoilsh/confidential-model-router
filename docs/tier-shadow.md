@@ -28,8 +28,8 @@ The candidate order is reserved tier 0, shared tier 0, reserved tier 1, shared
 tier 1, unknown load, then overload rejection. Tier 0 has no queue and running
 below the candidate limit; tier 1 has not tripped the candidate queue guard.
 Queue recovery uses `clear_requests_waiting`, defaulting to half the trip mark.
-Public callers use shared hosts only. Priority and internal dispatches retain
-their serve-through-overload semantics in the comparison.
+Callers without a reservation use shared hosts only. Priority and internal
+dispatches retain their serve-through-overload semantics in the comparison.
 
 `router_tier_shadow_decisions_total` compares `actual` and `proposed` outcomes
 by model and caller pool. Outcomes are `reserved`, `shared`, `reject`,
@@ -48,6 +48,7 @@ hypothetical cache hit or sending a duplicate inference request.
 
 Shadow adds one separate metrics scrape per second per applicable backend,
 per router, at a nominal cadence. It cannot update live overload state.
+Scrapes reject redirects and responses exceeding 1 MiB after decompression.
 Monitor `router_tier_shadow_scrapes_total`,
 `router_tier_shadow_backend_requests`,
 `router_tier_shadow_sample_timestamp_seconds`, and
@@ -55,7 +56,8 @@ Monitor `router_tier_shadow_scrapes_total`,
 Missing counts affect only policies that require them; samples older than
 15 seconds are unknown.
 
-Start with a small router canary and compare its existing latency and error
-metrics with other routers. Shadow decisions describe today's observed load;
-they do not predict the changed queues, cache reuse, or latency after routing
-is enforced. Stream output-event gaps also remain distinct from per-token ITL.
+Deploy the same release to all routers with shadow disabled, then enable it
+and compare existing latency and error metrics before and after. Shadow
+decisions describe today's observed load; they do not predict the changed
+queues, cache reuse, or latency after routing is enforced. Stream output-event
+gaps also remain distinct from per-token ITL.
