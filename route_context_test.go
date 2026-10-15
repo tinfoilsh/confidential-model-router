@@ -94,7 +94,7 @@ func TestRouteContextInvalidResponsesAdmitWithoutDecision(t *testing.T) {
 		`{"rate_limit":{"decision":"demote","retry_after_seconds":1}}`,
 		`{"rate_limit":{"decision":"demote","reason":"tokens","retry_after_seconds":1}}`,
 		`{"rate_limit":{"decision":"allowed","reason":"requests","retry_after_seconds":0}}`,
-		`{"rate_limit":{"decision":"exempt","reason":"tokens","retry_after_seconds":0}}`,
+		`{"org_id":"org_test","priority":-1,"rate_limit":{"decision":"exempt","retry_after_seconds":0}}`,
 		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"requests":{"limit":10}}}`,
 		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"tokens":{"limit":10,"used":-1}}}`,
 		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0}} {}`,
@@ -294,11 +294,11 @@ func TestRouteContextQuotaDenialHidesUnrecognizedBodies(t *testing.T) {
 }
 
 func TestRouteContextDecisionReasonContract(t *testing.T) {
-	for _, decision := range []string{decisionAllowed, decisionExempt, decisionDemote, decisionRejected, "unknown"} {
+	for _, decision := range []string{decisionAllowed, decisionDemote, decisionRejected, "unknown"} {
 		for _, reason := range []string{"", rateReasonRequests, rateReasonTokens, "unknown"} {
 			for _, retry := range []int64{-1, 0, 1} {
 				t.Run(fmt.Sprintf("%s/%s/%d", decision, reason, retry), func(t *testing.T) {
-					valid := retry >= 0 && ((decision == decisionAllowed || decision == decisionExempt) && reason == "" || decision == decisionDemote && reason == rateReasonRequests || decision == decisionRejected && retry > 0 && (reason == rateReasonRequests || reason == rateReasonTokens))
+					valid := retry >= 0 && (decision == decisionAllowed && reason == "" || decision == decisionDemote && reason == rateReasonRequests || decision == decisionRejected && retry > 0 && (reason == rateReasonRequests || reason == rateReasonTokens))
 					beforeSeries := testutil.CollectAndCount(manager.RateLimitRejectionsByReasonTotal)
 					beforeRejections := testutil.ToFloat64(manager.RateLimitRejectionsTotal.WithLabelValues(admissionTestModel))
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -327,14 +327,14 @@ func TestRouteContextDecisionReasonContract(t *testing.T) {
 func TestRouteContextQuotaDetailsDoNotOverrideDecision(t *testing.T) {
 	for _, payload := range []string{
 		`{"rate_limit":{"decision":"allowed","retry_after_seconds":0,"requests":{"limit":0,"used":10},"tokens":{"limit":1,"used":100}}}`,
-		`{"rate_limit":{"decision":"exempt","retry_after_seconds":0}}`,
+		`{"priority":-1,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`,
 		`{"rate_limit":{"decision":"demote","reason":"requests","retry_after_seconds":1,"requests":{"limit":100,"used":0}}}`,
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, payload) }))
-		_, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
+		resolved, err := newRouteContextClient(server.URL).fetchDecision(context.Background(), "tk_test", admissionTestModel)
 		server.Close()
-		if err != nil {
-			t.Fatalf("valid CP decision overridden by optional details: %v", err)
+		if err != nil || resolved.RateLimit == nil {
+			t.Fatalf("valid CP decision overridden or discarded by optional details: %+v, %v", resolved, err)
 		}
 	}
 }

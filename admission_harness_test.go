@@ -289,12 +289,9 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "realtime default", path: "/v1/realtime?intent=transcription", model: "voxtral-mini-4b-realtime", upgrade: true},
 	}
 	// Quota decisions and the configured priority are independent grants.
-	// exempt with a priority is what control planes before the split sent;
-	// priority with demote or rejected is what a priority-only organization
-	// gets after it.
 	for _, grant := range []struct{ decision, priority string }{
 		{decisionAllowed, ""}, {decisionDemote, ""}, {decisionRejected, ""},
-		{decisionExempt, "-2"}, {decisionDemote, "-2"}, {decisionRejected, "-2"},
+		{decisionAllowed, "-2"}, {decisionDemote, "-2"}, {decisionRejected, "-2"},
 	} {
 		decision := grant.decision
 		t.Run(decision+"/priority="+grant.priority, func(t *testing.T) {
@@ -689,15 +686,14 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 }
 
 // TestAdmissionHandlerOverloadPriority pins that only the configured priority
-// admits a caller through backend overload: the quota decision, including the
-// legacy exempt value on its own, never does.
+// admits a caller through backend overload: the quota decision never does.
 func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 	for _, tc := range []struct {
 		decision, priority string
 		status             int
 	}{
-		{decisionAllowed, "", 503}, {decisionDemote, "", 503}, {decisionExempt, "", 503},
-		{decisionExempt, `,"priority":-1`, 200}, {decisionDemote, `,"priority":-1`, 200},
+		{decisionAllowed, "", 503}, {decisionDemote, "", 503},
+		{decisionAllowed, `,"priority":-1`, 200}, {decisionDemote, `,"priority":-1`, 200},
 		{decisionAllowed, `,"priority":0`, 200},
 	} {
 		t.Run(tc.decision+tc.priority, func(t *testing.T) {
