@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"compress/gzip"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ const (
 	shadowTestOrg            = "example-org"
 	shadowTestRunningLimit   = 4
 	shadowTestLiveQueueLimit = 14
+	shadowTestBodyLimit      = 1 << 20
 )
 
 func shadowTestModelWithSamples(reservedWaiting, reservedRunning, sharedWaiting, sharedRunning float64) *Model {
@@ -189,5 +191,121 @@ func TestTierShadowReloadAndShutdown(t *testing.T) {
 	}
 	if e.metrics.currentConfig() != nil || e.metrics.overloaded.Load() {
 		t.Fatal("shadow configuration changed the live policy")
+	}
+}
+
+func TestTierShadowRejectsRedirects(t *testing.T) {
+	previousKey, _ := pollAPIKey.Load().(string)
+	SetMetricsPollAPIKey("shadow-test-token")
+	t.Cleanup(func() { SetMetricsPollAPIKey(previousKey) })
+	for _, downgrade := range []bool{false, true} {
+		t.Run(fmt.Sprintf("downgrade_%v", downgrade), func(t *testing.T) {
+			var redirected, authenticated atomic.Int64
+			target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				redirected.Add(1)
+				fmt.Fprint(w, "vllm:num_requests_waiting 0\nvllm:num_requests_running 0\n")
+			})
+			plain := httptest.NewServer(target)
+			defer plain.Close()
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/metrics" {
+					target.ServeHTTP(w, r)
+					return
+				}
+				if r.Header.Get("Authorization") == "Bearer shadow-test-token" {
+					authenticated.Add(1)
+				}
+				location := "/redirected"
+				if downgrade {
+					location = plain.URL
+				}
+				http.Redirect(w, r, location, http.StatusTemporaryRedirect)
+			}))
+			defer server.Close()
+			s := newTierShadowMetrics(strings.TrimPrefix(server.URL, "https://"), shadowTestModel)
+			s.client.Transport = server.Client().Transport
+			defer s.stop()
+			s.scrape(t.Context())
+			if authenticated.Load() != 1 || redirected.Load() != 0 || !s.sample.collected.IsZero() {
+				t.Fatalf("redirect followed: initial authenticated=%d redirected=%d sample=%v", authenticated.Load(), redirected.Load(), s.sample)
+			}
+		})
+	}
+}
+
+func TestTierShadowScrapeSizeLimit(t *testing.T) {
+	const counts = "vllm:num_requests_waiting 0\nvllm:num_requests_running 0\n"
+	for _, compressed := range []bool{false, true} {
+		for _, size := range []int{shadowTestBodyLimit, shadowTestBodyLimit + 1} {
+			t.Run(fmt.Sprintf("compressed_%v_size_%d", compressed, size), func(t *testing.T) {
+				body := counts + "#" + strings.Repeat("x", size-len(counts)-2) + "\n"
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if compressed {
+						w.Header().Set("Content-Encoding", "gzip")
+						writer := gzip.NewWriter(w)
+						defer writer.Close()
+						fmt.Fprint(writer, body)
+						return
+					}
+					fmt.Fprint(w, body)
+				}))
+				defer server.Close()
+				s := newTierShadowMetrics(strings.TrimPrefix(server.URL, "https://"), shadowTestModel)
+				s.client.Transport = server.Client().Transport
+				defer s.stop()
+				s.scrape(t.Context())
+				if accepted := !s.sample.collected.IsZero(); accepted != (size == shadowTestBodyLimit) {
+					t.Fatalf("scrape of %d bytes accepted=%v", size, accepted)
+				}
+			})
+		}
+	}
+}
+
+func TestTierShadowInvalidScrapePreservesSample(t *testing.T) {
+	var body atomic.Value
+	body.Store("vllm:num_requests_waiting 2\nvllm:num_requests_running 1\n")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body.Load().(string))
+	}))
+	defer server.Close()
+	s := newTierShadowMetrics(strings.TrimPrefix(server.URL, "https://"), shadowTestModel)
+	s.client.Transport = server.Client().Transport
+	defer s.stop()
+	s.scrape(t.Context())
+	before := s.sample
+	if !before.hasWaiting || !before.hasRunning {
+		t.Fatal("valid scrape did not initialize the sample")
+	}
+	for _, invalid := range []string{
+		"vllm:num_requests_running NaN\n",
+		"vllm:num_requests_running -1\n",
+		"vllm:num_requests_running{engine=\"0\"} 1e308\nvllm:num_requests_running{engine=\"1\"} 1e308\n",
+	} {
+		body.Store("vllm:num_requests_waiting 0\n" + invalid)
+		s.scrape(t.Context())
+		if s.sample != before || testutil.ToFloat64(tierShadowBackendRequests.WithLabelValues(s.model, s.host, shadowWaiting)) != 2 ||
+			testutil.ToFloat64(tierShadowBackendRequests.WithLabelValues(s.model, s.host, shadowRunning)) != 1 ||
+			testutil.ToFloat64(tierShadowSampleTimestamp.WithLabelValues(s.model, s.host)) != float64(before.collected.Unix()) {
+			t.Errorf("invalid counts changed the committed sample or exported gauges: %s", invalid)
+		}
+	}
+}
+
+func TestTierShadowUnknownReservationPreservesPolicy(t *testing.T) {
+	m := shadowTestModelWithSamples(0, shadowTestRunningLimit, 0, 0)
+	policy := m.shadowPoliciesByOrg[shadowTestOrg]
+	reservations := append([]config.ReservationConfig(nil), m.Reservations...)
+	reservations = append(reservations, config.ReservationConfig{
+		OrgIDs: []string{shadowTestOrg}, Enclaves: []string{"unknown.example"}, TierShadow: m.TierShadow,
+	})
+	m.applyReservations(shadowTestModel, reservations, []string{"reserved.example", "shared.example"})
+	if m.shadowPoliciesByOrg[shadowTestOrg] != policy {
+		t.Fatal("unknown hosts replaced the reserved caller's shadow policy")
+	}
+	reservations[1].Enclaves = []string{"reserved.example"}
+	m.applyReservations(shadowTestModel, reservations, []string{"reserved.example", "shared.example"})
+	if m.shadowPoliciesByOrg[shadowTestOrg] != m.TierShadow {
+		t.Fatal("last recognized reservation did not replace the shadow policy")
 	}
 }

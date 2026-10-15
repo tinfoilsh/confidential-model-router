@@ -101,6 +101,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				set = make(map[string]bool, len(res.Enclaves))
 				byOrg[orgID] = set
 			}
+			recognized := false
 			for _, host := range res.Enclaves {
 				if !known[host] {
 					log.Warnf("reservation for org %s references unknown enclave %s, ignoring", orgID, host)
@@ -109,9 +110,13 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				set[host] = true
 				reserved[host] = true
 				overloads[host] = res.Overload
+				recognized = true
 			}
 			if len(set) == 0 {
 				delete(byOrg, orgID)
+				continue
+			}
+			if !recognized {
 				continue
 			}
 			policy := res.TierShadow

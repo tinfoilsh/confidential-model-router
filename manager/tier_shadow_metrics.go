@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"io"
 	"math"
 	"net/http"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 const (
 	tierShadowPollTimeout     = 5 * time.Second
+	tierShadowMaxBodyBytes    = 1 << 20
 	shadowRunning             = "running"
 	shadowWaiting             = "waiting"
 	shadowScrapeError         = "error"
@@ -53,6 +55,16 @@ type tierShadowMetrics struct {
 	queues      map[config.TierShadowConfig]bool
 }
 
+func newTierShadowMetrics(host, model string) *tierShadowMetrics {
+	return &tierShadowMetrics{host: host, model: model,
+		client: &http.Client{
+			Timeout: tierShadowPollTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}}
+}
+
 // The model lock serializes configuration and retirement. Shadow pollers
 // have no references to the live overload state or its metric collectors.
 func (m *Model) configureTierShadowLocked(e *Enclave) {
@@ -78,8 +90,7 @@ func (m *Model) configureTierShadowLocked(e *Enclave) {
 		return
 	}
 	if e.tierShadow == nil {
-		e.tierShadow = &tierShadowMetrics{host: e.host, model: e.modelName,
-			client: &http.Client{Timeout: tierShadowPollTimeout}}
+		e.tierShadow = newTierShadowMetrics(e.host, e.modelName)
 	}
 	s := e.tierShadow
 	s.mu.Lock()
@@ -142,19 +153,21 @@ func (s *tierShadowMetrics) scrape(ctx context.Context) {
 		return
 	}
 	parser := expfmt.NewTextParser(prommodel.UTF8Validation)
-	families, err := parser.TextToMetricFamilies(resp.Body)
-	if err != nil {
+	body := &io.LimitedReader{R: resp.Body, N: tierShadowMaxBodyBytes + 1}
+	families, err := parser.TextToMetricFamilies(body)
+	if err != nil || body.N == 0 {
 		return
 	}
 	sample := tierShadowSample{collected: time.Now()}
-	for _, metric := range []struct {
+	metrics := []struct {
 		state   string
 		value   *float64
 		present *bool
 	}{
 		{shadowWaiting, &sample.waiting, &sample.hasWaiting},
 		{shadowRunning, &sample.running, &sample.hasRunning},
-	} {
+	}
+	for _, metric := range metrics {
 		for _, value := range families[shadowRequestMetricPrefix+metric.state].GetMetric() {
 			var count float64
 			switch {
@@ -169,18 +182,23 @@ func (s *tierShadowMetrics) scrape(ctx context.Context) {
 				return
 			}
 			*metric.value += count
+			if math.IsInf(*metric.value, 0) {
+				return
+			}
 			*metric.present = true
-		}
-		if *metric.present {
-			tierShadowBackendRequests.WithLabelValues(s.model, s.host, metric.state).Set(*metric.value)
-		} else {
-			tierShadowBackendRequests.DeleteLabelValues(s.model, s.host, metric.state)
 		}
 	}
 	s.mu.Lock()
 	s.sample = sample
 	s.updateQueuesLocked()
 	s.mu.Unlock()
+	for _, metric := range metrics {
+		if *metric.present {
+			tierShadowBackendRequests.WithLabelValues(s.model, s.host, metric.state).Set(*metric.value)
+		} else {
+			tierShadowBackendRequests.DeleteLabelValues(s.model, s.host, metric.state)
+		}
+	}
 	tierShadowSampleTimestamp.WithLabelValues(s.model, s.host).Set(float64(sample.collected.Unix()))
 	result = shadowScrapeComplete
 	if !sample.hasWaiting || !sample.hasRunning {
