@@ -82,3 +82,26 @@ func ConfigureReservationsForTest(em *EnclaveManager, name string, reservations 
 	model.applyReservations(name, reservations, hosts)
 	return nil
 }
+
+func ConfigureTierShadowForTest(em *EnclaveManager, name string, policy config.TierShadowConfig, waiting, running float64) error {
+	model, ok := em.GetModel(name)
+	if !ok {
+		return fmt.Errorf("model %s not configured", name)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	model.TierShadow = &policy
+	for _, enclave := range model.Enclaves {
+		enclave.tierShadow = &tierShadowMetrics{
+			host: enclave.host, model: name,
+			sample: tierShadowSample{waiting: waiting, running: running, hasWaiting: true, hasRunning: true, collected: time.Now()},
+			queues: map[config.TierShadowConfig]bool{policy: false},
+		}
+		enclave.tierShadow.updateQueuesLocked()
+	}
+	return nil
+}
+
+func TierShadowCounterForTest(model, actual, proposed string) prometheus.Counter {
+	return tierShadowDecisions.WithLabelValues(model, shadowSharedPool, actual, proposed, shadowDifferentAdmission)
+}

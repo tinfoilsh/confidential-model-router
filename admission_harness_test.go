@@ -174,6 +174,39 @@ func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
 	}
 }
 
+func TestAdmissionHarnessTierShadowDoesNotChangeDispatch(t *testing.T) {
+	for _, overloaded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("live_overloaded_%v", overloaded), func(t *testing.T) {
+			var calls atomic.Int64
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				io.WriteString(w, `{}`)
+			}), "", overloaded)
+			waiting, actual, proposed := float64(1), "shared", "reject"
+			wantStatus, wantCalls := http.StatusOK, int64(1)
+			if overloaded {
+				waiting, actual, proposed = 0, "reject", "shared"
+				wantStatus, wantCalls = http.StatusServiceUnavailable, 0
+			}
+			if err := manager.ConfigureTierShadowForTest(em, admissionTestModel, config.TierShadowConfig{MaxRequestsWaiting: 1}, waiting, 0); err != nil {
+				t.Fatal(err)
+			}
+			counter := manager.TierShadowCounterForTest(admissionTestModel, actual, proposed)
+			before := testutil.ToFloat64(counter)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test"))
+			if rec.Code != wantStatus || calls.Load() != wantCalls {
+				t.Fatalf("shadow changed live behavior: HTTP=%d backend calls=%d", rec.Code, calls.Load())
+			}
+			if testutil.ToFloat64(counter)-before != 1 {
+				t.Fatal("shadow disagreement was not observed")
+			}
+		})
+	}
+}
+
 func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	const unknownModel = "unknown-model"
 	var admissions, backends atomic.Int64

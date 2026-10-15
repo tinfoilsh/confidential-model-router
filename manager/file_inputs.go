@@ -128,6 +128,9 @@ func (em *EnclaveManager) ConvertFile(
 	// pools apply via the caller org in ctx.
 	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
 	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
+	model.ObserveTierShadow(TierShadowObservation{
+		Model: "doc-upload", OrgID: CallerOrgFromContext(ctx), Actual: enclave, ServeThrough: true,
+	})
 	if enclave == nil {
 		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)
 	}

@@ -1054,6 +1054,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		} else {
 			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
 		}
+		model.ObserveTierShadow(manager.TierShadowObservation{
+			Model: modelName, OrgID: admission.OrgID, Order: cacheRouteOrder, Actual: enclave,
+			Rejected: overloaded, Probe: probeClaim != nil, CanProbe: true, ServeThrough: hasConfiguredPriority,
+		})
 		if enclave == nil {
 			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))

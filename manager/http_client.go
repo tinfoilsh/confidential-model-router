@@ -40,6 +40,10 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 
 	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
 	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill)
+	model.ObserveTierShadow(TierShadowObservation{
+		Model: modelName, OrgID: CallerOrgFromContext(ctx), Order: order, Actual: enclave,
+		Probe: claim != nil, CanProbe: claimProbes, ServeThrough: true,
+	})
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}

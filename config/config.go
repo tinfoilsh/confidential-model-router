@@ -39,7 +39,8 @@ type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 	// A nil block inherits the model policy; a present block replaces it.
-	Overload *OverloadConfig `yaml:"overload,omitempty" json:"overload,omitempty"`
+	Overload   *OverloadConfig   `yaml:"overload,omitempty" json:"overload,omitempty"`
+	TierShadow *TierShadowConfig `yaml:"tier_shadow,omitempty" json:"tier_shadow,omitempty"`
 }
 
 // Model represents the configuration for a single model. Admission policy is
@@ -50,7 +51,20 @@ type Model struct {
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	TierShadow   *TierShadowConfig   `yaml:"tier_shadow,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
+}
+
+// TierShadowConfig enables observation only. Its thresholds never affect
+// live routing; an omitted reservation block inherits the model's block.
+type TierShadowConfig struct {
+	MaxRequestsRunning   int `yaml:"max_requests_running"`
+	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
+	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
+}
+
+func (c TierShadowConfig) Marks() (int, int) {
+	return (&OverloadConfig{MaxRequestsWaiting: c.MaxRequestsWaiting, ClearRequestsWaiting: c.ClearRequestsWaiting}).Marks()
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
