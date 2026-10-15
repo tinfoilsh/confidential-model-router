@@ -36,6 +36,7 @@ type Enclave struct {
 	attestation *attestationState
 	proxy       *httputil.ReverseProxy
 	metrics     *enclaveMetrics
+	tierShadow  *tierShadowMetrics
 	cb          *circuitBreaker
 	pricing     func(string) (ModelPricing, bool)
 
@@ -52,6 +53,7 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
+	TierShadow        *config.TierShadowConfig `json:"-"`
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
 	// exposed there.
@@ -65,6 +67,7 @@ type Model struct {
 	reservedByOrg        map[string]map[string]bool // org id -> its reserved host set
 	sharedHosts          map[string]bool            // unreserved hosts; nil when no reservations
 	reservationOverloads map[string]*config.OverloadConfig
+	shadowPoliciesByOrg  map[string]*config.TierShadowConfig
 
 	mu sync.RWMutex
 }
@@ -84,6 +87,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	byOrg := make(map[string]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
 	overloads := make(map[string]*config.OverloadConfig)
+	shadowPolicies := make(map[string]*config.TierShadowConfig)
 	for _, res := range reservations {
 		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
 			continue
@@ -97,6 +101,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				set = make(map[string]bool, len(res.Enclaves))
 				byOrg[orgID] = set
 			}
+			recognized := false
 			for _, host := range res.Enclaves {
 				if !known[host] {
 					log.Warnf("reservation for org %s references unknown enclave %s, ignoring", orgID, host)
@@ -105,14 +110,25 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				set[host] = true
 				reserved[host] = true
 				overloads[host] = res.Overload
+				recognized = true
 			}
 			if len(set) == 0 {
 				delete(byOrg, orgID)
+				continue
 			}
+			if !recognized {
+				continue
+			}
+			policy := res.TierShadow
+			if policy == nil {
+				policy = m.TierShadow
+			}
+			shadowPolicies[orgID] = policy
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
 	m.reservationOverloads = overloads
+	m.shadowPoliciesByOrg = shadowPolicies
 	if len(byOrg) == 0 {
 		m.reservedByOrg = nil
 		m.sharedHosts = nil
@@ -330,6 +346,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		pricing:     em.ModelPricing,
 	})
 	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host))
+	model.configureTierShadowLocked(model.Enclaves[host])
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
@@ -922,6 +939,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		CacheRoute:        modelConfig.CacheRoute,
+		TierShadow:        modelConfig.TierShadow,
 	}
 	model.setConfiguredHosts(modelConfig.Hostnames)
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
@@ -980,9 +998,11 @@ func (em *EnclaveManager) sync() error {
 			model.setConfiguredHosts(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.CacheRoute = configModel.CacheRoute
+			model.TierShadow = configModel.TierShadow
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for host, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.overloadForHostLocked(host))
+				model.configureTierShadowLocked(enclave)
 			}
 			cacheroute.SetMode(modelName, configModel.CacheRoute)
 			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
@@ -1083,6 +1103,9 @@ func (e *Enclave) shutdown() {
 	}
 	if e.metrics != nil {
 		e.metrics.shutdown()
+	}
+	if e.tierShadow != nil {
+		e.tierShadow.stop()
 	}
 	if e.cb != nil {
 		e.cb.Retire()

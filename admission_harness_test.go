@@ -174,6 +174,63 @@ func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
 	}
 }
 
+func TestAdmissionHarnessTierShadowDoesNotChangeDispatch(t *testing.T) {
+	for _, overloaded := range []bool{false, true} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("live_overloaded_%v_streaming_%v", overloaded, streaming), func(t *testing.T) {
+				var calls atomic.Int64
+				responseBody, contentType := `{}`, "application/json"
+				if streaming {
+					responseBody, contentType = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n", "text/event-stream"
+				}
+				em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+				}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls.Add(1)
+					w.Header().Set("Content-Type", contentType)
+					io.WriteString(w, responseBody)
+				}), "", overloaded)
+				waiting, actual, proposed := float64(1), "shared", "reject"
+				wantStatus, wantCalls := http.StatusOK, int64(1)
+				if overloaded {
+					waiting, actual, proposed = 0, "reject", "shared"
+					wantStatus, wantCalls = http.StatusServiceUnavailable, 0
+				}
+				requestBody := fmt.Sprintf(`{"model":"gpt-oss-120b","messages":[],"stream":%t}`, streaming)
+				baseline := httptest.NewRecorder()
+				handler.ServeHTTP(baseline, admissionRequest("/v1/chat/completions", requestBody, "tk_test"))
+				if baseline.Code != wantStatus || calls.Swap(0) != wantCalls {
+					t.Fatalf("unexpected live baseline: HTTP=%d", baseline.Code)
+				}
+				if !overloaded && baseline.Body.String() != responseBody {
+					t.Fatal("baseline did not return the upstream response")
+				}
+				if err := manager.ConfigureTierShadowForTest(em, admissionTestModel, config.TierShadowConfig{MaxRequestsWaiting: 1}, waiting, 0); err != nil {
+					t.Fatal(err)
+				}
+				counter := manager.TierShadowCounterForTest(admissionTestModel, actual, proposed)
+				before := testutil.ToFloat64(counter)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", requestBody, "tk_test"))
+				if rec.Code != wantStatus || calls.Load() != wantCalls {
+					t.Fatalf("shadow changed live behavior: HTTP=%d backend calls=%d", rec.Code, calls.Load())
+				}
+				if rec.Body.String() != baseline.Body.String() {
+					t.Fatal("shadow changed the response body")
+				}
+				for _, header := range []string{"Content-Type", "Retry-After", "Tinfoil-Enclave"} {
+					if rec.Header().Get(header) != baseline.Header().Get(header) {
+						t.Fatalf("shadow changed response header %s", header)
+					}
+				}
+				if testutil.ToFloat64(counter)-before != 1 {
+					t.Fatal("shadow disagreement was not observed")
+				}
+			})
+		}
+	}
+}
+
 func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	const unknownModel = "unknown-model"
 	var admissions, backends atomic.Int64

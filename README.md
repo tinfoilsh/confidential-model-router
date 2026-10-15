@@ -28,6 +28,8 @@ Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.s
 - **[safeguards/](safeguards/)**: Asynchronous acceptable-use checks for first-party chat
 - **[billing/](billing/)**: Usage reporting
 
+Proposed load tiers can be evaluated without changing routing using [tier shadow observation](docs/tier-shadow.md).
+
 ## Reporting Vulnerabilities
 
 Please report security vulnerabilities by either:
