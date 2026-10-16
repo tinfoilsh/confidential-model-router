@@ -31,7 +31,7 @@ func TestExecuteRouterToolCallDispatchesToCorrectProfile(t *testing.T) {
 		"fake_profile": fakeSession,
 	})
 
-	registry, err := buildSessionRegistry(context.Background(), profiles, dial)
+	registry, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err != nil {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestExecuteRouterToolCallPreservesStructuredSearchMetadata(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = session.Close() })
 
-	registry, err := buildSessionRegistry(ctx, []Profile{{Name: "web_search", ToolServerModel: "websearch"}}, dialFromMap(map[string]*mcp.ClientSession{"web_search": session}))
+	registry, err := buildSessionRegistry(ctx, []Profile{{Name: "web_search", ToolServerModel: "websearch"}}, nil, dialFromMap(map[string]*mcp.ClientSession{"web_search": session}))
 	if err != nil {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestExecuteRouterToolCallUnknownToolReturnsHumanizedError(t *testing.T) {
 	profiles := []Profile{{Name: "web_search", ToolServerModel: "websearch"}}
 	dial := dialFromMap(map[string]*mcp.ClientSession{"web_search": searchSession})
 
-	registry, err := buildSessionRegistry(context.Background(), profiles, dial)
+	registry, err := buildSessionRegistry(context.Background(), profiles, nil, dial)
 	if err != nil {
 		t.Fatalf("buildSessionRegistry: %v", err)
 	}

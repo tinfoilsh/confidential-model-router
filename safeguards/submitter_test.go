@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
@@ -37,24 +38,58 @@ func TestSubmitter_DeliversCompletedConversation(t *testing.T) {
 	}
 }
 
-func TestSubmitter_RejectsOversizedPayloads(t *testing.T) {
+func TestSubmitter_TrimsOversizedHistory(t *testing.T) {
+	big := strings.Repeat("x", maxSubmissionBytes)
 	for _, tc := range []struct {
-		name       string
-		credential string
-		messages   []Message
+		name     string
+		messages []Message
 	}{
-		{"history", "token", []Message{{Role: "user", Content: strings.Repeat("x", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
-		{"escaping", "token", []Message{{Role: "assistant", Content: strings.Repeat("\x00", maxSubmissionBytes/2)}}},
-		{"credential", strings.Repeat("x", maxSubmissionBytes), []Message{{Role: "assistant", Content: "reply"}}},
-		{"many messages", "token", append(make([]Message, maxSubmissionBytes/messageJSONOverhead), Message{Role: "assistant", Content: "reply"})},
+		{"history", []Message{{Role: "user", Content: big + "the question"}, {Role: "assistant", Content: "reply"}}},
+		{"older turns", []Message{{Role: "user", Content: big}, {Role: "assistant", Content: big}, {Role: "user", Content: "latest"}, {Role: "assistant", Content: "reply"}}},
+		{"escaping", []Message{{Role: "assistant", Content: strings.Repeat("<\x00", maxSubmissionBytes/2)}}},
+		{"escaped reply", []Message{{Role: "user", Content: big}, {Role: "assistant", Content: strings.Repeat("<", maxSubmissionBytes/3)}}},
+		{"multibyte", []Message{{Role: "user", Content: strings.Repeat("é", maxSubmissionBytes)}, {Role: "assistant", Content: "reply"}}},
+		{"many messages", append(make([]Message, maxSubmissionBytes/messageJSONOverhead), Message{Role: "assistant", Content: "reply"})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Submitter{pending: make(chan []byte, maxPending)}
-			s.Submit(tc.credential, "chat", tc.messages)
-			if len(s.pending) != 0 {
-				t.Fatal("oversized payload must not enter the queue")
+			s.Submit("token", "chat", tc.messages)
+			if len(s.pending) != 1 {
+				t.Fatal("oversized history must be trimmed, not dropped")
+			}
+			body := <-s.pending
+			if len(body) > maxSubmissionBytes {
+				t.Fatalf("body is %d bytes, want at most %d", len(body), maxSubmissionBytes)
+			}
+			var got submission
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatal(err)
+			}
+			offset := len(tc.messages) - len(got.Messages)
+			for i, m := range got.Messages {
+				want := tc.messages[offset+i]
+				if m.Role != want.Role {
+					t.Fatalf("message %d role = %q, want %q", i, m.Role, want.Role)
+				}
+				if i == 0 {
+					if !utf8.ValidString(m.Content) || !strings.HasSuffix(want.Content, m.Content) {
+						t.Fatal("the oldest kept message must be a valid trailing part of the original")
+					}
+					continue
+				}
+				if m.Content != want.Content {
+					t.Fatalf("message %d must be kept whole", i)
+				}
 			}
 		})
+	}
+}
+
+func TestSubmitter_RejectsOversizedCredential(t *testing.T) {
+	s := &Submitter{pending: make(chan []byte, maxPending)}
+	s.Submit(strings.Repeat("x", maxSubmissionBytes), "chat", []Message{{Role: "assistant", Content: "reply"}})
+	if len(s.pending) != 0 {
+		t.Fatal("a submission whose envelope alone is oversized must not enter the queue")
 	}
 }
 

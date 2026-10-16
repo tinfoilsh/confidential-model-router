@@ -93,7 +93,7 @@ func TestStreamedFetchCarriesRawExcerptsWithoutHarmonyCursors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	registry, err := buildSessionRegistry(ctx, []Profile{WebSearch}, dialFromMap(map[string]*mcp.ClientSession{WebSearch.Name: session}))
+	registry, err := buildSessionRegistry(ctx, []Profile{WebSearch}, nil, dialFromMap(map[string]*mcp.ClientSession{WebSearch.Name: session}))
 	if err != nil {
 		t.Fatal(err)
 	}

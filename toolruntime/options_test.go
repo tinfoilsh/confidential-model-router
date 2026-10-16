@@ -2,9 +2,13 @@ package toolruntime
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
 func unmarshal(t *testing.T, raw string) map[string]any {
@@ -110,6 +114,33 @@ func TestExtractRouterOptions_NonStringCredentialFieldsAreRejected(t *testing.T)
 	}`)
 	if _, err := ExtractRouterOptions(body); err == nil {
 		t.Fatalf("expected error for non-string accessToken")
+	}
+}
+
+func TestExtractRouterOptions_ExternalWebAccessMustBeBoolean(t *testing.T) {
+	cases := []struct {
+		body      string
+		wantParam string
+	}{
+		{`{"web_search_options": {"external_web_access": false}}`, ""},
+		{`{"web_search_options": {"external_web_access": true}}`, ""},
+		{`{"web_search_options": {"external_web_access": null}}`, ""},
+		{`{"tools": [{"type": "function", "name": "f", "external_web_access": "x"}, {"type": "web_search", "external_web_access": false}]}`, ""},
+		{`{"web_search_options": {"external_web_access": "false"}}`, "web_search_options.external_web_access"},
+		{`{"tools": [{"type": "function", "name": "f"}, {"type": "web_search", "external_web_access": 0}]}`, "tools[1].external_web_access"},
+	}
+	for _, tc := range cases {
+		_, err := ExtractRouterOptions(unmarshal(t, tc.body))
+		if tc.wantParam == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tc.body, err)
+			}
+			continue
+		}
+		var apiErr *manager.APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest || apiErr.Param != tc.wantParam {
+			t.Errorf("%s: got %v, want 400 for param %q", tc.body, err, tc.wantParam)
+		}
 	}
 }
 

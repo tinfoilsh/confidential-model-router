@@ -182,11 +182,12 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventFlags := parseTinfoilEventFlags(r.Header)
 	safetyOpts := parseSafetyOptIns(routerOpts, body)
+	searchOpts := parseWebSearchOptions(r.URL.Path, routerOpts, body)
 
 	dial := func(ctx context.Context, p Profile) (*mcp.ClientSession, error) {
 		return connectToolSession(ctx, em, p, r, rootRequestID, modelName, body, safetyOpts)
 	}
-	registry, err := buildSessionRegistry(ctx, profiles, dial)
+	registry, err := buildSessionRegistry(ctx, profiles, searchOpts.disabledRouterTools(), dial)
 	if err != nil {
 		return err
 	}
@@ -200,7 +201,7 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	}
 
 	harmony := isHarmonyModel(modelName)
-	promptResult := buildRouterPrompt(harmony, registry.profileNames())
+	promptResult := buildRouterPrompt(harmony, registry.profileNames(), registry.ownedTools())
 
 	streaming := isStream(body)
 	switch r.URL.Path {

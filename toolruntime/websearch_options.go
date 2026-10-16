@@ -24,7 +24,15 @@ const (
 
 	contentModeHighlights = "highlights"
 	contentModeText       = "text"
+
+	// maxAgeHoursCacheOnly tells the websearch server to serve page content
+	// from its provider's cache and never crawl a page live.
+	maxAgeHoursCacheOnly = -1
 )
+
+// fieldExternalWebAccess is OpenAI's `web_search` tool setting for live
+// internet access. Only an explicit false changes behavior.
+const fieldExternalWebAccess = "external_web_access"
 
 // webSearchOptions is the parsed view of the OpenAI web_search_options /
 // Responses `web_search` tool-config surface that we forward to the MCP tools.
@@ -55,6 +63,10 @@ type webSearchOptions struct {
 	// (the default) the field is omitted so spec-conformant clients are not
 	// billed for data they did not ask for.
 	includeActionSources bool
+	// cacheOnly mirrors OpenAI's `external_web_access: false`: searches
+	// only return cached page content and page fetching is withheld from
+	// the model.
+	cacheOnly bool
 }
 
 // normalizedContextSize returns search_context_size folded to its canonical
@@ -128,7 +140,9 @@ func (o webSearchOptions) effectiveMaxContentChars() int {
 
 // applyToSearchArgs merges forwarded options into a `search` tool-call
 // argument map produced by the model, leaving any model-supplied overrides in
-// place so it can still narrow the request on its own.
+// place so it can still narrow the request on its own. Cache-only mode is the
+// exception: it always overrides max_age_hours so neither the model nor the
+// caller can trigger a live crawl.
 func (o webSearchOptions) applyToSearchArgs(arguments map[string]any) {
 	if arguments == nil {
 		return
@@ -178,11 +192,22 @@ func (o webSearchOptions) applyToSearchArgs(arguments map[string]any) {
 			arguments["end_published_date"] = o.endPublishedDate
 		}
 	}
-	if o.maxAgeHours != nil {
+	if o.cacheOnly {
+		arguments["max_age_hours"] = maxAgeHoursCacheOnly
+	} else if o.maxAgeHours != nil {
 		if _, set := arguments["max_age_hours"]; !set {
 			arguments["max_age_hours"] = *o.maxAgeHours
 		}
 	}
+}
+
+// disabledRouterTools returns the model-facing router tools these options
+// turn off for the request.
+func (o webSearchOptions) disabledRouterTools() map[string]struct{} {
+	if !o.cacheOnly {
+		return nil
+	}
+	return map[string]struct{}{routerFetchToolName: {}}
 }
 
 // applyToFetchArgs merges forwarded options into a `fetch` tool-call argument
@@ -272,6 +297,15 @@ func parseResponsesWebSearchOptions(routerOpts *RouterOptions, body map[string]a
 		return opts
 	}
 	return webSearchOptions{}
+}
+
+// parseWebSearchOptions parses web search options from wherever the request's
+// API surface carries them.
+func parseWebSearchOptions(path string, routerOpts *RouterOptions, body map[string]any) webSearchOptions {
+	if path == "/v1/responses" {
+		return parseResponsesWebSearchOptions(routerOpts, body)
+	}
+	return parseChatWebSearchOptions(routerOpts, body)
 }
 
 // parseIncludeActionSources reports whether the request opted into OpenAI's
@@ -425,10 +459,10 @@ func extractDomainListFromFilterMap(filters map[string]any, key string) []string
 }
 
 // applyAdvancedSearchFields lifts the non-domain search knobs (content_mode,
-// max_content_chars, category, publish date range, max_age_hours) off a
-// caller-provided block into opts. Callers are responsible for the
-// surrounding domain/country parsing so this stays focused on the fields that
-// are identical across Chat and Responses surfaces.
+// max_content_chars, category, publish date range, max_age_hours,
+// external_web_access) off a caller-provided block into opts. Callers are
+// responsible for the surrounding domain/country parsing so this stays focused
+// on the fields that are identical across Chat and Responses surfaces.
 func applyAdvancedSearchFields(opts *webSearchOptions, raw map[string]any) {
 	if opts == nil || raw == nil {
 		return
@@ -451,6 +485,9 @@ func applyAdvancedSearchFields(opts *webSearchOptions, raw map[string]any) {
 	if n, ok := intValue(raw["max_age_hours"]); ok {
 		v := n
 		opts.maxAgeHours = &v
+	}
+	if access, ok := raw[fieldExternalWebAccess].(bool); ok && !access {
+		opts.cacheOnly = true
 	}
 }
 

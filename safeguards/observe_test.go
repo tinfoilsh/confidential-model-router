@@ -117,6 +117,31 @@ func TestObserve_ResponsesStreaming(t *testing.T) {
 	}
 }
 
+func TestObserve_TrimsOversizedHistory(t *testing.T) {
+	sidecar := newFakeSidecar(t)
+	s := NewSubmitter(sidecar.URL)
+	history, err := json.Marshal(map[string]any{"messages": []map[string]string{
+		{"role": "user", "content": strings.Repeat("x", maxSubmissionBytes)},
+		{"role": "assistant", "content": "earlier reply"},
+		{"role": "user", "content": "latest question"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle(t, s, "/v1/chat/completions", "Bearer chat-jwt", "chat-1",
+		string(history), "application/json", `{"choices":[{"message":{"content":"reply"}}]}`)
+	s.Close()
+
+	if len(sidecar.subs) != 1 {
+		t.Fatalf("submissions = %d, want 1", len(sidecar.subs))
+	}
+	msgs := sidecar.subs[0].Messages
+	latest := []Message{{Role: "assistant", Content: "earlier reply"}, {Role: "user", Content: "latest question"}, {Role: "assistant", Content: "reply"}}
+	if len(msgs) != 4 || !reflect.DeepEqual(msgs[1:], latest) || msgs[0].Content == "" {
+		t.Fatalf("got %d messages, want the latest turns whole after a truncated first turn", len(msgs))
+	}
+}
+
 func TestObserve_SkipsEmptyHistory(t *testing.T) {
 	sidecar := newFakeSidecar(t)
 	s := NewSubmitter(sidecar.URL)
