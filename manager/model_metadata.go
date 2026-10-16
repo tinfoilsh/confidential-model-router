@@ -113,7 +113,7 @@ func (em *EnclaveManager) AutoRouteStatus(modelName, orgID string) (eligible, he
 	if !found {
 		return false, false
 	}
-	primary, spill := model.ReservationPools(orgID)
+	primary, spill, _ := model.ReservationPools(orgID)
 	if primary != nil && len(primary) == 0 && len(spill) == 0 {
 		return false, false
 	}

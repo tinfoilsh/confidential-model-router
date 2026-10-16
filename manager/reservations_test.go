@@ -25,7 +25,7 @@ func TestReservationPools(t *testing.T) {
 	if m.HasReservations() {
 		t.Fatal("model without reservations must report none")
 	}
-	if primary, spill := m.ReservationPools("org-any"); primary != nil || spill != nil {
+	if primary, spill, _ := m.ReservationPools("org-any"); primary != nil || spill != nil {
 		t.Fatalf("pools without reservations = (%v, %v), want (nil, nil)", primary, spill)
 	}
 
@@ -35,7 +35,7 @@ func TestReservationPools(t *testing.T) {
 	}
 
 	// The reserved org gets its hosts as primary, the shared pool as spill.
-	primary, spill := m.ReservationPools("org-reserved")
+	primary, spill, _ := m.ReservationPools("org-reserved")
 	if len(primary) != 1 || !primary["c"] {
 		t.Fatalf("reserved primary = %v, want {c}", primary)
 	}
@@ -45,7 +45,7 @@ func TestReservationPools(t *testing.T) {
 
 	// Everyone else gets the shared pool with no spill.
 	for _, org := range []string{"", "org-other"} {
-		primary, spill = m.ReservationPools(org)
+		primary, spill, _ = m.ReservationPools(org)
 		if len(primary) != 2 || !primary["a"] || !primary["b"] {
 			t.Fatalf("shared primary for %q = %v, want {a, b}", org, primary)
 		}
@@ -76,15 +76,16 @@ func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 // pinned to an empty pool.
 func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 	m := newTestModel("a", "b")
+	m.Overload = nil
 	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{
 			{OrgIDs: []string{"org-x"}, Enclaves: []string{"b", "typo-host"}},
-			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}},
+			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}, Overload: &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit}},
 		},
 		[]string{"a", "b"},
 	)
 
-	primary, spill := m.ReservationPools("org-x")
+	primary, spill, _ := m.ReservationPools("org-x")
 	if len(primary) != 1 || !primary["b"] {
 		t.Fatalf("primary = %v, want {b} with typo-host dropped", primary)
 	}
@@ -94,9 +95,12 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 
 	// org-y's only host is unknown: it must fall back to the shared pool,
 	// not an empty primary.
-	primary, spill = m.ReservationPools("org-y")
+	primary, spill, _ = m.ReservationPools("org-y")
 	if len(primary) != 1 || !primary["a"] || spill != nil {
 		t.Fatalf("pools for org-y = (%v, %v), want shared ({a}, nil)", primary, spill)
+	}
+	if m.Enclaves["a"].metrics.configurePolicies(m.Overload, m.spillPoliciesLocked("a")) {
+		t.Fatal("ignored reservation enabled shared-pool metrics polling")
 	}
 }
 
@@ -109,7 +113,7 @@ func TestReservationPoolsMultiOrg(t *testing.T) {
 	)
 
 	for _, org := range []string{"org-reserved", "org-partner"} {
-		primary, spill := m.ReservationPools(org)
+		primary, spill, _ := m.ReservationPools(org)
 		if len(primary) != 2 || !primary["b"] || !primary["c"] {
 			t.Fatalf("primary for %q = %v, want {b, c}", org, primary)
 		}
@@ -118,7 +122,7 @@ func TestReservationPoolsMultiOrg(t *testing.T) {
 		}
 	}
 
-	primary, spill := m.ReservationPools("org-other")
+	primary, spill, _ := m.ReservationPools("org-other")
 	if len(primary) != 1 || !primary["a"] || spill != nil {
 		t.Fatalf("shared pools = (%v, %v), want ({a}, nil)", primary, spill)
 	}
@@ -126,13 +130,15 @@ func TestReservationPoolsMultiOrg(t *testing.T) {
 
 // The allowed set is a hard filter: even the degraded last-resort buckets
 // never leak a host outside it.
-func TestNextEnclaveHonorsAllowedFilter(t *testing.T) {
+func TestSelectionHonorsPoolFilter(t *testing.T) {
 	m := newTestModel("a", "b", "c")
 	allowed := map[string]bool{"c": true}
 
 	for range 50 {
-		if got, _ := m.nextEnclave(nil, true, allowed); got == nil || got.host != "c" {
+		if got, _, _, _, _ := m.SelectServing(nil, true, allowed, nil, m.Overload); got == nil || got.host != "c" {
 			t.Fatalf("pick = %v, want c", got)
+		} else {
+			got.ReleaseDispatch()
 		}
 	}
 
@@ -140,24 +146,28 @@ func TestNextEnclaveHonorsAllowedFilter(t *testing.T) {
 	makeOverloaded(m.Enclaves["c"])
 	tripBreaker(m.Enclaves["c"])
 	for range 50 {
-		if got, _ := m.nextEnclave(nil, false, allowed); got == nil || got.host != "c" {
+		if got, _, _, _, _ := m.SelectServing(nil, false, allowed, nil, m.Overload); got == nil || got.host != "c" {
 			t.Fatalf("degraded pick = %v, want c", got)
+		} else {
+			got.ReleaseDispatch()
 		}
 	}
 
 	// An empty allowed set selects nothing.
-	if got, _ := m.nextEnclave(nil, true, map[string]bool{}); got != nil {
+	if got, _, _, _, _ := m.SelectServing(nil, true, map[string]bool{}, nil, m.Overload); got != nil {
 		t.Fatalf("empty-pool pick = %v, want nil", got)
 	}
 }
 
 // Cache-order hosts outside the allowed set are skipped, not served.
-func TestNextEnclavePreferringHonorsAllowedFilter(t *testing.T) {
+func TestAffinityHonorsPoolFilter(t *testing.T) {
 	m := newTestModel("a", "b", "c")
 	allowed := map[string]bool{"b": true, "c": true}
 
-	if got, _ := m.nextEnclavePreferring([]string{"a", "b"}, nil, true, allowed); got == nil || got.host != "b" {
+	if got, _, _, _, _ := m.SelectServing([]string{"a", "b"}, true, allowed, nil, m.Overload); got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want b (a is outside the pool)", got)
+	} else {
+		got.ReleaseDispatch()
 	}
 }
 
@@ -165,10 +175,13 @@ func TestNextEnclavePreferringHonorsAllowedFilter(t *testing.T) {
 // verdict when both pools are exhausted.
 func TestSelectServingReservedCaller(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill := m.ReservationPools("org-reserved")
+	primary, spill, policy := m.ReservationPools("org-reserved")
 
 	// Healthy reserved host serves.
-	enclave, _, overloaded, _, _ := m.SelectServing(nil, primary, spill)
+	enclave, _, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+	if enclave != nil {
+		enclave.ReleaseDispatch()
+	}
 	if enclave == nil || enclave.host != "c" || overloaded {
 		t.Fatalf("pick = (%v, overloaded=%v), want reserved c", enclave, overloaded)
 	}
@@ -176,7 +189,10 @@ func TestSelectServingReservedCaller(t *testing.T) {
 	// Reserved host overloaded: spill to the shared pool, no 429.
 	makeOverloaded(m.Enclaves["c"])
 	for range 50 {
-		enclave, _, overloaded, _, _ = m.SelectServing(nil, primary, spill)
+		enclave, _, overloaded, _, _ = m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host == "c" || overloaded {
 			t.Fatalf("spill pick = (%v, overloaded=%v), want shared a or b", enclave, overloaded)
 		}
@@ -185,7 +201,10 @@ func TestSelectServingReservedCaller(t *testing.T) {
 	// Both pools overloaded: overload verdict (429), not a silent serve.
 	makeOverloaded(m.Enclaves["a"])
 	makeOverloaded(m.Enclaves["b"])
-	enclave, _, overloaded, _, _ = m.SelectServing(nil, primary, spill)
+	enclave, _, overloaded, _, _ = m.SelectServing(nil, true, primary, spill, policy)
+	if enclave != nil {
+		enclave.ReleaseDispatch()
+	}
 	if enclave == nil || !overloaded {
 		t.Fatalf("exhausted pick = (%v, overloaded=%v), want overload verdict", enclave, overloaded)
 	}
@@ -195,11 +214,14 @@ func TestSelectServingReservedCaller(t *testing.T) {
 // of serving at a dead host.
 func TestSelectServingReservedCallerSpillsFromDeadPool(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill := m.ReservationPools("org-reserved")
+	primary, spill, policy := m.ReservationPools("org-reserved")
 
 	tripBreaker(m.Enclaves["c"])
 	for range 50 {
-		enclave, claim, overloaded, _, _ := m.SelectServing(nil, primary, spill)
+		enclave, claim, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		// A due recovery probe for c is fine; a plain pick must spill.
 		if claim != nil {
 			continue
@@ -214,12 +236,15 @@ func TestSelectServingReservedCallerSpillsFromDeadPool(t *testing.T) {
 // touching the reserved host.
 func TestSelectServingSharedCallerNeverUsesReservedHost(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill := m.ReservationPools("org-other")
+	primary, spill, policy := m.ReservationPools("org-other")
 
 	makeOverloaded(m.Enclaves["a"])
 	makeOverloaded(m.Enclaves["b"])
 	for range 50 {
-		enclave, _, overloaded, _, _ := m.SelectServing(nil, primary, spill)
+		enclave, _, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host == "c" {
 			t.Fatalf("shared pick = %v, must never be reserved c", enclave)
 		}
@@ -235,42 +260,19 @@ func TestSelectServingNoReservations(t *testing.T) {
 	makeOverloaded(m.Enclaves["a"])
 
 	for range 50 {
-		enclave, _, overloaded, _, _ := m.SelectServing(nil, nil, nil)
+		enclave, _, overloaded, _, _ := m.SelectServing(nil, true, nil, nil, m.Overload)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host != "b" || overloaded {
 			t.Fatalf("pick = (%v, overloaded=%v), want healthy b", enclave, overloaded)
 		}
 	}
 }
 
-// No-429 dispatch path: spill on primary overload, serve through overload
-// at the primary when both pools are exhausted.
-func TestSelectForDispatchPools(t *testing.T) {
-	m := newReservedTestModel()
-	primary, spill := m.ReservationPools("org-reserved")
-
-	if got, _ := m.SelectForDispatchPools(nil, primary, spill); got == nil || got.host != "c" {
-		t.Fatalf("pick = %v, want reserved c", got)
-	}
-
-	makeOverloaded(m.Enclaves["c"])
-	for range 50 {
-		if got, _ := m.SelectForDispatchPools(nil, primary, spill); got == nil || got.host == "c" {
-			t.Fatalf("spill pick = %v, want shared a or b", got)
-		}
-	}
-
-	makeOverloaded(m.Enclaves["a"])
-	makeOverloaded(m.Enclaves["b"])
-	for range 50 {
-		if got, _ := m.SelectForDispatchPools(nil, primary, spill); got == nil || got.host != "c" {
-			t.Fatalf("exhausted pick = %v, want serve-through at reserved c", got)
-		}
-	}
-}
-
 func TestCacheRoutePoolIn(t *testing.T) {
 	m := newReservedTestModel()
-	primary, _ := m.ReservationPools("org-other")
+	primary, _, _ := m.ReservationPools("org-other")
 
 	pool := m.CacheRoutePoolIn(primary)
 	if pool.Size != 2 || len(pool.Candidates) != 2 {

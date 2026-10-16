@@ -22,12 +22,13 @@ func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName
 	if err != nil {
 		return "", nil, err
 	}
+	enclave.ReleaseDispatch()
 	return enclave.host, client, nil
 }
 
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
-// Model.SelectForDispatch) — and builds its attested client. Reservation
+// Model.SelectServing) — and builds its attested client. Reservation
 // pools apply via the caller org in ctx (see WithCallerOrg); no org means
 // the shared pool. A non-nil ProbeClaim must travel with the dispatched
 // request (see ProbeClaim); claimProbes must be false for callers that
@@ -38,12 +39,8 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
-	enclave, claim := model.selectForDispatchPools(order, claimProbes, primary, spill)
-	model.ObserveTierShadow(TierShadowObservation{
-		Model: modelName, OrgID: CallerOrgFromContext(ctx), Order: order, Actual: enclave,
-		Probe: claim != nil, CanProbe: claimProbes, ServeThrough: true,
-	})
+	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
+	enclave, claim, _, _, _ := model.SelectServing(order, claimProbes, primary, spill, policy)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
 	}
@@ -150,15 +147,19 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
-	primary, _ := model.ReservationPools(CallerOrgFromContext(ctx))
+	primary, _, _ := model.ReservationPools(CallerOrgFromContext(ctx))
 	return req, settings, model.CacheRoutePoolIn(primary), true
 }
 
-// postToEnclave builds and sends an attested POST to one enclave, counting
-// it in the enclave's in-flight gauge for the lifetime of the response body
-// so internal dispatches are visible to least-loaded selection like proxied
-// requests are.
+// postToEnclave holds the selection's in-flight reservation until dispatch
+// fails or the response body closes, including while a stream is consumed.
 func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header, claim *ProbeClaim) (*http.Response, error) {
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			enclave.ReleaseDispatch()
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
 		// The claim resolves through the request's outcome; a request that
@@ -180,12 +181,8 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-	enclave.inflight.Add(1)
-	BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
 	resp, err := client.Do(req)
 	if err != nil {
-		enclave.inflight.Add(-1)
-		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Dec()
 		reason := classifyProxyError(err)
 		if reason == "canceled" {
 			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
@@ -214,6 +211,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
 	}
 	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
+	handedOff = true
 	return resp, nil
 }
 
@@ -233,8 +231,7 @@ func (b *inflightBody) Close() error {
 	if !b.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	b.enclave.inflight.Add(-1)
-	BackendInflight.WithLabelValues(b.enclave.modelName, b.enclave.host).Dec()
+	b.enclave.ReleaseDispatch()
 	return b.ReadCloser.Close()
 }
 

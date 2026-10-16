@@ -336,6 +336,7 @@ func TestPostToEnclaveDelegationFailureBlocksDownstream(t *testing.T) {
 	headers := http.Header{"Authorization": []string{"Bearer original"}}
 	ctx := WithAuthorizationProvider(context.Background(), provider)
 
+	reserveTestDispatch(t, enclave)
 	_, err := postToEnclave(ctx, server.Client(), enclave, "/v1/chat/completions", []byte("{}"), headers, nil)
 	var delegationErr *DelegationHTTPError
 	if !errors.As(err, &delegationErr) || delegationErr.APIError().Status != http.StatusServiceUnavailable {
@@ -343,6 +344,9 @@ func TestPostToEnclaveDelegationFailureBlocksDownstream(t *testing.T) {
 	}
 	if got := downstreamCalls.Load(); got != 0 {
 		t.Fatalf("downstream calls = %d, want 0", got)
+	}
+	if enclave.inflight.Load() != 0 {
+		t.Fatal("authorization failure retained its dispatch reservation")
 	}
 	if got := headers.Get("Authorization"); got != "Bearer original" {
 		t.Fatalf("original headers changed to %q", got)

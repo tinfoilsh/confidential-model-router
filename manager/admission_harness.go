@@ -51,17 +51,19 @@ func ConfigureAdmissionModelForTest(em *EnclaveManager, name, org string, overlo
 	}
 	model.mu.Lock()
 	defer model.mu.Unlock()
+	model.Overload = nil
+	if overloaded {
+		model.Overload = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+	}
 	hosts := make([]string, 0, len(model.Enclaves))
 	for host, enclave := range model.Enclaves {
 		hosts = append(hosts, host)
 		if overloaded {
-			enclave.metrics.cfgMu.Lock()
-			enclave.metrics.cfg = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
-			enclave.metrics.cfgMu.Unlock()
-			enclave.metrics.updateLatest(2, time.Now())
-			enclave.metrics.evaluateThresholds(2)
+			enclave.metrics.configurePolicies(model.Overload, nil)
+			counts := requestCounts{waiting: 2, hasWaiting: true}
+			enclave.metrics.updateLatest(counts, time.Now())
 		} else {
-			enclave.updateOverloadConfig(nil)
+			enclave.updateOverloadConfig(nil, nil)
 		}
 	}
 	if org != "" {
@@ -81,27 +83,4 @@ func ConfigureReservationsForTest(em *EnclaveManager, name string, reservations 
 	defer model.mu.Unlock()
 	model.applyReservations(name, reservations, hosts)
 	return nil
-}
-
-func ConfigureTierShadowForTest(em *EnclaveManager, name string, policy config.TierShadowConfig, waiting, running float64) error {
-	model, ok := em.GetModel(name)
-	if !ok {
-		return fmt.Errorf("model %s not configured", name)
-	}
-	model.mu.Lock()
-	defer model.mu.Unlock()
-	model.TierShadow = &policy
-	for _, enclave := range model.Enclaves {
-		enclave.tierShadow = &tierShadowMetrics{
-			host: enclave.host, model: name,
-			sample: tierShadowSample{waiting: waiting, running: running, hasWaiting: true, hasRunning: true, collected: time.Now()},
-			queues: map[config.TierShadowConfig]bool{policy: false},
-		}
-		enclave.tierShadow.updateQueuesLocked()
-	}
-	return nil
-}
-
-func TierShadowCounterForTest(model, actual, proposed string) prometheus.Counter {
-	return tierShadowDecisions.WithLabelValues(model, shadowSharedPool, actual, proposed, shadowDifferentAdmission)
 }

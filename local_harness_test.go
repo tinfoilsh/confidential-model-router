@@ -196,11 +196,13 @@ func TestLocalRouter_EndToEnd(t *testing.T) {
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		_ = apiKey
 		model, _ := em.GetModel("gpt-oss-120b")
-		enc, _ := model.NextEnclave(nil)
+		primary, spill, policy := model.ReservationPools("")
+		enc, _, _, _, _ := model.SelectServing(nil, true, primary, spill, policy)
 		if enc == nil {
 			http.Error(w, "no enclave", 503)
 			return
 		}
+		defer enc.ReleaseDispatch()
 		enc.ServeHTTP(w, r)
 	})
 	router := httptest.NewServer(handler)
@@ -300,7 +302,9 @@ func TestLocalRouter_SurvivesSidecarOutage(t *testing.T) {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		model, _ := em.GetModel("gpt-oss-120b")
-		enc, _ := model.NextEnclave(nil)
+		primary, spill, policy := model.ReservationPools("")
+		enc, _, _, _, _ := model.SelectServing(nil, true, primary, spill, policy)
+		defer enc.ReleaseDispatch()
 		enc.ServeHTTP(w, r)
 	}))
 	defer router.Close()

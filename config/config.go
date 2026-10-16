@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -33,14 +34,13 @@ type CacheRouteConfig struct {
 }
 
 // ReservationConfig dedicates a subset of a model's enclaves to the listed
-// orgs: only their traffic may use those enclaves, spilling to the shared
-// pool when they are overloaded or unhealthy.
+// orgs: only their traffic may use those enclaves. Shared capacity can serve
+// spillover according to the caller's routing policy.
 type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 	// A nil block inherits the model policy; a present block replaces it.
-	Overload   *OverloadConfig   `yaml:"overload,omitempty" json:"overload,omitempty"`
-	TierShadow *TierShadowConfig `yaml:"tier_shadow,omitempty" json:"tier_shadow,omitempty"`
+	Overload *OverloadConfig `yaml:"overload,omitempty" json:"overload,omitempty"`
 }
 
 // Model represents the configuration for a single model. Admission policy is
@@ -51,20 +51,7 @@ type Model struct {
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
-	TierShadow   *TierShadowConfig   `yaml:"tier_shadow,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
-}
-
-// TierShadowConfig enables observation only. Its thresholds never affect
-// live routing; an omitted reservation block inherits the model's block.
-type TierShadowConfig struct {
-	MaxRequestsRunning   int `yaml:"max_requests_running"`
-	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
-	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
-}
-
-func (c TierShadowConfig) Marks() (int, int) {
-	return (&OverloadConfig{MaxRequestsWaiting: c.MaxRequestsWaiting, ClearRequestsWaiting: c.ClearRequestsWaiting}).Marks()
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
@@ -74,13 +61,21 @@ func (c TierShadowConfig) Marks() (int, int) {
 // the flag clears only once the queue drains back down to it, so a backend
 // hovering around the trip mark doesn't flap in and out of overload on every
 // poll. Zero deliberately means omitted (the default of half the trip mark
-// applies), so the smallest expressible clear mark is 1 — clear once at most
-// one request is waiting. Queue depths are integral, so setting the clear
+// applies); a trip mark of 1 therefore clears only when the queue is empty.
+// Queue depths are integral, so setting the clear
 // mark to MaxRequestsWaiting-1 disables hysteresis.
 type OverloadConfig struct {
 	MaxRequestsWaiting   int `yaml:"max_requests_waiting"`
 	ClearRequestsWaiting int `yaml:"clear_requests_waiting,omitempty"`
-	RetryAfterMinutes    int `yaml:"retry_after_minutes"`
+	// Running load sets a soft tier preference; only the waiting limit
+	// rejects ordinary traffic. Zero disables the running threshold.
+	// Samples are not atomic admission caps. See docs/routing.md.
+	SoftMaxRequestsRunning int `yaml:"soft_max_requests_running,omitempty"`
+	RetryAfterMinutes      int `yaml:"retry_after_minutes"`
+}
+
+func (c *OverloadConfig) Enabled() bool {
+	return c != nil && (c.MaxRequestsWaiting > 0 || c.SoftMaxRequestsRunning > 0)
 }
 
 // Marks returns the overload trip and clear thresholds. When
@@ -96,6 +91,28 @@ func (c *OverloadConfig) Marks() (trip, clear int) {
 	return trip, clear
 }
 
+const defaultRetryAfterMinutes = 1
+
+func (c *OverloadConfig) normalized() OverloadConfig {
+	var resolved OverloadConfig
+	if c == nil {
+		return resolved
+	}
+	resolved.SoftMaxRequestsRunning = max(c.SoftMaxRequestsRunning, 0)
+	if c.MaxRequestsWaiting > 0 {
+		resolved.MaxRequestsWaiting, resolved.ClearRequestsWaiting = c.Marks()
+		resolved.RetryAfterMinutes = c.RetryAfterMinutes
+		if resolved.RetryAfterMinutes <= 0 {
+			resolved.RetryAfterMinutes = defaultRetryAfterMinutes
+		}
+	}
+	return resolved
+}
+
+func (c *OverloadConfig) RetryAfter() time.Duration {
+	return time.Duration(c.normalized().RetryAfterMinutes) * time.Minute
+}
+
 // Config represents the configuration structure matching config.yml
 type Config struct {
 	Models map[string]Model `yaml:"models"`
@@ -106,6 +123,22 @@ func FromBytes(data []byte) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
+	}
+	for name, model := range config.Models {
+		byOrg := make(map[string]OverloadConfig)
+		for _, reservation := range model.Reservations {
+			policy := model.Overload
+			if reservation.Overload != nil {
+				policy = reservation.Overload
+			}
+			resolved := policy.normalized()
+			for _, org := range reservation.OrgIDs {
+				if previous, ok := byOrg[org]; ok && previous != resolved {
+					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
+				}
+				byOrg[org] = resolved
+			}
+		}
 	}
 
 	return &config, nil

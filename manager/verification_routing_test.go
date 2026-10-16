@@ -23,16 +23,25 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 			expired.cb.storeState(cbOpen)
 			expired.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 		}
-		selected, claim := model.NextEnclave(nil)
+		selected, claim, _, _, _ := model.SelectServing(nil, true, nil, nil, model.Overload)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("random selection chose expired evidence: selected=%v claim=%v", selected, claim)
 		}
-		selected, claim = model.NextEnclavePreferring([]string{"expired", "valid"}, nil)
+		selected, claim, _, _, _ = model.SelectServing([]string{"expired", "valid"}, true, nil, nil, model.Overload)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("preferred selection chose expired evidence: selected=%v claim=%v", selected, claim)
 		}
-		primary, spill := model.ReservationPools("test-org")
-		selected, claim = model.selectForDispatchPools([]string{"expired"}, true, primary, spill)
+		primary, spill, policy := model.ReservationPools("test-org")
+		selected, claim, _, _, _ = model.SelectServing([]string{"expired"}, true, primary, spill, policy)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("reserved selection failed to spill past expired evidence: selected=%v claim=%v", selected, claim)
 		}
@@ -45,7 +54,7 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 	if model.HasHealthyEnclave(nil, nil) {
 		t.Fatal("expired backend reported healthy")
 	}
-	if selected, claim := model.NextEnclavePreferring([]string{"expired", "valid"}, nil); selected != nil || claim != nil {
+	if selected, claim, _, _, _ := model.SelectServing([]string{"expired", "valid"}, true, nil, nil, model.Overload); selected != nil || claim != nil {
 		t.Fatal("degraded fallback selected expired evidence")
 	}
 	if pool := model.CacheRoutePool(); len(pool.Candidates) != 0 {

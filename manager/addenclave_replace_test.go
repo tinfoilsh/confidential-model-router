@@ -23,7 +23,7 @@ func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
 
 	existing := newTestEnclave(addr)
 	existing.tlsKeyFP = "previous-fingerprint"
-	existing.metrics.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1})
+	existing.metrics.setPolicies(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1}, nil)
 	t.Cleanup(existing.shutdown)
 
 	model := &Model{Enclaves: map[string]*Enclave{addr: existing}}
@@ -50,7 +50,7 @@ func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
 func TestInstallEnclaveRetiresPrevious(t *testing.T) {
 	const host = "replace-host"
 	previous := newTestEnclave(host)
-	previous.metrics.setConfig(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1})
+	previous.metrics.setPolicies(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1}, nil)
 	t.Cleanup(previous.shutdown)
 	if !pollingActive(previous.metrics) {
 		t.Fatal("test setup: previous enclave is not polling")

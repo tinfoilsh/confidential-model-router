@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -36,11 +35,10 @@ type Enclave struct {
 	attestation *attestationState
 	proxy       *httputil.ReverseProxy
 	metrics     *enclaveMetrics
-	tierShadow  *tierShadowMetrics
 	cb          *circuitBreaker
 	pricing     func(string) (ModelPricing, bool)
 
-	// inflight counts requests currently proxied through this enclave —
+	// inflight counts requests selected for or served through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
 	// to sampleStalenessLimit stale when scrapes fail.
 	inflight atomic.Int64
@@ -53,7 +51,6 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
-	TierShadow        *config.TierShadowConfig `json:"-"`
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
 	// exposed there.
@@ -67,7 +64,7 @@ type Model struct {
 	reservedByOrg        map[string]map[string]bool // org id -> its reserved host set
 	sharedHosts          map[string]bool            // unreserved hosts; nil when no reservations
 	reservationOverloads map[string]*config.OverloadConfig
-	shadowPoliciesByOrg  map[string]*config.TierShadowConfig
+	policiesByOrg        map[string]*config.OverloadConfig
 
 	mu sync.RWMutex
 }
@@ -87,7 +84,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	byOrg := make(map[string]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
 	overloads := make(map[string]*config.OverloadConfig)
-	shadowPolicies := make(map[string]*config.TierShadowConfig)
+	policies := make(map[string]*config.OverloadConfig)
 	for _, res := range reservations {
 		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
 			continue
@@ -95,6 +92,10 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 		for _, orgID := range res.OrgIDs {
 			if orgID == "" {
 				continue
+			}
+			policy := res.Overload
+			if policy == nil {
+				policy = m.Overload
 			}
 			set := byOrg[orgID]
 			if set == nil {
@@ -116,19 +117,14 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				delete(byOrg, orgID)
 				continue
 			}
-			if !recognized {
-				continue
+			if recognized {
+				policies[orgID] = policy
 			}
-			policy := res.TierShadow
-			if policy == nil {
-				policy = m.TierShadow
-			}
-			shadowPolicies[orgID] = policy
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
 	m.reservationOverloads = overloads
-	m.shadowPoliciesByOrg = shadowPolicies
+	m.policiesByOrg = policies
 	if len(byOrg) == 0 {
 		m.reservedByOrg = nil
 		m.sharedHosts = nil
@@ -161,23 +157,21 @@ func (m *Model) HasReservations() bool {
 	return len(m.reservedByOrg) > 0
 }
 
-// ReservationPools returns the caller's pool filters: primary is the host
-// set selection must draw from, spill what it may widen to when the primary
-// is exhausted. A reserved org gets its hosts + shared spill; everyone else
-// gets the shared hosts with no spill — reserved capacity is exclusive. Both
-// nil when the model has no reservations.
-func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) {
+// ReservationPools snapshots the caller's pool filters and policy. Reserved
+// callers get their hosts plus shared spillover; everyone else gets shared
+// hosts only. Both filters are nil when the model has no reservations.
+func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool, policy *config.OverloadConfig) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.reservedByOrg) == 0 {
-		return nil, nil
+		return nil, nil, m.Overload
 	}
 	if orgID != "" {
 		if hosts, ok := m.reservedByOrg[orgID]; ok {
-			return hosts, m.sharedHosts
+			return hosts, m.sharedHosts, m.policiesByOrg[orgID]
 		}
 	}
-	return m.sharedHosts, nil
+	return m.sharedHosts, nil, m.Overload
 }
 
 type EnclaveManager struct {
@@ -345,8 +339,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		cb:          cb,
 		pricing:     em.ModelPricing,
 	})
-	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host))
-	model.configureTierShadowLocked(model.Enclaves[host])
+	model.Enclaves[host].updateOverloadConfig(model.overloadForHostLocked(host), model.spillPoliciesLocked(host))
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	return nil
 }
@@ -472,265 +465,9 @@ func (e *Enclave) claimProbe() *ProbeClaim {
 	return &ProbeClaim{cb: e.cb, token: token, modelName: e.modelName, host: e.host}
 }
 
-// NextEnclave picks a uniformly random enclave with a closed circuit breaker,
-// preferring those that are not currently overloaded and not in skip. If an
-// open breaker is past its cooldown, it sends a probe to that enclave. Falls
-// back to any closed enclave, then any enclave (degraded > unavailable).
-// A non-nil ProbeClaim means the pick is a claimed recovery probe: the
-// request dispatched to it must carry the claim (see ProbeClaim).
-func (m *Model) NextEnclave(skip map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.nextEnclave(skip, true, nil)
-}
-
-// nextEnclave is NextEnclave with probe claiming optional and an optional
-// allowed host filter (nil = all hosts). The filter is hard: it applies to
-// every bucket including the degraded last resort and probe claiming.
-func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	all := make([]*Enclave, 0, len(m.Enclaves))
-	var closed, preferred []*Enclave
-	for _, enclave := range m.Enclaves {
-		if !enclave.attestationValid(time.Now()) {
-			continue
-		}
-		if allowed != nil && !allowed[enclave.host] {
-			continue
-		}
-		all = append(all, enclave)
-		if enclave.cb != nil && !enclave.cb.Closed() {
-			if claimProbes {
-				if claim := enclave.claimProbe(); claim != nil {
-					return enclave, claim
-				}
-			}
-			continue
-		}
-		if skip[enclave.host] {
-			continue
-		}
-		closed = append(closed, enclave)
-		if !enclave.isOverloaded() {
-			preferred = append(preferred, enclave)
-		}
-	}
-
-	switch {
-	case len(preferred) > 0:
-		return preferred[rand.IntN(len(preferred))], nil
-	case len(closed) > 0:
-		return closed[rand.IntN(len(closed))], nil
-	case len(all) > 0:
-		return all[rand.IntN(len(all))], nil
-	}
-	return nil, nil
-}
-
-// NextEnclavePreferring picks like NextEnclave, but serves the first
-// acceptable host from order — the cache-aware preference, best first —
-// before falling back to random selection. Health still beats cache: a due
-// probe wins, and order hosts are honored only while their breakers are
-// closed. The overload flag deliberately does not veto an order host; every
-// caller must step aside per request via ShouldReject and skip (main.go's
-// retry loop, SelectForDispatch for internal dispatches), so a flapping
-// load signal can never move a key's home.
-func (m *Model) NextEnclavePreferring(order []string, skip map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.nextEnclavePreferring(order, skip, true, nil)
-}
-
-func (m *Model) nextEnclavePreferring(order []string, skip map[string]bool, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
-	if len(order) == 0 {
-		return m.nextEnclave(skip, claimProbes, allowed)
-	}
-
-	if claimProbes {
-		m.mu.RLock()
-		for _, enclave := range m.Enclaves {
-			if !enclave.attestationValid(time.Now()) {
-				continue
-			}
-			if allowed != nil && !allowed[enclave.host] {
-				continue
-			}
-			if enclave.cb != nil && !enclave.cb.Closed() {
-				if claim := enclave.claimProbe(); claim != nil {
-					m.mu.RUnlock()
-					return enclave, claim
-				}
-			}
-		}
-		m.mu.RUnlock()
-	}
-	m.mu.RLock()
-	for _, host := range order {
-		if allowed != nil && !allowed[host] {
-			continue
-		}
-		enclave := m.Enclaves[host]
-		if enclave == nil || skip[host] || !enclave.attestationValid(time.Now()) {
-			continue
-		}
-		if enclave.cb != nil && !enclave.cb.Closed() {
-			continue
-		}
-		m.mu.RUnlock()
-		return enclave, nil
-	}
-	m.mu.RUnlock()
-	return m.nextEnclave(skip, claimProbes, allowed)
-}
-
-// SelectForDispatch picks the serving enclave for an internal dispatch (the
-// tool loop), honoring the cache-aware order with the same overload spill as
-// the public retry loop: an overloaded pick is skipped and selection moves
-// to the next-warmest host. Internal dispatches have no 429 path, so when
-// every live candidate is overloaded it serves through overload at the
-// warmest one — never at a breaker-open host, which is reachable only when
-// no closed replica exists at all. Internal dispatches record their outcomes,
-// so they may also claim a due recovery probe.
-func (m *Model) SelectForDispatch(order []string) (*Enclave, *ProbeClaim) {
-	return m.selectForDispatch(order, true, nil)
-}
-
-// SelectForDispatchPools picks like SelectForDispatch over the caller's
-// reservation pools: primary first, spill only when every primary candidate
-// is overloaded or unhealthy. Both exhausted serves through overload at the
-// primary pick (no-429 contract).
-func (m *Model) SelectForDispatchPools(order []string, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
-	return m.selectForDispatchPools(order, true, primary, spill)
-}
-
-func (m *Model) selectForDispatchPools(order []string, claimProbes bool, primary, spill map[string]bool) (*Enclave, *ProbeClaim) {
-	enclave, claim := m.selectForDispatch(order, claimProbes, primary)
-	// A claimed probe must be dispatched.
-	if len(spill) == 0 || claim != nil {
-		return enclave, claim
-	}
-	if enclave != nil && enclave.breakerClosed() {
-		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
-			return enclave, nil
-		}
-	}
-	spillEnclave, spillClaim := m.selectForDispatch(order, claimProbes, spill)
-	if spillEnclave != nil {
-		if spillClaim != nil {
-			return spillEnclave, spillClaim
-		}
-		if spillEnclave.breakerClosed() {
-			if overloaded, _, _ := spillEnclave.ShouldReject(); !overloaded {
-				return spillEnclave, nil
-			}
-		}
-	}
-	// Both pools exhausted: serve through overload at the primary pick.
-	if enclave != nil {
-		return enclave, nil
-	}
-	return spillEnclave, nil
-}
-
-// selectForDispatch is SelectForDispatch with probe claiming optional, for
-// callers that hand the connection to a transport that records no breaker
-// outcomes (a claimed probe there would strand the breaker half-open), and
-// an optional allowed host filter (see nextEnclave).
-func (m *Model) selectForDispatch(order []string, claimProbes bool, allowed map[string]bool) (*Enclave, *ProbeClaim) {
-	skip := map[string]bool{}
-	var firstOverloaded *Enclave
-	var enclave *Enclave
-	for range m.EnclaveCount() {
-		var claim *ProbeClaim
-		enclave, claim = m.nextEnclavePreferring(order, skip, claimProbes, allowed)
-		if enclave == nil {
-			break
-		}
-		// A claimed probe must be dispatched: preferring an overloaded
-		// pick over it would leave the claim unresolved.
-		if claim != nil {
-			return enclave, claim
-		}
-		if enclave.cb != nil && !enclave.cb.Closed() {
-			// Selection is down to non-closed last resorts: every
-			// remaining closed candidate is overloaded or none exist.
-			break
-		}
-		if overloaded, _, _ := enclave.ShouldReject(); !overloaded {
-			return enclave, nil
-		}
-		if firstOverloaded == nil {
-			firstOverloaded = enclave
-		}
-		OverloadSkipsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
-		skip[enclave.String()] = true
-	}
-	if firstOverloaded != nil {
-		return firstOverloaded, nil
-	}
-	return enclave, nil
-}
-
-// SelectServing picks the serving enclave for a public proxied request: the
-// overload skip loop over the caller's primary pool, widening to spill only
-// when every primary candidate is overloaded or unhealthy (nil primary =
-// all enclaves, no reservations). A nil enclave means 503; overloaded=true
-// is the 429 verdict with retryAfter/waiting; a non-nil ProbeClaim must
-// travel with the dispatched request.
-func (m *Model) SelectServing(order []string, primary, spill map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
-	enclave, claim, overloaded, retryAfter, waiting = m.selectServingFrom(order, primary)
-	// A claimed probe must be dispatched. Breaker-open last resorts do
-	// spill: an all-dead reserved pool should fail over to shared capacity,
-	// not serve at a dead host.
-	if len(spill) == 0 || claim != nil {
-		return
-	}
-	if enclave != nil && !overloaded && enclave.breakerClosed() {
-		return
-	}
-	spillEnclave, spillClaim, spillOverloaded, spillRetryAfter, spillWaiting := m.selectServingFrom(order, spill)
-	if spillEnclave == nil {
-		return
-	}
-	if enclave == nil || spillClaim != nil || (!spillOverloaded && spillEnclave.breakerClosed()) {
-		return spillEnclave, spillClaim, spillOverloaded, spillRetryAfter, spillWaiting
-	}
-	// Both pools exhausted: surface the primary pool's overload verdict.
-	return
-}
-
-func (m *Model) selectServingFrom(order []string, allowed map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
-	skip := map[string]bool{}
-	for range m.EnclaveCount() {
-		enclave, claim = m.nextEnclavePreferring(order, skip, true, allowed)
-		if enclave == nil {
-			return
-		}
-		// A claimed probe must be dispatched or the breaker strands
-		// half-open; overload skip applies to plain picks only.
-		if claim != nil {
-			overloaded = false
-			return
-		}
-		if overloaded, retryAfter, waiting = enclave.ShouldReject(); !overloaded {
-			return
-		}
-		OverloadSkipsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
-		skip[enclave.String()] = true
-	}
-	return
-}
-
-// EnclaveCount returns the number of configured enclaves under the model lock.
-// Callers that need to bound a retry loop on enclave cardinality should use
-// this rather than reading len(m.Enclaves) directly.
-func (m *Model) EnclaveCount() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.Enclaves)
-}
-
 // CacheRoutePool snapshots the model's replica set for cache-aware routing:
 // breaker-closed enclaves with live in-flight counts, falling back to all
-// enclaves when every breaker is open (mirroring NextEnclave). The overload
+// enclaves when every breaker is open. The overload
 // flag is deliberately ignored — membership must stay stable so a flapping
 // load signal can't move a key's home.
 func (m *Model) CacheRoutePool() cacheroute.Pool {
@@ -809,24 +546,20 @@ func (m *Model) HasHealthyEnclave(primary, spill map[string]bool) bool {
 	return false
 }
 
-func (e *Enclave) isOverloaded() bool {
-	return e != nil && e.metrics != nil && e.metrics.overloaded.Load()
-}
-
 // breakerClosed reports whether the circuit breaker is closed (nil counts
 // as closed, matching selection's treatment).
 func (e *Enclave) breakerClosed() bool {
 	return e.cb == nil || e.cb.Closed()
 }
 
-func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	e.inflight.Add(1)
-	BackendInflight.WithLabelValues(e.modelName, e.host).Inc()
-	defer func() {
-		e.inflight.Add(-1)
-		BackendInflight.WithLabelValues(e.modelName, e.host).Dec()
-	}()
+// ReleaseDispatch releases one SelectServing reservation after rejection,
+// dispatch failure, or response completion. Each selection must release once.
+func (e *Enclave) ReleaseDispatch() {
+	e.inflight.Add(-1)
+	BackendInflight.WithLabelValues(e.modelName, e.host).Dec()
+}
 
+func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
 	// Check if client requested usage metrics in response header/trailer
@@ -939,7 +672,6 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		CacheRoute:        modelConfig.CacheRoute,
-		TierShadow:        modelConfig.TierShadow,
 	}
 	model.setConfiguredHosts(modelConfig.Hostnames)
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
@@ -998,11 +730,9 @@ func (em *EnclaveManager) sync() error {
 			model.setConfiguredHosts(configModel.Hostnames)
 			model.Overload = configModel.Overload
 			model.CacheRoute = configModel.CacheRoute
-			model.TierShadow = configModel.TierShadow
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for host, enclave := range model.Enclaves {
-				enclave.updateOverloadConfig(model.overloadForHostLocked(host))
-				model.configureTierShadowLocked(enclave)
+				enclave.updateOverloadConfig(model.overloadForHostLocked(host), model.spillPoliciesLocked(host))
 			}
 			cacheroute.SetMode(modelName, configModel.CacheRoute)
 			cacheroute.SetPoolInfo(modelName, configModel.Hostnames)
@@ -1083,11 +813,11 @@ func (em *EnclaveManager) runWorker(ctx context.Context) {
 	}
 }
 
-func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig) {
+func (e *Enclave) updateOverloadConfig(cfg *config.OverloadConfig, policies []*config.OverloadConfig) {
 	if e == nil || e.metrics == nil {
 		return
 	}
-	e.metrics.setConfig(cfg)
+	e.metrics.setPolicies(cfg, policies)
 }
 
 // shutdown stops the enclave's background polling and drops its per-enclave
@@ -1104,41 +834,11 @@ func (e *Enclave) shutdown() {
 	if e.metrics != nil {
 		e.metrics.shutdown()
 	}
-	if e.tierShadow != nil {
-		e.tierShadow.stop()
-	}
 	if e.cb != nil {
 		e.cb.Retire()
 	}
 	BackendQueueDepth.DeleteLabelValues(e.modelName, e.host)
+	BackendRunningRequests.DeleteLabelValues(e.modelName, e.host)
 	BackendOverloaded.DeleteLabelValues(e.modelName, e.host)
 	CircuitBreakerState.DeleteLabelValues(e.modelName, e.host)
-}
-
-func (e *Enclave) ShouldReject() (bool, time.Duration, float64) {
-	if e == nil || e.metrics == nil {
-		return false, 0, 0
-	}
-	// A pick whose breaker isn't closed is a recovery probe or a last
-	// resort — rejecting it for overload defeats its purpose (and swallows
-	// the probe: claimed but never dispatched, the breaker would strand in
-	// half-open). Its queue metrics are suspect while the host fails, too.
-	if e.cb != nil && !e.cb.Closed() {
-		return false, 0, 0
-	}
-	return e.metrics.shouldReject()
-}
-
-// OverloadMarks returns the resolved overload trip and clear marks for this
-// enclave, or ok=false when no usable overload thresholds are configured.
-func (e *Enclave) OverloadMarks() (trip, clear int, ok bool) {
-	if e == nil || e.metrics == nil {
-		return 0, 0, false
-	}
-	cfg := e.metrics.currentConfig()
-	if cfg == nil || cfg.MaxRequestsWaiting <= 0 {
-		return 0, 0, false
-	}
-	trip, clear = cfg.Marks()
-	return trip, clear, true
 }

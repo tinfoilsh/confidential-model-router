@@ -126,14 +126,12 @@ func (em *EnclaveManager) ConvertFile(
 	// must not claim a recovery probe — a claimed probe with no recorded
 	// outcome strands the breaker half-open until restart. Reservation
 	// pools apply via the caller org in ctx.
-	primary, spill := model.ReservationPools(CallerOrgFromContext(ctx))
-	enclave, _ := model.selectForDispatchPools(nil, false, primary, spill)
-	model.ObserveTierShadow(TierShadowObservation{
-		Model: "doc-upload", OrgID: CallerOrgFromContext(ctx), Actual: enclave, ServeThrough: true,
-	})
+	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
+	enclave, _, _, _, _ := model.SelectServing(nil, false, primary, spill, policy)
 	if enclave == nil {
 		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)
 	}
+	defer enclave.ReleaseDispatch()
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)

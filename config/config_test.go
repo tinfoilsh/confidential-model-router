@@ -1,10 +1,44 @@
 package config
 
 import (
+	"fmt"
 	"testing"
 
 	"gopkg.in/yaml.v2"
 )
+
+func TestReservationTierPolicyConsistency(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second, third string
+		wantErr                    bool
+	}{
+		{name: "same tier policy", first: "{soft_max_requests_running: 3}", second: "{soft_max_requests_running: 3}", third: "{soft_max_requests_running: 3}"},
+		{name: "inherited tier policy", first: "null", second: "{soft_max_requests_running: 6, max_requests_waiting: 12}", third: "null"},
+		{name: "equivalent defaults", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 2, retry_after_minutes: 1}", third: "{max_requests_waiting: 4, clear_requests_waiting: 4, retry_after_minutes: -1}"},
+		{name: "disabled queue settings", first: "{soft_max_requests_running: 3}", second: "{soft_max_requests_running: 3, clear_requests_waiting: 2, retry_after_minutes: 2}", third: "{soft_max_requests_running: 3, max_requests_waiting: -1}"},
+		{name: "disabled policies", first: "{}", second: "{soft_max_requests_running: -1, max_requests_waiting: -1}", third: "{clear_requests_waiting: 2, retry_after_minutes: 2}"},
+		{name: "conflicting limits", first: "{soft_max_requests_running: 3}", second: "{soft_max_requests_running: 6}", third: "null", wantErr: true},
+		{name: "conflicting clear marks", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 1}", third: "{max_requests_waiting: 4}", wantErr: true},
+		{name: "conflicting retry delays", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, retry_after_minutes: 2}", third: "{max_requests_waiting: 4}", wantErr: true},
+		{name: "conflicting earlier queue policy", first: "{max_requests_waiting: 1}", second: "{}", third: "{soft_max_requests_running: 3}", wantErr: true},
+		{name: "conflicting queue policies", wantErr: true, first: "{max_requests_waiting: 1}", second: "{max_requests_waiting: 12}", third: "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf(`models:
+  gpt-oss-120b:
+    overload: {soft_max_requests_running: 6, max_requests_waiting: 12}
+    enclaves: [a.example, b.example, c.example]
+    reservations:
+      - {org_ids: [example-org], enclaves: [a.example], overload: %s}
+      - {org_ids: [example-org], enclaves: [b.example], overload: %s}
+      - {org_ids: [example-org], enclaves: [c.example], overload: %s}
+`, tc.first, tc.second, tc.third)
+			if _, err := FromBytes([]byte(data)); (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 // A legacy rate_limit block must load like any other unknown field so a new
 // router can serve from the same runtime YAML as the old fleet it replaces.
@@ -167,6 +201,8 @@ func TestReservationOverloadParsing(t *testing.T) {
 		{name: "disabled", block: "        overload: {max_requests_waiting: 0}\n", want: &OverloadConfig{}},
 		{name: "independent defaults", block: "        overload: {max_requests_waiting: 1}\n", want: &OverloadConfig{MaxRequestsWaiting: 1}},
 		{name: "all fields", block: "        overload: {max_requests_waiting: 3, clear_requests_waiting: 1, retry_after_minutes: 2}\n", want: &OverloadConfig{MaxRequestsWaiting: 3, ClearRequestsWaiting: 1, RetryAfterMinutes: 2}},
+		{name: "running only", block: "        overload: {soft_max_requests_running: 4}\n", want: &OverloadConfig{SoftMaxRequestsRunning: 4}},
+		{name: "both limits", block: "        overload: {max_requests_waiting: 1, soft_max_requests_running: 4, retry_after_minutes: 2}\n", want: &OverloadConfig{MaxRequestsWaiting: 1, SoftMaxRequestsRunning: 4, RetryAfterMinutes: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := []byte("models:\n  gpt-oss-120b:\n    repo: org/repo\n    enclaves: [a.example]\n    overload: {max_requests_waiting: 14, clear_requests_waiting: 7, retry_after_minutes: 3}\n    reservations:\n      - org_ids: [org_test]\n        enclaves: [a.example]\n" + tc.block)
@@ -183,6 +219,27 @@ func TestReservationOverloadParsing(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+			}
+		})
+	}
+}
+
+func TestOverloadRunningConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     *OverloadConfig
+		enabled bool
+	}{
+		{name: "omitted"},
+		{name: "disabled", cfg: &OverloadConfig{}},
+		{name: "negative disables", cfg: &OverloadConfig{SoftMaxRequestsRunning: -1}},
+		{name: "waiting only", cfg: &OverloadConfig{MaxRequestsWaiting: 1}, enabled: true},
+		{name: "running only", cfg: &OverloadConfig{SoftMaxRequestsRunning: 4}, enabled: true},
+		{name: "both limits", cfg: &OverloadConfig{MaxRequestsWaiting: 1, SoftMaxRequestsRunning: 4}, enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.Enabled(); got != tc.enabled {
+				t.Fatalf("Enabled() = %v, want %v", got, tc.enabled)
 			}
 		})
 	}

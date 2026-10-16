@@ -119,8 +119,12 @@ func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
 			t.Fatalf("overloaded=%v: HTTP=%d backend calls=%d: %s", overloaded, rec.Code, backends.Load()-before, rec.Body.String())
 		}
 		model, _ := em.GetModel(admissionTestModel)
-		for host, enclave := range model.Enclaves {
-			if _, _, configured := enclave.OverloadMarks(); configured != overloaded {
+		_, _, policy := model.ReservationPools("")
+		for host := range model.Enclaves {
+			if got := testutil.ToFloat64(manager.BackendInflight.WithLabelValues(admissionTestModel, host)); got != 0 {
+				t.Fatalf("completed or rejected request retained in-flight load: %v", got)
+			}
+			if configured := policy.Enabled(); configured != overloaded {
 				t.Fatalf("overloaded=%v: thresholds configured=%v", overloaded, configured)
 			}
 			if !overloaded && testutil.ToFloat64(manager.BackendOverloaded.WithLabelValues(admissionTestModel, host)) != 0 {
@@ -171,63 +175,6 @@ func TestAdmissionHarnessConfiguredCacheRoute(t *testing.T) {
 				t.Errorf("warm repeats=%v, want %d", got, requests-1)
 			}
 		})
-	}
-}
-
-func TestAdmissionHarnessTierShadowDoesNotChangeDispatch(t *testing.T) {
-	for _, overloaded := range []bool{false, true} {
-		for _, streaming := range []bool{false, true} {
-			t.Run(fmt.Sprintf("live_overloaded_%v_streaming_%v", overloaded, streaming), func(t *testing.T) {
-				var calls atomic.Int64
-				responseBody, contentType := `{}`, "application/json"
-				if streaming {
-					responseBody, contentType = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n", "text/event-stream"
-				}
-				em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
-				}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					calls.Add(1)
-					w.Header().Set("Content-Type", contentType)
-					io.WriteString(w, responseBody)
-				}), "", overloaded)
-				waiting, actual, proposed := float64(1), "shared", "reject"
-				wantStatus, wantCalls := http.StatusOK, int64(1)
-				if overloaded {
-					waiting, actual, proposed = 0, "reject", "shared"
-					wantStatus, wantCalls = http.StatusServiceUnavailable, 0
-				}
-				requestBody := fmt.Sprintf(`{"model":"gpt-oss-120b","messages":[],"stream":%t}`, streaming)
-				baseline := httptest.NewRecorder()
-				handler.ServeHTTP(baseline, admissionRequest("/v1/chat/completions", requestBody, "tk_test"))
-				if baseline.Code != wantStatus || calls.Swap(0) != wantCalls {
-					t.Fatalf("unexpected live baseline: HTTP=%d", baseline.Code)
-				}
-				if !overloaded && baseline.Body.String() != responseBody {
-					t.Fatal("baseline did not return the upstream response")
-				}
-				if err := manager.ConfigureTierShadowForTest(em, admissionTestModel, config.TierShadowConfig{MaxRequestsWaiting: 1}, waiting, 0); err != nil {
-					t.Fatal(err)
-				}
-				counter := manager.TierShadowCounterForTest(admissionTestModel, actual, proposed)
-				before := testutil.ToFloat64(counter)
-				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", requestBody, "tk_test"))
-				if rec.Code != wantStatus || calls.Load() != wantCalls {
-					t.Fatalf("shadow changed live behavior: HTTP=%d backend calls=%d", rec.Code, calls.Load())
-				}
-				if rec.Body.String() != baseline.Body.String() {
-					t.Fatal("shadow changed the response body")
-				}
-				for _, header := range []string{"Content-Type", "Retry-After", "Tinfoil-Enclave"} {
-					if rec.Header().Get(header) != baseline.Header().Get(header) {
-						t.Fatalf("shadow changed response header %s", header)
-					}
-				}
-				if testutil.ToFloat64(counter)-before != 1 {
-					t.Fatal("shadow disagreement was not observed")
-				}
-			})
-		}
 	}
 }
 
@@ -698,7 +645,7 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 	} {
 		t.Run(tc.decision+tc.priority, func(t *testing.T) {
 			var calls atomic.Int64
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reason := ""
 				if tc.decision == decisionDemote {
 					reason = rateReasonRequests
@@ -716,6 +663,12 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 			}
 			if tc.status == 200 && calls.Load() != 1 {
 				t.Fatal("priority caller did not reach backend")
+			}
+			model, _ := em.GetModel(admissionTestModel)
+			for _, replica := range model.CacheRoutePool().Candidates {
+				if replica.InFlight != 0 {
+					t.Fatal("priority or rejected request retained in-flight load")
+				}
 			}
 		})
 	}
@@ -741,7 +694,7 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			if jwt {
 				org = ""
 			}
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/internal/inference/delegate" {
 					delegates.Add(1)
 					json.NewEncoder(w).Encode(map[string]any{"access_token": "delegated-token", "grant_token": "grant", "access_token_expires_at": time.Now().Add(time.Hour), "grant_expires_at": time.Now().Add(time.Hour)})
@@ -800,6 +753,14 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			}
 			if cpCalls.Load() != wantCP || delegates.Load() != wantDelegate || conversions.Load() != 1 || modelCalls.Load() != 2 || toolCalls.Load() != 1 {
 				t.Fatalf("calls cp=%d delegates=%d files=%d models=%d tools=%d", cpCalls.Load(), delegates.Load(), conversions.Load(), modelCalls.Load(), toolCalls.Load())
+			}
+			for _, name := range []string{admissionTestModel, "doc-upload", "websearch"} {
+				model, _ := em.GetModel(name)
+				for _, replica := range model.CacheRoutePool().Candidates {
+					if replica.InFlight != 0 {
+						t.Errorf("%s retained in-flight load after completion", name)
+					}
+				}
 			}
 			orderMu.Lock()
 			defer orderMu.Unlock()

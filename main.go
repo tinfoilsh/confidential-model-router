@@ -1012,15 +1012,12 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		// Reuse the admission context for reservation selection.
-		var poolPrimary, poolSpill map[string]bool
-		if model.HasReservations() {
-			poolPrimary, poolSpill = model.ReservationPools(admission.OrgID)
-		}
+		poolPrimary, poolSpill, overloadPolicy := model.ReservationPools(admission.OrgID)
 
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its
-		// ranking, so an overloaded pick spills to the next-warmest host
-		// via the skip loop below instead of a random sibling. The
+		// ranking, so the tier selector retains affinity among candidates
+		// with the preferred load. The
 		// decision carries its pool snapshot and replication factor to
 		// the landing observation, so the metrics describe the decision
 		// that actually routed the request. The pool is scoped to the
@@ -1034,35 +1031,18 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 		}
 
-		var (
-			enclave    *manager.Enclave
-			probeClaim *manager.ProbeClaim
-			overloaded bool
-			retryAfter time.Duration
-			waiting    float64
-		)
-		if hasConfiguredPriority {
-			// Configured-priority callers have no 429 path: like internal
-			// dispatches they serve through overload at the warmest host,
-			// where their injected priority jumps the backend queue.
-			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill)
-			if enclave != nil && probeClaim == nil {
-				if ov, _, _ := enclave.ShouldReject(); ov {
-					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
-				}
-			}
-		} else {
-			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
+		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServing(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
+		if hasConfiguredPriority && overloaded {
+			manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
+			overloaded = false
 		}
-		model.ObserveTierShadow(manager.TierShadowObservation{
-			Model: modelName, OrgID: admission.OrgID, Order: cacheRouteOrder, Actual: enclave,
-			Rejected: overloaded, Probe: probeClaim != nil, CanProbe: true, ServeThrough: hasConfiguredPriority,
-		})
+
 		if enclave == nil {
 			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
 			return
 		}
+		defer enclave.ReleaseDispatch()
 
 		// Meter landing pools on reserved models; poolSpill is only
 		// non-nil for reserved callers. Models without reservations have
@@ -1078,7 +1058,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					log.WithFields(log.Fields{
 						"model":   modelName,
 						"enclave": enclave.String(),
-					}).Debug("reserved pool exhausted; spilling to shared pool")
+					}).Debug("spilling to preferred shared capacity")
 				}
 			}
 			manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
@@ -1099,10 +1079,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			// With hysteresis, requests_waiting can sit below the trip mark
 			// while the queue drains; log the marks so an in-band reject
 			// doesn't read as a contradiction.
-			if trip, clear, ok := enclave.OverloadMarks(); ok {
-				fields["max_requests_waiting"] = trip
-				fields["clear_requests_waiting"] = clear
-			}
+			trip, clear := overloadPolicy.Marks()
+			fields["max_requests_waiting"] = trip
+			fields["clear_requests_waiting"] = clear
 			log.WithFields(fields).Warn("rejecting request due to backend overload")
 
 			// Record rejection metrics
