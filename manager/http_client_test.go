@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+func reserveTestDispatch(t *testing.T, enclave *Enclave) {
+	t.Helper()
+	model := &Model{Enclaves: map[string]*Enclave{enclave.host: enclave}}
+	selected, _, _, _, _ := model.SelectServing(nil, false, nil, nil, nil)
+	if selected != enclave {
+		t.Fatal("enclave could not be selected")
+	}
+}
+
 // TestLocalMCPEndpointEnvVar pins the exact shape of the debug-bypass
 // env var name derived from a model name. The router advertises this
 // contract to operators setting up local tool-server development, so
@@ -56,6 +65,7 @@ func TestPostToEnclaveInflight(t *testing.T) {
 		cb:        newCircuitBreaker(),
 	}
 
+	reserveTestDispatch(t, e)
 	resp, err := postToEnclave(context.Background(), ts.Client(), e, "/v1/chat/completions", []byte("{}"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +98,7 @@ func TestPostToEnclaveInflight(t *testing.T) {
 		modelName: "test-model",
 		cb:        newCircuitBreaker(),
 	}
+	reserveTestDispatch(t, e2)
 	if _, err := postToEnclave(context.Background(), client, e2, "/x", nil, nil, nil); err == nil {
 		t.Fatal("expected transport error against closed server")
 	}
@@ -116,6 +127,7 @@ func TestPostToEnclaveCancellationReleasesRecoveryProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	reserveTestDispatch(t, e)
 	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil, claim); err == nil {
 		t.Fatal("expected canceled request to fail")
 	}
@@ -124,6 +136,9 @@ func TestPostToEnclaveCancellationReleasesRecoveryProbe(t *testing.T) {
 	}
 	if got := cb.ConsecutiveFailures(); got != cbFailureThreshold {
 		t.Fatalf("breaker failures = %d, want %d", got, cbFailureThreshold)
+	}
+	if e.inflight.Load() != 0 {
+		t.Fatal("cancellation retained its dispatch reservation")
 	}
 }
 
@@ -145,11 +160,15 @@ func TestPostToEnclaveNonOwnerCancellationKeepsProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	reserveTestDispatch(t, e)
 	if _, err := postToEnclave(ctx, http.DefaultClient, e, "/x", nil, nil, nil); err == nil {
 		t.Fatal("expected canceled request to fail")
 	}
 	if got := cb.State(); got != cbHalfOpen {
 		t.Fatalf("breaker state = %d, want half-open (probe still owned)", got)
+	}
+	if e.inflight.Load() != 0 {
+		t.Fatal("cancellation retained its dispatch reservation")
 	}
 }
 
@@ -171,7 +190,7 @@ func (c *strictCloser) Close() error {
 // nil on every later call.
 func TestInflightBodyCloseIdempotent(t *testing.T) {
 	e := &Enclave{}
-	e.inflight.Add(1)
+	reserveTestDispatch(t, e)
 	rc := &strictCloser{}
 	b := &inflightBody{ReadCloser: rc, enclave: e}
 

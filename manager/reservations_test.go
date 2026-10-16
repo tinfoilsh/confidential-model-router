@@ -137,6 +137,8 @@ func TestSelectionHonorsPoolFilter(t *testing.T) {
 	for range 50 {
 		if got, _, _, _, _ := m.SelectServing(nil, true, allowed, nil, m.Overload); got == nil || got.host != "c" {
 			t.Fatalf("pick = %v, want c", got)
+		} else {
+			got.ReleaseDispatch()
 		}
 	}
 
@@ -146,6 +148,8 @@ func TestSelectionHonorsPoolFilter(t *testing.T) {
 	for range 50 {
 		if got, _, _, _, _ := m.SelectServing(nil, false, allowed, nil, m.Overload); got == nil || got.host != "c" {
 			t.Fatalf("degraded pick = %v, want c", got)
+		} else {
+			got.ReleaseDispatch()
 		}
 	}
 
@@ -162,6 +166,8 @@ func TestAffinityHonorsPoolFilter(t *testing.T) {
 
 	if got, _, _, _, _ := m.SelectServing([]string{"a", "b"}, true, allowed, nil, m.Overload); got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want b (a is outside the pool)", got)
+	} else {
+		got.ReleaseDispatch()
 	}
 }
 
@@ -173,6 +179,9 @@ func TestSelectServingReservedCaller(t *testing.T) {
 
 	// Healthy reserved host serves.
 	enclave, _, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+	if enclave != nil {
+		enclave.ReleaseDispatch()
+	}
 	if enclave == nil || enclave.host != "c" || overloaded {
 		t.Fatalf("pick = (%v, overloaded=%v), want reserved c", enclave, overloaded)
 	}
@@ -181,6 +190,9 @@ func TestSelectServingReservedCaller(t *testing.T) {
 	makeOverloaded(m.Enclaves["c"])
 	for range 50 {
 		enclave, _, overloaded, _, _ = m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host == "c" || overloaded {
 			t.Fatalf("spill pick = (%v, overloaded=%v), want shared a or b", enclave, overloaded)
 		}
@@ -190,6 +202,9 @@ func TestSelectServingReservedCaller(t *testing.T) {
 	makeOverloaded(m.Enclaves["a"])
 	makeOverloaded(m.Enclaves["b"])
 	enclave, _, overloaded, _, _ = m.SelectServing(nil, true, primary, spill, policy)
+	if enclave != nil {
+		enclave.ReleaseDispatch()
+	}
 	if enclave == nil || !overloaded {
 		t.Fatalf("exhausted pick = (%v, overloaded=%v), want overload verdict", enclave, overloaded)
 	}
@@ -204,6 +219,9 @@ func TestSelectServingReservedCallerSpillsFromDeadPool(t *testing.T) {
 	tripBreaker(m.Enclaves["c"])
 	for range 50 {
 		enclave, claim, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		// A due recovery probe for c is fine; a plain pick must spill.
 		if claim != nil {
 			continue
@@ -224,6 +242,9 @@ func TestSelectServingSharedCallerNeverUsesReservedHost(t *testing.T) {
 	makeOverloaded(m.Enclaves["b"])
 	for range 50 {
 		enclave, _, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host == "c" {
 			t.Fatalf("shared pick = %v, must never be reserved c", enclave)
 		}
@@ -240,6 +261,9 @@ func TestSelectServingNoReservations(t *testing.T) {
 
 	for range 50 {
 		enclave, _, overloaded, _, _ := m.SelectServing(nil, true, nil, nil, m.Overload)
+		if enclave != nil {
+			enclave.ReleaseDispatch()
+		}
 		if enclave == nil || enclave.host != "b" || overloaded {
 			t.Fatalf("pick = (%v, overloaded=%v), want healthy b", enclave, overloaded)
 		}

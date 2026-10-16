@@ -113,6 +113,9 @@ func TestTieredSelection(t *testing.T) {
 			primary, spill, policy := m.ReservationPools(org)
 			order := []string{"other-reserved", "warm", "sibling", "shared"}
 			selected, claim, reject, retry, _ := m.SelectServing(order, true, primary, spill, policy)
+			if selected != nil {
+				selected.ReleaseDispatch()
+			}
 			if selected == nil || selected.host != tc.want || claim != nil || reject != tc.reject {
 				t.Fatalf("selected=%v claim=%v reject=%v, want %s reject=%v", selected, claim, reject, tc.want, tc.reject)
 			}
@@ -140,12 +143,16 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	order := []string{"warm", "sibling", "shared"}
 	if selected, _, reject, _, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "shared" || reject {
 		t.Fatal("queued reserved hosts must yield to shared tier zero without a running threshold")
+	} else {
+		selected.ReleaseDispatch()
 	}
 	for _, host := range []string{"warm", "sibling", "shared"} {
 		observe(m.Enclaves[host].metrics, queueLimit)
 	}
 	if selected, _, reject, retry, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "warm" || !reject || retry != sharedRetryMinutes*time.Minute {
 		t.Fatal("all pools must use the caller's queue and retry policy")
+	} else {
+		selected.ReleaseDispatch()
 	}
 }
 
@@ -158,6 +165,8 @@ func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	m.Enclaves["warm"].inflight.Store(1)
 	if selected, _, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "sibling" {
 		t.Fatal("affinity bypassed the local in-flight cap")
+	} else {
+		selected.ReleaseDispatch()
 	}
 	for _, host := range []string{"warm", "sibling"} {
 		e := m.Enclaves[host]
@@ -167,10 +176,55 @@ func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	}
 	if selected, claim, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "shared" || claim != nil {
 		t.Fatal("expired evidence was selected or claimed for a probe")
+	} else {
+		selected.ReleaseDispatch()
 	}
 	m.Enclaves["shared"].attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "expired-release")
 	if selected, _, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected != nil {
 		t.Fatal("unavailable caller pools escaped to another organization's reservation")
+	}
+}
+
+func TestConcurrentSelectionsReserveLocalLoad(t *testing.T) {
+	const requests = 64
+	m := newTieredTestModel()
+	cap := 0
+	m.CacheRoute = &config.CacheRouteConfig{MaxInflightDelta: &cap}
+	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	start := make(chan struct{})
+	results := make(chan *Enclave, requests)
+	for range requests {
+		go func() {
+			<-start
+			enclave, _, _, _, _ := m.SelectServing([]string{"warm", "sibling"}, true, primary, spill, policy)
+			results <- enclave
+		}()
+	}
+	close(start)
+	selected := make([]*Enclave, 0, requests)
+	for range requests {
+		selected = append(selected, <-results)
+	}
+	for host, enclave := range m.Enclaves {
+		want := int64(0)
+		if primary[host] {
+			want = requests / int64(len(primary))
+		}
+		if got := enclave.inflight.Load(); got != want {
+			t.Errorf("%s in-flight before dispatch = %d, want %d", host, got, want)
+		}
+	}
+	for _, enclave := range selected {
+		if enclave == nil {
+			t.Error("available capacity returned no enclave")
+			continue
+		}
+		enclave.ReleaseDispatch()
+	}
+	for host, enclave := range m.Enclaves {
+		if got := enclave.inflight.Load(); got != 0 {
+			t.Errorf("%s in-flight after completion = %d, want zero", host, got)
+		}
 	}
 }
 
@@ -183,6 +237,9 @@ func TestTieredRecoveryProbes(t *testing.T) {
 		probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 		observeCounts(probe.metrics, reservedQueueLimit, runningRequestLimit)
 		selected, claim, _, _, _ := m.SelectServing([]string{"warm", "sibling"}, claimProbes, primary, spill, policy)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if claimProbes {
 			if selected != probe || claim == nil {
 				t.Fatal("recovery probe did not bypass tier rejection")
@@ -198,6 +255,8 @@ func TestTieredRecoveryProbes(t *testing.T) {
 	shared.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 	if selected, claim, _, _, _ := m.SelectServing([]string{"warm"}, true, primary, spill, policy); selected.host != "warm" || claim != nil {
 		t.Fatal("shared recovery probe displaced available reserved tier zero")
+	} else {
+		selected.ReleaseDispatch()
 	}
 }
 

@@ -24,15 +24,24 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 			expired.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 		}
 		selected, claim, _, _, _ := model.SelectServing(nil, true, nil, nil, model.Overload)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("random selection chose expired evidence: selected=%v claim=%v", selected, claim)
 		}
 		selected, claim, _, _, _ = model.SelectServing([]string{"expired", "valid"}, true, nil, nil, model.Overload)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("preferred selection chose expired evidence: selected=%v claim=%v", selected, claim)
 		}
 		primary, spill, policy := model.ReservationPools("test-org")
 		selected, claim, _, _, _ = model.SelectServing([]string{"expired"}, true, primary, spill, policy)
+		if selected != nil {
+			selected.ReleaseDispatch()
+		}
 		if selected != valid || claim != nil {
 			t.Fatalf("reserved selection failed to spill past expired evidence: selected=%v claim=%v", selected, claim)
 		}

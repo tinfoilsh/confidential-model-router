@@ -81,10 +81,14 @@ func TestReservationPolicySurvivesReplacement(t *testing.T) {
 			primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
 			if selected, _, reject, retry, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || !reject || retry != time.Minute {
 				t.Fatal("reserved queue policy must apply to both pools even without a running limit")
+			} else {
+				selected.ReleaseDispatch()
 			}
 			public, _, publicPolicy := model.ReservationPools("public-org")
 			if selected, _, reject, _, _ := model.SelectServing(nil, true, public, nil, publicPolicy); selected != shared || reject {
 				t.Fatal("reserved policy affected the public caller")
+			} else {
+				selected.ReleaseDispatch()
 			}
 
 			model.mu.Lock()
@@ -100,6 +104,8 @@ func TestReservationPolicySurvivesReplacement(t *testing.T) {
 			observe(replacement.metrics, reservedQueueLimit)
 			if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != replacement || !reject {
 				t.Fatal("replacement lost the reserved overload policy")
+			} else {
+				selected.ReleaseDispatch()
 			}
 		})
 	}
@@ -199,6 +205,8 @@ func TestReservationTierPolicyReload(t *testing.T) {
 	}
 	if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || reject {
 		t.Fatal("shared native running limit overrode the reserved caller's policy")
+	} else {
+		selected.ReleaseDispatch()
 	}
 
 	reload(nil, cfg.Hostnames[:1])

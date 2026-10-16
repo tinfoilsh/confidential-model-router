@@ -131,6 +131,7 @@ func (em *EnclaveManager) ConvertFile(
 	if enclave == nil {
 		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)
 	}
+	defer enclave.ReleaseDispatch()
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)

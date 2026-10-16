@@ -57,9 +57,19 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float
 // SelectServing ranks closed backends by the request's tier, then pool, then
 // affinity. Unknown load fails open only after known usable capacity. Due
 // recovery probes and the all-breakers-open last resort retain their bypass.
+// A non-nil enclave reserves one local in-flight request until ReleaseDispatch.
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy)
+	if enclave != nil {
+		enclave.inflight.Add(1)
+		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
+	}
+	return enclave, claim, overloaded, retryAfter, waiting
+}
+
+func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	pools := []map[string]bool{primary}
 	if len(spill) > 0 {
 		pools = append(pools, spill)

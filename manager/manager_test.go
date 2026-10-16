@@ -202,8 +202,10 @@ func TestEnclaveInflightTracking(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	reserveTestDispatch(t, e)
 	go func() {
 		defer close(done)
+		defer e.ReleaseDispatch()
 		req := httptest.NewRequest(http.MethodGet, "http://example/", nil)
 		e.ServeHTTP(httptest.NewRecorder(), req)
 	}()
@@ -363,6 +365,8 @@ func TestSelectServingAllOverloadedReturnsWarmest(t *testing.T) {
 	for range 20 {
 		if got, _, _, _, _ := m.SelectServing([]string{"b", "c", "a"}, true, nil, nil, m.Overload); got == nil || got.host != "b" {
 			t.Fatalf("all-overloaded pick = %v, want warmest b", got)
+		} else {
+			got.ReleaseDispatch()
 		}
 	}
 }
@@ -379,6 +383,9 @@ func TestSelectServingNeverPicksDeadHost(t *testing.T) {
 
 	for range 200 {
 		got, _, _, _, _ := m.SelectServing([]string{"a", "b"}, true, nil, nil, m.Overload)
+		if got != nil {
+			got.ReleaseDispatch()
+		}
 		if got == nil || got.host == "c" {
 			t.Fatalf("pick = %v, must never be dead host c", got)
 		}
@@ -396,6 +403,9 @@ func TestSelectServingClaimsProbes(t *testing.T) {
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
 
 	got, claim, _, _, _ := m.SelectServing([]string{"a"}, true, nil, nil, m.Overload)
+	if got != nil {
+		got.ReleaseDispatch()
+	}
 	if got == nil || got.host != "b" {
 		t.Fatalf("pick = %v, want due probe b", got)
 	}
@@ -416,6 +426,9 @@ func TestSelectServingWithoutClaimingLeavesProbes(t *testing.T) {
 	m.Enclaves["b"].cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano()) // probe due
 
 	got, claim, _, _, _ := m.SelectServing([]string{"a"}, false, nil, nil, m.Overload)
+	if got != nil {
+		got.ReleaseDispatch()
+	}
 	if got == nil || got.host != "a" {
 		t.Fatalf("pick = %v, want a", got)
 	}

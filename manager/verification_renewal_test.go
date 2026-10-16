@@ -155,8 +155,10 @@ func TestAttestationRenewalPreservesServingStateAndHeldClients(t *testing.T) {
 
 	heldResponse := httptest.NewRecorder()
 	heldDone := make(chan struct{})
+	reserveTestDispatch(t, existing)
 	go func() {
 		defer close(heldDone)
+		defer existing.ReleaseDispatch()
 		existing.ServeHTTP(heldResponse, httptest.NewRequest(http.MethodGet, "https://router.example/held", nil))
 	}()
 	waitRenewalSignal(t, heldStarted)

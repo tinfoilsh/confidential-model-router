@@ -121,6 +121,9 @@ func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
 		model, _ := em.GetModel(admissionTestModel)
 		_, _, policy := model.ReservationPools("")
 		for host := range model.Enclaves {
+			if got := testutil.ToFloat64(manager.BackendInflight.WithLabelValues(admissionTestModel, host)); got != 0 {
+				t.Fatalf("completed or rejected request retained in-flight load: %v", got)
+			}
 			if configured := policy.Enabled(); configured != overloaded {
 				t.Fatalf("overloaded=%v: thresholds configured=%v", overloaded, configured)
 			}
@@ -642,7 +645,7 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 	} {
 		t.Run(tc.decision+tc.priority, func(t *testing.T) {
 			var calls atomic.Int64
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reason := ""
 				if tc.decision == decisionDemote {
 					reason = rateReasonRequests
@@ -660,6 +663,12 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 			}
 			if tc.status == 200 && calls.Load() != 1 {
 				t.Fatal("priority caller did not reach backend")
+			}
+			model, _ := em.GetModel(admissionTestModel)
+			for _, replica := range model.CacheRoutePool().Candidates {
+				if replica.InFlight != 0 {
+					t.Fatal("priority or rejected request retained in-flight load")
+				}
 			}
 		})
 	}
@@ -685,7 +694,7 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			if jwt {
 				org = ""
 			}
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/internal/inference/delegate" {
 					delegates.Add(1)
 					json.NewEncoder(w).Encode(map[string]any{"access_token": "delegated-token", "grant_token": "grant", "access_token_expires_at": time.Now().Add(time.Hour), "grant_expires_at": time.Now().Add(time.Hour)})
@@ -744,6 +753,14 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			}
 			if cpCalls.Load() != wantCP || delegates.Load() != wantDelegate || conversions.Load() != 1 || modelCalls.Load() != 2 || toolCalls.Load() != 1 {
 				t.Fatalf("calls cp=%d delegates=%d files=%d models=%d tools=%d", cpCalls.Load(), delegates.Load(), conversions.Load(), modelCalls.Load(), toolCalls.Load())
+			}
+			for _, name := range []string{admissionTestModel, "doc-upload", "websearch"} {
+				model, _ := em.GetModel(name)
+				for _, replica := range model.CacheRoutePool().Candidates {
+					if replica.InFlight != 0 {
+						t.Errorf("%s retained in-flight load after completion", name)
+					}
+				}
 			}
 			orderMu.Lock()
 			defer orderMu.Unlock()

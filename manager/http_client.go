@@ -22,6 +22,7 @@ func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName
 	if err != nil {
 		return "", nil, err
 	}
+	enclave.ReleaseDispatch()
 	return enclave.host, client, nil
 }
 
@@ -150,11 +151,15 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 	return req, settings, model.CacheRoutePoolIn(primary), true
 }
 
-// postToEnclave builds and sends an attested POST to one enclave, counting
-// it in the enclave's in-flight gauge for the lifetime of the response body
-// so internal dispatches are visible to least-loaded selection like proxied
-// requests are.
+// postToEnclave holds the selection's in-flight reservation until dispatch
+// fails or the response body closes, including while a stream is consumed.
 func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header, claim *ProbeClaim) (*http.Response, error) {
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			enclave.ReleaseDispatch()
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
 		// The claim resolves through the request's outcome; a request that
@@ -176,12 +181,8 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-	enclave.inflight.Add(1)
-	BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
 	resp, err := client.Do(req)
 	if err != nil {
-		enclave.inflight.Add(-1)
-		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Dec()
 		reason := classifyProxyError(err)
 		if reason == "canceled" {
 			ClientCancellationsTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
@@ -210,6 +211,7 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		publishBreakerState(enclave.modelName, enclave.host, enclave.cb)
 	}
 	resp.Body = &inflightBody{ReadCloser: resp.Body, enclave: enclave}
+	handedOff = true
 	return resp, nil
 }
 
@@ -229,8 +231,7 @@ func (b *inflightBody) Close() error {
 	if !b.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	b.enclave.inflight.Add(-1)
-	BackendInflight.WithLabelValues(b.enclave.modelName, b.enclave.host).Dec()
+	b.enclave.ReleaseDispatch()
 	return b.ReadCloser.Close()
 }
 

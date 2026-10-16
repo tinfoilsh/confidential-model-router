@@ -38,7 +38,7 @@ type Enclave struct {
 	cb          *circuitBreaker
 	pricing     func(string) (ModelPricing, bool)
 
-	// inflight counts requests currently proxied through this enclave —
+	// inflight counts requests selected for or served through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
 	// to sampleStalenessLimit stale when scrapes fail.
 	inflight atomic.Int64
@@ -552,14 +552,14 @@ func (e *Enclave) breakerClosed() bool {
 	return e.cb == nil || e.cb.Closed()
 }
 
-func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	e.inflight.Add(1)
-	BackendInflight.WithLabelValues(e.modelName, e.host).Inc()
-	defer func() {
-		e.inflight.Add(-1)
-		BackendInflight.WithLabelValues(e.modelName, e.host).Dec()
-	}()
+// ReleaseDispatch releases one SelectServing reservation after rejection,
+// dispatch failure, or response completion. Each selection must release once.
+func (e *Enclave) ReleaseDispatch() {
+	e.inflight.Add(-1)
+	BackendInflight.WithLabelValues(e.modelName, e.host).Dec()
+}
 
+func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
 	// Check if client requested usage metrics in response header/trailer

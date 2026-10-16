@@ -1016,8 +1016,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its
-		// ranking, so an overloaded pick spills to the next-warmest host
-		// via the skip loop below instead of a random sibling. The
+		// ranking, so the tier selector retains affinity among candidates
+		// with the preferred load. The
 		// decision carries its pool snapshot and replication factor to
 		// the landing observation, so the metrics describe the decision
 		// that actually routed the request. The pool is scoped to the
@@ -1042,6 +1042,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
 			return
 		}
+		defer enclave.ReleaseDispatch()
 
 		// Meter landing pools on reserved models; poolSpill is only
 		// non-nil for reserved callers. Models without reservations have

@@ -28,6 +28,9 @@ requests receive **HTTP 503** with `Retry-After` (default: one minute).
 Configured priority requests and internal dispatches serve through overload.
 
 Metrics polling has a nominal one-second interval; slow scrapes reduce it.
+Selection reserves local in-flight load atomically so simultaneous arrivals
+respect the affinity cap. Routers track this independently; sampled running
+limits are not global concurrency caps.
 Missing/incomplete samples or samples older than 15 seconds are unknown:
 known tiers 0 and 1 win first, then unknown load fails open. Expired
 attestations are excluded; circuit-breaker recovery probes and the
