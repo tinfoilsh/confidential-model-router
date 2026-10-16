@@ -70,12 +70,12 @@ type OverloadConfig struct {
 	// Running load sets a soft tier preference; only the waiting limit
 	// rejects ordinary traffic. Zero disables the running threshold.
 	// Samples are not atomic admission caps. See docs/routing.md.
-	MaxRequestsRunning int `yaml:"max_requests_running,omitempty"`
-	RetryAfterMinutes  int `yaml:"retry_after_minutes"`
+	SoftMaxRequestsRunning int `yaml:"soft_max_requests_running,omitempty"`
+	RetryAfterMinutes      int `yaml:"retry_after_minutes"`
 }
 
 func (c *OverloadConfig) Enabled() bool {
-	return c != nil && (c.MaxRequestsWaiting > 0 || c.MaxRequestsRunning > 0)
+	return c != nil && (c.MaxRequestsWaiting > 0 || c.SoftMaxRequestsRunning > 0)
 }
 
 // Marks returns the overload trip and clear thresholds. When
@@ -98,7 +98,7 @@ func (c *OverloadConfig) normalized() OverloadConfig {
 	if c == nil {
 		return resolved
 	}
-	resolved.MaxRequestsRunning = max(c.MaxRequestsRunning, 0)
+	resolved.SoftMaxRequestsRunning = max(c.SoftMaxRequestsRunning, 0)
 	if c.MaxRequestsWaiting > 0 {
 		resolved.MaxRequestsWaiting, resolved.ClearRequestsWaiting = c.Marks()
 		resolved.RetryAfterMinutes = c.RetryAfterMinutes

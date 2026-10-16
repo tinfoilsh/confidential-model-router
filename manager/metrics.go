@@ -35,7 +35,7 @@ type requestCounts struct {
 
 func (s requestCounts) supports(cfg *config.OverloadConfig) bool {
 	return cfg.Enabled() && s.hasWaiting &&
-		(cfg.MaxRequestsRunning <= 0 || s.hasRunning)
+		(cfg.SoftMaxRequestsRunning <= 0 || s.hasRunning)
 }
 
 // pollAPIKey, when set, is sent as a bearer token on backend /metrics
@@ -120,7 +120,7 @@ func (m *enclaveMetrics) configurePolicies(native *config.OverloadConfig, polici
 			continue
 		}
 		poll = true
-		m.requiresRunning = m.requiresRunning || policy.MaxRequestsRunning > 0
+		m.requiresRunning = m.requiresRunning || policy.SoftMaxRequestsRunning > 0
 		trip, clear := policy.Marks()
 		if trip > 0 {
 			marks := queueMarks{trip, clear}

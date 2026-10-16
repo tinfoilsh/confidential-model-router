@@ -12,7 +12,7 @@ import (
 )
 
 func TestTierRequiresWaitingAndRunningSamples(t *testing.T) {
-	policy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}
+	policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit}
 	m := newTestMetrics("sample.example", policy)
 	for _, tc := range []struct {
 		counts requestCounts
@@ -36,7 +36,7 @@ func TestSpilloverScrapeWithoutNativeGuard(t *testing.T) {
 		fmt.Fprintf(w, "%s %d\n%s 0\n", waitingMetricName, reservedQueueLimit, runningMetricName)
 	}))
 	defer server.Close()
-	policy := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
+	policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
 	m := newTestMetrics(strings.TrimPrefix(server.URL, "https://"), nil)
 	m.client = server.Client()
 	m.setPolicies(nil, []*config.OverloadConfig{policy})
@@ -52,8 +52,8 @@ func TestSpilloverScrapeWithoutNativeGuard(t *testing.T) {
 
 func newTieredTestModel() *Model {
 	m := newTestModel("warm", "sibling", "shared", "other-reserved")
-	m.Overload = &config.OverloadConfig{MaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
-	reserved := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
+	m.Overload = &config.OverloadConfig{SoftMaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
+	reserved := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit}
 	m.applyReservations("gpt-oss-120b", []config.ReservationConfig{
 		{OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"}, Overload: reserved},
 		{OrgIDs: []string{"other-org"}, Enclaves: []string{"other-reserved"}},
@@ -263,8 +263,8 @@ func TestTieredRecoveryProbes(t *testing.T) {
 func TestTierPoliciesKeepIndependentQueueRecovery(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(http.NotFound))
 	defer server.Close()
-	shared := &config.OverloadConfig{MaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
-	reserved := &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit, RetryAfterMinutes: sharedRetryMinutes}
+	shared := &config.OverloadConfig{SoftMaxRequestsRunning: 2 * runningRequestLimit, MaxRequestsWaiting: sharedQueueLimit}
+	reserved := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: reservedQueueLimit, RetryAfterMinutes: sharedRetryMinutes}
 	m := newTestMetrics(strings.TrimPrefix(server.URL, "https://"), shared)
 	m.client = server.Client()
 	defer m.shutdown()

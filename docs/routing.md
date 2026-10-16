@@ -7,7 +7,7 @@ Multiple reservations for one organization must agree on the policy.
 
 | Tier | Meaning under the caller's policy |
 | --- | --- |
-| 0 | No waiting requests; running below `max_requests_running`, if set |
+| 0 | No waiting requests; running below `soft_max_requests_running`, if set |
 | 1 | Not tier 0, but the queue guard has not tripped |
 | 2 | Queue reached `max_requests_waiting` and has not recovered |
 
@@ -16,7 +16,7 @@ Cache affinity wins within the selected pool and tier, subject to
 `cache_route.max_inflight_delta`. Public callers use shared hosts only.
 Without reservations, all hosts form one pool.
 
-`max_requests_running` is a soft preference, never a rejection threshold.
+`soft_max_requests_running` is a soft preference, never a rejection threshold.
 For example, public running/waiting limits of **8/14** and reserved limits
 of **4/14** make a shared host with four running requests and no queue tier 0
 for public callers and tier 1 for reserved callers. Neither policy rejects it.
@@ -39,4 +39,4 @@ all-breakers-open fallback retain their load-guard bypass.
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.
 Backend overload gauges describe the host's own policy, not every caller's tier.
 Deploy router support and update the control plane's router-config dependency
-before publishing `max_requests_running`. Policies reload without a restart.
+before publishing `soft_max_requests_running`. Policies reload without a restart.

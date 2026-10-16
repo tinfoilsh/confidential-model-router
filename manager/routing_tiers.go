@@ -48,7 +48,7 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float
 	if trip > 0 && marks.overloaded(counts.waiting, m.queueOverloads[marks]) {
 		return tierOverloaded, counts.waiting
 	}
-	if counts.waiting == 0 && (policy.MaxRequestsRunning <= 0 || counts.running < float64(policy.MaxRequestsRunning)) {
+	if counts.waiting == 0 && (policy.SoftMaxRequestsRunning <= 0 || counts.running < float64(policy.SoftMaxRequestsRunning)) {
 		return tierPreferred, counts.waiting
 	}
 	return tierBusy, counts.waiting

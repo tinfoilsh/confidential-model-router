@@ -175,11 +175,11 @@ func TestReservationOverloadReload(t *testing.T) {
 }
 
 func TestReservationTierPolicyReload(t *testing.T) {
-	sharedPolicy := &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit, MaxRequestsRunning: 2 * runningRequestLimit}
+	sharedPolicy := &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit, SoftMaxRequestsRunning: 2 * runningRequestLimit}
 	em, model, cfg := reservationOverloadManager(t, sharedPolicy)
 	em.updateConfigURL = t.TempDir() + "/config.yaml"
 	reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
-	reservedPolicy := &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit, MaxRequestsRunning: runningRequestLimit}
+	reservedPolicy := &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit, SoftMaxRequestsRunning: runningRequestLimit}
 	reload := func(override *config.OverloadConfig, pool []string) {
 		t.Helper()
 		cfg.Reservations[0].Overload = override
@@ -200,7 +200,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 		observeCounts(enclave.metrics, 0, runningRequestLimit)
 	}
 	primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
-	if policy.MaxRequestsRunning != runningRequestLimit {
+	if policy.SoftMaxRequestsRunning != runningRequestLimit {
 		t.Fatal("request did not inherit its reservation policy")
 	}
 	if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || reject {

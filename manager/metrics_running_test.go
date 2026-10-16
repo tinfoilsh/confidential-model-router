@@ -63,7 +63,7 @@ func TestScrapeRunningPreference(t *testing.T) {
 	}))
 	defer ts.Close()
 	m := newTestMetrics(strings.TrimPrefix(ts.URL, "https://"), &config.OverloadConfig{
-		MaxRequestsRunning: runningRequestLimit, RetryAfterMinutes: 2,
+		SoftMaxRequestsRunning: runningRequestLimit, RetryAfterMinutes: 2,
 	})
 	m.client = ts.Client()
 	for _, count := range []int{runningRequestLimit - 1, runningRequestLimit, runningRequestLimit + 1, runningRequestLimit - 1} {
@@ -84,7 +84,7 @@ func TestScrapeRunningPreference(t *testing.T) {
 
 func TestCombinedOverloadHysteresis(t *testing.T) {
 	m := newTestMetrics("combined-limits.example", &config.OverloadConfig{
-		MaxRequestsWaiting: 4, ClearRequestsWaiting: 1, MaxRequestsRunning: runningRequestLimit,
+		MaxRequestsWaiting: 4, ClearRequestsWaiting: 1, SoftMaxRequestsRunning: runningRequestLimit,
 	})
 	for _, step := range []struct {
 		waiting, running float64
@@ -128,7 +128,7 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 			}))
 			defer ts.Close()
 			m := newTestMetrics(strings.TrimPrefix(ts.URL, "https://"), &config.OverloadConfig{
-				MaxRequestsWaiting: 1, MaxRequestsRunning: runningRequestLimit,
+				MaxRequestsWaiting: 1, SoftMaxRequestsRunning: runningRequestLimit,
 			})
 			m.client = ts.Client()
 			observeCounts(m, previous.waiting, previous.running)
@@ -173,7 +173,7 @@ func TestRunningPolicyReload(t *testing.T) {
 	defer m.shutdown()
 	observeCounts(m, 0, runningRequestLimit)
 	for _, limit := range []int{runningRequestLimit, runningRequestLimit + 1, runningRequestLimit} {
-		policy := &config.OverloadConfig{MaxRequestsRunning: limit}
+		policy := &config.OverloadConfig{SoftMaxRequestsRunning: limit}
 		m.setPolicies(policy, nil)
 		if !pollingActive(m) {
 			t.Fatal("running-only policy did not start polling")

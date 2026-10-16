@@ -80,7 +80,7 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 	m.applyReservations("reservation-test-model",
 		[]config.ReservationConfig{
 			{OrgIDs: []string{"org-x"}, Enclaves: []string{"b", "typo-host"}},
-			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}, Overload: &config.OverloadConfig{MaxRequestsRunning: runningRequestLimit}},
+			{OrgIDs: []string{"org-y"}, Enclaves: []string{"stale-host"}, Overload: &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit}},
 		},
 		[]string{"a", "b"},
 	)
