@@ -834,6 +834,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					writeError(w, &manager.ErrModelMismatch)
 					return
 				}
+				if apiErr := applyMaxOutputTokensHeader(r.Header, r.URL.Path, body); apiErr != nil {
+					writeError(w, apiErr)
+					return
+				}
 
 				// "auto" is a router-side sentinel: the caller states an
 				// intelligence level and the router picks a concrete,

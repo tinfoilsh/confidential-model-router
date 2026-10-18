@@ -32,6 +32,7 @@ const (
 	ErrCodeMethodNotAllowed   = "method_not_allowed"
 	ErrCodeModelNotFound      = "model_not_found"
 	ErrCodeModelMismatch      = "model_mismatch"
+	ErrCodeMaxTokensMismatch  = "max_output_tokens_mismatch"
 	ErrCodeModelUnavailable   = "model_unavailable"
 	ErrCodeRateLimitExceeded  = "rate_limit_exceeded"
 	ErrCodeServerOverloaded   = "server_is_overloaded"
@@ -61,6 +62,9 @@ const (
 	ErrMsgAutoUnavailable  = "Model 'auto' is not available for this request."
 
 	ErrMsgTokenRateLimited = "Rate limit reached for tokens. Retry after %d seconds."
+
+	ErrMsgMaxTokensMismatch      = "The '%s' in the request body does not match the " + MaxOutputTokensRequestHeader + " header."
+	ErrMsgInvalidMaxTokensHeader = "Invalid " + MaxOutputTokensRequestHeader + " header: must be a single positive integer."
 )
 
 // APIError is an error response in OpenAI's format. Param and Code are
@@ -153,6 +157,13 @@ var (
 		Code:    ErrCodeModelMismatch,
 		Param:   "model",
 		Message: ErrMsgModelMismatch,
+	}
+	// ErrMaxTokensMismatch is returned with Param and Message naming the
+	// body field that disagrees with the header.
+	ErrMaxTokensMismatch = APIError{
+		Status: http.StatusBadRequest,
+		Type:   ErrTypeInvalidRequest,
+		Code:   ErrCodeMaxTokensMismatch,
 	}
 	ErrRateLimited = APIError{
 		Status: http.StatusTooManyRequests,
