@@ -20,8 +20,6 @@ func TestApplyMaxOutputTokensHeader(t *testing.T) {
 	}{
 		{name: "absent header leaves body unchanged", path: "/v1/chat/completions",
 			body: `{"model":"m","max_tokens":10}`, want: `{"model":"m","max_tokens":10}`},
-		{name: "empty header counts as absent", path: "/v1/chat/completions", headers: []string{" "},
-			body: `{"model":"m","max_tokens":10}`, want: `{"model":"m","max_tokens":10}`},
 		{name: "non-generation endpoint ignores header", path: "/v1/embeddings", headers: []string{"not-a-number"},
 			body: `{"model":"m","input":"hi"}`, want: `{"model":"m","input":"hi"}`},
 
@@ -43,6 +41,8 @@ func TestApplyMaxOutputTokensHeader(t *testing.T) {
 		{name: "header replaces malformed body limit", path: "/v1/completions", headers: []string{"64"},
 			body: `{"model":"m","max_tokens":"lots"}`, want: `{"model":"m","max_tokens":64}`},
 
+		{name: "empty header is rejected", path: "/v1/chat/completions", headers: []string{" "},
+			body: `{"model":"m","max_tokens":10}`, wantError: true},
 		{name: "non-numeric header is rejected", path: "/v1/chat/completions", headers: []string{"lots"},
 			body: `{"model":"m"}`, wantError: true},
 		{name: "zero header is rejected", path: "/v1/chat/completions", headers: []string{"0"},

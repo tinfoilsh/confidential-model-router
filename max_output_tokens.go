@@ -23,8 +23,7 @@ var maxOutputTokensFields = map[string][]string{
 // header on generation endpoints. EHBP leaves headers readable to proxies in
 // front of the enclave while the body stays sealed, so the header lets such a
 // proxy know the output limit; it replaces any limit the body sets so the
-// body cannot exceed it. Other endpoints ignore the header, and an empty
-// header counts as absent.
+// body cannot exceed it. Other endpoints ignore the header.
 func applyMaxOutputTokensHeader(header http.Header, path string, body map[string]any) *manager.APIError {
 	fields, ok := maxOutputTokensFields[path]
 	if !ok {
@@ -37,11 +36,7 @@ func applyMaxOutputTokensHeader(header http.Header, path string, body map[string
 	if len(values) > 1 {
 		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidMaxTokensHeader)
 	}
-	raw := strings.TrimSpace(values[0])
-	if raw == "" {
-		return nil
-	}
-	limit, err := strconv.ParseInt(raw, 10, 64)
+	limit, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
 	if err != nil || limit < 1 {
 		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidMaxTokensHeader)
 	}
