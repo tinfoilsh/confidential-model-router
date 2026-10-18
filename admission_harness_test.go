@@ -201,6 +201,49 @@ func TestAdmissionHandlerUnknownModel(t *testing.T) {
 	}
 }
 
+func TestAdmissionHandlerMaxOutputTokensHeader(t *testing.T) {
+	var admissions atomic.Int64
+	forwarded := make(chan []byte, 1)
+	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admissions.Add(1)
+		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		forwarded <- data
+		io.WriteString(w, `{}`)
+	}), "", false)
+
+	r := admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[]}`, "tk_test")
+	r.Header.Set(manager.MaxOutputTokensRequestHeader, "0")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+	handler.client.refreshes.Wait()
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid header: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if admissions.Load() != 0 || len(forwarded) != 0 {
+		t.Fatalf("invalid header reached admission/backend: %d/%d", admissions.Load(), len(forwarded))
+	}
+
+	r = admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[],"max_tokens":4096}`, "tk_test")
+	r.Header.Set(manager.MaxOutputTokensRequestHeader, "64")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(<-forwarded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["max_completion_tokens"]) != "64" {
+		t.Fatalf("header limit not forwarded: max_completion_tokens=%s", body["max_completion_tokens"])
+	}
+	if _, kept := body["max_tokens"]; kept {
+		t.Fatalf("body limit not replaced: max_tokens=%s", body["max_tokens"])
+	}
+}
+
 func admissionRequest(path, body, key string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")

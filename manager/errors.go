@@ -61,6 +61,8 @@ const (
 	ErrMsgAutoUnavailable  = "Model 'auto' is not available for this request."
 
 	ErrMsgTokenRateLimited = "Rate limit reached for tokens. Retry after %d seconds."
+
+	ErrMsgInvalidMaxTokensHeader = "Invalid " + MaxOutputTokensRequestHeader + " header: must be a single positive integer."
 )
 
 // APIError is an error response in OpenAI's format. Param and Code are

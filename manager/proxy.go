@@ -39,6 +39,9 @@ const (
 	// ModelRequestHeader optionally names the model the client intends to
 	// call; when set it must match the model field in the request body.
 	ModelRequestHeader = "X-Tinfoil-Model"
+	// MaxOutputTokensRequestHeader optionally sets the output-token limit on
+	// generation endpoints, replacing any limit in the request body.
+	MaxOutputTokensRequestHeader = "X-Tinfoil-Max-Output-Tokens"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.
