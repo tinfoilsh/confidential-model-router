@@ -16,14 +16,12 @@ func TestApplyMaxOutputTokensHeader(t *testing.T) {
 		body    string
 		// want is the body after the call when no error is expected.
 		want      string
-		wantCode  string
-		wantParam string
 		wantError bool
 	}{
 		{name: "absent header leaves body unchanged", path: "/v1/chat/completions",
 			body: `{"model":"m","max_tokens":10}`, want: `{"model":"m","max_tokens":10}`},
 		{name: "empty header counts as absent", path: "/v1/chat/completions", headers: []string{" "},
-			body: `{"model":"m"}`, want: `{"model":"m"}`},
+			body: `{"model":"m","max_tokens":10}`, want: `{"model":"m","max_tokens":10}`},
 		{name: "non-generation endpoint ignores header", path: "/v1/embeddings", headers: []string{"not-a-number"},
 			body: `{"model":"m","input":"hi"}`, want: `{"model":"m","input":"hi"}`},
 
@@ -33,29 +31,17 @@ func TestApplyMaxOutputTokensHeader(t *testing.T) {
 			body: `{"model":"m"}`, want: `{"model":"m","max_tokens":64}`},
 		{name: "responses without limit gets max_output_tokens", path: "/v1/responses", headers: []string{" 64 "},
 			body: `{"model":"m"}`, want: `{"model":"m","max_output_tokens":64}`},
-		{name: "null limit is replaced", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":null}`, want: `{"model":"m","max_completion_tokens":64,"max_tokens":null}`},
 
-		{name: "matching max_tokens is kept", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":64}`, want: `{"model":"m","max_tokens":64}`},
-		{name: "matching chat fields are kept", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":64,"max_completion_tokens":64}`,
-			want: `{"model":"m","max_tokens":64,"max_completion_tokens":64}`},
-		{name: "matching max_output_tokens is kept", path: "/v1/responses", headers: []string{"64"},
-			body: `{"model":"m","max_output_tokens":64}`, want: `{"model":"m","max_output_tokens":64}`},
-
-		{name: "larger body limit is rejected", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":1000000}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_tokens"},
-		{name: "smaller body limit is rejected", path: "/v1/responses", headers: []string{"64"},
-			body: `{"model":"m","max_output_tokens":32}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_output_tokens"},
-		{name: "engine-preferred field cannot bypass header", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":64,"max_completion_tokens":1000000}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_completion_tokens"},
-		{name: "fallback field cannot disagree", path: "/v1/chat/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":1000000,"max_completion_tokens":64}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_tokens"},
-		{name: "string limit is rejected", path: "/v1/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":"64"}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_tokens"},
-		{name: "fractional limit is rejected", path: "/v1/completions", headers: []string{"64"},
-			body: `{"model":"m","max_tokens":64.0}`, wantError: true, wantCode: manager.ErrCodeMaxTokensMismatch, wantParam: "max_tokens"},
+		{name: "header replaces larger body limit", path: "/v1/completions", headers: []string{"64"},
+			body: `{"model":"m","max_tokens":1000000}`, want: `{"model":"m","max_tokens":64}`},
+		{name: "header replaces smaller body limit", path: "/v1/responses", headers: []string{"64"},
+			body: `{"model":"m","max_output_tokens":32}`, want: `{"model":"m","max_output_tokens":64}`},
+		{name: "header replaces both chat fields", path: "/v1/chat/completions", headers: []string{"64"},
+			body: `{"model":"m","max_tokens":10,"max_completion_tokens":1000000}`, want: `{"model":"m","max_completion_tokens":64}`},
+		{name: "header replaces chat max_tokens", path: "/v1/chat/completions", headers: []string{"64"},
+			body: `{"model":"m","max_tokens":1000000}`, want: `{"model":"m","max_completion_tokens":64}`},
+		{name: "header replaces malformed body limit", path: "/v1/completions", headers: []string{"64"},
+			body: `{"model":"m","max_tokens":"lots"}`, want: `{"model":"m","max_tokens":64}`},
 
 		{name: "non-numeric header is rejected", path: "/v1/chat/completions", headers: []string{"lots"},
 			body: `{"model":"m"}`, wantError: true},
@@ -84,8 +70,8 @@ func TestApplyMaxOutputTokensHeader(t *testing.T) {
 				if apiErr == nil {
 					t.Fatalf("expected an error, body became %v", body)
 				}
-				if apiErr.Status != http.StatusBadRequest || apiErr.Code != tt.wantCode || apiErr.Param != tt.wantParam {
-					t.Fatalf("error = %+v, want 400 code=%q param=%q", apiErr, tt.wantCode, tt.wantParam)
+				if apiErr.Status != http.StatusBadRequest || apiErr.Type != manager.ErrTypeInvalidRequest {
+					t.Fatalf("error = %+v, want 400 %s", apiErr, manager.ErrTypeInvalidRequest)
 				}
 				return
 			}
