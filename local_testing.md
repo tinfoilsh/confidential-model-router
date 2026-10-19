@@ -17,8 +17,8 @@ Start whichever servers you need. Each listens on its own port.
 
 ### Web Search (port 8091)
 
-For standalone bring-up and direct MCP probes, see
-`../websearch/local_testing.md`.
+For standalone bring-up and direct MCP probes, see the
+[websearch development guide](https://github.com/tinfoilsh/confidential-websearch/blob/main/DEVELOPMENT.md).
 
 #### Fixture mode
 
@@ -26,7 +26,7 @@ For standalone bring-up and direct MCP probes, see
 cd ../websearch
 LOCAL_TEST_MODE=1 \
 LISTEN_ADDR=127.0.0.1:8091 \
-go run .
+go run ./cmd/websearch-mcp
 ```
 
 `LOCAL_TEST_MODE=1` replaces Exa and Cloudflare with deterministic fixtures.
@@ -37,7 +37,7 @@ go run .
 cd ../websearch
 set -a && . ./.env && set +a
 LISTEN_ADDR=127.0.0.1:8091 \
-go run .
+go run ./cmd/websearch-mcp
 ```
 
 ### Code Execution (port 7070)
@@ -213,8 +213,8 @@ TINFOIL_API_KEY=... python3 evals/run_websearch_eval.py \
   --mcp-base http://127.0.0.1:8091
 ```
 
-For the matrix layout and result analyzer details, see
-`../websearch/evals/WEBSEARCH_EVAL.md`.
+For eval options and the result analyzer, see the
+[websearch development guide](https://github.com/tinfoilsh/confidential-websearch/blob/main/DEVELOPMENT.md).
 
 ---
 
