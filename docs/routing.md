@@ -38,5 +38,4 @@ all-breakers-open fallback retain their load-guard bypass.
 
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.
 Backend overload gauges describe the host's own policy, not every caller's tier.
-Deploy router support and update the control plane's router-config dependency
-before publishing `soft_max_requests_running`. Policies reload without a restart.
+Policies reload without a restart.
