@@ -3,7 +3,7 @@
 
 models:
   nomic-embed-text:
-    repo: tinfoilsh/confidential-nomic-embed-text
+    repo: tinfoilsh/confidential-small-models
 
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
