@@ -9,16 +9,16 @@ models:
     repo: tinfoilsh/confidential-doc-upload
 
   whisper-large-v3-turbo:
-    repo: tinfoilsh/confidential-realtime-models
+    repo: tinfoilsh/confidential-small-models
 
   voxtral-small-24b:
     repo: tinfoilsh/confidential-voxtral-small-24b
 
   voxtral-mini-4b-realtime:
-    repo: tinfoilsh/confidential-realtime-models
+    repo: tinfoilsh/confidential-small-models
 
   voxtral-tts:
-    repo: tinfoilsh/confidential-realtime-models
+    repo: tinfoilsh/confidential-small-models
 
   llama3-3-70b:
     repo: tinfoilsh/confidential-llama3-3-70b
@@ -36,7 +36,7 @@ models:
     repo: tinfoilsh/confidential-gpt-oss-safeguard-120b
 
   qwen3-tts:
-    repo: tinfoilsh/confidential-realtime-models
+    repo: tinfoilsh/confidential-small-models
 
   deepseek-v4-1-flash:
     repo: tinfoilsh/confidential-deepseek-v4-1-flash
