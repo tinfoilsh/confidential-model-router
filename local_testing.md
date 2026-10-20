@@ -7,7 +7,7 @@ MCP tool traffic to local servers.
 Two tool profiles are currently supported:
 
 - **Web Search** — `confidential-websearch` MCP server
-- **Code Execution** — `confidential-code-execution` MCP server (orchestrator)
+- **Code Execution** — code execution MCP server
 
 You can run either or both depending on what you're testing.
 
@@ -42,26 +42,7 @@ go run ./cmd/websearch-mcp
 
 ### Code Execution (port 7070)
 
-From the `confidential-code-execution` repo (`Tinfoil/code-execution/confidential-code-execution`):
-
-```bash
-cd ../code-execution/confidential-code-execution
-ADMIN_API_KEY=$TINFOIL_API_KEY \
-go run -tags dev .
-```
-
-`-tags dev` disables the session-auth check (`auth_dev.go`) and the
-attested-TLS hop to the executor (`proxy_dev.go`) so local probes work
-without enclave attestation. The orchestrator still calls the real
-Tinfoil controlplane to provision sandbox containers, so
-`ADMIN_API_KEY` must be a valid controlplane token. Never ship a binary
-built with `-tags dev`.
-
-The orchestrator exposes `POST /mcp` (MCP Streamable HTTP) and
-`GET /metrics`. It manages a pool of sandboxed containers and routes
-tool calls to them by the `accessToken` carried in
-`params._meta.tinfoil_code_exec` (one container per token,
-snapshotted+evicted after `IDLE_TIMEOUT=60s`).
+Code execution needs a separately run code execution server listening on port 7070.
 
 ## 2. Create a small router config
 
@@ -223,7 +204,7 @@ For eval options and the result analyzer, see the
 Every code-execution call carries three credentials in
 `code_execution_options` (plus the Tinfoil API key on `Authorization`).
 
-Format constraints, enforced downstream of the router (in confidential-code-execution)
+Format constraints, enforced downstream of the router (in the code execution server)
 
 - `accessToken` and `containerAuthToken` must be **64 hex chars**
   (32 random bytes).
@@ -317,7 +298,7 @@ EOF
 
 ### Session cleanup
 
-The orchestrator closes containers on shutdown
+The code execution server closes containers on shutdown
 
 ---
 
@@ -369,6 +350,6 @@ If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server
-lsof -ti tcp:7070 | xargs kill   # code execution orchestrator
+lsof -ti tcp:7070 | xargs kill   # code execution server
 lsof -ti tcp:8090 | xargs kill   # model-router
 ```
