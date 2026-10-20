@@ -54,15 +54,7 @@ models:
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
     enclaves:
-      - gpt-oss-120b.inf6.tinfoil.sh
-  gpt-oss-120b:
-    repo: tinfoilsh/confidential-gpt-oss-120b
-    enclaves:
-      - gpt-oss-120b-0.inf6.tinfoil.sh
-  kimi-k2-6:
-    repo: tinfoilsh/confidential-kimi-k2-6
-    enclaves:
-      - kimi-k2-6.tinfoil.containers.tinfoil.dev
+      - gpt-oss-120b-inf12-0.tinfoil.containers.tinfoil.dev
 EOF
 ```
 
