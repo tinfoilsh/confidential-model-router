@@ -301,9 +301,6 @@ These combinations were validated locally:
 - `gpt-oss-120b`
   - `/v1/chat/completions`
   - non-streaming and streaming
-- `gpt-oss-120b`
-  - `/v1/chat/completions`
-  - non-streaming and streaming
   - `/v1/responses`
   - non-streaming and streaming
 
