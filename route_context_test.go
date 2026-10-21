@@ -478,3 +478,40 @@ func TestRouteContextMissingInputDoesNotFailOpen(t *testing.T) {
 		t.Fatal("missing input reached the control plane")
 	}
 }
+
+// TestApplyPriorityPaths pins which endpoints receive an injected priority.
+// /v1/decisions accepts cache_salt but its schema forbids priority (vLLM
+// rejects the request with 400 extra_forbidden), so neither a configured
+// organization priority nor a demotion may be written there.
+func TestApplyPriorityPaths(t *testing.T) {
+	configured := -1
+	cases := []struct {
+		name string
+		ctx  routeContext
+		path string
+		want any
+	}{
+		{"configured chat", routeContext{Priority: &configured}, "/v1/chat/completions", -1},
+		{"demoted chat", routeContext{RateLimit: &routeRateLimit{Decision: decisionDemote}}, "/v1/chat/completions", demotedPriority},
+		{"configured decisions", routeContext{Priority: &configured}, "/v1/decisions", nil},
+		{"demoted decisions", routeContext{RateLimit: &routeRateLimit{Decision: decisionDemote}}, "/v1/decisions", nil},
+		{"configured embeddings", routeContext{Priority: &configured}, "/v1/embeddings", nil},
+		{"cold decisions", routeContext{}, "/v1/decisions", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"model": "m", "priority": float64(9)} // client value must always be stripped
+			tc.ctx.applyPriority(body, tc.path, "m")
+			got, ok := body["priority"]
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("priority injected on %s: %v", tc.path, got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("priority on %s = %v (present %v), want %v", tc.path, got, ok, tc.want)
+			}
+		})
+	}
+}

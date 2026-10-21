@@ -369,6 +369,14 @@ func (r routeContext) skipsQueue() bool {
 	return r.Priority != nil
 }
 
+// priorityPaths are the endpoints whose engine request schema accepts a
+// vLLM priority field.
+var priorityPaths = map[string]bool{
+	"/v1/chat/completions": true,
+	"/v1/completions":      true,
+	"/v1/responses":        true,
+}
+
 // applyPriority owns the body's vLLM priority field on endpoints whose schema
 // accepts it: client-supplied values are always stripped, then the configured
 // organization priority or a demotion is injected. A configured priority wins
@@ -376,7 +384,7 @@ func (r routeContext) skipsQueue() bool {
 // still reject before this point.
 func (r routeContext) applyPriority(body map[string]any, path, model string) {
 	delete(body, "priority")
-	if !cacheSaltPaths[path] || body == nil {
+	if !priorityPaths[path] || body == nil {
 		return
 	}
 	if r.Priority != nil {
