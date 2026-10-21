@@ -5,15 +5,6 @@ models:
   nomic-embed-text:
     repo: tinfoilsh/confidential-small-models
 
-  decision-27b:
-    repo: tinfoilsh/confidential-decision-models
-
-  decision-9b:
-    repo: tinfoilsh/confidential-decision-models
-
-  decision-4b:
-    repo: tinfoilsh/confidential-decision-models
-
   doc-upload:
     repo: tinfoilsh/confidential-doc-upload
 
@@ -61,3 +52,12 @@ models:
 
   pii-filter:
     repo: tinfoilsh/confidential-pii-cpu
+
+  decision-27b:
+    repo: tinfoilsh/confidential-decision-models
+
+  decision-9b:
+    repo: tinfoilsh/confidential-decision-models
+
+  decision-4b:
+    repo: tinfoilsh/confidential-decision-models
