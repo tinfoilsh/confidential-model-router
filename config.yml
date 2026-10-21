@@ -53,11 +53,11 @@ models:
   pii-filter:
     repo: tinfoilsh/confidential-pii-cpu
 
-  decision-27b:
+  decision-large:
     repo: tinfoilsh/confidential-decision-models
 
-  decision-9b:
+  decision-medium:
     repo: tinfoilsh/confidential-decision-models
 
-  decision-4b:
+  decision-small:
     repo: tinfoilsh/confidential-decision-models
