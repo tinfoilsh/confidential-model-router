@@ -19,10 +19,7 @@ var cacheSaltPaths = map[string]bool{
 	"/v1/chat/completions": true,
 	"/v1/completions":      true,
 	"/v1/responses":        true,
-	// OpenAI Decisions: the engine schema accepts cache_salt and
-	// priority, so decisions participate in salting and the rate-limit
-	// demote/priority lanes like any JSON inference path.
-	"/v1/decisions": true,
+	"/v1/decisions":        true,
 }
 
 // errBodyNotObject is returned when a proxied body decodes but is not a
