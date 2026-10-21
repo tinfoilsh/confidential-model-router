@@ -370,9 +370,7 @@ func (r routeContext) skipsQueue() bool {
 }
 
 // priorityPaths are the endpoints whose engine request schema accepts a
-// vLLM priority field. Not the same set as cacheSaltPaths: /v1/decisions
-// accepts cache_salt but forbids priority (its schema is extra="forbid" and
-// the server hardcodes engine priority 0).
+// vLLM priority field.
 var priorityPaths = map[string]bool{
 	"/v1/chat/completions": true,
 	"/v1/completions":      true,
