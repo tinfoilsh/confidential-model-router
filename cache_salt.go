@@ -19,6 +19,7 @@ var cacheSaltPaths = map[string]bool{
 	"/v1/chat/completions": true,
 	"/v1/completions":      true,
 	"/v1/responses":        true,
+	"/v1/decisions":        true,
 }
 
 // errBodyNotObject is returned when a proxied body decodes but is not a
