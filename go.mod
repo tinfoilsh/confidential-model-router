@@ -1,6 +1,6 @@
 module github.com/tinfoilsh/confidential-model-router
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
