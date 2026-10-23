@@ -312,12 +312,12 @@ github.com/theupdateframework/go-tuf v0.7.0 h1:CqbQFrWo1ae3/I0UCblSbczevCCbS31Qv
 github.com/theupdateframework/go-tuf v0.7.0/go.mod h1:uEB7WSY+7ZIugK6R1hiBMBjQftaFzn7ZCDJcp1tCUug=
 github.com/theupdateframework/go-tuf/v2 v2.4.2 h1:w7976/W8uTwlsegP5nRymlpjPgrwSh+AXUf85is6nJk=
 github.com/theupdateframework/go-tuf/v2 v2.4.2/go.mod h1:JqBrIUnNLAaNq/8GmBcEMFWfAFBbqp/MkJEJseXKbks=
-github.com/tinfoilsh/encrypted-http-body-protocol v0.3.2 h1:yKxfC3pVJ4ORwLeHwflvv2x8ld2Eo3fpcKt+wYIJorc=
-github.com/tinfoilsh/encrypted-http-body-protocol v0.3.2/go.mod h1:THDK0GFNny7Pcc+nO3AQi4f6Wf1cDkfLatmHAUlIn5s=
+github.com/tinfoilsh/encrypted-http-body-protocol v0.4.1 h1:JgFdUPGHTFTUpggQFfGE0mQZbzYh3aDUjUtgvlr8zu0=
+github.com/tinfoilsh/encrypted-http-body-protocol v0.4.1/go.mod h1:zF6e0gesDXC8AkrVWs7BxiRZV2xF5jgqH2rljdaGOk8=
 github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd h1:qprAQDbhLiW9wxztGqgZgxUlKTnN6jJZx/FQl9HyLH8=
 github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd/go.mod h1:2L/TPoX4xeq44MkhftLSU6JBpdwzLPIsFvijrGKKe1s=
-github.com/tinfoilsh/tinfoil-go v0.17.0-rc.2 h1:lHUujKNovhT7B7Co9+yg5oIx3XWjqfvsgXy5TizBntU=
-github.com/tinfoilsh/tinfoil-go v0.17.0-rc.2/go.mod h1:1zCk7XLvOEkVcb5sLTNf2oeNhzhLP+D8ESO07wXDI50=
+github.com/tinfoilsh/tinfoil-go v0.17.0-rc.4 h1:9394VVM1EYQ6sNxh8xd5l0DXxPSgLmxXDO77ZXqaEHM=
+github.com/tinfoilsh/tinfoil-go v0.17.0-rc.4/go.mod h1:lr5G8tF9N4r7UnuxxpqzMof5rWPgcN46Ng9XBLsFglo=
 github.com/tinfoilsh/usage-reporting-go v0.1.4 h1:RS2DhXG6VitnlZb2628gqO16ZU1NxGJ1gQdqzlp50Es=
 github.com/tinfoilsh/usage-reporting-go v0.1.4/go.mod h1:1lXVGmDbEmlAdUo+0YPsUYuFVtr74xycCs0K4fSnwYs=
 github.com/tink-crypto/tink-go-awskms/v3 v3.0.0 h1:XSohRhCkXAVI0iaCnWB/GS05TEmpnKurQmzaY1jzt3Y=

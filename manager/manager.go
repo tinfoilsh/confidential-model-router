@@ -15,9 +15,9 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tinfoilsh/tinfoil-go/document"
 	tinfoilEnclave "github.com/tinfoilsh/tinfoil-go/enclave"
 	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/tinfoilsh/tinfoil-go/verify/document"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
@@ -301,16 +301,16 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	if verification.FreshnessExpiresAt.IsZero() || !verifiedAt.Before(verification.FreshnessExpiresAt) {
 		return fmt.Errorf("verification did not return unexpired authenticated freshness")
 	}
-	tlsKey, err := verification.TLSPublicKeyFP()
-	if err != nil {
-		return err
+	tlsKey, ok := verification.TLSPublicKeyFP()
+	if !ok {
+		return fmt.Errorf("verified attestation has no TLS key fingerprint")
 	}
 	var hpkeKey string
 	for _, item := range verification.CryptoMaterial {
 		if item.ID == document.CryptoMaterialIDHPKE {
-			hpkeKey, err = verification.HPKEPublicKey()
-			if err != nil {
-				return err
+			hpkeKey, ok = verification.HPKEPublicKey()
+			if !ok {
+				return fmt.Errorf("verified attestation has no HPKE public key")
 			}
 		}
 	}
