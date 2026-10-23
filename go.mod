@@ -12,7 +12,7 @@ require (
 	github.com/prometheus/common v0.67.5
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.2
+	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.4
 	github.com/tinfoilsh/usage-reporting-go v0.1.4
 	golang.org/x/sync v0.23.0
 	gopkg.in/yaml.v2 v2.4.0
