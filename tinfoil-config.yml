@@ -39,7 +39,7 @@ containers:
   # The digest is NOT rewritten by this repo's release workflow. Pin it by
   # hand to a published confidential-safeguards release before deploying.
   - name: "safeguards"
-    image: "ghcr.io/tinfoilsh/confidential-safeguards@sha256:45a6c5e506bb73c018423f9ad7dd746ed98ba8d887c6bb3d46d9da2fdbb7dd6a" # v0.1.1
+    image: "ghcr.io/tinfoilsh/confidential-safeguards@sha256:a637b983b8a8cbfccd4e26584333c1ca28551eda8815a9bc660b536328ae5255" # v0.1.2
     restart: always
     networks: [web]
     memory: "4g"
@@ -48,7 +48,6 @@ containers:
       - SAFEGUARD_REVIEW_MODEL: "kimi-k3"
       - SAFEGUARD_TIMEOUT: "5m"
       - SAFEGUARD_REVIEW_TIMEOUT: "10m"
-      - MAX_TRANSCRIPT_BYTES: "320000"
       - MAX_REQUEST_BYTES: "4194304"
       - QUEUE_TTL: "1h"
       - QUEUE_MAX_SIZE: "10000"
