@@ -199,3 +199,53 @@ func TestRotationRecoveredCancellationDoesNotFailCandidate(t *testing.T) {
 		t.Fatal("old probe was not released without an additional failure")
 	}
 }
+
+func TestRotationRecoveredSlowCancellationUsesServingBreaker(t *testing.T) {
+	const headerTimeout = time.Millisecond
+	started, slow := make(chan struct{}), make(chan struct{})
+	var requests atomic.Int32
+	_, model, previous, rotation := rotationFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+	}, func(key string) (*verify.Verification, error) {
+		return renewalVerification(key, time.Now().Add(time.Hour)), nil
+	})
+	refresh := rotation.refresh
+	rotation.refresh = func(ctx context.Context) (http.RoundTripper, error) {
+		transport, err := refresh(ctx)
+		if err != nil {
+			return nil, err
+		}
+		headers := transport.(*recoveredTransport).base.(*slowHeaderTripper)
+		headers.timeout = headerTimeout
+		onSlow := headers.onSlow
+		headers.onSlow = func() {
+			onSlow()
+			close(slow)
+		}
+		return transport, nil
+	}
+	previous.cb.RecordFailure()
+	oldFailures := previous.cb.ConsecutiveFailures()
+	req := rotationRequest(t, previous.host)
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		previous.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
+	}()
+	waitRenewalSignal(t, started)
+	waitRenewalSignal(t, slow)
+	cancel()
+	waitRenewalSignal(t, done)
+	current := model.Enclaves[previous.host]
+	if current == previous || current.cb.ConsecutiveFailures() != 1 {
+		t.Fatal("slow cancellation did not record exactly one failure on the candidate")
+	}
+	if previous.cb.ConsecutiveFailures() != oldFailures || requests.Load() != 1 {
+		t.Fatalf("old failures=%d, want %d; backend requests=%d, want 1", previous.cb.ConsecutiveFailures(), oldFailures, requests.Load())
+	}
+}
