@@ -14,6 +14,18 @@ import (
 
 const attestationRecoveryTimeout = 10 * time.Second
 
+type recoveredTransport struct {
+	base http.RoundTripper
+	cb   *circuitBreaker
+}
+
+func (t *recoveredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if owner, ok := req.Context().Value(proxyBreakerKey{}).(*proxyBreaker); ok {
+		owner.current = t.cb
+	}
+	return t.base.RoundTrip(req)
+}
+
 // rotationTransport retries only handshake rejections, before HTTP headers have
 // been sent. HTTP errors and failures while reading a response are not replayed.
 type rotationTransport struct {
@@ -89,5 +101,5 @@ func (em *EnclaveManager) recoverEnclave(ctx context.Context, modelName, host, f
 	}
 	// Use the verified replacement's transport directly so a second rotation
 	// cannot recursively replay this request.
-	return current.proxy.Transport.(*rotationTransport).base, nil
+	return &recoveredTransport{base: current.proxy.Transport.(*rotationTransport).base, cb: current.cb}, nil
 }

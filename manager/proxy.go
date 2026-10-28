@@ -180,13 +180,28 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
+type proxyBreakerKey struct{}
+
+// proxyBreaker follows the serving attempt across request clones, including
+// transport errors that have no response from which to recover ownership.
+type proxyBreaker struct {
+	current *circuitBreaker
+}
+
+func servingBreaker(ctx context.Context, fallback *circuitBreaker) *circuitBreaker {
+	if owner, ok := ctx.Value(proxyBreakerKey{}).(*proxyBreaker); ok {
+		return owner.current
+	}
+	return fallback
+}
+
 func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, attestation *attestationState) *httputil.ReverseProxy {
-	recordFailure := func(reason string) {
+	recordFailure := func(cb *circuitBreaker, reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
 		publishBreakerState(modelName, host, cb)
 	}
-	recordSuccess := func() {
+	recordSuccess := func(cb *circuitBreaker) {
 		cb.RecordSuccess()
 		ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
 		publishBreakerState(modelName, host, cb)
@@ -212,7 +227,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// cancel as non-failure so this is the only increment for this
 		// request. Consecutive-failure + success reset still apply.
 		onHang: func() {
-			recordFailure("canceled_after_slow")
+			recordFailure(cb, "canceled_after_slow")
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
@@ -224,6 +239,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	proxy.Director = func(req *http.Request) {
 		defaultDirector(req)
 		req.Host = host
+		*req = *req.WithContext(context.WithValue(req.Context(), proxyBreakerKey{}, &proxyBreaker{current: cb}))
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -258,17 +274,18 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
 			ProbeClaimFromContext(r.Context()).Abort()
 		} else {
-			recordFailure(reason)
+			recordFailure(servingBreaker(r.Context(), cb), reason)
 		}
 		WriteAPIError(w, &ErrUpstream)
 	}
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		serving := servingBreaker(resp.Request.Context(), cb)
 		if resp.StatusCode >= 500 {
-			recordFailure(httpFailureReason(resp.StatusCode))
+			recordFailure(serving, httpFailureReason(resp.StatusCode))
 		} else {
-			recordSuccess()
+			recordSuccess(serving)
 		}
 
 		// Extract request details that we'll need for billing
