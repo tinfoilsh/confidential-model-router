@@ -260,3 +260,28 @@ func TestRecordCacheSaltInjection(t *testing.T) {
 		t.Errorf(`series {record-metric-count,user} delta = %v, want 2`, got)
 	}
 }
+
+func TestReplaceJSONBodyReplayUsesFinalPayload(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"user_cache_secret":"private"}`))
+	body := map[string]any{"model": "gpt-oss-120b", "priority": 5}
+	if err := replaceJSONBody(req, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, req.Body); err != nil {
+		t.Fatal(err)
+	}
+	req.Body.Close()
+	if req.GetBody == nil {
+		t.Fatal("rewritten request cannot be replayed after handshake rejection")
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	data, err := io.ReadAll(replay)
+	const want = `{"model":"gpt-oss-120b","priority":5}`
+	if err != nil || string(data) != want || req.ContentLength != int64(len(want)) {
+		t.Fatalf("replayed body=%q length=%d err=%v", data, req.ContentLength, err)
+	}
+}

@@ -794,6 +794,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					modelName = "voxtral-small-24b"
 				}
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
@@ -928,6 +929,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
 					// Streaming tool requests feed the same first-token SLA

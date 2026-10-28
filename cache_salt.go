@@ -105,6 +105,7 @@ func replaceJSONBody(r *http.Request, body map[string]any) error {
 	}
 	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(data))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
 	r.ContentLength = int64(len(data))
 	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	return nil

@@ -19,6 +19,7 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verify"
 	"github.com/tinfoilsh/tinfoil-go/verify/document"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
@@ -175,6 +176,7 @@ func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool, 
 }
 
 type EnclaveManager struct {
+	verifications             singleflight.Group
 	models                    *sync.Map // model name -> *Model
 	multimodalModels          sync.Map  // sticky set of multimodal chat model names
 	modelPricing              atomic.Pointer[map[string]ModelPricing]
@@ -258,7 +260,7 @@ func tlsPublicKeyFP(host string) (string, error) {
 
 // addEnclave verifies and adds an enclave to the model enclave pool.
 // If the enclave already exists, replace it if the TLS key fingerprint is different.
-func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
+func (em *EnclaveManager) addEnclave(modelName, host string) error {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return fmt.Errorf("model %s not found", modelName)
@@ -268,10 +270,6 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	// Take read lock only for this short check, don't hold it during network I/O below
 	model.mu.RLock()
 	currentEnclave, exists := model.Enclaves[host]
-	var currentFP string
-	if exists {
-		currentFP = currentEnclave.tlsKeyFP
-	}
 	model.mu.RUnlock()
 	if exists && !currentEnclave.attestationRefreshDue(time.Now(), em.refreshInterval) {
 		realTLSKeyFP, err := tlsPublicKeyFP(host)
@@ -283,10 +281,26 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 			// enclave on every transient network error.
 			return nil
 		}
-		if currentFP == realTLSKeyFP {
+		model.mu.RLock()
+		current := model.Enclaves[host]
+		alreadyVerified := current != nil && current.tlsKeyFP == realTLSKeyFP && !current.attestationRefreshDue(time.Now(), em.refreshInterval)
+		model.mu.RUnlock()
+		if alreadyVerified {
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
 		}
+	}
+
+	_, err, _ := em.verifications.Do(modelName+"\x00"+host, func() (any, error) {
+		return nil, em.refreshEnclave(modelName, host)
+	})
+	return err
+}
+
+func (em *EnclaveManager) refreshEnclave(modelName, host string) (err error) {
+	model, found := em.GetModel(modelName)
+	if !found {
+		return fmt.Errorf("model %s not found", modelName)
 	}
 
 	attemptedAt := time.Now()
@@ -318,6 +332,10 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
+	if _, configured := model.configuredHosts[host]; !configured {
+		return fmt.Errorf("enclave %s is no longer configured", host)
+	}
+
 	model.Tag = verification.CodeTag
 	model.SourceMeasurement = verification.CodeMeasurement
 
@@ -327,13 +345,20 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		return nil
 	}
 	cb := newCircuitBreaker()
+	proxy := newProxy(host, tlsKey, modelName, em.billingCollector, cb, state)
+	proxy.Transport = &rotationTransport{
+		base: proxy.Transport,
+		refresh: func(ctx context.Context) (http.RoundTripper, error) {
+			return em.recoverEnclave(ctx, modelName, host, tlsKey)
+		},
+	}
 	model.installEnclaveLocked(host, &Enclave{
 		host:        host,
 		modelName:   modelName,
 		predicate:   verification.EnclaveMeasurement.Type,
 		tlsKeyFP:    tlsKey,
 		hpkeKey:     hpkeKey,
-		proxy:       newProxy(host, tlsKey, modelName, em.billingCollector, cb, state),
+		proxy:       proxy,
 		attestation: state,
 		metrics:     newEnclaveMetrics(host, modelName),
 		cb:          cb,
