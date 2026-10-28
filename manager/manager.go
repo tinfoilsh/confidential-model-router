@@ -270,10 +270,6 @@ func (em *EnclaveManager) addEnclave(modelName, host string) error {
 	// Take read lock only for this short check, don't hold it during network I/O below
 	model.mu.RLock()
 	currentEnclave, exists := model.Enclaves[host]
-	var currentFP string
-	if exists {
-		currentFP = currentEnclave.tlsKeyFP
-	}
 	model.mu.RUnlock()
 	if exists && !currentEnclave.attestationRefreshDue(time.Now(), em.refreshInterval) {
 		realTLSKeyFP, err := tlsPublicKeyFP(host)
@@ -285,7 +281,11 @@ func (em *EnclaveManager) addEnclave(modelName, host string) error {
 			// enclave on every transient network error.
 			return nil
 		}
-		if currentFP == realTLSKeyFP {
+		model.mu.RLock()
+		current := model.Enclaves[host]
+		alreadyVerified := current != nil && current.tlsKeyFP == realTLSKeyFP && !current.attestationRefreshDue(time.Now(), em.refreshInterval)
+		model.mu.RUnlock()
+		if alreadyVerified {
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
 		}
