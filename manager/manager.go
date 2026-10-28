@@ -261,13 +261,6 @@ func tlsPublicKeyFP(host string) (string, error) {
 // addEnclave verifies and adds an enclave to the model enclave pool.
 // If the enclave already exists, replace it if the TLS key fingerprint is different.
 func (em *EnclaveManager) addEnclave(modelName, host string) error {
-	_, err, _ := em.verifications.Do(modelName+"\x00"+host, func() (any, error) {
-		return nil, em.refreshEnclave(modelName, host, false)
-	})
-	return err
-}
-
-func (em *EnclaveManager) refreshEnclave(modelName, host string, force bool) (err error) {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return fmt.Errorf("model %s not found", modelName)
@@ -282,7 +275,7 @@ func (em *EnclaveManager) refreshEnclave(modelName, host string, force bool) (er
 		currentFP = currentEnclave.tlsKeyFP
 	}
 	model.mu.RUnlock()
-	if exists && !force && !currentEnclave.attestationRefreshDue(time.Now(), em.refreshInterval) {
+	if exists && !currentEnclave.attestationRefreshDue(time.Now(), em.refreshInterval) {
 		realTLSKeyFP, err := tlsPublicKeyFP(host)
 		if err != nil {
 			em.recordVerification(model, host, time.Now(), verificationTLSProbe, err)
@@ -296,6 +289,18 @@ func (em *EnclaveManager) refreshEnclave(modelName, host string, force bool) (er
 			log.Debugf("enclave %s already exists and TLS key fingerprint is the same, skipping", host)
 			return nil
 		}
+	}
+
+	_, err, _ := em.verifications.Do(modelName+"\x00"+host, func() (any, error) {
+		return nil, em.refreshEnclave(modelName, host)
+	})
+	return err
+}
+
+func (em *EnclaveManager) refreshEnclave(modelName, host string) (err error) {
+	model, found := em.GetModel(modelName)
+	if !found {
+		return fmt.Errorf("model %s not found", modelName)
 	}
 
 	attemptedAt := time.Now()

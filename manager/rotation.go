@@ -70,7 +70,7 @@ func (em *EnclaveManager) recoverEnclave(ctx context.Context, modelName, host, f
 		if changed {
 			return nil, nil
 		}
-		return nil, em.refreshEnclave(modelName, host, true)
+		return nil, em.refreshEnclave(modelName, host)
 	})
 	select {
 	case <-ctx.Done():

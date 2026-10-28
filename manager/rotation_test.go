@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
@@ -254,5 +255,130 @@ func TestRotationRecoveryRejectsUnverifiedDocument(t *testing.T) {
 	}
 	if err == nil || challenges.Load() == 0 || inference.Load() != 0 || model.Enclaves[previous.host] != previous {
 		t.Fatalf("err=%v challenges=%d inference=%d replacement=%v", err, challenges.Load(), inference.Load(), model.Enclaves[previous.host] != previous)
+	}
+}
+
+type rotationWaitContext struct {
+	context.Context
+	waiting func()
+}
+
+func (c *rotationWaitContext) Done() <-chan struct{} {
+	c.waiting()
+	return c.Context.Done()
+}
+
+func TestRotationProxyRecoversDuringPeriodicRefresh(t *testing.T) {
+	for _, test := range []struct {
+		name, contentType, response string
+		periodicVerification        bool
+	}{
+		{"streaming probe", "text/event-stream", rotationStream, false},
+		{"non-streaming probe", "application/json", `{"id":"synthetic-response","output":[]}`, false},
+		{"streaming verification", "text/event-stream", rotationStream, true},
+		{"non-streaming verification", "application/json", `{"id":"synthetic-response","output":[]}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probeStarted, releaseProbe, recoveryWaiting := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseProbe) })
+			var handshakes, upstream, verifications atomic.Int32
+			payload := rotationBody
+			if test.contentType == "application/json" {
+				payload = strings.Replace(payload, `"stream":true`, `"stream":false`, 1)
+			}
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstream.Add(1)
+				body, err := io.ReadAll(r.Body)
+				if err != nil || string(body) != payload || r.Header.Get("Authorization") != "Bearer synthetic-key" {
+					t.Errorf("forwarded body=%q err=%v", body, err)
+				}
+				w.Header().Set("Content-Type", test.contentType)
+				io.WriteString(w, test.response)
+			}))
+			server.TLS = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				if !test.periodicVerification && handshakes.Add(1) == 1 {
+					close(probeStarted)
+					<-releaseProbe
+					return nil, errors.New("synthetic periodic probe failure")
+				}
+				return nil, nil
+			}}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+			trustVerificationServer(t, server)
+			key, err := enclave.CertPubkeyFP(server.Certificate())
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			expiresAt := now.Add(2 * attestationRenewalWindow)
+			if test.periodicVerification {
+				expiresAt = now.Add(time.Hour)
+			}
+			em, model, previous := renewalManager(t, server, expiresAt, now, func(string, string) (*verify.Verification, error) {
+				verifications.Add(1)
+				if test.periodicVerification {
+					close(probeStarted)
+					<-releaseProbe
+				}
+				return renewalVerification(key, time.Now().Add(time.Hour)), nil
+			})
+			t.Cleanup(func() {
+				for _, current := range model.Enclaves {
+					current.shutdown()
+				}
+			})
+			previous.tlsKeyFP = strings.Repeat("0", len(key))
+			previous.proxy = newProxy(previous.host, previous.tlsKeyFP, renewalTestModel, nil, previous.cb, previous.attestation)
+			previous.proxy.Transport = &rotationTransport{base: previous.proxy.Transport, refresh: func(ctx context.Context) (http.RoundTripper, error) {
+				observed := &rotationWaitContext{Context: ctx, waiting: sync.OnceFunc(func() { close(recoveryWaiting) })}
+				return em.recoverEnclave(observed, renewalTestModel, previous.host, previous.tlsKeyFP)
+			}}
+			router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				r.Body.Close()
+				if err != nil {
+					t.Errorf("reading client body: %v", err)
+					return
+				}
+				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+				r.Body, _ = r.GetBody()
+				previous.ServeHTTP(w, r)
+			}))
+			t.Cleanup(router.Close)
+			ctx, cancel := context.WithTimeout(context.Background(), renewalTestTimeout)
+			var wg sync.WaitGroup
+			t.Cleanup(func() { release(); cancel(); wg.Wait() })
+			wg.Go(func() {
+				if err := em.addEnclave(renewalTestModel, previous.host); err != nil {
+					t.Errorf("periodic refresh: %v", err)
+				}
+			})
+			waitRenewalSignal(t, probeStarted)
+			wg.Go(func() {
+				request, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL+"/v1/responses", strings.NewReader(payload))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				request.Header.Set("Authorization", "Bearer synthetic-key")
+				response, err := router.Client().Do(request)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer response.Body.Close()
+				body, err := io.ReadAll(response.Body)
+				if err != nil || response.StatusCode != http.StatusOK || string(body) != test.response {
+					t.Errorf("status=%d body=%q err=%v", response.StatusCode, body, err)
+				}
+			})
+			waitRenewalSignal(t, recoveryWaiting)
+			release()
+			wg.Wait()
+			if upstream.Load() != 1 || verifications.Load() != 1 {
+				t.Fatalf("upstream=%d verifications=%d", upstream.Load(), verifications.Load())
+			}
+		})
 	}
 }
