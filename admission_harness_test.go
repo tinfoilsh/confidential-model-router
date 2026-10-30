@@ -1208,3 +1208,60 @@ func TestModelHostHeaderIsIgnored(t *testing.T) {
 		t.Fatalf("admissions = %d, want 1", admissions.Load())
 	}
 }
+
+func TestAdmissionHandlerCompletionCountHeader(t *testing.T) {
+	tests := []struct {
+		name      string
+		count     string
+		body      string
+		status    int
+		wantCount string
+	}{
+		{"overrides hidden count with both headers", "1", `{"model":"gpt-oss-120b","messages":[],"n":3,"max_tokens":4096}`, http.StatusOK, "1"},
+		{"allows multiple choices", "3", `{"model":"gpt-oss-120b","messages":[],"n":1,"best_of":1}`, http.StatusOK, "3"},
+		{"invalid count rejected before admission", "0", `{"model":"gpt-oss-120b","messages":[]}`, http.StatusBadRequest, ""},
+		{"hidden best_of rejected before admission", "1", `{"model":"gpt-oss-120b","messages":[],"best_of":3}`, http.StatusBadRequest, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var admissions atomic.Int64
+			forwarded := make(chan []byte, 1)
+			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				admissions.Add(1)
+				io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, _ := io.ReadAll(r.Body)
+				forwarded <- data
+				io.WriteString(w, `{}`)
+			}), "", false)
+			r := admissionRequest("/v1/chat/completions", tt.body, "tk_test")
+			r.Header.Set(manager.CompletionCountRequestHeader, tt.count)
+			r.Header.Set(manager.MaxOutputTokensRequestHeader, "8")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			handler.client.refreshes.Wait()
+			if rec.Code != tt.status {
+				t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
+			}
+			if tt.status != http.StatusOK {
+				if admissions.Load() != 0 || len(forwarded) != 0 {
+					t.Fatal("invalid request reached admission/backend")
+				}
+				return
+			}
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(<-forwarded, &body); err != nil {
+				t.Fatal(err)
+			}
+			if string(body["n"]) != tt.wantCount || string(body["max_completion_tokens"]) != "8" {
+				t.Fatalf("limits not enforced: n=%s, max_completion_tokens=%s", body["n"], body["max_completion_tokens"])
+			}
+			if _, present := body["best_of"]; present {
+				t.Fatal("best_of forwarded")
+			}
+			if _, present := body["max_tokens"]; present {
+				t.Fatal("old body token cap forwarded")
+			}
+		})
+	}
+}
