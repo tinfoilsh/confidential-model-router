@@ -839,6 +839,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					writeError(w, apiErr)
 					return
 				}
+				if apiErr := applyCompletionCountHeader(r.Header, r.URL.Path, body); apiErr != nil {
+					writeError(w, apiErr)
+					return
+				}
 
 				// "auto" is a router-side sentinel: the caller states an
 				// intelligence level and the router picks a concrete,
