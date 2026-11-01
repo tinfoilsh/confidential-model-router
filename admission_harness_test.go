@@ -744,100 +744,76 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 }
 
 func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
-	for _, jwt := range []bool{false, true} {
-		t.Run(fmt.Sprint("jwt=", jwt), func(t *testing.T) {
-			var cpCalls, delegates, conversions, modelCalls, toolCalls atomic.Int64
-			var orderMu sync.Mutex
-			var order []string
-			record := func(event string) { orderMu.Lock(); order = append(order, event); orderMu.Unlock() }
-			server := mcp.NewServer(&mcp.Implementation{Name: "admission-tools", Version: "1"}, nil)
-			mcp.AddTool(server, &mcp.Tool{Name: "search"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
-				Query string `json:"query"`
-			}) (*mcp.CallToolResult, any, error) {
-				toolCalls.Add(1)
-				record("tool")
-				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "search result"}}}, nil, nil
-			})
-			mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
-			org := admissionTestOrg
-			if jwt {
-				org = ""
+	var cpCalls, conversions, modelCalls, toolCalls atomic.Int64
+	var orderMu sync.Mutex
+	var order []string
+	record := func(event string) { orderMu.Lock(); order = append(order, event); orderMu.Unlock() }
+	server := mcp.NewServer(&mcp.Implementation{Name: "admission-tools", Version: "1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "search"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
+		Query string `json:"query"`
+	}) (*mcp.CallToolResult, any, error) {
+		toolCalls.Add(1)
+		record("tool")
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "search result"}}}, nil, nil
+	})
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
+	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cpCalls.Add(1)
+		var req routeContextRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Model != admissionTestModel {
+			t.Errorf("counted internal model: %q", req.Model)
+		}
+		fmt.Fprintf(w, `{"org_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, admissionTestOrg)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/mcp" {
+			mcpHandler.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/convert/file" {
+			conversions.Add(1)
+			record("convert")
+			io.WriteString(w, `{"document":{"md_content":"converted document"}}`)
+			return
+		}
+		modelCalls.Add(1)
+		record("model")
+		data, _ := io.ReadAll(r.Body)
+		if !bytes.Contains(data, []byte("converted document")) {
+			t.Error("model ran before file conversion")
+		}
+		if modelCalls.Load() == 1 {
+			io.WriteString(w, `{"id":"first","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"router_search","arguments":"{\"query\":\"hello\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
+		} else {
+			io.WriteString(w, `{"id":"last","choices":[{"index":0,"message":{"role":"assistant","content":"final answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+		}
+	}), admissionTestOrg, false)
+	key := "tk_test"
+	handler.warm(key, admissionTestModel)
+	cpCalls.Store(0)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]}],"web_search_options":{}}`, key))
+	handler.client.refreshes.Wait()
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
+		t.Fatalf("tool loop HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if cpCalls.Load() != 1 || conversions.Load() != 1 || modelCalls.Load() != 2 || toolCalls.Load() != 1 {
+		t.Fatalf("calls cp=%d files=%d models=%d tools=%d", cpCalls.Load(), conversions.Load(), modelCalls.Load(), toolCalls.Load())
+	}
+	for _, name := range []string{admissionTestModel, "doc-upload", "websearch"} {
+		model, _ := em.GetModel(name)
+		for _, replica := range model.CacheRoutePool().Candidates {
+			if replica.InFlight != 0 {
+				t.Errorf("%s retained in-flight load after completion", name)
 			}
-			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/internal/inference/delegate" {
-					delegates.Add(1)
-					json.NewEncoder(w).Encode(map[string]any{"access_token": "delegated-token", "grant_token": "grant", "access_token_expires_at": time.Now().Add(time.Hour), "grant_expires_at": time.Now().Add(time.Hour)})
-					return
-				}
-				cpCalls.Add(1)
-				var req routeContextRequest
-				json.NewDecoder(r.Body).Decode(&req)
-				if req.Model != admissionTestModel {
-					t.Errorf("counted internal model: %q", req.Model)
-				}
-				fmt.Fprintf(w, `{"org_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, org)
-			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/mcp" {
-					mcpHandler.ServeHTTP(w, r)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				if r.URL.Path == "/v1/convert/file" {
-					conversions.Add(1)
-					record("convert")
-					io.WriteString(w, `{"document":{"md_content":"converted document"}}`)
-					return
-				}
-				modelCalls.Add(1)
-				record("model")
-				data, _ := io.ReadAll(r.Body)
-				if !bytes.Contains(data, []byte("converted document")) {
-					t.Error("model ran before file conversion")
-				}
-				if jwt && r.Header.Get("Authorization") != "Bearer delegated-token" {
-					t.Error("delegation lost on internal model call")
-				}
-				if modelCalls.Load() == 1 {
-					io.WriteString(w, `{"id":"first","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"router_search","arguments":"{\"query\":\"hello\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
-				} else {
-					io.WriteString(w, `{"id":"last","choices":[{"index":0,"message":{"role":"assistant","content":"final answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
-				}
-			}), org, false)
-			key := "tk_test"
-			if jwt {
-				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","client_id":"tinfoil-chat","product":"chat"}`)
-			} else {
-				handler.warm(key, admissionTestModel)
-				cpCalls.Store(0)
-			}
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", `{"model":"gpt-oss-120b","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]}],"web_search_options":{}}`, key))
-			handler.client.refreshes.Wait()
-			if rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
-				t.Fatalf("tool loop HTTP %d: %s", rec.Code, rec.Body.String())
-			}
-			wantCP, wantDelegate := int64(1), int64(0)
-			if jwt {
-				wantCP, wantDelegate = 0, 1
-			}
-			if cpCalls.Load() != wantCP || delegates.Load() != wantDelegate || conversions.Load() != 1 || modelCalls.Load() != 2 || toolCalls.Load() != 1 {
-				t.Fatalf("calls cp=%d delegates=%d files=%d models=%d tools=%d", cpCalls.Load(), delegates.Load(), conversions.Load(), modelCalls.Load(), toolCalls.Load())
-			}
-			for _, name := range []string{admissionTestModel, "doc-upload", "websearch"} {
-				model, _ := em.GetModel(name)
-				for _, replica := range model.CacheRoutePool().Candidates {
-					if replica.InFlight != 0 {
-						t.Errorf("%s retained in-flight load after completion", name)
-					}
-				}
-			}
-			orderMu.Lock()
-			defer orderMu.Unlock()
-			wantOrder := "convert,model,tool,model"
-			if strings.Join(order, ",") != wantOrder {
-				t.Fatalf("dispatch order: %v", order)
-			}
-		})
+		}
+	}
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	wantOrder := "convert,model,tool,model"
+	if strings.Join(order, ",") != wantOrder {
+		t.Fatalf("dispatch order: %v", order)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,27 +177,25 @@ func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool, 
 }
 
 type EnclaveManager struct {
-	verifications             singleflight.Group
-	models                    *sync.Map // model name -> *Model
-	multimodalModels          sync.Map  // sticky set of multimodal chat model names
-	modelPricing              atomic.Pointer[map[string]ModelPricing]
-	modelIntelligence         atomic.Pointer[map[string]ModelIntelligence]
-	initConfigURL             string
-	updateConfigURL           string
-	controlPlaneURL           string
-	verifier                  func(host, repo string) (*verify.Verification, error)
-	billingCollector          *billing.Collector
-	unknownModelReporter      *billing.UnknownModelReporter
-	usageContextSecret        string
-	inferenceDelegationSecret string
-	delegationHTTPClient      *http.Client
-	cacheRouteShadow          *cacheroute.Shadow
-	refreshInterval           time.Duration
-	stateMu                   sync.Mutex
-	errors                    []string
-	lastSuccessfulUpdate      time.Time
-	lastAttemptedUpdate       time.Time
-	debug                     bool
+	verifications        singleflight.Group
+	models               *sync.Map // model name -> *Model
+	multimodalModels     sync.Map  // sticky set of multimodal chat model names
+	modelPricing         atomic.Pointer[map[string]ModelPricing]
+	modelIntelligence    atomic.Pointer[map[string]ModelIntelligence]
+	initConfigURL        string
+	updateConfigURL      string
+	controlPlaneURL      string
+	verifier             func(host, repo string) (*verify.Verification, error)
+	billingCollector     *billing.Collector
+	unknownModelReporter *billing.UnknownModelReporter
+	usageContextSecret   string
+	cacheRouteShadow     *cacheroute.Shadow
+	refreshInterval      time.Duration
+	stateMu              sync.Mutex
+	errors               []string
+	lastSuccessfulUpdate time.Time
+	lastAttemptedUpdate  time.Time
+	debug                bool
 }
 
 // SetDebugMode enables debug-only behaviors such as honoring the
@@ -644,12 +643,23 @@ func (e *Enclave) String() string {
 	return e.host
 }
 
+func validateControlPlaneURL(controlPlaneURL string, debug bool) error {
+	if debug {
+		return nil
+	}
+	parsed, err := url.Parse(controlPlaneURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("control plane URL must use HTTPS")
+	}
+	return nil
+}
+
 // NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
-func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, inferenceDelegationSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration, debug bool) (*EnclaveManager, error) {
+func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration, debug bool) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
 	}
-	if err := validateDelegationControlPlaneURL(controlPlaneURL, debug); err != nil {
+	if err := validateControlPlaneURL(controlPlaneURL, debug); err != nil {
 		return nil, err
 	}
 
@@ -665,19 +675,17 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	}
 
 	em := &EnclaveManager{
-		models:                    &sync.Map{},
-		initConfigURL:             initConfigURL,
-		updateConfigURL:           updateConfigURL,
-		controlPlaneURL:           controlPlaneURL,
-		verifier:                  verifyEnclave,
-		billingCollector:          billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
-		unknownModelReporter:      billing.NewUnknownModelReporter(controlPlaneURL, usageReporterID, usageReporterSecret),
-		usageContextSecret:        usageContextSecret,
-		inferenceDelegationSecret: inferenceDelegationSecret,
-		delegationHTTPClient:      &http.Client{},
-		cacheRouteShadow:          cacheroute.NewShadow(nil),
-		refreshInterval:           refreshInterval,
-		debug:                     debug,
+		models:               &sync.Map{},
+		initConfigURL:        initConfigURL,
+		updateConfigURL:      updateConfigURL,
+		controlPlaneURL:      controlPlaneURL,
+		verifier:             verifyEnclave,
+		billingCollector:     billing.NewCollector(controlPlaneURL, usageReporterID, usageReporterSecret),
+		unknownModelReporter: billing.NewUnknownModelReporter(controlPlaneURL, usageReporterID, usageReporterSecret),
+		usageContextSecret:   usageContextSecret,
+		cacheRouteShadow:     cacheroute.NewShadow(nil),
+		refreshInterval:      refreshInterval,
+		debug:                debug,
 	}
 
 	for modelName, modelConfig := range cfg.Models {

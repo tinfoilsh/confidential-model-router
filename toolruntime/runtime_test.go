@@ -1,7 +1,6 @@
 package toolruntime
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,17 +27,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
-}
-
-type sequenceAuthorizationProvider struct {
-	tokens []string
-	next   int
-}
-
-func (p *sequenceAuthorizationProvider) Authorization(context.Context) (string, error) {
-	token := p.tokens[p.next]
-	p.next++
-	return "Bearer " + token, nil
 }
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -1273,7 +1261,7 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer tk_test")
 
-	headers, usageContext := toolSessionHeaders(req, "req-1", "root-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	headers, usageContext := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
 	var sentHeaders []http.Header
 	nowIndex := 0
 	transport := &headerRoundTripper{
@@ -1287,7 +1275,6 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 			}, nil
 		}),
 		headers:            headers,
-		authorization:      &sequenceAuthorizationProvider{tokens: []string{"child-1", "child-2"}},
 		usageContext:       usageContext,
 		usageContextSecret: secret,
 		now: func() time.Time {
@@ -1333,16 +1320,16 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 		if !got.IssuedAt.Equal(times[i]) {
 			t.Fatalf("issued at mismatch: got %s want %s", got.IssuedAt, times[i])
 		}
-		if got.RootRequestID != "root-1" || got.ContextID != "req-1" {
+		if got.RootRequestID != "req-1" || got.ContextID != "req-1" {
 			t.Fatalf("request identity mismatch: got context=%q root=%q", got.ContextID, got.RootRequestID)
 		}
 		if got.ParentService != usagereporting.ServiceRouter {
 			t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, usagereporting.ServiceRouter)
 		}
-		if !usagereporting.VerifyAPIKeyHash(fmt.Sprintf("child-%d", i+1), got.APIKeyHash) {
+		if !usagereporting.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
 			t.Fatal("api key hash does not match forwarded authorization")
 		}
-		if authorization := sent.Get("Authorization"); authorization != fmt.Sprintf("Bearer child-%d", i+1) {
+		if authorization := sent.Get("Authorization"); authorization != "Bearer tk_test" {
 			t.Fatalf("authorization mismatch: got %q", authorization)
 		}
 		if got.Depth != 1 {
@@ -1368,7 +1355,7 @@ func TestHeaderRoundTripperOmitsUsageContextWhenSecretEmpty(t *testing.T) {
 		t.Fatalf("build request: %v", err)
 	}
 
-	headers, usageContext := toolSessionHeaders(req, "req-1", "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	headers, usageContext := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
 	var sentHeaders http.Header
 	transport := &headerRoundTripper{
 		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
