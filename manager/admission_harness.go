@@ -4,7 +4,6 @@ package manager
 
 import (
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -22,12 +21,10 @@ func NewAdmissionManagerForTest(data []byte, controlPlaneURL string) (*EnclaveMa
 		return nil, err
 	}
 	em := &EnclaveManager{
-		models:                    &sync.Map{},
-		controlPlaneURL:           controlPlaneURL,
-		usageContextSecret:        "test-context-secret",
-		inferenceDelegationSecret: "test-delegation-secret",
-		delegationHTTPClient:      &http.Client{},
-		cacheRouteShadow:          cacheroute.NewShadow(prometheus.NewRegistry()),
+		models:             &sync.Map{},
+		controlPlaneURL:    controlPlaneURL,
+		usageContextSecret: "test-context-secret",
+		cacheRouteShadow:   cacheroute.NewShadow(prometheus.NewRegistry()),
 	}
 	for name, model := range cfg.Models {
 		em.addModel(name, model)

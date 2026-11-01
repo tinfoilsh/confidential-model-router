@@ -516,8 +516,8 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 }
 
 // TestDetectToolProfiles pins the contract between the request shape
-// and the set of MCP profiles the router activates. Display-only client
-// tools can also enter the tool loop without activating an MCP profile;
+// and the set of MCP profiles the router activates. This test is the
+// single source of truth for "which requests enter the tool loop";
 // adding a new profile must come with a new case here.
 func TestDetectToolProfiles(t *testing.T) {
 	profileNames := func(ps []toolruntime.Profile) []string {
@@ -572,57 +572,6 @@ func TestDetectToolProfiles(t *testing.T) {
 				"tools":              []any{map[string]any{"type": "web_search"}},
 			},
 			want: []string{"web_search"},
-		},
-		{
-			name: "chat completions with code_execution_options",
-			path: "/v1/chat/completions",
-			body: map[string]any{"code_execution_options": map[string]any{
-				"accessToken":        "a",
-				"encryptionKey":      "b",
-				"containerAuthToken": "c",
-			}},
-			want: []string{"code_execution"},
-		},
-		{
-			name: "responses with code_execution tool",
-			path: "/v1/responses",
-			body: map[string]any{"tools": []any{map[string]any{"type": "code_execution"}}},
-			want: []string{"code_execution"},
-		},
-		{
-			name: "both web_search and code_execution",
-			path: "/v1/chat/completions",
-			body: map[string]any{
-				"web_search_options": map[string]any{},
-				"code_execution_options": map[string]any{
-					"accessToken":        "a",
-					"encryptionKey":      "b",
-					"containerAuthToken": "c",
-				},
-			},
-			want: []string{"web_search", "code_execution"},
-		},
-		{
-			name: "responses with both tool types",
-			path: "/v1/responses",
-			body: map[string]any{"tools": []any{
-				map[string]any{"type": "web_search"},
-				map[string]any{"type": "code_execution"},
-			}},
-			want: []string{"web_search", "code_execution"},
-		},
-		{
-			name: "responses duplicates do not stack code_execution",
-			path: "/v1/responses",
-			body: map[string]any{
-				"code_execution_options": map[string]any{
-					"accessToken":        "a",
-					"encryptionKey":      "b",
-					"containerAuthToken": "c",
-				},
-				"tools": []any{map[string]any{"type": "code_execution"}},
-			},
-			want: []string{"code_execution"},
 		},
 	}
 

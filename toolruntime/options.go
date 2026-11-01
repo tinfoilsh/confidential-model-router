@@ -12,25 +12,9 @@ import (
 // in via RouterOptions at the MCP boundary, so the upstream model never sees
 // these fields but the MCP servers still get the caller's preferences.
 const (
-	fieldCodeExecutionOptions = "code_execution_options"
-	fieldWebSearchOptions     = "web_search_options"
-	fieldPIICheckOptions      = "pii_check_options"
+	fieldWebSearchOptions = "web_search_options"
+	fieldPIICheckOptions  = "pii_check_options"
 )
-
-type CodeExecutionOptions struct {
-	AccessToken        string
-	EncryptionKey      string
-	ContainerAuthToken string
-	// pointer to distinguish absent from empty
-	Uploads *[]UploadedFile
-}
-
-// code_execution_options.uploads. Handled by code-exec mcp
-type UploadedFile struct {
-	FileAccessToken string
-	Filename        string
-	Sha256          string
-}
 
 // WebSearchOptions wraps the caller's web_search_options block so it
 // survives the strip-from-body step at the router edge. Raw is the
@@ -47,19 +31,13 @@ type WebSearchOptions struct {
 type PIICheckOptions struct{}
 
 type RouterOptions struct {
-	CodeExecution *CodeExecutionOptions
-	WebSearch     *WebSearchOptions
-	PIICheck      *PIICheckOptions
+	WebSearch *WebSearchOptions
+	PIICheck  *PIICheckOptions
 }
 
 // ExtractRouterOptions pulls every router-only options field off the
 // request body in place. The body afterwards is the plain OpenAI-spec
 // shape that gets forwarded to the model enclave.
-//
-// Validation is eager: if code_execution_options is present, all three
-// credential subfields must be non-empty strings. A missing field or
-// malformed shape returns an error so the router responds 400 with a
-// clear message instead of deferring to the orchestrator.
 //
 // web_search_options and pii_check_options are lifted into typed
 // wrappers and the body field is stripped. The only web search setting
@@ -68,15 +46,6 @@ type RouterOptions struct {
 // is rejected rather than ignored.
 func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 	opts := &RouterOptions{}
-
-	if raw, ok := body[fieldCodeExecutionOptions]; ok {
-		ce, err := parseCodeExecutionOptions(raw)
-		if err != nil {
-			return nil, err
-		}
-		opts.CodeExecution = ce
-		delete(body, fieldCodeExecutionOptions)
-	}
 
 	if raw, ok := body[fieldWebSearchOptions]; ok {
 		ws, _ := raw.(map[string]any)
@@ -103,65 +72,6 @@ func ExtractRouterOptions(body map[string]any) (*RouterOptions, error) {
 // options field, with param set to the field's JSON path.
 func optionsParamError(param string, detail string) *manager.APIError {
 	return manager.ErrInvalidRequest.WithParam(param).WithMessage(manager.ErrMsgInvalidParam, param, detail)
-}
-
-func parseCodeExecutionOptions(raw any) (*CodeExecutionOptions, error) {
-	m, ok := raw.(map[string]any)
-	if !ok {
-		return nil, optionsParamError(fieldCodeExecutionOptions, "must be an object")
-	}
-	ce := &CodeExecutionOptions{
-		AccessToken:        stringField(m, "accessToken"),
-		EncryptionKey:      stringField(m, "encryptionKey"),
-		ContainerAuthToken: stringField(m, "containerAuthToken"),
-	}
-	if ce.AccessToken == "" {
-		return nil, optionsParamError(fieldCodeExecutionOptions+".accessToken", "is required")
-	}
-	if ce.EncryptionKey == "" {
-		return nil, optionsParamError(fieldCodeExecutionOptions+".encryptionKey", "is required")
-	}
-	if ce.ContainerAuthToken == "" {
-		return nil, optionsParamError(fieldCodeExecutionOptions+".containerAuthToken", "is required")
-	}
-	if rawUploads, ok := m["uploads"]; ok {
-		uploads, err := parseUploads(rawUploads)
-		if err != nil {
-			return nil, err
-		}
-		ce.Uploads = &uploads
-	}
-	return ce, nil
-}
-
-func parseUploads(raw any) ([]UploadedFile, error) {
-	arr, ok := raw.([]any)
-	if !ok {
-		return nil, optionsParamError(fieldCodeExecutionOptions+".uploads", "must be an array")
-	}
-	out := make([]UploadedFile, len(arr))
-	for i, item := range arr {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d]", fieldCodeExecutionOptions, i), "must be an object")
-		}
-		u := UploadedFile{
-			FileAccessToken: stringField(entry, "fileAccessToken"),
-			Filename:        stringField(entry, "filename"),
-			Sha256:          stringField(entry, "sha256"),
-		}
-		if u.FileAccessToken == "" {
-			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].fileAccessToken", fieldCodeExecutionOptions, i), "is required")
-		}
-		if u.Filename == "" {
-			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].filename", fieldCodeExecutionOptions, i), "is required")
-		}
-		if u.Sha256 == "" {
-			return nil, optionsParamError(fmt.Sprintf("%s.uploads[%d].sha256", fieldCodeExecutionOptions, i), "is required")
-		}
-		out[i] = u
-	}
-	return out, nil
 }
 
 // validateExternalWebAccess rejects a non-boolean external_web_access on the
@@ -192,24 +102,4 @@ func validateWebSearchTools(body map[string]any) error {
 		}
 	}
 	return nil
-}
-
-func stringField(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-// attachRouterOptionsMeta lifts per-request secrets from RouterOptions onto
-// the session registry as mcp.Meta.
-func attachRouterOptionsMeta(registry *sessionRegistry, opts *RouterOptions) {
-	if registry == nil || opts == nil {
-		return
-	}
-	for _, d := range profiles {
-		if d.AttachMeta != nil {
-			d.AttachMeta(registry, opts)
-		}
-	}
 }

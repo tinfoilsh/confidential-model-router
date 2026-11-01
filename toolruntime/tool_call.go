@@ -146,8 +146,7 @@ func responseTools(tools []*mcp.Tool) []any {
 // placeholder entries are stripped from the upstream request and replaced
 // with the concrete function definitions the MCP servers advertise.
 var routerOwnedToolTypes = map[string]bool{
-	"web_search":     true,
-	"code_execution": true,
+	"web_search": true,
 }
 
 func replaceRouterOwnedResponsesTools(raw any, replacements []any) []any {

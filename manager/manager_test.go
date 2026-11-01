@@ -439,3 +439,22 @@ func TestSelectServingWithoutClaimingLeavesProbes(t *testing.T) {
 		t.Fatalf("breaker state = %v, want still open (probe left unclaimed)", st)
 	}
 }
+
+func TestValidateControlPlaneURL(t *testing.T) {
+	if err := validateControlPlaneURL("https://api.tinfoil.sh", false); err != nil {
+		t.Fatalf("HTTPS production URL rejected: %v", err)
+	}
+	if err := validateControlPlaneURL("http://api.tinfoil.sh", false); err == nil {
+		t.Fatal("expected production HTTP URL to be rejected")
+	}
+	if err := validateControlPlaneURL("http://127.0.0.1:8080", true); err != nil {
+		t.Fatalf("debug local URL rejected: %v", err)
+	}
+}
+
+func TestNewEnclaveManagerRejectsHTTPControlPlane(t *testing.T) {
+	_, err := NewEnclaveManager(nil, "http://api.tinfoil.sh", "reporter", "reporting-secret", "context-secret", "", "", time.Minute, false)
+	if err == nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("constructor error = %v, want HTTPS validation error", err)
+	}
+}

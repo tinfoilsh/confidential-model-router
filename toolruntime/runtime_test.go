@@ -1,7 +1,6 @@
 package toolruntime
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,17 +27,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
-}
-
-type sequenceAuthorizationProvider struct {
-	tokens []string
-	next   int
-}
-
-func (p *sequenceAuthorizationProvider) Authorization(context.Context) (string, error) {
-	token := p.tokens[p.next]
-	p.next++
-	return "Bearer " + token, nil
 }
 
 func TestReplaceRouterOwnedResponsesTools(t *testing.T) {
@@ -89,51 +77,6 @@ func TestReplaceRouterOwnedResponsesToolsDedupes(t *testing.T) {
 	}
 	if len(replaced) != 3 {
 		t.Fatalf("expected 3 tools (2 replacements + 1 pre-existing), got %d", len(replaced))
-	}
-}
-
-func TestReplaceRouterOwnedResponsesToolsHandlesCodeExecution(t *testing.T) {
-	replaced := replaceRouterOwnedResponsesTools([]any{
-		map[string]any{"type": "code_execution"},
-		map[string]any{"type": "function", "name": "other"},
-	}, []any{
-		map[string]any{"type": "function", "name": "bash"},
-		map[string]any{"type": "function", "name": "view"},
-	})
-
-	if len(replaced) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(replaced))
-	}
-	if replaced[0].(map[string]any)["name"] != "bash" {
-		t.Fatalf("expected first replacement tool to be bash, got %#v", replaced[0])
-	}
-	if replaced[2].(map[string]any)["name"] != "other" {
-		t.Fatalf("expected pre-existing tool preserved, got %#v", replaced[2])
-	}
-}
-
-func TestReplaceRouterOwnedResponsesToolsMixedTypes(t *testing.T) {
-	replaced := replaceRouterOwnedResponsesTools([]any{
-		map[string]any{"type": "web_search"},
-		map[string]any{"type": "code_execution"},
-		map[string]any{"type": "function", "name": "client_tool"},
-	}, []any{
-		map[string]any{"type": "function", "name": "search"},
-		map[string]any{"type": "function", "name": "bash"},
-	})
-
-	if len(replaced) != 3 {
-		t.Fatalf("expected 3 tools (2 replacements + 1 client), got %d", len(replaced))
-	}
-	names := make([]string, 0, len(replaced))
-	for _, tool := range replaced {
-		m, _ := tool.(map[string]any)
-		if name, ok := m["name"].(string); ok {
-			names = append(names, name)
-		}
-	}
-	if names[0] != "search" || names[1] != "bash" || names[2] != "client_tool" {
-		t.Fatalf("unexpected tool ordering: %v", names)
 	}
 }
 
@@ -217,7 +160,6 @@ func TestToolCallLogWebSearchCallsCountsSearchAndFetchOnly(t *testing.T) {
 	log.record(toolCallRecord{name: routerSearchToolName, errorReason: publicToolErrorReasonString})
 	log.record(toolCallRecord{name: routerFetchToolName})
 	log.record(toolCallRecord{name: "bash"})
-	log.record(toolCallRecord{name: mcpPresentToolName})
 
 	if got := log.webSearchCalls(); got != 3 {
 		t.Fatalf("web search calls = %d, want 3 (search, failed search, fetch)", got)
@@ -1273,7 +1215,7 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer tk_test")
 
-	headers, usageContext := toolSessionHeaders(req, "req-1", "root-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	headers, usageContext := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
 	var sentHeaders []http.Header
 	nowIndex := 0
 	transport := &headerRoundTripper{
@@ -1287,7 +1229,6 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 			}, nil
 		}),
 		headers:            headers,
-		authorization:      &sequenceAuthorizationProvider{tokens: []string{"child-1", "child-2"}},
 		usageContext:       usageContext,
 		usageContextSecret: secret,
 		now: func() time.Time {
@@ -1333,16 +1274,16 @@ func TestHeaderRoundTripperRefreshesUsageContext(t *testing.T) {
 		if !got.IssuedAt.Equal(times[i]) {
 			t.Fatalf("issued at mismatch: got %s want %s", got.IssuedAt, times[i])
 		}
-		if got.RootRequestID != "root-1" || got.ContextID != "req-1" {
+		if got.RootRequestID != "req-1" || got.ContextID != "req-1" {
 			t.Fatalf("request identity mismatch: got context=%q root=%q", got.ContextID, got.RootRequestID)
 		}
 		if got.ParentService != usagereporting.ServiceRouter {
 			t.Fatalf("parent service mismatch: got %q want %q", got.ParentService, usagereporting.ServiceRouter)
 		}
-		if !usagereporting.VerifyAPIKeyHash(fmt.Sprintf("child-%d", i+1), got.APIKeyHash) {
+		if !usagereporting.VerifyAPIKeyHash("tk_test", got.APIKeyHash) {
 			t.Fatal("api key hash does not match forwarded authorization")
 		}
-		if authorization := sent.Get("Authorization"); authorization != fmt.Sprintf("Bearer child-%d", i+1) {
+		if authorization := sent.Get("Authorization"); authorization != "Bearer tk_test" {
 			t.Fatalf("authorization mismatch: got %q", authorization)
 		}
 		if got.Depth != 1 {
@@ -1368,7 +1309,7 @@ func TestHeaderRoundTripperOmitsUsageContextWhenSecretEmpty(t *testing.T) {
 		t.Fatalf("build request: %v", err)
 	}
 
-	headers, usageContext := toolSessionHeaders(req, "req-1", "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
+	headers, usageContext := toolSessionHeaders(req, "req-1", "gpt-oss-120b", map[string]any{}, safetyOptIns{})
 	var sentHeaders http.Header
 	transport := &headerRoundTripper{
 		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {

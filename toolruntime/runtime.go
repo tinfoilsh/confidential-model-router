@@ -113,7 +113,6 @@ func (a *usageAccumulator) Usage() *tokencount.Usage {
 type headerRoundTripper struct {
 	base               http.RoundTripper
 	headers            http.Header
-	authorization      manager.AuthorizationProvider
 	usageContext       usagereporting.Context
 	usageContextSecret string
 	now                func() time.Time
@@ -127,13 +126,6 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 				cloned.Header.Add(key, value)
 			}
 		}
-	}
-	if t.authorization != nil {
-		authorization, err := t.authorization.Authorization(req.Context())
-		if err != nil {
-			return nil, fmt.Errorf("resolve delegated tool authorization: %w", err)
-		}
-		cloned.Header.Set("Authorization", authorization)
 	}
 	if t.usageContextSecret != "" {
 		usageContext := t.usageContext
@@ -167,17 +159,6 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 // toolcontext.ExtractRouterOptions).
 func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, profiles []Profile, body map[string]any, modelName string, routerOpts *RouterOptions) error {
 	ctx := r.Context()
-	rootRequestID := ""
-	delegationRootRequestID := uuid.NewString()
-	delegatedCtx, delegated, err := em.WithDelegatedAuthorization(ctx, r.Header.Get("Authorization"), delegationRootRequestID)
-	if err != nil {
-		return err
-	}
-	if delegated {
-		rootRequestID = delegationRootRequestID
-		ctx = delegatedCtx
-		r = r.WithContext(ctx)
-	}
 	requestHeaders := modelRequestHeaders(r.Header)
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	eventFlags := parseTinfoilEventFlags(r.Header)
@@ -185,18 +166,17 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 	searchOpts := parseWebSearchOptions(r.URL.Path, routerOpts, body)
 
 	dial := func(ctx context.Context, p Profile) (*mcp.ClientSession, error) {
-		return connectToolSession(ctx, em, p, r, rootRequestID, modelName, body, safetyOpts)
+		return connectToolSession(ctx, em, p, r, modelName, body, safetyOpts)
 	}
 	registry, err := buildSessionRegistry(ctx, profiles, searchOpts.disabledRouterTools(), dial)
 	if err != nil {
 		return err
 	}
 	defer registry.CloseAll()
-	attachRouterOptionsMeta(registry, routerOpts)
 
 	var dl *devLog
 	if em.DebugMode() {
-		dl = openDevLog(r, body, modelName, registry, routerOpts)
+		dl = openDevLog(body, modelName, registry)
 		defer dl.Close()
 	}
 
@@ -259,23 +239,19 @@ func newToolSessionRequestID(_ *http.Request) string {
 // connectToolSession opens one attested MCP session for a single
 // profile. buildSessionRegistry invokes it once per active profile
 // and aggregates the results into the per-request routing table.
-func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, rootRequestID, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
+func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile Profile, r *http.Request, modelName string, body map[string]any, safety safetyOptIns) (*mcp.ClientSession, error) {
 	endpoint, httpClient, err := em.MCPServerEndpoint(ctx, profile.ToolServerModel)
 	if err != nil {
 		return nil, err
 	}
 
 	requestID := newToolSessionRequestID(r)
-	if rootRequestID == "" {
-		rootRequestID = requestID
-	}
 
-	headers, usageContext := toolSessionHeaders(r, requestID, rootRequestID, modelName, body, safety)
+	headers, usageContext := toolSessionHeaders(r, requestID, modelName, body, safety)
 
 	httpClient.Transport = &headerRoundTripper{
 		base:               httpClient.Transport,
 		headers:            headers,
-		authorization:      manager.AuthorizationProviderFromContext(ctx),
 		usageContext:       usageContext,
 		usageContextSecret: em.UsageContextSecret(),
 		now:                time.Now,
@@ -295,7 +271,7 @@ func connectToolSession(ctx context.Context, em *manager.EnclaveManager, profile
 // per-RequestID dedup window: every internal MCP HTTP call within one chat
 // completion shares the same X-Tinfoil-Tool-Request-Id, so multiple
 // model-initiated tool calls collapse into a single billable session event.
-func toolSessionHeaders(r *http.Request, requestID, rootRequestID, modelName string, body map[string]any, safety safetyOptIns) (http.Header, usagereporting.Context) {
+func toolSessionHeaders(r *http.Request, requestID, modelName string, body map[string]any, safety safetyOptIns) (http.Header, usagereporting.Context) {
 	headers := make(http.Header)
 	headers.Set(toolcontext.HeaderRequestID, requestID)
 	headers.Set(toolcontext.HeaderModel, modelName)
@@ -312,7 +288,7 @@ func toolSessionHeaders(r *http.Request, requestID, rootRequestID, modelName str
 	}
 	return headers, usagereporting.Context{
 		ContextID:           requestID,
-		RootRequestID:       rootRequestID,
+		RootRequestID:       requestID,
 		ParentService:       usagereporting.ServiceRouter,
 		Depth:               1,
 		BillCustomerRequest: true,

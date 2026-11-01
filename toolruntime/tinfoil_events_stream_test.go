@@ -141,7 +141,7 @@ func TestChatStreamerEmitsPIIOnTerminalMarker(t *testing.T) {
 	emitter := &chatToolProgressEmitter{streamer: streamer}
 
 	details := map[string]any{"type": "search", "query": "john@example.com hiking trails"}
-	handle := emitter.open("ws_1", routerSearchToolName, details)
+	handle := emitter.open("ws_1", details)
 	emitter.close(handle, routerSearchToolName, details, toolProgressResult{
 		pii: &piiCheckResult{
 			masked:        true,
@@ -255,7 +255,7 @@ func TestResponsesStreamerIncludesSourceMetadataOnTerminalSearchItem(t *testing.
 	streamer.includeActionSources = true
 	emitter := &responsesToolProgressEmitter{streamer: streamer}
 	details := map[string]any{"type": "search", "query": "q"}
-	handle := emitter.open("ws_1", "search", details)
+	handle := emitter.open("ws_1", details)
 	emitter.close(handle, "search", details, toolProgressResult{
 		sources: []toolCallSource{{
 			url:           "https://example.com",
@@ -282,7 +282,7 @@ func TestResponsesStreamerOmitsSourceMetadataWithoutInclude(t *testing.T) {
 	streamer, rec := newTestResponsesStreamerForSpecEvents(t)
 	emitter := &responsesToolProgressEmitter{streamer: streamer}
 	details := map[string]any{"type": "search", "query": "q"}
-	handle := emitter.open("ws_1", "search", details)
+	handle := emitter.open("ws_1", details)
 	emitter.close(handle, "search", details, toolProgressResult{
 		sources: []toolCallSource{{
 			url:     "https://example.com",

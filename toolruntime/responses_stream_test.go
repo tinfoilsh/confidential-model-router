@@ -68,7 +68,7 @@ func TestResponsesBuildersOwnStreamMode(t *testing.T) {
 		t.Error("loop request kept stream_options, which is invalid without streaming")
 	}
 
-	streamReq, _ := buildResponsesStreamRequest(body, nil, nil)
+	streamReq := buildResponsesStreamRequest(body, nil, nil)
 	if streamReq["stream"] != true {
 		t.Errorf("stream request stream = %v, want true", streamReq["stream"])
 	}
@@ -275,42 +275,6 @@ func TestResponsesStreamerForwardsClientOwnedFunctionCall(t *testing.T) {
 	}
 	if len(streamer.finalOutput) != 1 {
 		t.Fatalf("expected finalOutput to contain client function_call, got %#v", streamer.finalOutput)
-	}
-}
-
-func TestResponsesStreamerCanonicalizesStringifiedAutoContinueArguments(t *testing.T) {
-	streamer, rec := newTestResponsesStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	// Trailing prose after the JSON object exercises the same repair the
-	// chat streaming path applies before canonicalization.
-	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}Here is the preview.`
-	frames := []string{
-		"event: response.output_item.added\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":""}}`,
-		"event: response.output_item.done\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"render_artifact_preview","call_id":"call_x","arguments":` + jsonStringChat(rawArguments) + `}}`,
-		"event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_upstream"}}`,
-	}
-	upstream := strings.Join(frames, "\n\n") + "\n\n"
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream)), true); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	if len(streamer.finalOutput) != 1 {
-		t.Fatalf("expected one forwarded function_call item, got %#v", streamer.finalOutput)
-	}
-	item, _ := streamer.finalOutput[0].(map[string]any)
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(stringValue(item["arguments"])), &decoded); err != nil {
-		t.Fatalf("forwarded arguments are not JSON: %v", err)
-	}
-	source, ok := decoded["source"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected source unwrapped into an object, got %#v", decoded["source"])
-	}
-	if source["type"] != "html" || source["html"] != "<p>hi</p>" {
-		t.Fatalf("unexpected unwrapped source: %#v", source)
-	}
-	if !strings.Contains(rec.Body.String(), `\"type\":\"html\"`) {
-		t.Fatalf("expected live output_item.done to carry canonicalized arguments, got %s", rec.Body.String())
 	}
 }
 
@@ -633,38 +597,6 @@ func TestResponsesStreamerFinalOutputResetsPerIteration(t *testing.T) {
 	item, _ := streamer.finalOutput[0].(map[string]any)
 	if stringValue(item["id"]) != "msg_final" {
 		t.Fatalf("expected finalOutput item id msg_final, got %q", stringValue(item["id"]))
-	}
-}
-
-func TestResponsesStreamerCompletedOutputKeepsPersistedAutoContinueCalls(t *testing.T) {
-	streamer, rec := newTestResponsesStreamer(t)
-	streamer.persistedOutput = []any{
-		map[string]any{
-			"id":        "fc_widget",
-			"type":      "function_call",
-			"name":      "render_stat_cards",
-			"call_id":   "call_widget",
-			"arguments": `{"stats":[]}`,
-		},
-	}
-	streamer.finalOutput = []any{
-		map[string]any{"id": "msg_final", "type": "message", "text": "done"},
-	}
-
-	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	if err := streamer.finalize(req, newTestEnclaveManager(), "gpt-oss-120b", responsesIterationResult{}); err != nil {
-		t.Fatalf("finalize returned error: %v", err)
-	}
-
-	body := rec.Body.String()
-	if !strings.Contains(body, `"id":"fc_widget"`) {
-		t.Fatalf("expected persisted auto-continue call in completed output, got %s", body)
-	}
-	if !strings.Contains(body, `"id":"msg_final"`) {
-		t.Fatalf("expected final message in completed output, got %s", body)
-	}
-	if strings.Index(body, `"id":"fc_widget"`) > strings.Index(body, `"id":"msg_final"`) {
-		t.Fatalf("expected auto-continue call before final message, got %s", body)
 	}
 }
 

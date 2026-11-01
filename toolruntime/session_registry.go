@@ -37,10 +37,6 @@ type sessionRegistry struct {
 
 	// tools is the union of advertised tools the upstream model sees.
 	tools []*mcp.Tool
-
-	// metaByProfile maps profile name -> mcp.Meta attached to each CallTool
-	// for tools advertised by that profile.
-	metaByProfile map[string]mcp.Meta
 }
 
 type sessionEntry struct {
@@ -64,14 +60,14 @@ func buildSessionRegistry(
 	disabledTools map[string]struct{},
 	dial func(context.Context, Profile) (*mcp.ClientSession, error),
 ) (*sessionRegistry, error) {
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("no tool profiles activated for this request")
+	}
+
 	r := &sessionRegistry{
 		byTool:         make(map[string]*mcp.ClientSession),
 		dispatchByTool: make(map[string]string),
 		owned:          make(map[string]struct{}),
-		metaByProfile:  make(map[string]mcp.Meta),
-	}
-	if len(profiles) == 0 {
-		return r, nil
 	}
 
 	for _, profile := range profiles {
@@ -138,22 +134,6 @@ func (r *sessionRegistry) sessionFor(toolName string) (*mcp.ClientSession, bool)
 	}
 	s, ok := r.byTool[toolName]
 	return s, ok
-}
-
-// metaFor returns the meta attached to the profile that advertised toolName,
-// or nil if none is attached.
-func (r *sessionRegistry) metaFor(toolName string) mcp.Meta {
-	if r == nil {
-		return nil
-	}
-	for _, e := range r.entries {
-		for _, tool := range e.tools {
-			if outwardRouterToolName(e.profile.Name, tool.Name) == toolName {
-				return r.metaByProfile[e.profile.Name]
-			}
-		}
-	}
-	return nil
 }
 
 func (r *sessionRegistry) dispatchName(toolName string) string {

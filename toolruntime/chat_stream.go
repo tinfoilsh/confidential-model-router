@@ -41,7 +41,6 @@ type chatStreamer struct {
 	identityPinned bool
 
 	ownedTools              map[string]struct{}
-	autoContinueTools       map[string]struct{}
 	clientToolCallForwarder *clientToolCallDeltaForwarder
 }
 
@@ -65,7 +64,7 @@ const (
 )
 
 // chatToolCallBuilder assembles OpenAI streaming tool_call deltas into
-// final tool_call objects while forwarding ordinary client-owned deltas live.
+// final tool_call objects while forwarding client-owned deltas live.
 type chatToolCallBuilder struct {
 	entries         []*chatToolCallEntry
 	clientForwarder *clientToolCallDeltaForwarder
@@ -81,15 +80,12 @@ type chatToolCallEntry struct {
 
 type clientToolCallDeltaForwarder struct {
 	ownedTools            map[string]struct{}
-	autoContinueTools     map[string]struct{}
 	emit                  func(map[string]any)
 	stateByUpstreamIndex  map[int]*clientToolCallDeltaState
 	clientIndexByUpstream map[int]int
 	nextClientIndex       int
 	streamedIDs           map[string]bool
 	streamedWithoutIDs    map[string]int
-	bufferingFromIndex    int
-	bufferingActive       bool
 }
 
 type clientToolCallDeltaState struct {
@@ -103,8 +99,6 @@ const (
 	clientToolCallForwardPending clientToolCallForwardMode = iota
 	clientToolCallForwardLive
 	clientToolCallForwardDrop
-	clientToolCallForwardBuffered
-	clientToolCallForwardDeferred
 )
 
 // ---------------------------------------------------------------------------
@@ -276,7 +270,7 @@ func (s *chatStreamer) pumpUpstream(reader *sseReader) (chatIterationResult, err
 	if !doneSeen {
 		return result, newUpstreamStreamError("upstream stream ended without a terminal [DONE] marker")
 	}
-	forwarder.flushBuffered(builder.entries)
+	forwarder.recordStreamedWithoutIDs(builder.entries)
 	return result, nil
 }
 
@@ -430,7 +424,6 @@ func (s *chatStreamer) getClientToolCallForwarder() *clientToolCallDeltaForwarde
 	if s.clientToolCallForwarder == nil {
 		s.clientToolCallForwarder = newClientToolCallDeltaForwarder(
 			s.ownedTools,
-			s.autoContinueTools,
 			s.emitClientToolCallDelta,
 		)
 	}
@@ -502,24 +495,6 @@ func (s *chatStreamer) emitTinfoilEventMarker(id, status string, action map[stri
 		return
 	}
 	marker := tinfoilEventMarker(id, status, action, reason, sources, pii)
-	s.writeChunk(map[string]any{
-		"choices": []any{
-			map[string]any{
-				"index": 0,
-				"delta": map[string]any{"content": marker},
-			},
-		},
-	})
-}
-
-// emitTinfoilToolCallMarker writes a single `tinfoil.tool_call` marker as
-// `delta.content` of a chat.completion.chunk frame. Gated on the
-// code_execution event flag; if the caller did not opt in, this is a no-op.
-func (s *chatStreamer) emitTinfoilToolCallMarker(id, status, toolName string, arguments map[string]any, output string) {
-	if !s.eventFlags.codeExecution {
-		return
-	}
-	marker := tinfoilToolCallMarker(id, status, toolName, arguments, output)
 	s.writeChunk(map[string]any{
 		"choices": []any{
 			map[string]any{
@@ -677,7 +652,7 @@ func (s *chatStreamer) terminateWithError(r *http.Request, em *manager.EnclaveMa
 // chatToolCallBuilder methods
 // ---------------------------------------------------------------------------
 
-// ingest merges tool_call fragments and forwards ordinary client-owned deltas live.
+// ingest merges tool_call fragments and forwards client-owned deltas live.
 func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 	for _, item := range rawCalls {
 		m, _ := item.(map[string]any)
@@ -717,12 +692,10 @@ func (b *chatToolCallBuilder) ingest(rawCalls []any) {
 
 func newClientToolCallDeltaForwarder(
 	ownedTools map[string]struct{},
-	autoContinueTools map[string]struct{},
 	emit func(map[string]any),
 ) *clientToolCallDeltaForwarder {
 	return &clientToolCallDeltaForwarder{
 		ownedTools:            ownedTools,
-		autoContinueTools:     autoContinueTools,
 		emit:                  emit,
 		stateByUpstreamIndex:  map[int]*clientToolCallDeltaState{},
 		clientIndexByUpstream: map[int]int{},
@@ -742,8 +715,6 @@ func (f *clientToolCallDeltaForwarder) resetIteration() {
 	f.stateByUpstreamIndex = map[int]*clientToolCallDeltaState{}
 	f.clientIndexByUpstream = map[int]int{}
 	f.streamedWithoutIDs = map[string]int{}
-	f.bufferingFromIndex = 0
-	f.bufferingActive = false
 }
 
 func (f *clientToolCallDeltaForwarder) ingest(
@@ -761,10 +732,6 @@ func (f *clientToolCallDeltaForwarder) ingest(
 		return
 	case clientToolCallForwardDrop:
 		return
-	case clientToolCallForwardBuffered:
-		return
-	case clientToolCallForwardDeferred:
-		return
 	}
 	if toolName == "" {
 		state.pending = append(state.pending, rawDelta)
@@ -773,19 +740,6 @@ func (f *clientToolCallDeltaForwarder) ingest(
 	if _, isRouterOwned := f.ownedTools[toolName]; isRouterOwned {
 		state.mode = clientToolCallForwardDrop
 		state.pending = nil
-		return
-	}
-	if _, isAutoContinue := f.autoContinueTools[toolName]; isAutoContinue {
-		state.mode = clientToolCallForwardBuffered
-		state.pending = nil
-		f.beginBufferingAt(upstreamIndex)
-		f.clientIndex(upstreamIndex)
-		return
-	}
-	if f.bufferingActive && upstreamIndex > f.bufferingFromIndex {
-		state.mode = clientToolCallForwardDeferred
-		state.pending = nil
-		f.clientIndex(upstreamIndex)
 		return
 	}
 	state.mode = clientToolCallForwardLive
@@ -820,15 +774,10 @@ func (f *clientToolCallDeltaForwarder) forward(upstreamIndex int, rawDelta map[s
 	f.emit(forwarded)
 }
 
-func (f *clientToolCallDeltaForwarder) beginBufferingAt(upstreamIndex int) {
-	if !f.bufferingActive || upstreamIndex < f.bufferingFromIndex {
-		f.bufferingFromIndex = upstreamIndex
-	}
-	f.bufferingActive = true
-}
-
-func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntry) {
-	if f == nil || f.emit == nil {
+// recordStreamedWithoutIDs counts the live-forwarded calls that carried no
+// id, so finalize can skip them by name instead of sending them twice.
+func (f *clientToolCallDeltaForwarder) recordStreamedWithoutIDs(entries []*chatToolCallEntry) {
+	if f == nil {
 		return
 	}
 	for upstreamIndex, entry := range entries {
@@ -836,36 +785,9 @@ func (f *clientToolCallDeltaForwarder) flushBuffered(entries []*chatToolCallEntr
 		if state == nil || entry == nil {
 			continue
 		}
-		if entry.id == "" && (state.mode == clientToolCallForwardLive || state.mode == clientToolCallForwardBuffered || state.mode == clientToolCallForwardDeferred) {
+		if entry.id == "" && state.mode == clientToolCallForwardLive {
 			f.streamedWithoutIDs[entry.functionName]++
 		}
-		if state.mode != clientToolCallForwardBuffered && state.mode != clientToolCallForwardDeferred {
-			continue
-		}
-		arguments := entry.arguments
-		if state.mode == clientToolCallForwardBuffered {
-			if repaired, changed := sanitizeToolCallArgumentsJSON(arguments); changed && jsonBytesValid(repaired) {
-				arguments = repaired
-			}
-			arguments = []byte(canonicalizeAutoContinueArguments(string(arguments)))
-		}
-		toolType := entry.toolType
-		if toolType == "" {
-			toolType = "function"
-		}
-		forwarded := map[string]any{
-			"index": f.clientIndex(upstreamIndex),
-			"id":    entry.id,
-			"type":  toolType,
-			"function": map[string]any{
-				"name":      entry.functionName,
-				"arguments": string(arguments),
-			},
-		}
-		if entry.id != "" {
-			f.streamedIDs[entry.id] = true
-		}
-		f.emit(forwarded)
 	}
 }
 
@@ -970,11 +892,11 @@ func (b *chatToolCallBuilder) raw() []any {
 // the streaming path. It shares its body construction with the non-streaming
 // loop via buildChatUpstreamRequest, then forces streaming with usage
 // reporting.
-func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
-	reqBody, autoContinue := buildChatUpstreamRequest(body, tools, prompt)
+func buildChatStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) map[string]any {
+	reqBody := buildChatUpstreamRequest(body, tools, prompt)
 	reqBody["stream"] = true
 	reqBody["stream_options"] = streamUsageOptions()
-	return reqBody, autoContinue
+	return reqBody
 }
 
 // streamUsageOptions returns the stream_options set on every upstream
@@ -1017,9 +939,7 @@ func runChatStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	reqBody, autoContinue := buildChatStreamRequest(body, tools, prompt)
-	autoContinueTools := autoContinue.tools
-	autoContinueFailures := autoContinueSchemaFailures{}
+	reqBody := buildChatStreamRequest(body, tools, prompt)
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 	clientRequestedUsage := r.Header.Get("X-Tinfoil-Client-Requested-Usage") == "true"
@@ -1047,7 +967,6 @@ func runChatStreaming(
 		eventFlags:           eventFlags,
 		emitter:              nil,
 		ownedTools:           ownedTools,
-		autoContinueTools:    autoContinueTools,
 	}
 	streamer.emitter = citations.NewEmitter(streamer.citations)
 
@@ -1079,29 +998,27 @@ func runChatStreaming(
 		dl.WriteStreamedTurn(i+1, result.usage, result.reasoningText(), result.content)
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
-		autoContinueCalls, externalClientCalls := splitClientToolCalls(autoContinueTools, clientToolCalls)
 		if debugEnabled {
 			toolNames := make([]string, 0, len(result.toolCalls))
 			for _, c := range result.toolCalls {
 				toolNames = append(toolNames, c.name)
 			}
-			debugLogf("toolruntime:%s chatstream.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d auto_continue=%d external_client=%d tool_names=%v content=%q",
-				tid, i, time.Since(iterStart), result.finishReason, len(result.toolCalls), len(routerToolCalls), len(clientToolCalls), len(autoContinueCalls), len(externalClientCalls), toolNames, debugPreview(result.content, 240))
+			debugLogf("toolruntime:%s chatstream.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
+				tid, i, time.Since(iterStart), result.finishReason, len(result.toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(result.content, 240))
 		}
-		// Terminal turn: nothing for the router to resolve and no
-		// auto-continue calls to auto-acknowledge. Surface any external
+		// Terminal turn: nothing for the router to resolve. Surface any
 		// client tool calls back to the caller as-is.
-		if len(routerToolCalls) == 0 && len(autoContinueCalls) == 0 {
-			debugLogf("toolruntime:%s chatstream.done iterations=%d (no router or auto-continue tool calls)", tid, i+1)
+		if len(routerToolCalls) == 0 {
+			debugLogf("toolruntime:%s chatstream.done iterations=%d (no router tool calls)", tid, i+1)
 			dl.WriteFinish(result.finishReason)
-			return streamer.finalize(r, em, modelName, result, externalClientCalls)
+			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 
-		// Mixed turn: real client function tools were requested
-		// alongside router/auto-continue work. Resolve the router work
-		// (citations, etc.) but finalize without replay so the
-		// caller-owned tool_calls survive in the response.
-		mixedTurn := len(externalClientCalls) > 0
+		// Mixed turn: client function tools were requested alongside
+		// router work. Resolve the router work (citations, etc.) but
+		// finalize without replay so the caller-owned tool_calls survive
+		// in the response.
+		mixedTurn := len(clientToolCalls) > 0
 		dl.WriteToolCalls(routerToolCalls)
 		tracePhase := fmt.Sprintf("chatstream.iter=%d", i)
 		var messages []any
@@ -1127,24 +1044,10 @@ func runChatStreaming(
 				})
 			}
 		}
-		// Auto-continue client tool calls: synthesise a result and fold
-		// it into history so the model can keep generating the prose
-		// that surrounds the widget. Arguments the client's schema would
-		// reject yield an error result so the model retries instead of
-		// believing the widget rendered.
-		if !mixedTurn {
-			for _, call := range autoContinueCalls {
-				messages = append(messages, map[string]any{
-					"role":         "tool",
-					"tool_call_id": call.id,
-					"content":      autoContinueToolOutput(call, autoContinue.schemas, autoContinueFailures),
-				})
-			}
-		}
 		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
-			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+external client calls in one turn; finalizing)", tid, i+1)
-			return streamer.finalize(r, em, modelName, result, externalClientCalls)
+			debugLogf("toolruntime:%s chatstream.mixed_turn iterations=%d (router+client calls in one turn; finalizing)", tid, i+1)
+			return streamer.finalize(r, em, modelName, result, clientToolCalls)
 		}
 		reqBody["messages"] = messages
 	}

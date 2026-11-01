@@ -1,9 +1,5 @@
 package toolruntime
 
-import (
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-)
-
 // Profile identifies one built-in tool family the router dials as an MCP server.
 type Profile struct {
 	Name            string // stable identifier used in detectors and logs
@@ -11,7 +7,7 @@ type Profile struct {
 }
 
 // Descriptor captures everything the router needs to activate and drive a
-// built-in tool profile: activation signals, aliasing, prompt, and per-request meta.
+// built-in tool profile: activation signals, aliasing, and prompt.
 type Descriptor struct {
 	Profile Profile
 
@@ -30,20 +26,12 @@ type Descriptor struct {
 	// System prompt injected when active. tools is the set of model-facing
 	// tool names available to the request.
 	Prompt func(harmony bool, tools map[string]struct{}) string
-
-	// Lifts per-request options from RouterOptions onto the session registry as mcp.Meta
-	AttachMeta func(*sessionRegistry, *RouterOptions)
 }
 
 // All profiles
 var WebSearch = Profile{
 	Name:            "web_search",
 	ToolServerModel: "websearch",
-}
-
-var CodeExecution = Profile{
-	Name:            "code_execution",
-	ToolServerModel: "code-execution",
 }
 
 // piiFilterModel is the catalog key for the privacy filter that the websearch
@@ -62,16 +50,7 @@ var profiles = []Descriptor{
 		},
 		Prompt: webSearchPrompt,
 	},
-	{
-		Profile:           CodeExecution,
-		ResponsesToolType: "code_execution",
-		OptionsActive:     func(o *RouterOptions) bool { return o.CodeExecution != nil },
-		Prompt:            func(bool, map[string]struct{}) string { return codeExecutionInstructions },
-		AttachMeta:        attachCodeExecutionMeta,
-	},
 }
-
-const CodeExecutionMetaKey = "tinfoil_code_exec"
 
 func descriptorForProfile(profileName string) *Descriptor {
 	for i := range profiles {
@@ -119,32 +98,4 @@ func responsesToolTypePresent(body map[string]any, toolType string) bool {
 		}
 	}
 	return false
-}
-
-// attachCodeExecutionMeta lifts code-execution credentials from
-// RouterOptions onto the session registry as mcp.Meta.
-func attachCodeExecutionMeta(registry *sessionRegistry, opts *RouterOptions) {
-	ce := opts.CodeExecution
-	if ce == nil {
-		return
-	}
-	metaBlock := map[string]any{
-		"accessToken":        ce.AccessToken,
-		"encryptionKey":      ce.EncryptionKey,
-		"containerAuthToken": ce.ContainerAuthToken,
-	}
-	if ce.Uploads != nil {
-		arr := make([]any, len(*ce.Uploads))
-		for i, u := range *ce.Uploads {
-			arr[i] = map[string]any{
-				"fileAccessToken": u.FileAccessToken,
-				"filename":        u.Filename,
-				"sha256":          u.Sha256,
-			}
-		}
-		metaBlock["uploads"] = arr
-	}
-	registry.metaByProfile[CodeExecution.Name] = mcp.Meta{
-		CodeExecutionMetaKey: metaBlock,
-	}
 }

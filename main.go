@@ -27,7 +27,6 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -193,16 +192,15 @@ func getEnvBool(envKey string) bool {
 }
 
 var (
-	port                      = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
-	controlPlaneURL           = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
-	usageReporterID           = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
-	usageReporterSecret       = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
-	usageContextSecret        = flag.String("usage-context-secret", getEnvOrDefault("USAGE_CONTEXT_SECRET", ""), "usage-context HMAC secret used to sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
-	inferenceDelegationSecret = flag.String("inference-delegation-secret", "", "secret used to delegate inference access tokens (env: INFERENCE_DELEGATION_SECRET)")
-	verbose                   = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
-	initConfigURL             = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
-	updateConfigURL           = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
-	refreshInterval           = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
+	port                = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
+	controlPlaneURL     = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
+	usageReporterID     = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
+	usageReporterSecret = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
+	usageContextSecret  = flag.String("usage-context-secret", getEnvOrDefault("USAGE_CONTEXT_SECRET", ""), "usage-context HMAC secret used to sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
+	verbose             = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
+	initConfigURL       = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
+	updateConfigURL     = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
+	refreshInterval     = flag.Duration("r", getEnvOrDefaultDuration("REFRESH_INTERVAL", 5*time.Minute), "refresh interval for syncing enclave config (env: REFRESH_INTERVAL)")
 	// debug enables non-production behaviors such as honoring
 	// LOCAL_MCP_ENDPOINT_<MODEL> env vars to bypass attested TLS
 	// pinning for MCP tool servers during local development. MUST
@@ -224,10 +222,6 @@ var (
 	// scrapes. Env resolved after parse, like cache-route-secret, so the
 	// secret never reaches flag output.
 	metricsAPIKey = flag.String("metrics-api-key", "", "admin API key sent as a bearer token when polling enclave /metrics (env: METRICS_API_KEY)")
-	// safeguardsURL points at the safeguards sidecar in this enclave. When
-	// empty, completed first-party chat conversations are not submitted for
-	// acceptable-use classification.
-	safeguardsURL = flag.String("safeguards-url", getEnvOrDefault("SAFEGUARDS_URL", ""), "safeguards sidecar base URL (env: SAFEGUARDS_URL)")
 )
 
 // writeError logs the error at a level matching its status and writes it in
@@ -477,12 +471,6 @@ func main() {
 	if *usageContextSecret == "" {
 		log.Fatal("USAGE_CONTEXT_SECRET is required")
 	}
-	if *inferenceDelegationSecret == "" {
-		*inferenceDelegationSecret = os.Getenv("INFERENCE_DELEGATION_SECRET")
-	}
-	if *inferenceDelegationSecret == "" && !*debug {
-		log.Fatal("INFERENCE_DELEGATION_SECRET is required")
-	}
 
 	// A routing-secret skew between replicas silently re-homes keys on only
 	// the skewed instance, so tolerate the classic source — a trailing
@@ -507,7 +495,7 @@ func main() {
 		manager.SetMetricsPollAPIKey(strings.TrimSpace(key))
 	}
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *inferenceDelegationSecret, *initConfigURL, *updateConfigURL, *refreshInterval, *debug)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval, *debug)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -522,17 +510,11 @@ func main() {
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 	defer routeContextClient.refreshes.Wait()
 
-	safeguardsSubmitter := safeguards.NewSubmitter(*safeguardsURL)
-	defer safeguardsSubmitter.Close()
-	if safeguardsSubmitter != nil {
-		log.Infof("Safeguards sidecar: %s", *safeguardsURL)
-	}
-
-	http.Handle("/", newRouterHandler(em, routeContextClient, safeguardsSubmitter))
+	http.Handle("/", newRouterHandler(em, routeContextClient))
 	runRouterServer()
 }
 
-func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient, safeguardsSubmitter *safeguards.Submitter) http.Handler {
+func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient) http.Handler {
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
@@ -628,11 +610,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			r = r.WithContext(manager.WithCallerOrg(r.Context(), resolved.OrgID))
 			return true
 		}
-
-		// Completed first-party chat turns are submitted to the safeguards
-		// sidecar once the response has been written.
-		w, capture, finishCapture := safeguardsSubmitter.Observe(w, r, manager.IsFirstPartyChatAccessJWT)
-		defer finishCapture()
 
 		if isInputTokensPath(r.URL.Path) {
 			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
@@ -811,9 +788,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				}
 
 				// Pull Tinfoil-specific options blobs off the body in
-				// place. These fields (code_execution_options,
-				// web_search_options, pii_check_options) are
-				// router-only.
+				// place. These fields (web_search_options,
+				// pii_check_options) are router-only.
 				routerOpts, err := toolruntime.ExtractRouterOptions(body)
 				if err != nil {
 					writeError(w, asAPIError(err))
@@ -854,17 +830,12 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					modelName = resolved
 				}
 
-				if capture != nil {
-					capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
-				}
-
 				// Detect which built-in tool profiles this request
 				// activates. The router runs the tool loop locally
 				// against one MCP session per active profile; zero
-				// profiles and no auto-continue tools means no router-owned
-				// work, so the request falls through to the plain proxy path.
+				// profiles means no router-owned tools, so the
+				// request falls through to the plain proxy path.
 				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
-				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
@@ -931,7 +902,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
 
-				if len(activeProfiles) > 0 || hasAutoContinueTools {
+				if len(activeProfiles) > 0 {
 					// Streaming tool requests feed the same first-token SLA
 					// metrics as plain proxied streams. The loop may dispatch
 					// to several replicas and pools before the first
@@ -962,13 +933,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 						// holds a 200; the failure was reported in-band and a
 						// JSON error here would corrupt the event stream.
 						var aborted *toolruntime.StreamAbortedError
-						var delegationErr *manager.DelegationHTTPError
 						if !errors.As(err, &aborted) {
-							if errors.As(err, &delegationErr) {
-								writeError(tw, delegationErr.APIError())
-							} else {
-								writeError(tw, &manager.ErrUpstream)
-							}
+							writeError(tw, &manager.ErrUpstream)
 						}
 					}
 					toolServed = true

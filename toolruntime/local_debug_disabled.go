@@ -3,7 +3,6 @@
 package toolruntime
 
 import (
-	"net/http"
 	"time"
 )
 
@@ -34,7 +33,7 @@ func debugMessagesSummary([]any, int) string { return "" }
 // in debug builds.
 type devLog struct{}
 
-func openDevLog(*http.Request, map[string]any, string, *sessionRegistry, *RouterOptions) *devLog {
+func openDevLog(map[string]any, string, *sessionRegistry) *devLog {
 	return nil
 }
 func (d *devLog) Close()                                                              {}

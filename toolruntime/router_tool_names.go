@@ -6,9 +6,8 @@ const (
 	routerSearchToolName = "router_search"
 	routerFetchToolName  = "router_fetch"
 
-	mcpSearchToolName  = "search"
-	mcpFetchToolName   = "fetch"
-	mcpPresentToolName = "present"
+	mcpSearchToolName = "search"
+	mcpFetchToolName  = "fetch"
 )
 
 func outwardRouterToolName(profileName, toolName string) string {
@@ -52,8 +51,4 @@ func isRouterSearchToolName(toolName string) bool {
 
 func isRouterFetchToolName(toolName string) bool {
 	return dispatchRouterToolName(toolName) == mcpFetchToolName
-}
-
-func isPresentTool(toolName string) bool {
-	return dispatchRouterToolName(toolName) == mcpPresentToolName
 }

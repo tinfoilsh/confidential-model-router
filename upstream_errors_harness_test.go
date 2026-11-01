@@ -15,47 +15,6 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-func TestRouterPreservesDelegationErrors(t *testing.T) {
-	const privateDetail = "private delegation detail"
-	for _, status := range []int{http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var delegationCalls, backendCalls atomic.Int64
-			_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/internal/inference/delegate" {
-					t.Errorf("unexpected control-plane request: %s", r.URL.Path)
-				}
-				delegationCalls.Add(1)
-				w.Header().Set("Retry-After", "42")
-				w.WriteHeader(status)
-				io.WriteString(w, privateDetail)
-			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				backendCalls.Add(1)
-			}), "", false)
-			key := accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","client_id":"tinfoil-chat","product":"chat"}`)
-			for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
-				toolOptions := `"web_search_options":{}`
-				if path == "/v1/responses" {
-					toolOptions = `"tools":[{"type":"web_search"}]`
-				}
-				for _, stream := range []bool{false, true} {
-					body := fmt.Sprintf(`{"model":%q,"messages":[],"input":"hi",%s,"stream":%t}`, admissionTestModel, toolOptions, stream)
-					rec := httptest.NewRecorder()
-					handler.ServeHTTP(rec, admissionRequest(path, body, key))
-					if rec.Code != status || rec.Header().Get("Retry-After") != "42" {
-						t.Errorf("%s stream=%t: HTTP %d retry=%q: %s", path, stream, rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
-					}
-					if strings.Contains(rec.Body.String(), privateDetail) {
-						t.Fatal("private delegation detail leaked")
-					}
-				}
-			}
-			if delegationCalls.Load() != 4 || backendCalls.Load() != 0 {
-				t.Fatalf("delegation/backend calls = %d/%d", delegationCalls.Load(), backendCalls.Load())
-			}
-		})
-	}
-}
-
 func TestRouterPreservesDocumentErrors(t *testing.T) {
 	for _, tc := range []struct {
 		status  int

@@ -225,19 +225,18 @@ func TestSessionRegistryDialFailureClosesPriorSessions(t *testing.T) {
 	}
 }
 
-// TestSessionRegistryEmptyProfilesBuildsEmptyRegistry pins the
-// auto-continue-only path: the router may need toolruntime even when no
-// MCP-backed profile is active.
-func TestSessionRegistryEmptyProfilesBuildsEmptyRegistry(t *testing.T) {
-	r, err := buildSessionRegistry(context.Background(), nil, nil, func(context.Context, Profile) (*mcp.ClientSession, error) {
+// TestSessionRegistryEmptyProfilesFailsLoud pins that Handle cannot
+// accidentally open zero sessions: the outer caller is expected to
+// short-circuit on an empty detector result, and a registry built
+// against an empty profile list is a programming error we surface
+// rather than masking.
+func TestSessionRegistryEmptyProfilesFailsLoud(t *testing.T) {
+	_, err := buildSessionRegistry(context.Background(), nil, nil, func(context.Context, Profile) (*mcp.ClientSession, error) {
 		t.Fatal("dial should not be invoked for empty profile list")
 		return nil, nil
 	})
-	if err != nil {
-		t.Fatalf("expected empty registry, got error: %v", err)
-	}
-	if len(r.allTools()) != 0 || len(r.ownedTools()) != 0 {
-		t.Fatalf("expected empty registry, got tools=%v owned=%v", r.allTools(), r.ownedTools())
+	if err == nil {
+		t.Fatalf("expected error for empty profile list")
 	}
 }
 
