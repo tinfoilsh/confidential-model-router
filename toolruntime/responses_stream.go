@@ -79,10 +79,6 @@ type responsesStreamer struct {
 	// iteration for echoing in the synthesized response.completed event.
 	finalOutput []any
 
-	// persistedOutput carries client-visible items from internal
-	// auto-continue continuations into the final response.completed snapshot.
-	persistedOutput []any
-
 	// aggregatedUsage is the last non-nil usage block observed.
 	aggregatedUsage map[string]any
 
@@ -90,11 +86,6 @@ type responsesStreamer struct {
 	// function_call / mcp_call output items are suppressed from the
 	// client stream. Client-owned tool calls are forwarded live.
 	ownedTools map[string]struct{}
-
-	// autoContinueTools names the client tools the caller flagged for
-	// router-side continuation; their function_call arguments are
-	// canonicalized before the output item is forwarded to the client.
-	autoContinueTools map[string]struct{}
 
 	// includeActionSources mirrors the request's opt-in for
 	// `web_search_call.action.sources` on the terminal snapshot.
@@ -474,14 +465,6 @@ func (s *responsesStreamer) handleOutputItemDone(event map[string]any, result *r
 			}
 		}
 		delete(s.functionCallArguments, upstreamIndex)
-		if _, isAutoContinue := s.autoContinueTools[stringValue(item["name"])]; isAutoContinue {
-			if rawArgs, ok := item["arguments"].(string); ok {
-				if repaired, changed := sanitizeToolCallArgumentsJSON([]byte(rawArgs)); changed && jsonBytesValid(repaired) {
-					rawArgs = string(repaired)
-				}
-				item["arguments"] = canonicalizeAutoContinueArguments(rawArgs)
-			}
-		}
 	}
 	clientIndex, ok := s.outputIndexMap[upstreamIndex]
 	if !ok {
@@ -795,9 +778,7 @@ func (s *responsesStreamer) finalize(r *http.Request, em *manager.EnclaveManager
 	// instead of (or in addition to) the live delta stream must see a
 	// terminal payload that is byte-for-byte comparable to the
 	// non-streaming response.
-	completedOutput := append([]any{}, s.persistedOutput...)
-	completedOutput = append(completedOutput, s.finalOutput...)
-	completedBody := map[string]any{"output": completedOutput}
+	completedBody := map[string]any{"output": append([]any{}, s.finalOutput...)}
 	// The Responses streaming path surfaces web_search progress via the
 	// spec-defined `response.web_search_call.*` events fired live from
 	// executeTool and via the prepended `web_search_call` output items
@@ -888,10 +869,10 @@ func (s *responsesStreamer) totalsBillingUsage() map[string]any {
 // buildResponsesStreamRequest builds the upstream /v1/responses request for
 // the streaming path. It shares its body construction with the non-streaming
 // loop via buildResponsesUpstreamRequest, then forces streaming.
-func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
-	base, autoContinue := buildResponsesUpstreamRequest(body, tools, prompt)
+func buildResponsesStreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) map[string]any {
+	base := buildResponsesUpstreamRequest(body, tools, prompt)
 	base["stream"] = true
-	return base, autoContinue
+	return base
 }
 
 func runResponsesStreaming(
@@ -920,9 +901,7 @@ func runResponsesStreaming(
 	tools := registry.allTools()
 	ownedTools := registry.ownedTools()
 	toolSchemas := schemaLookup(tools)
-	base, autoContinue := buildResponsesStreamRequest(body, tools, prompt)
-	autoContinueTools := autoContinue.tools
-	autoContinueFailures := autoContinueSchemaFailures{}
+	base := buildResponsesStreamRequest(body, tools, prompt)
 
 	usageMetricsRequested := r.Header.Get(manager.UsageMetricsRequestHeader) == "true"
 
@@ -939,7 +918,6 @@ func runResponsesStreaming(
 		annotationCounts:      map[itemContentKey]int{},
 		functionCallArguments: map[int]*strings.Builder{},
 		ownedTools:            ownedTools,
-		autoContinueTools:     autoContinueTools,
 		includeActionSources:  searchOpts.includeActionSources,
 	}
 
@@ -963,19 +941,17 @@ func runResponsesStreaming(
 		dl.WriteStreamedTurn(i+1, result.usage, "", "")
 
 		routerToolCalls, clientToolCalls := splitToolCalls(ownedTools, result.toolCalls)
-		autoContinueCalls, externalClientCalls := splitClientToolCalls(autoContinueTools, clientToolCalls)
-		// Terminal turn: nothing for the router to resolve and no
-		// auto-continue calls to auto-acknowledge.
-		if len(routerToolCalls) == 0 && len(autoContinueCalls) == 0 {
+		// Terminal turn: nothing for the router to resolve.
+		if len(routerToolCalls) == 0 {
 			dl.WriteFinish("stop (no router tool calls)")
 			return streamer.finalize(r, em, modelName, result)
 		}
 
 		dl.WriteToolCalls(routerToolCalls)
-		mixedTurn := len(externalClientCalls) > 0
+		mixedTurn := len(clientToolCalls) > 0
 		var toolOutputs []any
 		if !mixedTurn {
-			toolOutputs = make([]any, 0, len(routerToolCalls)+len(autoContinueCalls))
+			toolOutputs = make([]any, 0, len(routerToolCalls))
 		}
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
@@ -995,26 +971,11 @@ func runResponsesStreaming(
 				})
 			}
 		}
-		// Auto-continue client tool calls: inject a synthetic
-		// function_call_output so the model can continue producing
-		// the prose that surrounds the rendered widget. Arguments the
-		// client's schema would reject yield an error output so the
-		// model retries instead of believing the widget rendered.
-		if !mixedTurn {
-			for _, call := range autoContinueCalls {
-				toolOutputs = append(toolOutputs, map[string]any{
-					"type":    "function_call_output",
-					"call_id": call.id,
-					"output":  autoContinueToolOutput(call, autoContinue.schemas, autoContinueFailures),
-				})
-			}
-		}
 		// Mixed turn: see the mixed-turn contract on runToolLoop.
 		if mixedTurn {
 			return streamer.finalize(r, em, modelName, result)
 		}
 
-		streamer.persistedOutput = append(streamer.persistedOutput, filterResponsesOutputItemsForToolCalls(result.outputItems, autoContinueCalls)...)
 		accumulatedInput = append(accumulatedInput, normalizeResponsesOutputItems(result.outputItems)...)
 		accumulatedInput = append(accumulatedInput, toolOutputs...)
 		reqBody = cloneJSONMap(base)

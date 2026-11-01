@@ -64,7 +64,7 @@ func TestResponsesLoopContinuationKeepsCacheSalt(t *testing.T) {
 }
 
 func TestChatStreamRequestKeepsCacheSalt(t *testing.T) {
-	req, _ := buildChatStreamRequest(
+	req := buildChatStreamRequest(
 		map[string]any{"model": "m", "messages": []any{}, "cache_salt": testSalt}, nil, nil)
 	if got, _ := req["cache_salt"].(string); got != testSalt {
 		t.Errorf("chat stream request cache_salt = %q, want %q", got, testSalt)
@@ -75,7 +75,7 @@ func TestChatStreamRequestKeepsCacheSalt(t *testing.T) {
 }
 
 func TestResponsesStreamRequestKeepsCacheSalt(t *testing.T) {
-	req, _ := buildResponsesStreamRequest(
+	req := buildResponsesStreamRequest(
 		map[string]any{"model": "m", "input": []any{}, "cache_salt": testSalt}, nil, nil)
 	if got, _ := req["cache_salt"].(string); got != testSalt {
 		t.Errorf("responses stream request cache_salt = %q, want %q", got, testSalt)

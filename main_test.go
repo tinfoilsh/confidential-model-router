@@ -516,8 +516,8 @@ func TestEnsureStreamingUsageOptions(t *testing.T) {
 }
 
 // TestDetectToolProfiles pins the contract between the request shape
-// and the set of MCP profiles the router activates. Display-only client
-// tools can also enter the tool loop without activating an MCP profile;
+// and the set of MCP profiles the router activates. This test is the
+// single source of truth for "which requests enter the tool loop";
 // adding a new profile must come with a new case here.
 func TestDetectToolProfiles(t *testing.T) {
 	profileNames := func(ps []toolruntime.Profile) []string {

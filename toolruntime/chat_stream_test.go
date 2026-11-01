@@ -181,7 +181,7 @@ func TestChatStreamerPumpFoldsCompletedTurnUsageExactlyOnce(t *testing.T) {
 }
 
 func TestBuildChatStreamRequestEnablesContinuousUsage(t *testing.T) {
-	req, _ := buildChatStreamRequest(
+	req := buildChatStreamRequest(
 		map[string]any{"model": "m", "messages": []any{}}, nil, nil)
 	opts, _ := req["stream_options"].(map[string]any)
 	if opts == nil {
@@ -197,7 +197,6 @@ func TestBuildChatStreamRequestEnablesContinuousUsage(t *testing.T) {
 
 func TestChatStreamerPumpForwardsClientToolCallDeltasLive(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_stat_cards": {}}
 	upstream := strings.Join([]string{
 		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
 		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"go\"}"}},{"index":1,"id":"call_widget","type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo"}}]}}]}`,
@@ -243,181 +242,6 @@ func TestChatStreamerPumpForwardsClientToolCallDeltasLive(t *testing.T) {
 	if !strings.Contains(body, `\"source\":{\"type\":\"markdown\"`) {
 		t.Fatalf("expected continued argument fragment, got %s", body)
 	}
-}
-
-func TestChatStreamerPumpBuffersFragmentedAutoContinueArguments(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	upstream := strings.Join([]string{
-		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_widget","type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo"}}]}}]}`,
-		`data: {"id":"up_1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\",\"body\":\"Hello\"}"}}]}}]}`,
-		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-		"data: [DONE]",
-		"",
-	}, "\n\n")
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 1 {
-		t.Fatalf("expected one completed tool_call delta, got %d: %s", len(calls), rec.Body.String())
-	}
-	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", `{"title":"Demo","body":"Hello"}`)
-}
-
-func TestChatStreamerPumpRepairsAutoContinueTrailingProse(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	rawArguments := `{"title":"Demo"}I will explain the artifact next.`
-	upstream := chatToolCallTurn("up_1", "call_widget", "render_artifact_preview", rawArguments)
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 1 {
-		t.Fatalf("expected one repaired tool_call delta, got %d", len(calls))
-	}
-	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", `{"title":"Demo"}`)
-}
-
-func TestChatStreamerPumpPreservesIrreparableAutoContinueArguments(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	rawArguments := `{"title":"Demo"`
-	upstream := chatToolCallTurn("up_1", "call_widget", "render_artifact_preview", rawArguments)
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 1 {
-		t.Fatalf("expected one passthrough tool_call delta, got %d", len(calls))
-	}
-	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", rawArguments)
-}
-
-func TestChatStreamerPumpPreservesLargeAutoContinueArguments(t *testing.T) {
-	const largePayloadLength = 5000
-
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	rawArguments := `{"body":"` + strings.Repeat("x", largePayloadLength) + `"}`
-	upstream := chatToolCallTurn("up_1", "call_widget", "render_artifact_preview", rawArguments)
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 1 {
-		t.Fatalf("expected one large tool_call delta, got %d", len(calls))
-	}
-	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", rawArguments)
-}
-
-func TestChatStreamerPumpCanonicalizesStringifiedAutoContinueArguments(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	rawArguments := `{"title":"Demo","source":"{\"type\":\"html\",\"html\":\"<p>hi</p>\"}"}`
-	upstream := chatToolCallTurn("up_1", "call_widget", "render_artifact_preview", rawArguments)
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 1 {
-		t.Fatalf("expected one tool_call delta, got %d", len(calls))
-	}
-	function, _ := calls[0]["function"].(map[string]any)
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(stringValue(function["arguments"])), &decoded); err != nil {
-		t.Fatalf("forwarded arguments are not JSON: %v", err)
-	}
-	source, ok := decoded["source"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected source unwrapped into an object, got %#v", decoded["source"])
-	}
-	if source["type"] != "html" || source["html"] != "<p>hi</p>" {
-		t.Fatalf("unexpected unwrapped source: %#v", source)
-	}
-}
-
-func TestChatStreamerPumpPreservesOrderAfterBufferedAutoContinueCall(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	ordinaryArguments := `{"id":1}leave this trailing text`
-	upstream := strings.Join([]string{
-		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_widget","type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo\"}extra prose"}},{"index":1,"id":"call_lookup","type":"function","function":{"name":"lookup_order","arguments":` + jsonStringChat(ordinaryArguments) + `}}]}}]}`,
-		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-		"data: [DONE]",
-		"",
-	}, "\n\n")
-
-	if _, err := streamer.pumpUpstream(newSSEReader(strings.NewReader(upstream))); err != nil {
-		t.Fatalf("pumpUpstream returned error: %v", err)
-	}
-
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 2 {
-		t.Fatalf("expected two completed tool_call deltas, got %d: %s", len(calls), rec.Body.String())
-	}
-	assertChatToolCallDelta(t, calls[0], 0, "call_widget", "render_artifact_preview", `{"title":"Demo"}`)
-	assertChatToolCallDelta(t, calls[1], 1, "call_lookup", "lookup_order", ordinaryArguments)
-}
-
-func TestChatStreamerKeepsOrdinaryCallBeforeAutoContinueLive(t *testing.T) {
-	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
-	builder := &chatToolCallBuilder{clientForwarder: streamer.getClientToolCallForwarder()}
-	builder.ingest([]any{
-		map[string]any{
-			"index": float64(0),
-			"id":    "call_lookup",
-			"type":  "function",
-			"function": map[string]any{
-				"name":      "lookup_order",
-				"arguments": `{"id":`,
-			},
-		},
-		map[string]any{
-			"index": float64(1),
-			"id":    "call_widget",
-			"type":  "function",
-			"function": map[string]any{
-				"name":      "render_artifact_preview",
-				"arguments": `{"title":"Demo"}`,
-			},
-		},
-	})
-	builder.ingest([]any{
-		map[string]any{
-			"index":    float64(0),
-			"function": map[string]any{"arguments": `1}`},
-		},
-	})
-
-	liveCalls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(liveCalls) != 2 {
-		t.Fatalf("expected both ordinary argument fragments live before completion, got %d", len(liveCalls))
-	}
-	for _, call := range liveCalls {
-		if int(numberValue(call["index"])) != 0 {
-			t.Fatalf("expected live ordinary fragments at index 0, got %#v", call)
-		}
-	}
-
-	builder.clientForwarder.flushBuffered(builder.entries)
-	calls := emittedChatToolCallDeltas(t, rec.Body.String())
-	if len(calls) != 3 {
-		t.Fatalf("expected buffered auto-continue call after two live fragments, got %d", len(calls))
-	}
-	assertChatToolCallDelta(t, calls[2], 1, "call_widget", "render_artifact_preview", `{"title":"Demo"}`)
 }
 
 func emittedChatToolCallDeltas(t *testing.T, body string) []map[string]any {
@@ -571,7 +395,6 @@ func TestChatStreamerFinalizeSkipsAlreadyStreamedClientToolCalls(t *testing.T) {
 
 func TestChatStreamerFinalizeSkipsMultipleStreamedToolCallsWithoutIDs(t *testing.T) {
 	streamer, rec := newTestChatStreamer(t)
-	streamer.autoContinueTools = map[string]struct{}{"render_artifact_preview": {}}
 	upstream := strings.Join([]string{
 		`data: {"id":"up_1","created":1700000001,"model":"gpt-oss-120b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"lookup_order","arguments":"{\"id\":1}"}},{"index":1,"type":"function","function":{"name":"render_artifact_preview","arguments":"{\"title\":\"Demo\"}"}},{"index":2,"type":"function","function":{"name":"lookup_order","arguments":"{\"id\":2}"}}]}}]}`,
 		`data: {"id":"up_1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
@@ -584,8 +407,7 @@ func TestChatStreamerFinalizeSkipsMultipleStreamedToolCallsWithoutIDs(t *testing
 		t.Fatalf("pumpUpstream returned error: %v", err)
 	}
 	_, clientToolCalls := splitToolCalls(testOwnedTools, result.toolCalls)
-	_, externalClientCalls := splitClientToolCalls(streamer.autoContinueTools, clientToolCalls)
-	if err := streamer.finalize(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), newTestEnclaveManager(), "gpt-oss-120b", result, externalClientCalls); err != nil {
+	if err := streamer.finalize(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), newTestEnclaveManager(), "gpt-oss-120b", result, clientToolCalls); err != nil {
 		t.Fatalf("finalize returned error: %v", err)
 	}
 

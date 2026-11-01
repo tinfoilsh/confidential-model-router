@@ -15,32 +15,27 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
 const (
-	billingTestPromptTokens     = 11
-	billingTestOutputTokens     = 7
-	billingTestCachedTokens     = 3
-	billingTestToolBudget       = 10
-	billingTestToolName         = "show"
-	billingTestAutoContinueFlag = "x-tinfoil-tool-auto-continue"
-	billingTestPrecisionSeed    = json.Number("9007199254740993") // 2^53+1 cannot be represented by float64.
+	billingTestPromptTokens  = 11
+	billingTestOutputTokens  = 7
+	billingTestCachedTokens  = 3
+	billingTestToolBudget    = 10
+	billingTestToolName      = "router_search"
+	billingTestToolArguments = `{"query":"hello"}`
+	billingTestPrecisionSeed = json.Number("9007199254740993") // 2^53+1 cannot be represented by float64.
 )
 
 func billingLoopBody(path, model string) map[string]any {
-	function := map[string]any{
-		"name":                      billingTestToolName,
-		"parameters":                map[string]any{"type": "object"},
-		billingTestAutoContinueFlag: true,
-	}
 	if path == "/v1/chat/completions" {
-		return map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "tools": []any{map[string]any{"type": "function", "function": function}}}
+		return map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "web_search_options": map[string]any{}}
 	}
-	function["type"] = "function"
-	return map[string]any{"model": model, "input": "hi", "tools": []any{function}}
+	return map[string]any{"model": model, "input": "hi", "tools": []any{map[string]any{"type": "web_search"}}}
 }
 
 func billingLoopResponse(path string, turn int, terminal bool, usageMode string) map[string]any {
@@ -51,7 +46,7 @@ func billingLoopResponse(path string, turn int, terminal bool, usageMode string)
 		finish := "stop"
 		if !terminal {
 			message["content"] = nil
-			message["tool_calls"] = []any{map[string]any{"id": fmt.Sprintf("call-%d", turn), "type": "function", "function": map[string]any{"name": billingTestToolName, "arguments": "{}"}}}
+			message["tool_calls"] = []any{map[string]any{"id": fmt.Sprintf("call-%d", turn), "type": "function", "function": map[string]any{"name": billingTestToolName, "arguments": billingTestToolArguments}}}
 			finish = "tool_calls"
 		}
 		response["choices"] = []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}
@@ -59,7 +54,7 @@ func billingLoopResponse(path string, turn int, terminal bool, usageMode string)
 	} else {
 		output := map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "final answer"}}}
 		if !terminal {
-			output = map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call-%d", turn), "name": billingTestToolName, "arguments": "{}"}
+			output = map[string]any{"type": "function_call", "call_id": fmt.Sprintf("call-%d", turn), "name": billingTestToolName, "arguments": billingTestToolArguments}
 		}
 		response["status"] = "completed"
 		output["status"] = "completed"
@@ -121,6 +116,13 @@ func billingReplyText(path string, body []byte) string {
 }
 
 func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "billing-tools", Version: "1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "search"}, func(ctx context.Context, req *mcp.CallToolRequest, args struct {
+		Query string `json:"query"`
+	}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "search result"}}}, nil, nil
+	})
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
 		for _, tc := range []struct {
 			name, outcome, usage string
@@ -174,6 +176,10 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 						w.WriteHeader(http.StatusNotFound)
 					}
 				}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/mcp" {
+						mcpHandler.ServeHTTP(w, r)
+						return
+					}
 					turn := int(turns.Add(1))
 					var request map[string]any
 					decoder := json.NewDecoder(r.Body)
@@ -231,7 +237,7 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 						t.Fatalf("admissions = %d", admissions.Load())
 					}
 				} else {
-					err = toolruntime.Handle(rec, r, em, nil, body, admissionTestModel, &toolruntime.RouterOptions{})
+					err = toolruntime.Handle(rec, r, em, []toolruntime.Profile{toolruntime.WebSearch}, body, admissionTestModel, &toolruntime.RouterOptions{})
 				}
 				stopBilling()
 				switch tc.outcome {

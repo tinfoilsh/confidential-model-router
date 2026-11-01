@@ -51,20 +51,10 @@ type toolLoopAdapter interface {
 	// onUpstreamResponse extracts router-owned tool calls plus any
 	// surface-specific state (Chat: assistant message; Responses: raw
 	// output items) that applyToolOutputs will fold back into the next
-	// request body. autoContinueToolCalls is the subset of client-owned
-	// tool calls the caller flagged as auto-continue; the driver
-	// synthesises results for them and continues the loop instead of
-	// finalizing. hasExternalClientToolCalls reports whether the same
-	// turn also carried client-owned tool calls the router cannot
-	// resolve (real function tools); see the mixed-turn contract in
-	// runToolLoop. elapsed is the upstream call's wall time.
-	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, autoContinueToolCalls []toolCall, hasExternalClientToolCalls bool, state any)
-
-	// autoContinueResponseItems extracts the client-visible tool-call
-	// records from a auto-continue turn so finalize can return them
-	// alongside the final model prose after the internal continuation.
-	autoContinueResponseItems(state any, calls []toolCall) []any
-	attachAutoContinueResponseItems(response *upstreamJSONResponse, items []any)
+	// request body. hasClientToolCalls reports whether the same turn
+	// also carried client-owned tool calls; see the mixed-turn contract
+	// in runToolLoop. elapsed is the upstream call's wall time.
+	onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) (routerToolCalls []toolCall, hasClientToolCalls bool, state any)
 
 	applyToolOutputs(reqBody map[string]any, state any, outputs []toolOutput) map[string]any
 
@@ -89,12 +79,6 @@ type toolLoopAdapter interface {
 
 	options() webSearchOptions
 	schemas() map[string]*jsonschema.Schema
-
-	// autoContinueParameterSchemas returns the resolved parameter schema
-	// per auto-continue tool, captured from the caller's tools array by
-	// buildInitialRequest. Used to validate arguments before the router
-	// acknowledges a call.
-	autoContinueParameterSchemas() map[string]*jsonschema.Resolved
 }
 
 // toolOutput pairs an upstream tool call's id/name with the text the router
@@ -139,9 +123,6 @@ func runToolLoop(
 	opts := adapter.options()
 	toolSchemas := adapter.schemas()
 	path := adapter.upstreamPath()
-	var autoContinueResponseItems []any
-	autoContinueSchemas := adapter.autoContinueParameterSchemas()
-	autoContinueFailures := autoContinueSchemaFailures{}
 	var completedHeaders http.Header
 	// Error exits carry billing-only usage from fully consumed successful turns;
 	// the caller must still surface the original error, not this partial result.
@@ -176,26 +157,24 @@ func runToolLoop(
 		usageTotals.Add(response)
 		completedHeaders = response.header
 
-		routerToolCalls, autoContinueCalls, hasExternalClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
+		routerToolCalls, hasClientToolCalls, state := adapter.onUpstreamResponse(response, i, time.Since(start))
 
 		dl.WriteTurn(i+1, response.body)
 
-		// Terminal turn: no router work to do and no auto-continue calls
-		// to auto-acknowledge. External (host-executed) client tool
-		// calls are surfaced as-is for the caller to handle.
-		if len(routerToolCalls) == 0 && len(autoContinueCalls) == 0 {
+		// Terminal turn: no router work to do. Client tool calls are
+		// surfaced as-is for the caller to handle.
+		if len(routerToolCalls) == 0 {
 			if traceID := adapter.traceID(); traceID != "" {
-				debugLogf("toolruntime:%s %s done iterations=%d (no router or auto-continue tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
+				debugLogf("toolruntime:%s %s done iterations=%d (no router tool calls this turn)", traceID, adapter.tracePhase(i), i+1)
 			}
 			dl.WriteFinish("stop (no router tool calls)")
-			adapter.attachAutoContinueResponseItems(response, autoContinueResponseItems)
 			adapter.applyUsage(response, usageTotals.Usage())
 			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, webSearchUsage(em, &toolCalls), nil
 		}
 
 		dl.WriteToolCalls(routerToolCalls)
-		outputs := make([]toolOutput, 0, len(routerToolCalls)+len(autoContinueCalls))
+		outputs := make([]toolOutput, 0, len(routerToolCalls))
 		for _, call := range routerToolCalls {
 			tstart := time.Now()
 			output := executeRouterToolCall(ctx, registry, call, opts, toolSchemas, &citeState, &toolCalls, adapter.tracePhase(i), adapter.traceID())
@@ -206,37 +185,19 @@ func runToolLoop(
 				output: output,
 			})
 		}
-		// Auto-continue client tool calls don't reach any external
-		// service. Synthesise a result so the model's history stays
-		// protocol-valid and the next turn can produce the prose that
-		// would otherwise be lost when the model hands off. Arguments
-		// the client's schema would reject yield an error result so the
-		// model can retry rather than believing the widget rendered.
-		for _, call := range autoContinueCalls {
-			outputs = append(outputs, toolOutput{
-				callID: call.id,
-				name:   call.name,
-				output: autoContinueToolOutput(call, autoContinueSchemas, autoContinueFailures),
-			})
-		}
 
 		// Mixed turn: finalize instead of replaying so the client's
 		// tool calls are not orphaned in the next request's history.
-		// Auto-continue calls do not count as external — the router
-		// resolves them above and continues looping.
-		if hasExternalClientToolCalls {
+		if hasClientToolCalls {
 			if traceID := adapter.traceID(); traceID != "" {
-				debugLogf("toolruntime:%s %s mixed_turn iterations=%d (router+external client calls in one turn; finalizing without replay)", traceID, adapter.tracePhase(i), i+1)
+				debugLogf("toolruntime:%s %s mixed_turn iterations=%d (router+client calls in one turn; finalizing without replay)", traceID, adapter.tracePhase(i), i+1)
 			}
-			currentAutoContinueItems := adapter.autoContinueResponseItems(state, autoContinueCalls)
 			adapter.stripRouterToolCallsFromResponse(response)
-			adapter.attachAutoContinueResponseItems(response, append(autoContinueResponseItems, currentAutoContinueItems...))
 			adapter.applyUsage(response, usageTotals.Usage())
 			adapter.attachCitations(response.body, &citeState, &toolCalls, eventFlags)
 			return response, webSearchUsage(em, &toolCalls), nil
 		}
 
-		autoContinueResponseItems = append(autoContinueResponseItems, adapter.autoContinueResponseItems(state, autoContinueCalls)...)
 		reqBody = adapter.applyToolOutputs(reqBody, state, outputs)
 	}
 
@@ -252,7 +213,6 @@ func runToolLoop(
 	// the aggregated totals. Without this, callers billed for the tool
 	// budget would undercount by exactly the final-answer turn.
 	usageTotals.Add(finalResponse)
-	adapter.attachAutoContinueResponseItems(finalResponse, autoContinueResponseItems)
 	adapter.applyUsage(finalResponse, usageTotals.Usage())
 	adapter.attachCitations(finalResponse.body, &citeState, &toolCalls, eventFlags)
 	return finalResponse, webSearchUsage(em, &toolCalls), nil
@@ -331,17 +291,15 @@ func executeRouterToolCall(
 // messages history shape, the trace id threaded through debug logs, and the
 // per-iteration assistant-history sanitization quirk.
 type chatLoopAdapter struct {
-	body                map[string]any
-	prompt              *mcp.GetPromptResult
-	tools               []*mcp.Tool
-	ownedTools          map[string]struct{}
-	autoContinueTools   map[string]struct{}
-	autoContinueSchemas map[string]*jsonschema.Resolved
-	modelName           string
-	requestHeaders      http.Header
-	tid                 string
-	opts                webSearchOptions
-	toolSchemas         map[string]*jsonschema.Schema
+	body           map[string]any
+	prompt         *mcp.GetPromptResult
+	tools          []*mcp.Tool
+	ownedTools     map[string]struct{}
+	modelName      string
+	requestHeaders http.Header
+	tid            string
+	opts           webSearchOptions
+	toolSchemas    map[string]*jsonschema.Schema
 }
 
 func newChatLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, modelName string, requestHeaders http.Header, routerOpts *RouterOptions) *chatLoopAdapter {
@@ -368,9 +326,6 @@ func (a *chatLoopAdapter) options() webSearchOptions  { return a.opts }
 func (a *chatLoopAdapter) schemas() map[string]*jsonschema.Schema {
 	return a.toolSchemas
 }
-func (a *chatLoopAdapter) autoContinueParameterSchemas() map[string]*jsonschema.Resolved {
-	return a.autoContinueSchemas
-}
 
 func (a *chatLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
 	if response == nil || response.body == nil || usage == nil {
@@ -386,12 +341,11 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 // buildChatUpstreamRequest builds the upstream /v1/chat/completions request
 // body shared by the non-streaming tool loop and the streaming path. It clones
 // body (preserving router-injected fields such as cache_salt), strips
-// router-only fields, applies the parallel-tool-calls policy, merges the
-// tools and prompt, and returns the request plus the auto-continue tool set
-// stripped from it. Callers set the stream flag (and stream_options) for their
+// router-only fields, applies the parallel-tool-calls policy, and merges the
+// tools and prompt. Callers set the stream flag (and stream_options) for their
 // mode; the shared body is otherwise identical, so keeping it in one place
 // stops the two paths from drifting.
-func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
+func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) map[string]any {
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
 	delete(reqBody, "code_execution_options")
@@ -401,21 +355,14 @@ func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mc
 	delete(reqBody, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(reqBody)
 	applyParallelToolCallsPolicy(reqBody)
-	autoContinueTools := extractAndStripAutoContinueChatTools(reqBody["tools"])
-	autoContinue := autoContinueConfig{
-		tools:   autoContinueTools,
-		schemas: autoContinueSchemas(reqBody["tools"], autoContinueTools),
-	}
 	reqBody["tools"] = append(existingTools(reqBody["tools"]), chatTools(tools)...)
 	reqBody["messages"] = prependChatPrompt(prompt, reqBody["messages"])
-	return reqBody, autoContinue
+	return reqBody
 }
 
 func (a *chatLoopAdapter) buildInitialRequest() map[string]any {
-	reqBody, autoContinue := buildChatUpstreamRequest(a.body, a.tools, a.prompt)
+	reqBody := buildChatUpstreamRequest(a.body, a.tools, a.prompt)
 	reqBody["stream"] = false
-	a.autoContinueTools = autoContinue.tools
-	a.autoContinueSchemas = autoContinue.schemas
 
 	if debugEnabled {
 		ownedNames := make([]string, 0, len(a.ownedTools))
@@ -436,10 +383,9 @@ func (a *chatLoopAdapter) preIteration(reqBody map[string]any, iteration int) {
 	}
 }
 
-func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) ([]toolCall, []toolCall, bool, any) {
+func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, iteration int, elapsed time.Duration) ([]toolCall, bool, any) {
 	message, toolCalls := parseChatToolCalls(response.body)
 	routerToolCalls, clientToolCalls := splitToolCalls(a.ownedTools, toolCalls)
-	autoContinueCalls, externalClientCalls := splitClientToolCalls(a.autoContinueTools, clientToolCalls)
 	if debugEnabled {
 		finishReason := ""
 		content := ""
@@ -455,42 +401,10 @@ func (a *chatLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, ite
 		for _, c := range toolCalls {
 			toolNames = append(toolNames, c.name)
 		}
-		debugLogf("toolruntime:%s chat.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d auto_continue=%d external_client=%d tool_names=%v content=%q",
-			a.tid, iteration, elapsed, finishReason, len(toolCalls), len(routerToolCalls), len(clientToolCalls), len(autoContinueCalls), len(externalClientCalls), toolNames, debugPreview(content, 240))
+		debugLogf("toolruntime:%s chat.iter=%d upstream.response elapsed=%s finish=%q total_tool_calls=%d router_tool_calls=%d client_tool_calls=%d tool_names=%v content=%q",
+			a.tid, iteration, elapsed, finishReason, len(toolCalls), len(routerToolCalls), len(clientToolCalls), toolNames, debugPreview(content, 240))
 	}
-	return routerToolCalls, autoContinueCalls, len(externalClientCalls) > 0, message
-}
-
-func (a *chatLoopAdapter) autoContinueResponseItems(state any, calls []toolCall) []any {
-	if len(calls) == 0 {
-		return nil
-	}
-	message, _ := state.(map[string]any)
-	if message == nil {
-		return nil
-	}
-	rawCalls, _ := message["tool_calls"].([]any)
-	return filterChatRawToolCalls(rawCalls, calls)
-}
-
-func (a *chatLoopAdapter) attachAutoContinueResponseItems(response *upstreamJSONResponse, items []any) {
-	if response == nil || response.body == nil || len(items) == 0 {
-		return
-	}
-	choices, _ := response.body["choices"].([]any)
-	if len(choices) == 0 {
-		return
-	}
-	choice, _ := choices[0].(map[string]any)
-	if choice == nil {
-		return
-	}
-	message, _ := choice["message"].(map[string]any)
-	if message == nil {
-		return
-	}
-	existing, _ := message["tool_calls"].([]any)
-	message["tool_calls"] = append(append([]any{}, items...), existing...)
+	return routerToolCalls, len(clientToolCalls) > 0, message
 }
 
 // stripRouterToolCallsFromResponse keeps only the client-owned
@@ -532,9 +446,6 @@ func (a *chatLoopAdapter) stripRouterToolCallsFromResponse(response *upstreamJSO
 		if _, ok := a.ownedTools[name]; ok {
 			continue
 		}
-		if _, ok := a.autoContinueTools[name]; ok {
-			continue
-		}
 		filtered = append(filtered, raw)
 	}
 	message["tool_calls"] = filtered
@@ -568,16 +479,14 @@ func (a *chatLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[string]
 // list that threads every prior output back into each subsequent turn, plus
 // the `include` opt-in for `action.sources` on web_search_call items.
 type responsesLoopAdapter struct {
-	body                map[string]any
-	prompt              *mcp.GetPromptResult
-	tools               []*mcp.Tool
-	ownedTools          map[string]struct{}
-	autoContinueTools   map[string]struct{}
-	autoContinueSchemas map[string]*jsonschema.Resolved
-	base                map[string]any
-	accumulatedInput    []any
-	opts                webSearchOptions
-	toolSchemas         map[string]*jsonschema.Schema
+	body             map[string]any
+	prompt           *mcp.GetPromptResult
+	tools            []*mcp.Tool
+	ownedTools       map[string]struct{}
+	base             map[string]any
+	accumulatedInput []any
+	opts             webSearchOptions
+	toolSchemas      map[string]*jsonschema.Schema
 }
 
 func newResponsesLoopAdapter(body map[string]any, prompt *mcp.GetPromptResult, tools []*mcp.Tool, ownedTools map[string]struct{}, routerOpts *RouterOptions) *responsesLoopAdapter {
@@ -599,10 +508,7 @@ func (a *responsesLoopAdapter) tracePhase(iteration int) string {
 func (a *responsesLoopAdapter) includeActionSources() bool             { return a.opts.includeActionSources }
 func (a *responsesLoopAdapter) options() webSearchOptions              { return a.opts }
 func (a *responsesLoopAdapter) schemas() map[string]*jsonschema.Schema { return a.toolSchemas }
-func (a *responsesLoopAdapter) autoContinueParameterSchemas() map[string]*jsonschema.Resolved {
-	return a.autoContinueSchemas
-}
-func (a *responsesLoopAdapter) preIteration(map[string]any, int) {}
+func (a *responsesLoopAdapter) preIteration(map[string]any, int)       {}
 
 func (a *responsesLoopAdapter) applyUsage(response *upstreamJSONResponse, usage *tokencount.Usage) {
 	if response == nil || response.body == nil || usage == nil {
@@ -619,62 +525,37 @@ func (a *responsesLoopAdapter) attachCitations(body map[string]any, state *citat
 // body shared by the non-streaming tool loop and the streaming path,
 // mirroring buildChatUpstreamRequest. It clones body (preserving
 // router-injected fields such as cache_salt), strips router-only fields,
-// applies the parallel-tool-calls policy, merges the tools and prompt, and
-// returns the request plus the auto-continue tool set stripped from it.
+// applies the parallel-tool-calls policy, and merges the tools and prompt.
 // Callers set the stream flag for their mode and own the stream_options
 // disposition (the loop strips it — invalid without streaming — while the
 // streaming path forwards a client-supplied value); the shared body is
 // otherwise identical, so keeping it in one place stops the two paths from
 // drifting.
-func buildResponsesUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) (map[string]any, autoContinueConfig) {
+func buildResponsesUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) map[string]any {
 	base := cloneJSONMap(body)
 	delete(base, "pii_check_options")
 	delete(base, "prompt_injection_check_options")
 	stripRouterOwnedIncludes(base)
 	applyParallelToolCallsPolicy(base)
-	autoContinueTools := extractAndStripAutoContinueResponsesTools(base["tools"])
-	autoContinue := autoContinueConfig{
-		tools:   autoContinueTools,
-		schemas: autoContinueSchemas(base["tools"], autoContinueTools),
-	}
 	base["tools"] = replaceRouterOwnedResponsesTools(base["tools"], responseTools(tools))
 	base["input"] = prependResponsesPrompt(prompt, base["input"])
 	base["input"] = stripClientSyntheticResponseItems(base["input"])
-	return base, autoContinue
+	return base
 }
 
 func (a *responsesLoopAdapter) buildInitialRequest() map[string]any {
-	base, autoContinue := buildResponsesUpstreamRequest(a.body, a.tools, a.prompt)
+	base := buildResponsesUpstreamRequest(a.body, a.tools, a.prompt)
 	base["stream"] = false
 	delete(base, "stream_options")
-	a.autoContinueTools = autoContinue.tools
-	a.autoContinueSchemas = autoContinue.schemas
 	a.base = base
 	a.accumulatedInput, _ = base["input"].([]any)
 	return base
 }
 
-func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, []toolCall, bool, any) {
+func (a *responsesLoopAdapter) onUpstreamResponse(response *upstreamJSONResponse, _ int, _ time.Duration) ([]toolCall, bool, any) {
 	routerToolCalls, clientToolCalls := splitToolCalls(a.ownedTools, parseResponsesToolCalls(response.body))
-	autoContinueCalls, externalClientCalls := splitClientToolCalls(a.autoContinueTools, clientToolCalls)
 	outputItems, _ := response.body["output"].([]any)
-	return routerToolCalls, autoContinueCalls, len(externalClientCalls) > 0, outputItems
-}
-
-func (a *responsesLoopAdapter) autoContinueResponseItems(state any, calls []toolCall) []any {
-	if len(calls) == 0 {
-		return nil
-	}
-	outputItems, _ := state.([]any)
-	return filterResponsesOutputItemsForToolCalls(outputItems, calls)
-}
-
-func (a *responsesLoopAdapter) attachAutoContinueResponseItems(response *upstreamJSONResponse, items []any) {
-	if response == nil || response.body == nil || len(items) == 0 {
-		return
-	}
-	outputItems, _ := response.body["output"].([]any)
-	response.body["output"] = append(append([]any{}, items...), outputItems...)
+	return routerToolCalls, len(clientToolCalls) > 0, outputItems
 }
 
 // stripRouterToolCallsFromResponse drops router-owned function_call
@@ -698,9 +579,6 @@ func (a *responsesLoopAdapter) stripRouterToolCallsFromResponse(response *upstre
 		itemType := stringValue(item["type"])
 		if itemType == "function_call" || itemType == "mcp_call" {
 			if _, ok := a.ownedTools[stringValue(item["name"])]; ok {
-				continue
-			}
-			if _, ok := a.autoContinueTools[stringValue(item["name"])]; ok {
 				continue
 			}
 		}
@@ -731,75 +609,6 @@ func (a *responsesLoopAdapter) forcedFinalRequest(reqBody map[string]any) map[st
 // ---------------------------------------------------------------------------
 // Unexported helpers
 // ---------------------------------------------------------------------------
-
-func filterChatRawToolCalls(rawCalls []any, calls []toolCall) []any {
-	if len(rawCalls) == 0 || len(calls) == 0 {
-		return nil
-	}
-	out := make([]any, 0, len(calls))
-	for _, raw := range rawCalls {
-		call, _ := raw.(map[string]any)
-		if call == nil {
-			continue
-		}
-		function, _ := call["function"].(map[string]any)
-		if !matchesAnyToolCall(stringValue(call["id"]), stringValue(function["name"]), calls) {
-			continue
-		}
-		cloned := cloneJSONMap(call)
-		if clonedFn, ok := cloned["function"].(map[string]any); ok {
-			if args, ok := clonedFn["arguments"].(string); ok {
-				clonedFn["arguments"] = canonicalizeAutoContinueArguments(args)
-			}
-		}
-		out = append(out, cloned)
-	}
-	return out
-}
-
-func filterResponsesOutputItemsForToolCalls(outputItems []any, calls []toolCall) []any {
-	if len(outputItems) == 0 || len(calls) == 0 {
-		return nil
-	}
-	out := make([]any, 0, len(calls))
-	for _, raw := range outputItems {
-		item, _ := raw.(map[string]any)
-		if item == nil {
-			continue
-		}
-		itemType := stringValue(item["type"])
-		if itemType != "function_call" && itemType != "mcp_call" {
-			continue
-		}
-		callID := stringValue(item["call_id"])
-		if callID == "" {
-			callID = stringValue(item["id"])
-		}
-		if !matchesAnyToolCall(callID, stringValue(item["name"]), calls) {
-			continue
-		}
-		cloned := cloneJSONMap(item)
-		if args, ok := cloned["arguments"].(string); ok {
-			cloned["arguments"] = canonicalizeAutoContinueArguments(args)
-		}
-		out = append(out, cloned)
-	}
-	return out
-}
-
-func matchesAnyToolCall(id, name string, calls []toolCall) bool {
-	for _, call := range calls {
-		if id != "" && call.id != "" && id == call.id {
-			return true
-		}
-		if id == "" || call.id == "" {
-			if name != "" && name == call.name {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // applyParallelToolCallsPolicy defaults parallel_tool_calls to true so
 // the model can fan out client-owned tool calls. Router-owned tools are

@@ -834,10 +834,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// Detect which built-in tool profiles this request
 				// activates. The router runs the tool loop locally
 				// against one MCP session per active profile; zero
-				// profiles and no auto-continue tools means no router-owned
-				// work, so the request falls through to the plain proxy path.
+				// profiles means no router-owned tools, so the
+				// request falls through to the plain proxy path.
 				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
-				hasAutoContinueTools := toolruntime.HasAutoContinueTools(r.URL.Path, body)
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
@@ -904,7 +903,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
 
-				if len(activeProfiles) > 0 || hasAutoContinueTools {
+				if len(activeProfiles) > 0 {
 					// Streaming tool requests feed the same first-token SLA
 					// metrics as plain proxied streams. The loop may dispatch
 					// to several replicas and pools before the first

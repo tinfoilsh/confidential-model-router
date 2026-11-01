@@ -482,7 +482,6 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 	for _, body := range []string{
 		`{"model":"gpt-oss-120b","input":[{"role":"user","content":[{"type":"input_file","filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}]}]}`,
 		`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"web_search"}]}`,
-		`{"model":"gpt-oss-120b","input":"hi","tools":[{"type":"function","name":"show","parameters":{"type":"object"},"x-tinfoil-tool-auto-continue":true}]}`,
 	} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, admissionRequest("/v1/responses", body, "tk_test"))
@@ -491,7 +490,7 @@ func TestAdmissionHandlerRejectsBeforePreprocessing(t *testing.T) {
 		}
 	}
 	handler.client.refreshes.Wait()
-	if backendCalls.Load() != 0 || cpCalls.Load() != 3 {
+	if backendCalls.Load() != 0 || cpCalls.Load() != 2 {
 		t.Fatalf("preprocessing after rejection: backend=%d cp=%d", backendCalls.Load(), cpCalls.Load())
 	}
 }
