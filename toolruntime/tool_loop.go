@@ -260,7 +260,7 @@ func executeRouterToolCall(
 		return output
 	}
 	tstart := time.Now()
-	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments, registry.metaFor(call.name))
+	output, structured, err := callTool(ctx, session, registry.dispatchName(call.name), call.arguments)
 	output = applyStructuredFormat(call.name, output, structured, state)
 	record := toolCallRecord{
 		name:       call.name,
@@ -282,7 +282,6 @@ func executeRouterToolCall(
 				traceID, tracePhase, call.name, time.Since(tstart), len(output), record.resultURLs, debugPreview(output, 400))
 		}
 	}
-	record.output = output
 	toolCalls.record(record)
 	return output
 }
@@ -348,7 +347,6 @@ func (a *chatLoopAdapter) attachCitations(body map[string]any, state *citations.
 func buildChatUpstreamRequest(body map[string]any, tools []*mcp.Tool, prompt *mcp.GetPromptResult) map[string]any {
 	reqBody := cloneJSONMap(body)
 	delete(reqBody, "web_search_options")
-	delete(reqBody, "code_execution_options")
 	delete(reqBody, "filters")
 	delete(reqBody, "stream_options")
 	delete(reqBody, "pii_check_options")
@@ -643,10 +641,9 @@ func toolResultErrorMessage(result *mcp.CallToolResult) string {
 // structured content the server returned. The caller is responsible for
 // formatting structured content (e.g. via applyStructuredFormat) when
 // citation-aware formatting is needed.
-func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any, meta mcp.Meta) (text string, structured any, err error) {
+func callTool(ctx context.Context, session *mcp.ClientSession, name string, arguments map[string]any) (text string, structured any, err error) {
 	start := time.Now()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Meta:      meta,
 		Name:      name,
 		Arguments: arguments,
 	})

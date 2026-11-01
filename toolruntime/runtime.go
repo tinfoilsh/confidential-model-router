@@ -173,11 +173,10 @@ func Handle(w http.ResponseWriter, r *http.Request, em *manager.EnclaveManager, 
 		return err
 	}
 	defer registry.CloseAll()
-	attachRouterOptionsMeta(registry, routerOpts)
 
 	var dl *devLog
 	if em.DebugMode() {
-		dl = openDevLog(r, body, modelName, registry, routerOpts)
+		dl = openDevLog(body, modelName, registry)
 		defer dl.Close()
 	}
 

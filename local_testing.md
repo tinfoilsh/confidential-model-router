@@ -4,16 +4,11 @@ This is the router-centric runbook for testing router-owned tool loops
 end-to-end. The router talks to real model enclaves for generation but sends
 MCP tool traffic to local servers.
 
-Two tool profiles are currently supported:
+One tool profile is currently supported:
 
 - **Web Search** — `confidential-websearch` MCP server
-- **Code Execution** — code execution MCP server
 
-You can run either or both depending on what you're testing.
-
-## 1. Start local MCP servers
-
-Start whichever servers you need. Each listens on its own port.
+## 1. Start the local MCP server
 
 ### Web Search (port 8091)
 
@@ -39,10 +34,6 @@ set -a && . ./.env && set +a
 LISTEN_ADDR=127.0.0.1:8091 \
 go run ./cmd/websearch-mcp
 ```
-
-### Code Execution (port 7070)
-
-Code execution needs a separately run code execution server listening on port 7070.
 
 ## 2. Create a small router config
 
@@ -72,7 +63,6 @@ variables for whichever MCP servers you started in step 1:
 ```bash
 DEBUG=1 \
 LOCAL_MCP_ENDPOINT_WEBSEARCH=http://127.0.0.1:8091/mcp \
-LOCAL_MCP_ENDPOINT_CODE_EXECUTION=http://127.0.0.1:7070/mcp \
 PORT=8090 \
 INIT_CONFIG_URL="/tmp/model-router-local.yml@sha256:<sha-from-step-2>" \
 UPDATE_CONFIG_URL=/tmp/model-router-local.yml \
@@ -84,8 +74,7 @@ go run -tags toolruntime_debug .
 `LOCAL_MCP_ENDPOINT_<MODEL>` makes router-owned tool calls for the named MCP
 model hit a local MCP server instead of the attested deployment. The model
 name is upper-cased with non-alphanumeric characters replaced by underscores,
-so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH` and `code-execution`
-becomes `LOCAL_MCP_ENDPOINT_CODE_EXECUTION`. These overrides are only honored
+so `websearch` becomes `LOCAL_MCP_ENDPOINT_WEBSEARCH`. These overrides are only honored
 when debug mode is enabled (via `DEBUG=1` or the `--debug` flag), which
 prevents a misconfigured production deployment from silently downgrading to a
 non-attested HTTP endpoint.
@@ -191,109 +180,6 @@ For eval options and the result analyzer, see the
 
 ---
 
-## Code Execution smoke tests
-
-Every code-execution call carries three credentials in
-`code_execution_options` (plus the Tinfoil API key on `Authorization`).
-
-Format constraints, enforced downstream of the router (in the code execution server)
-
-- `accessToken` and `containerAuthToken` must be **64 hex chars**
-  (32 random bytes).
-- `encryptionKey` must be **base64url** (no padding).
-
-For local probes, `containerAuthToken` and `encryptionKey` can be any
-fixed random values — paste these into your shell once and reuse:
-
-```bash
-export CTR_AUTH=48bb95e712bf133be055845c4fc0a9dab692e88a615b70415c85949596a3491d
-export KEY=JMgMq_e9BDVnXvD_ptgUWmJsCHCNRrIjl3M6Wadcgvs
-```
-
-`accessToken` identifies the sandbox container, so generate one fresh
-per test session and **reuse it across every call in that session** to
-land on the same container:
-
-```bash
-export TOKEN=$(openssl rand -hex 32)
-```
-
-### Chat Completions
-
-```bash
-curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -d "$(cat <<EOF
-  {
-    "model": "gpt-oss-120b",
-    "code_execution_options": {
-      "accessToken": "$TOKEN",
-      "encryptionKey": "$KEY",
-      "containerAuthToken": "$CTR_AUTH"
-    },
-    "messages": [
-      {"role": "user", "content": "Create a new file called test.txt with hello from tinfoil in it"}
-    ],
-    "max_tokens": 200
-  }
-EOF
-)"
-```
-
-Session persists across calls with the same `accessToken`:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -d "$(cat <<EOF
-  {
-    "model": "gpt-oss-120b",
-    "code_execution_options": {
-      "accessToken": "$TOKEN",
-      "encryptionKey": "$KEY",
-      "containerAuthToken": "$CTR_AUTH"
-    },
-    "messages": [
-      {"role": "user", "content": "Use cat to read test.txt. What does it say in it?"}
-    ],
-    "max_tokens": 200
-  }
-EOF
-)"
-```
-
-### Responses
-
-```bash
-curl -sS -X POST http://127.0.0.1:8090/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TINFOIL_API_KEY" \
-  -d "$(cat <<EOF
-  {
-    "model": "gpt-oss-120b",
-    "code_execution_options": {
-      "accessToken": "$TOKEN",
-      "encryptionKey": "$KEY",
-      "containerAuthToken": "$CTR_AUTH"
-    },
-    "input": "Create a file called /tmp/hello.txt with the contents \"hello from tinfoil\" and then read it back.",
-    "stream": false,
-    "temperature": 0,
-    "max_output_tokens": 400,
-    "tools": [{"type": "code_execution"}]
-  }
-EOF
-)"
-```
-
-### Session cleanup
-
-The code execution server closes containers on shutdown
-
----
-
 ## Verified model matrix
 
 These combinations were validated locally:
@@ -321,6 +207,5 @@ If they are still running in the background, kill by port:
 
 ```bash
 lsof -ti tcp:8091 | xargs kill   # websearch MCP server
-lsof -ti tcp:7070 | xargs kill   # code execution server
 lsof -ti tcp:8090 | xargs kill   # model-router
 ```

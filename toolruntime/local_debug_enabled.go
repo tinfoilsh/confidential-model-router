@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,21 +97,12 @@ type devLog struct {
 	file *os.File
 }
 
-// openDevLog derives the session ID from the request, creates the logs/
-// directory (if needed), opens logs/<session-id>.txt in append mode, and
-// writes the initial header block. The session ID is sanitized to its
-// base name so a client-controlled access token value cannot escape the
-// logs/ directory. Returns nil on any error so callers never have to
-// nil-check beyond the initial open.
-func openDevLog(r *http.Request, body map[string]any, modelName string, registry *sessionRegistry, routerOpts *RouterOptions) *devLog {
-	var sid string
-	if routerOpts != nil && routerOpts.CodeExecution != nil {
-		sid = routerOpts.CodeExecution.AccessToken
-	}
-	if sid == "" {
-		sid = "no-session-" + debugTraceID()
-	}
-	sid = filepath.Base(sid)
+// openDevLog creates the logs/ directory (if needed), opens
+// logs/<session-id>.txt in append mode, and writes the initial header
+// block. Returns nil on any error so callers never have to nil-check
+// beyond the initial open.
+func openDevLog(body map[string]any, modelName string, registry *sessionRegistry) *devLog {
+	sid := "no-session-" + debugTraceID()
 
 	dir := "logs"
 	if err := os.MkdirAll(dir, 0o755); err != nil {

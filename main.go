@@ -788,9 +788,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				}
 
 				// Pull Tinfoil-specific options blobs off the body in
-				// place. These fields (code_execution_options,
-				// web_search_options, pii_check_options) are
-				// router-only.
+				// place. These fields (web_search_options,
+				// pii_check_options) are router-only.
 				routerOpts, err := toolruntime.ExtractRouterOptions(body)
 				if err != nil {
 					writeError(w, asAPIError(err))

@@ -21,19 +21,11 @@ import (
 // them with a single regex before rendering. The marker is only emitted
 // when the caller opts in via the tinfoilEventsHeader request header.
 const (
-	tinfoilEventsHeader      = "X-Tinfoil-Events"
-	tinfoilEventsWebSearch   = "web_search"
-	tinfoilEventsCodeExec    = "code_execution"
-	tinfoilEventOpenTag      = "<tinfoil-event>"
-	tinfoilEventCloseTag     = "</tinfoil-event>"
-	tinfoilEventPayloadType  = "tinfoil.web_search_call"
-	tinfoilEventToolCallType = "tinfoil.tool_call"
-
-	// maxToolCallOutputInMarker caps the tool output text embedded in
-	// tinfoil-event markers. The full output still goes to the model;
-	// this limit keeps the marker payload from inflating the
-	// assistant content delta to an unreasonable size.
-	maxToolCallOutputInMarker = 4096
+	tinfoilEventsHeader     = "X-Tinfoil-Events"
+	tinfoilEventsWebSearch  = "web_search"
+	tinfoilEventOpenTag     = "<tinfoil-event>"
+	tinfoilEventCloseTag    = "</tinfoil-event>"
+	tinfoilEventPayloadType = "tinfoil.web_search_call"
 )
 
 // ---------------------------------------------------------------------------
@@ -131,7 +123,6 @@ type toolCallRecord struct {
 	resultURLs    []string
 	resultSources []toolCallSource
 	errorReason   string
-	output        string // raw tool output text; used by code-exec events
 	pii           *piiCheckResult
 	piiBilling    serviceBilling
 }
@@ -340,10 +331,9 @@ func fetchArgumentURLs(arguments map[string]any) []string {
 // tinfoilEventFlags tracks which opt-in marker families the caller
 // requested via the `X-Tinfoil-Events` header. Each field gates the
 // corresponding marker type so a client that only understands web
-// search markers does not see code execution markers (and vice versa).
+// search markers does not see unrelated markers.
 type tinfoilEventFlags struct {
-	webSearch     bool
-	codeExecution bool
+	webSearch bool
 }
 
 // parseTinfoilEventFlags parses the `X-Tinfoil-Events` header into per-family
@@ -364,9 +354,6 @@ func parseTinfoilEventFlags(h http.Header) tinfoilEventFlags {
 		family := strings.TrimSpace(part)
 		if strings.EqualFold(family, tinfoilEventsWebSearch) {
 			flags.webSearch = true
-		}
-		if strings.EqualFold(family, tinfoilEventsCodeExec) {
-			flags.codeExecution = true
 		}
 	}
 	return flags
@@ -496,90 +483,9 @@ func tinfoilEventMarkersForRecords(records []toolCallRecord) string {
 }
 
 // isWebSearchTool reports whether the named tool belongs to the web
-// search family (search/router_search or fetch/router_fetch). Used by
-// emitter implementations to decide the wire format.
+// search family (search/router_search or fetch/router_fetch).
 func isWebSearchTool(name string) bool {
 	return isRouterSearchToolName(name) || isRouterFetchToolName(name)
-}
-
-// tinfoilToolCallMarker renders a code-execution tool-call progress
-// event as a `<tinfoil-event>` marker. The payload shape is:
-//
-//	in_progress: {"type":"tinfoil.tool_call","item_id":"...","status":"in_progress",
-//	              "tool":{"name":"bash","arguments":{...}}}
-//	completed:   {"type":"tinfoil.tool_call","item_id":"...","status":"completed",
-//	              "tool":{"name":"bash","output":"..."}}
-//	failed:      {"type":"tinfoil.tool_call","item_id":"...","status":"failed",
-//	              "tool":{"name":"bash","output":"error: ..."}}
-func tinfoilToolCallMarker(id, status, toolName string, arguments map[string]any, output string) string {
-	tool := map[string]any{"name": toolName}
-	if status == "in_progress" {
-		tool["arguments"] = arguments
-	} else {
-		if len(output) > maxToolCallOutputInMarker {
-			output = output[:maxToolCallOutputInMarker] + "...[truncated]"
-		}
-		tool["output"] = output
-	}
-	payload := map[string]any{
-		"type":    tinfoilEventToolCallType,
-		"item_id": id,
-		"status":  status,
-		"tool":    tool,
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		data = []byte(`{"type":"` + tinfoilEventToolCallType + `"}`)
-	}
-	return "\n" + tinfoilEventOpenTag + string(data) + tinfoilEventCloseTag + "\n"
-}
-
-// presentationPrefixForRecords builds the inline content block prepended
-// to the final assistant message on the non-streaming chat path. The
-// streaming path emits each block chronologically as it executes; the
-// non-streaming path collapses everything into one assistant message,
-// so we surface present output here once at finalize.
-func presentationPrefixForRecords(records []toolCallRecord) string {
-	var b strings.Builder
-	for _, r := range records {
-		if !isPresentTool(r.name) || r.output == "" || r.errorReason != "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(r.output)
-	}
-	if b.Len() == 0 {
-		return ""
-	}
-	return b.String() + "\n\n"
-}
-
-// tinfoilToolCallMarkersForRecords renders in_progress + terminal marker
-// pairs for code-execution tool calls in the non-streaming path. It
-// skips records whose name is "search" or "fetch" because those are
-// handled by tinfoilEventMarkersForRecords. Every other recorded
-// router-owned tool call gets one marker pair.
-func tinfoilToolCallMarkersForRecords(records []toolCallRecord) string {
-	if len(records) == 0 {
-		return ""
-	}
-	var builder strings.Builder
-	for _, record := range records {
-		if isWebSearchTool(record.name) {
-			continue
-		}
-		id := "tc_" + uuid.NewString()
-		builder.WriteString(tinfoilToolCallMarker(id, "in_progress", record.name, record.arguments, ""))
-		status := statusForRecord(record)
-		output := record.output
-		if status != "completed" && output == "" {
-			output = record.errorReason
-		}
-		builder.WriteString(tinfoilToolCallMarker(id, status, record.name, nil, output))
-	}
-	return builder.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -713,70 +619,13 @@ func buildWebSearchCallOutputItems(records []toolCallRecord, includeActionSource
 	return events
 }
 
-// ---------------------------------------------------------------------------
-// Code-interpreter-call output items (Responses API)
-// ---------------------------------------------------------------------------
-
-// codeInterpreterCallEvent builds a code_interpreter_call item for
-// Responses `output[]`. Shape matches OpenAI's ResponseCodeInterpreterToolCall:
-// https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_code_interpreter_tool_call.py
-// Tinfoil only emits the `logs` variant of `outputs` today.
-func codeInterpreterCallEvent(id, status, toolName string, arguments map[string]any, output, errorCode string) map[string]any {
-	code := toolName
-	if len(arguments) > 0 {
-		if argsJSON, err := json.Marshal(arguments); err == nil {
-			code = toolName + ": " + string(argsJSON)
-		}
-	}
-	item := map[string]any{
-		"type":         "code_interpreter_call",
-		"id":           id,
-		"status":       status,
-		"code":         code,
-		"container_id": tinfoilContainerID,
-	}
-	if output != "" {
-		item["outputs"] = []map[string]any{
-			{"type": "logs", "logs": output},
-		}
-	}
-	if sidecar := tinfoilSidecar(errorCode, nil); sidecar != nil {
-		item["_tinfoil"] = sidecar
-	}
-	return item
-}
-
-// tinfoilContainerID is the synthetic placeholder used for the
-// container_id field on every emitted code_interpreter_call item. The
-// spec requires a non-empty string;
-const tinfoilContainerID = "cnt_tinfoil_sandbox"
-
-// buildCodeInterpreterCallOutputItems turns recorded code-execution tool
-// calls into code_interpreter_call output items for the non-streaming
-// Responses API response. Records whose name is "search" or "fetch" are
-// skipped because those belong to the web_search family.
-func buildCodeInterpreterCallOutputItems(records []toolCallRecord) []any {
-	var events []any
-	for _, record := range records {
-		if isWebSearchTool(record.name) {
-			continue
-		}
-		status := statusForRecord(record)
-		events = append(events, codeInterpreterCallEvent(
-			"ci_"+uuid.NewString(), status, record.name, record.arguments, record.output, record.errorReason,
-		))
-	}
-	return events
-}
-
 // routerSynthesizedResponseItemTypes are the Responses output-item types the
 // router builds itself rather than receiving from the upstream model. Keep
 // this in sync with the builders above: adding a synthesized type means
 // adding its builder and its entry here, so stripClientSyntheticResponseItems
 // drops the echoed-back variant on the input side too.
 var routerSynthesizedResponseItemTypes = map[string]struct{}{
-	"web_search_call":       {},
-	"code_interpreter_call": {},
+	"web_search_call": {},
 }
 
 // stripClientSyntheticResponseItems drops router-synthesized output items
@@ -833,12 +682,6 @@ func attachChatOutput(body map[string]any, state *citations.State, toolCalls *to
 		if eventFlags.webSearch {
 			prefix += tinfoilEventMarkersForRecords(records)
 		}
-		if eventFlags.codeExecution {
-			prefix += tinfoilToolCallMarkersForRecords(records)
-		}
-		// Present tool output: regular markdown the user reads directly,
-		// so it is appended unconditionally (not gated on event flags).
-		prefix += presentationPrefixForRecords(records)
 
 		if prefix != "" {
 			content = prefix + content
@@ -890,14 +733,12 @@ func attachResponsesOutput(body map[string]any, state *citations.State, toolCall
 
 	// --- output items: one builder per tool type ---
 	wsEvents := buildWebSearchCallOutputItems(records, includeActionSources)
-	ciEvents := buildCodeInterpreterCallOutputItems(records)
 
-	if len(wsEvents) == 0 && len(ciEvents) == 0 {
+	if len(wsEvents) == 0 {
 		return
 	}
-	prepended := make([]any, 0, len(wsEvents)+len(ciEvents)+len(outputItems))
+	prepended := make([]any, 0, len(wsEvents)+len(outputItems))
 	prepended = append(prepended, wsEvents...)
-	prepended = append(prepended, ciEvents...)
 	prepended = append(prepended, outputItems...)
 	body["output"] = prepended
 }

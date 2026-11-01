@@ -8,7 +8,7 @@ For each request the router:
 
 1. Authenticates the caller and checks rate limits with the control plane
 2. Resolves the requested model (or picks one for `model: "auto"`) to a healthy enclave
-3. Runs any server-side tools the request asked for (web search, code execution, PII check)
+3. Runs any server-side tools the request asked for (web search, PII check)
 4. Streams the enclave's response back to the client
 
 Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.sh):
@@ -24,7 +24,7 @@ Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.s
 - **[main.go](main.go)**: Request handling, model resolution, and forwarding to enclaves
 - **[autoroute/](autoroute/)**: Model and reasoning-effort selection for `model: "auto"`
 - **[route_context.go](route_context.go)**: Admission and rate-limit decisions from the control plane
-- **[toolruntime/](toolruntime/)**: Server-side tool loops (web search, code execution)
+- **[toolruntime/](toolruntime/)**: Server-side tool loops (web search)
 - **[billing/](billing/)**: Usage reporting
 
 Pool selection and overload settings are described in [Routing](docs/routing.md).

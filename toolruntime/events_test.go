@@ -7,8 +7,8 @@ import (
 
 // TestStripClientSyntheticResponseItems pins that router-synthesized
 // output-item types are dropped from a client-echoed input array while
-// real conversation items survive. Covers both synthesized families
-// (web_search_call, code_interpreter_call) and the pass-through cases.
+// real conversation items survive. Covers web_search_call and the
+// pass-through cases.
 func TestStripClientSyntheticResponseItems(t *testing.T) {
 	t.Parallel()
 
@@ -19,9 +19,8 @@ func TestStripClientSyntheticResponseItems(t *testing.T) {
 	// web_search_call without an id (what Codex echoes back) and with one.
 	wsNoID := map[string]any{"type": "web_search_call", "status": "completed"}
 	wsWithID := map[string]any{"type": "web_search_call", "id": "ws_1", "status": "completed"}
-	ciCall := map[string]any{"type": "code_interpreter_call", "id": "ci_1", "status": "completed"}
 
-	got := stripClientSyntheticResponseItems([]any{userMsg, wsNoID, assistantMsg, wsWithID, ciCall, fnOutput})
+	got := stripClientSyntheticResponseItems([]any{userMsg, wsNoID, assistantMsg, wsWithID, fnOutput})
 	want := []any{userMsg, assistantMsg, fnOutput}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stripped = %v, want %v", got, want)
