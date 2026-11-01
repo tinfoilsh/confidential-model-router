@@ -27,7 +27,6 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/autoroute"
 	"github.com/tinfoilsh/confidential-model-router/cacheroute"
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
 
@@ -224,10 +223,6 @@ var (
 	// scrapes. Env resolved after parse, like cache-route-secret, so the
 	// secret never reaches flag output.
 	metricsAPIKey = flag.String("metrics-api-key", "", "admin API key sent as a bearer token when polling enclave /metrics (env: METRICS_API_KEY)")
-	// safeguardsURL points at the safeguards sidecar in this enclave. When
-	// empty, completed first-party chat conversations are not submitted for
-	// acceptable-use classification.
-	safeguardsURL = flag.String("safeguards-url", getEnvOrDefault("SAFEGUARDS_URL", ""), "safeguards sidecar base URL (env: SAFEGUARDS_URL)")
 )
 
 // writeError logs the error at a level matching its status and writes it in
@@ -522,17 +517,11 @@ func main() {
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 	defer routeContextClient.refreshes.Wait()
 
-	safeguardsSubmitter := safeguards.NewSubmitter(*safeguardsURL)
-	defer safeguardsSubmitter.Close()
-	if safeguardsSubmitter != nil {
-		log.Infof("Safeguards sidecar: %s", *safeguardsURL)
-	}
-
-	http.Handle("/", newRouterHandler(em, routeContextClient, safeguardsSubmitter))
+	http.Handle("/", newRouterHandler(em, routeContextClient))
 	runRouterServer()
 }
 
-func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient, safeguardsSubmitter *safeguards.Submitter) http.Handler {
+func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient) http.Handler {
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
@@ -628,11 +617,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			r = r.WithContext(manager.WithCallerOrg(r.Context(), resolved.OrgID))
 			return true
 		}
-
-		// Completed first-party chat turns are submitted to the safeguards
-		// sidecar once the response has been written.
-		w, capture, finishCapture := safeguardsSubmitter.Observe(w, r, manager.IsFirstPartyChatAccessJWT)
-		defer finishCapture()
 
 		if isInputTokensPath(r.URL.Path) {
 			dispatch := func(ctx context.Context, modelName, path string, body []byte, headers http.Header) (*http.Response, error) {
@@ -852,10 +836,6 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 						return
 					}
 					modelName = resolved
-				}
-
-				if capture != nil {
-					capture.SetMessages(safeguards.RequestMessages(r.URL.Path, body))
 				}
 
 				// Detect which built-in tool profiles this request

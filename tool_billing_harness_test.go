@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
-	"github.com/tinfoilsh/confidential-model-router/safeguards"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
@@ -75,6 +74,50 @@ func billingLoopResponse(path string, turn int, terminal bool, usageMode string)
 		response["usage"] = usage
 	}
 	return response
+}
+
+// billingReplyText returns the assistant reply of a completed non-streaming
+// chat or Responses body, or "" when the body is not a completed reply.
+func billingReplyText(path string, body []byte) string {
+	var reply struct {
+		Status string `json:"status"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &reply) != nil {
+		return ""
+	}
+	if path == "/v1/chat/completions" {
+		if len(reply.Choices) == 0 {
+			return ""
+		}
+		return reply.Choices[0].Message.Content
+	}
+	if reply.Status != "completed" {
+		return ""
+	}
+	var text strings.Builder
+	for _, item := range reply.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" {
+				text.WriteString(part.Text)
+			}
+		}
+	}
+	return text.String()
 }
 
 func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
@@ -181,15 +224,14 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 				r := admissionRequest(path, string(encoded), "tk_test").WithContext(ctx)
 				r.Header.Set("X-Request-Id", "original-request")
 				rec := httptest.NewRecorder()
-				capture := &safeguards.Capture{ResponseWriter: rec}
 				if tc.router {
-					handler.ServeHTTP(capture, r)
+					handler.ServeHTTP(rec, r)
 					handler.client.refreshes.Wait()
 					if admissions.Load() != 1 {
 						t.Fatalf("admissions = %d", admissions.Load())
 					}
 				} else {
-					err = toolruntime.Handle(capture, r, em, nil, body, admissionTestModel, &toolruntime.RouterOptions{})
+					err = toolruntime.Handle(rec, r, em, nil, body, admissionTestModel, &toolruntime.RouterOptions{})
 				}
 				stopBilling()
 				switch tc.outcome {
@@ -197,8 +239,8 @@ func TestNonstreamToolBillingCompletedUsage(t *testing.T) {
 					if err != nil || rec.Code != 200 || !strings.Contains(rec.Body.String(), "final answer") {
 						t.Fatalf("success changed: %v HTTP %d %s", err, rec.Code, rec.Body.String())
 					}
-					if got := capture.Text(); got != "final answer" {
-						t.Fatalf("completed reply not captured: %q", got)
+					if got := billingReplyText(path, rec.Body.Bytes()); got != "final answer" {
+						t.Fatalf("completed reply not delivered: %q", got)
 					}
 				case "error":
 					if err != nil || rec.Code != 502 || !strings.Contains(rec.Body.String(), "fixture_failure") || rec.Header().Get("Retry-After") != "17" {

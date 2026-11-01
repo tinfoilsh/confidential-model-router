@@ -5,12 +5,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,7 +94,28 @@ func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org s
 	}
 	client := newRouteContextClient(control.URL)
 	t.Cleanup(client.refreshes.Wait)
-	return em, &admissionHarness{newRouterHandler(em, client, nil), client}
+	return em, &admissionHarness{newRouterHandler(em, client), client}
+}
+
+// ecdsaCert mirrors real enclaves, whose fingerprinting only supports EC keys.
+func ecdsaCert(t *testing.T) tls.Certificate {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
@@ -850,7 +876,7 @@ func TestAdmissionHandlerSharedDecisions(t *testing.T) {
 	defer secondControl.Close()
 	secondClient := newRouteContextClient(secondControl.URL)
 	defer secondClient.refreshes.Wait()
-	second := &admissionHarness{newRouterHandler(em, secondClient, nil), secondClient}
+	second := &admissionHarness{newRouterHandler(em, secondClient), secondClient}
 	for i, tc := range []struct {
 		handler     *admissionHarness
 		key, model  string
