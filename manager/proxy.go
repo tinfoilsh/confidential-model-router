@@ -314,14 +314,15 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 				return
 			}
 			billingCollector.AddEvent(billing.Event{
-				Timestamp:   time.Now(),
-				UserID:      userID,
-				APIKey:      apiKey,
-				Model:       modelName,
-				RequestID:   requestID,
-				Enclave:     host,
-				RequestPath: requestPath,
-				Streaming:   streaming,
+				Timestamp:        time.Now(),
+				UserID:           userID,
+				APIKey:           apiKey,
+				Model:            modelName,
+				RequestID:        requestID,
+				Enclave:          host,
+				RequestPath:      requestPath,
+				Streaming:        streaming,
+				CustomerRequests: billing.CustomerRequests(req.Context()),
 			})
 		}
 
@@ -419,6 +420,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 						Enclave:            host,
 						RequestPath:        requestPath,
 						Streaming:          streaming,
+						CustomerRequests:   billing.CustomerRequests(req.Context()),
 					}
 					billingCollector.AddEvent(event)
 				}
