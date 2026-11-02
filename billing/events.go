@@ -30,6 +30,7 @@ type Event struct {
 	RequestPath        string    `json:"request_path"`
 	Streaming          bool      `json:"streaming"`
 	APIKey             string    `json:"api_key"`
+	CustomerRequests   int64     `json:"customer_requests"`
 }
 
 // Collector ships billing events to the control plane via the usage reporter.
@@ -112,7 +113,7 @@ func (c *Collector) AddEvent(event Event) {
 				Service: usagereporting.ServiceRouter,
 				Name:    usagereporting.OperationRouterModelRequest,
 			},
-			CustomerRequests: 1,
+			CustomerRequests: event.CustomerRequests,
 			Meters:           meters,
 			Attributes: map[string]string{
 				"model":     event.Model,

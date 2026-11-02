@@ -556,6 +556,7 @@ func emitBillingEvent(em *manager.EnclaveManager, r *http.Request, response *ups
 		Enclave:            response.header.Get("Tinfoil-Enclave"),
 		RequestPath:        r.URL.Path,
 		Streaming:          streaming,
+		CustomerRequests:   billing.CustomerRequests(r.Context()),
 	})
 }
 

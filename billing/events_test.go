@@ -70,6 +70,7 @@ func TestCollectorEmitsCustomerRequestAndTokenMeters(t *testing.T) {
 		RequestPath:      "/v1/chat/completions",
 		Streaming:        true,
 		APIKey:           "sk-test-1234567890",
+		CustomerRequests: 1,
 	})
 
 	batch := readBatch()

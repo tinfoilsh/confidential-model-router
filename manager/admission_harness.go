@@ -32,10 +32,18 @@ func NewAdmissionManagerForTest(data []byte, controlPlaneURL string) (*EnclaveMa
 	return em, nil
 }
 
-// EnableBillingForTest attaches the real collector to internal dispatch tests;
-// its returned stop function flushes pending reports before assertions.
+// EnableBillingForTest attaches the real collector to internal dispatch and
+// to the proxies of installed enclaves; its returned stop function flushes
+// pending reports before assertions.
 func EnableBillingForTest(em *EnclaveManager) func() {
 	em.billingCollector = billing.NewCollector(em.controlPlaneURL, "router-test", "test-secret")
+	for name, model := range em.Models() {
+		model.mu.Lock()
+		for host, enclave := range model.Enclaves {
+			enclave.proxy = newProxy(host, enclave.tlsKeyFP, name, em.billingCollector, enclave.cb, enclave.attestation)
+		}
+		model.mu.Unlock()
+	}
 	return em.billingCollector.Stop
 }
 

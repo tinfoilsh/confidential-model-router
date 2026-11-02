@@ -237,9 +237,10 @@ func (em *EnclaveManager) ReportUnknownModel(apiKey, modelName string) {
 	em.unknownModelReporter.Report(apiKey, modelName)
 }
 
-// UsageContextSecret returns the HMAC secret used to sign usage-context
-// headers attached to outbound MCP tool calls. The empty string means no
-// signing should be attempted.
+// UsageContextSecret returns the HMAC secret used to verify the usage context
+// the chat harness sends and to sign usage-context headers attached to
+// outbound MCP tool calls. The empty string means no signing should be
+// attempted.
 func (em *EnclaveManager) UsageContextSecret() string {
 	return em.usageContextSecret
 }
