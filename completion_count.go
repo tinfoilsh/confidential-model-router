@@ -2,8 +2,6 @@ package main
 
 import (
 	"net/http"
-	"strconv"
-	"strings"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
@@ -16,16 +14,12 @@ func applyCompletionCountHeader(header http.Header, path string, body map[string
 	if path != "/v1/chat/completions" {
 		return nil
 	}
-	values := header.Values(manager.CompletionCountRequestHeader)
-	if len(values) == 0 {
+	count, ok := positiveIntHeader(header, manager.CompletionCountRequestHeader)
+	if !ok {
+		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidCompletionCountHeader)
+	}
+	if count == 0 {
 		return nil
-	}
-	if len(values) != 1 {
-		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidCompletionCountHeader)
-	}
-	count, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
-	if err != nil || count < 1 {
-		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidCompletionCountHeader)
 	}
 	body["n"] = count
 	return nil
