@@ -42,6 +42,9 @@ const (
 	// MaxOutputTokensRequestHeader optionally sets the output-token limit on
 	// generation endpoints, replacing any limit in the request body.
 	MaxOutputTokensRequestHeader = "X-Tinfoil-Max-Output-Tokens"
+	// CompletionCountRequestHeader optionally sets the chat completion count,
+	// replacing n in the request body.
+	CompletionCountRequestHeader = "X-Tinfoil-Completion-Count"
 	// maxUsageMetricsBodyBytes caps buffering for non-streaming usage extraction.
 	maxUsageMetricsBodyBytes = int64(10 << 20)
 	// websearchModel is charged per-request in addition to per-token.

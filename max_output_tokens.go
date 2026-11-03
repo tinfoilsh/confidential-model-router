@@ -29,16 +29,12 @@ func applyMaxOutputTokensHeader(header http.Header, path string, body map[string
 	if !ok {
 		return nil
 	}
-	values := header.Values(manager.MaxOutputTokensRequestHeader)
-	if len(values) == 0 {
+	limit, ok := positiveIntHeader(header, manager.MaxOutputTokensRequestHeader)
+	if !ok {
+		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidMaxTokensHeader)
+	}
+	if limit == 0 {
 		return nil
-	}
-	if len(values) > 1 {
-		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidMaxTokensHeader)
-	}
-	limit, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
-	if err != nil || limit < 1 {
-		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidMaxTokensHeader)
 	}
 
 	for _, field := range fields {
@@ -46,4 +42,22 @@ func applyMaxOutputTokensHeader(header http.Header, path string, body map[string
 	}
 	body[fields[0]] = limit
 	return nil
+}
+
+// positiveIntHeader reads an optional header that must hold exactly one
+// positive base-10 integer. An absent header returns 0 and ok; ok is false
+// only when the header is present with any other value.
+func positiveIntHeader(header http.Header, name string) (value int64, ok bool) {
+	values := header.Values(name)
+	if len(values) == 0 {
+		return 0, true
+	}
+	if len(values) > 1 {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
+	if err != nil || value < 1 {
+		return 0, false
+	}
+	return value, true
 }

@@ -62,7 +62,8 @@ const (
 
 	ErrMsgTokenRateLimited = "Rate limit reached for tokens. Retry after %d seconds."
 
-	ErrMsgInvalidMaxTokensHeader = "Invalid " + MaxOutputTokensRequestHeader + " header: must be a single positive integer."
+	ErrMsgInvalidMaxTokensHeader       = "Invalid " + MaxOutputTokensRequestHeader + " header: must be a single positive integer."
+	ErrMsgInvalidCompletionCountHeader = "Invalid " + CompletionCountRequestHeader + " header: must be a single positive integer."
 
 	ErrMsgInvalidUsageContext = "Invalid usage context: %v."
 )
