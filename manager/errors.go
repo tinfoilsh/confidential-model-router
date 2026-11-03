@@ -64,7 +64,6 @@ const (
 
 	ErrMsgInvalidMaxTokensHeader       = "Invalid " + MaxOutputTokensRequestHeader + " header: must be a single positive integer."
 	ErrMsgInvalidCompletionCountHeader = "Invalid " + CompletionCountRequestHeader + " header: must be a single positive integer."
-	ErrMsgCompletionCountBestOf        = "When " + CompletionCountRequestHeader + " is supplied, best_of must be omitted or the integer 1."
 
 	ErrMsgInvalidUsageContext = "Invalid usage context: %v."
 )

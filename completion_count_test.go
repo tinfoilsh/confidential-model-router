@@ -18,13 +18,12 @@ func TestApplyCompletionCountHeader(t *testing.T) {
 		wantError bool
 	}
 	tests := []testCase{
-		{name: "absent leaves body unchanged", body: `{"n":3,"best_of":5}`, want: `{"n":3,"best_of":5}`},
+		{name: "absent leaves body unchanged", body: `{"n":3}`, want: `{"n":3}`},
 		{name: "adds missing count", headers: []string{"2"}, body: `{"model":"m"}`, want: `{"model":"m","n":2}`},
 		{name: "replaces larger count", headers: []string{"1"}, body: `{"n":3}`, want: `{"n":1}`},
 		{name: "replaces smaller count", headers: []string{"3"}, body: `{"n":1}`, want: `{"n":3}`},
 		{name: "replaces malformed count", headers: []string{"2"}, body: `{"n":"many"}`, want: `{"n":2}`},
 		{name: "matches output header parsing", headers: []string{" +02 "}, body: `{}`, want: `{"n":2}`},
-		{name: "removes redundant best_of", headers: []string{"3"}, body: `{"best_of":1}`, want: `{"n":3}`},
 		{name: "responses ignored", path: "/v1/responses", headers: []string{"bad"}, body: `{"n":3}`, want: `{"n":3}`},
 		{name: "legacy completions ignored", path: "/v1/completions", headers: []string{"2"}, body: `{"n":3}`, want: `{"n":3}`},
 		{name: "embeddings ignored", path: "/v1/embeddings", headers: []string{"bad"}, body: `{}`, want: `{}`},
@@ -33,9 +32,6 @@ func TestApplyCompletionCountHeader(t *testing.T) {
 		tests = append(tests, testCase{name: "invalid header " + value, headers: []string{value}, body: `{}`, wantError: true})
 	}
 	tests = append(tests, testCase{name: "duplicate header", headers: []string{"1", "1"}, body: `{}`, wantError: true})
-	for _, value := range []string{"2", "0", "-1", "1.5", "1.0", `"1"`, "null", "true", "{}", "[]", "9223372036854775808"} {
-		tests = append(tests, testCase{name: "invalid best_of " + value, headers: []string{"1"}, body: `{"best_of":` + value + `}`, wantError: true})
-	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := tt.path

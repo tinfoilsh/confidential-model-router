@@ -1219,9 +1219,8 @@ func TestAdmissionHandlerCompletionCountHeader(t *testing.T) {
 		wantCount string
 	}{
 		{"overrides hidden count with both headers", "1", `{"model":"gpt-oss-120b","messages":[],"n":3,"max_tokens":4096}`, http.StatusOK, "1"},
-		{"allows multiple choices", "3", `{"model":"gpt-oss-120b","messages":[],"n":1,"best_of":1}`, http.StatusOK, "3"},
+		{"allows multiple choices", "3", `{"model":"gpt-oss-120b","messages":[],"n":1}`, http.StatusOK, "3"},
 		{"invalid count rejected before admission", "0", `{"model":"gpt-oss-120b","messages":[]}`, http.StatusBadRequest, ""},
-		{"hidden best_of rejected before admission", "1", `{"model":"gpt-oss-120b","messages":[],"best_of":3}`, http.StatusBadRequest, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1256,9 +1255,6 @@ func TestAdmissionHandlerCompletionCountHeader(t *testing.T) {
 			}
 			if string(body["n"]) != tt.wantCount || string(body["max_completion_tokens"]) != "8" {
 				t.Fatalf("limits not enforced: n=%s, max_completion_tokens=%s", body["n"], body["max_completion_tokens"])
-			}
-			if _, present := body["best_of"]; present {
-				t.Fatal("best_of forwarded")
 			}
 			if _, present := body["max_tokens"]; present {
 				t.Fatal("old body token cap forwarded")

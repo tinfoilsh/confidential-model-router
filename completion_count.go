@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,11 +8,10 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
-// applyCompletionCountHeader overrides n on chat completions when the optional
-// visible header is supplied. Like the output-token header, this lets an EHBP
-// proxy see a limit the enclave enforces over the sealed body. Neither header
-// is a request-total budget across server-side tool loops or repeated calls.
-// Without this header, existing body semantics are unchanged.
+// applyCompletionCountHeader enforces the optional X-Tinfoil-Completion-Count
+// header on chat completions. Like the output-token header, it lets an EHBP
+// proxy see a limit the enclave enforces over the sealed body: the header
+// replaces any n the body sets. Other endpoints ignore the header.
 func applyCompletionCountHeader(header http.Header, path string, body map[string]any) *manager.APIError {
 	if path != "/v1/chat/completions" {
 		return nil
@@ -28,22 +26,6 @@ func applyCompletionCountHeader(header http.Header, path string, body map[string
 	count, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
 	if err != nil || count < 1 {
 		return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgInvalidCompletionCountHeader)
-	}
-	// best_of may generate candidates beyond those returned in n. Do not let
-	// a sealed body hide that additional work behind the visible count.
-	// decodeJSONBody preserves numbers as json.Number.
-	if raw, present := body["best_of"]; present {
-		number, ok := raw.(json.Number)
-		if !ok {
-			return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgCompletionCountBestOf)
-		}
-		bestOf, err := number.Int64()
-		if err != nil || bestOf != 1 {
-			return manager.ErrInvalidRequest.WithMessage(manager.ErrMsgCompletionCountBestOf)
-		}
-		// Redundant once validated; remove it so a backend cannot interpret
-		// best_of=1 as conflicting with an enforced n greater than one.
-		delete(body, "best_of")
 	}
 	body["n"] = count
 	return nil
