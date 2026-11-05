@@ -44,6 +44,9 @@ models:
   kimi-k3:
     repo: tinfoilsh/confidential-kimi-k3
 
+  kimi-k3-1-pro:
+    repo: tinfoilsh/confidential-kimi-k3-1-pro
+
   websearch:
     repo: tinfoilsh/confidential-websearch
 
