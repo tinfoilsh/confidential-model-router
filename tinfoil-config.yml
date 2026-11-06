@@ -4,7 +4,7 @@ cpus: 8
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/tinfoilsh/confidential-model-router@sha256:35020d18c90f549b1dc8e996821e9d3c4a74cbc6ef96938f45c0280d86ae4c95" # v0.0.171
     restart: always
     networks: [web]
     env:
