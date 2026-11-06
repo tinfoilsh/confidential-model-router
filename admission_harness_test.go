@@ -52,7 +52,7 @@ func (h *admissionHarness) warm(apiKey, model string) {
 
 func newAdmissionHarness(t *testing.T, cp, backend http.Handler, org string, overloaded bool) (*manager.EnclaveManager, *admissionHarness) {
 	t.Helper()
-	models := []string{admissionTestModel, "nomic-embed-text", "qwen3-tts", "voxtral-small-24b", "voxtral-mini-4b-realtime", "doc-upload", "websearch"}
+	models := []string{admissionTestModel, "nomic-embed-text", "qwen3-tts", "qwen3-tts-base", "voxtral-small-24b", "voxtral-mini-4b-realtime", "doc-upload", "websearch"}
 	var cfg strings.Builder
 	cfg.WriteString("models:\n")
 	for _, name := range models {
@@ -297,6 +297,8 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 		{name: "auto", path: "/v1/chat/completions", body: `{"model":"auto","messages":[],"auto_model_options":{"intelligence":100}}`, model: admissionTestModel},
 		{name: "embeddings", path: "/v1/embeddings", body: `{"model":"nomic-embed-text","priority":-99,"input":"hi"}`, model: "nomic-embed-text"},
 		{name: "speech default", path: "/v1/audio/speech", body: `{"input":"hi","priority":-99,"stream":true}` + "\n\t ", model: "qwen3-tts"},
+		{name: "speech base transcript", path: "/v1/audio/speech", body: `{"model":"qwen3-tts-base","input":"hi","ref_audio":"data:audio/wav;base64,UklGRg==","ref_text":"reference speech","x_vector_only_mode":false}`, model: "qwen3-tts-base"},
+		{name: "speech base x-vector", path: "/v1/audio/speech", body: `{"model":"qwen3-tts-base","input":"hi","ref_audio":"data:audio/wav;base64,UklGRg==","x_vector_only_mode":true}`, model: "qwen3-tts-base"},
 		{name: "speech explicit", path: "/v1/audio/speech", body: `{"model":"gpt-oss-120b","input":"hi","seed":` + precisionSeed + `,"stream":true,"stream_options":{"include_usage":false},"cache_salt":"client-chosen","user_cache_secret":"secret"}`, model: admissionTestModel},
 		{name: "transcription", path: "/v1/audio/transcriptions", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
 		{name: "translation", path: "/v1/audio/translations", body: multipartBody.String(), model: "voxtral-small-24b", contentType: mw.FormDataContentType(), raw: true},
@@ -436,13 +438,50 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 						if !bytes.Equal(body["stream"], sent["stream"]) || !bytes.Equal(body["input"], sent["input"]) {
 							t.Fatalf("speech content changed: %s", forwarded.body)
 						}
-						if !bytes.Equal(body["stream_options"], sent["stream_options"]) {
-							t.Fatalf("speech stream_options were injected or changed: %s", forwarded.body)
+						for _, field := range []string{"stream_options", "ref_audio", "ref_text", "x_vector_only_mode"} {
+							if !bytes.Equal(body[field], sent[field]) {
+								t.Fatalf("speech %s was injected or changed: %s", field, forwarded.body)
+							}
 						}
 					}
 				})
 			}
 		})
+	}
+}
+
+func TestAdmissionHandlerSpeechBaseUnavailable(t *testing.T) {
+	var backends atomic.Int64
+	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backends.Add(1)
+		io.WriteString(w, `{}`)
+	}), "", false)
+	model, _ := em.GetModel("qwen3-tts-base")
+	// The harness starts no enclave workers, so temporarily empty just the
+	// Base pool while leaving the preset pool available.
+	enclaves := model.Enclaves
+	model.Enclaves = nil
+	t.Cleanup(func() { model.Enclaves = enclaves })
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, admissionRequest("/v1/audio/speech", `{"model":"qwen3-tts-base","input":"hi"}`, "tk_test"))
+	var envelope manager.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusServiceUnavailable || envelope.Error.Code == nil || *envelope.Error.Code != manager.ErrCodeModelUnavailable {
+		t.Fatalf("empty Base pool: HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+	if backends.Load() != 0 {
+		t.Fatal("unavailable Base request fell back to another backend")
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, admissionRequest("/v1/audio/speech", `{"input":"hi"}`, "tk_test"))
+	if rec.Code != http.StatusOK || backends.Load() != 1 {
+		t.Fatalf("preset default unavailable: HTTP %d, backend calls=%d: %s", rec.Code, backends.Load(), rec.Body.String())
 	}
 }
 
