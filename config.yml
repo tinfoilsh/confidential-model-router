@@ -38,6 +38,9 @@ models:
   qwen3-tts:
     repo: tinfoilsh/confidential-small-models
 
+  qwen3-tts-base:
+    repo: tinfoilsh/confidential-small-models
+
   deepseek-v4-1-flash:
     repo: tinfoilsh/confidential-deepseek-v4-1-flash
 
