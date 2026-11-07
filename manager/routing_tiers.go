@@ -61,7 +61,7 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy)
+	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy, "")
 	if enclave != nil {
 		enclave.inflight.Add(1)
 		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
@@ -69,7 +69,21 @@ func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill m
 	return enclave, claim, overloaded, retryAfter, waiting
 }
 
-func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+// SelectRetry reserves a different, closed, non-overloaded backend. Retries
+// cannot claim recovery probes or use unknown load as a last resort.
+func (m *Model) SelectRetry(failedHost string, order []string, primary, spill map[string]bool, policy *config.OverloadConfig) *Enclave {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	enclave, _, overloaded, _, _ := m.selectServingLocked(order, false, primary, spill, policy, failedHost)
+	if enclave == nil || overloaded {
+		return nil
+	}
+	enclave.inflight.Add(1)
+	BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
+	return enclave
+}
+
+func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, excludedHost string) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	pools := []map[string]bool{primary}
 	if len(spill) > 0 {
 		pools = append(pools, spill)
@@ -80,10 +94,13 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 	waiting := make(map[*Enclave]float64)
 	for pool, allowed := range pools {
 		for _, enclave := range m.Enclaves {
-			if (allowed != nil && !allowed[enclave.host]) || !enclave.attestationValid(time.Now()) {
+			if (excludedHost != "" && enclave.host == excludedHost) || (allowed != nil && !allowed[enclave.host]) || !enclave.attestationValid(time.Now()) {
 				continue
 			}
 			if !enclave.breakerClosed() {
+				if excludedHost != "" {
+					continue
+				}
 				probes[pool] = append(probes[pool], enclave)
 				degraded = append(degraded, enclave)
 				continue
@@ -91,6 +108,9 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			tier := tierUnknown
 			if enclave.metrics != nil {
 				tier, waiting[enclave] = enclave.metrics.tier(policy)
+			}
+			if excludedHost != "" && tier == tierUnknown {
+				continue
 			}
 			buckets[tier][pool] = append(buckets[tier][pool], enclave)
 		}

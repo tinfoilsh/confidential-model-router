@@ -39,3 +39,14 @@ all-breakers-open fallback retain their load-guard bypass.
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.
 Backend overload gauges describe the host's own policy, not every caller's tier.
 Policies reload without a restart.
+
+Plain POST requests to `/v1/chat/completions`, `/v1/completions`, and
+`/v1/responses` retry one backend HTTP 502 on a different verified replica
+before any response headers or bytes reach the caller. The retry preserves
+the request deadline and pool policy, and excludes open circuits, unknown
+load, and overloaded replicas. Other HTTP errors, transport failures,
+started streams, and server-side tool workflows are not replayed. If no
+eligible alternate exists, the original 502 is returned. A 502 can follow
+accepted work, so a retry can duplicate computation. Routing does not check
+per-replica context limits; replicas sharing a model should support the same
+request lengths.

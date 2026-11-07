@@ -1102,8 +1102,39 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// handler; carry the labels resolved here to it.
 		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
 
+		var lw *latencyWriter
+		serve := func(w http.ResponseWriter) {
+			enclave.ServeHTTPWithFailover(w, r, func(replay *http.Request) *manager.Enclave {
+				next := model.SelectRetry(enclave.String(), cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
+				if next == nil {
+					return nil
+				}
+				if poolSpill != nil {
+					poolLabel = "spilled"
+					if poolPrimary[next.String()] {
+						poolLabel = "reserved"
+					}
+				}
+				if poolPrimary != nil {
+					manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
+				}
+				*replay = *replay.WithContext(manager.WithTokenMetricLabels(replay.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+				if lw != nil {
+					lw.enclave, lw.pool, lw.start = next.String(), poolLabel, time.Now()
+					initNoFirstTokenSeries(modelName, lw.enclave, lw.pool, lw.class)
+				}
+				if cacheRouteDecision != nil {
+					cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, next.String(), cacheRouteSettings)
+				} else if cacheRouteReq != nil {
+					cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), next.String(), cacheRouteSettings)
+				}
+				log.WithFields(log.Fields{"model": modelName, "failed_enclave": enclave.String(), "enclave": next.String()}).Warn("retrying backend 502 on another replica")
+				return next
+			})
+		}
+
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
-			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
+			lw = newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
 			// finish must run via defer: a backend that dies mid-stream
 			// unwinds ServeHTTP with http.ErrAbortHandler, and that request
 			// must still be counted as failed-before-first-token. served
@@ -1114,7 +1145,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				lw.finish(r.Context())
 				observeRequestDuration(r.Context(), modelName, poolLabel, lw.class, true, lw.status, lw.aborted, requestStart)
 			}()
-			enclave.ServeHTTP(lw, r)
+			serve(lw)
 			served = true
 			return
 		}
@@ -1129,7 +1160,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		defer func() {
 			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart)
 		}()
-		enclave.ServeHTTP(w, r)
+		serve(w)
 		served = true
 	})
 }
