@@ -246,6 +246,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, errRetryReplica) {
+			return
+		}
 		// A body-limit trip during the outbound copy (chunked uploads pass
 		// the router's Content-Length pre-check) is a client fault: answer
 		// 413 and leave the breaker alone, or cheap oversized uploads could
@@ -289,6 +292,11 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			recordFailure(serving, httpFailureReason(resp.StatusCode))
 		} else {
 			recordSuccess(serving)
+		}
+		if resp.StatusCode == http.StatusBadGateway {
+			if retry, ok := resp.Request.Context().Value(replicaRetryKey{}).(func() bool); ok && retry() {
+				return errRetryReplica
+			}
 		}
 
 		// Extract request details that we'll need for billing
