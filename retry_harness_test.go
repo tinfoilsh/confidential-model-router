@@ -55,6 +55,9 @@ func TestRouterRetries502AcrossReplicas(t *testing.T) {
 				firstHost = host
 			}
 			second := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := testutil.ToFloat64(manager.BackendInflight.WithLabelValues(admissionTestModel, firstHost)); got != 0 {
+					t.Errorf("failed replica retained inflight=%v during retry", got)
+				}
 				capture(r)
 				if streaming {
 					w.Header().Set("Content-Type", "text/event-stream")

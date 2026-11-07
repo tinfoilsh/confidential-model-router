@@ -69,8 +69,7 @@ func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill m
 	return enclave, claim, overloaded, retryAfter, waiting
 }
 
-// SelectRetry reserves a different, closed, non-overloaded backend. Retries
-// cannot claim recovery probes or use unknown load as a last resort.
+// SelectRetry excludes recovery probes, unknown load, and overloaded replicas.
 func (m *Model) SelectRetry(failedHost string, order []string, primary, spill map[string]bool, policy *config.OverloadConfig) *Enclave {
 	m.mu.Lock()
 	defer m.mu.Unlock()

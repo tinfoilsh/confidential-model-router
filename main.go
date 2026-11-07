@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1025,7 +1026,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
 			return
 		}
-		defer enclave.ReleaseDispatch()
+		releaseDispatch := sync.OnceFunc(enclave.ReleaseDispatch)
+		defer releaseDispatch()
 
 		// Meter landing pools on reserved models; poolSpill is only
 		// non-nil for reserved callers. Models without reservations have
@@ -1109,6 +1111,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				if next == nil {
 					return nil
 				}
+				releaseDispatch()
 				if poolSpill != nil {
 					poolLabel = "spilled"
 					if poolPrimary[next.String()] {
