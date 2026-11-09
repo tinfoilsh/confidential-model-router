@@ -78,13 +78,13 @@ func TestReservationPolicySurvivesReplacement(t *testing.T) {
 			for _, enclave := range []*Enclave{reserved, shared} {
 				observe(enclave.metrics, reservedQueueLimit)
 			}
-			primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
+			primary, spill, policy := model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 			if selected, _, reject, retry, _ := model.SelectServing(nil, true, primary, spill, policy); selected != reserved || !reject || retry != time.Minute {
 				t.Fatal("reserved queue policy must apply to both pools even without a running limit")
 			} else {
 				selected.ReleaseDispatch()
 			}
-			public, _, publicPolicy := model.ReservationPools("public-org")
+			public, _, publicPolicy := model.ReservationPools(Caller{OrgID: "public-org"})
 			if selected, _, reject, _, _ := model.SelectServing(nil, true, public, nil, publicPolicy); selected != shared || reject {
 				t.Fatal("reserved policy affected the public caller")
 			} else {
@@ -199,7 +199,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 	for _, enclave := range []*Enclave{reserved, shared} {
 		observeCounts(enclave.metrics, 0, runningRequestLimit)
 	}
-	primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy := model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	if policy.SoftMaxRequestsRunning != runningRequestLimit {
 		t.Fatal("request did not inherit its reservation policy")
 	}
@@ -210,7 +210,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 	}
 
 	reload(nil, cfg.Hostnames[:1])
-	_, _, policy = model.ReservationPools(reservationOverloadOrg)
+	_, _, policy = model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	if *policy != *sharedPolicy {
 		t.Fatal("removing override did not restore the model policy")
 	}
@@ -228,12 +228,12 @@ func TestReservationTierPolicyReload(t *testing.T) {
 		t.Fatal("shared metrics did not enforce the caller's queue policy")
 	}
 	reload(reservedPolicy, cfg.Hostnames[1:])
-	primary, spill, policy = model.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy = model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	if !primary[shared.host] || !spill[reserved.host] || !pollingActive(reserved.metrics) {
 		t.Fatal("moving the reservation lost spillover polling or pool membership")
 	}
 	reload(&config.OverloadConfig{}, cfg.Hostnames[1:])
-	_, _, policy = model.ReservationPools(reservationOverloadOrg)
+	_, _, policy = model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	if policy.Enabled() || pollingActive(shared.metrics) || pollingActive(reserved.metrics) {
 		t.Fatal("empty policy did not disable tiers and unused polling")
 	}

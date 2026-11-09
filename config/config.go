@@ -34,10 +34,11 @@ type CacheRouteConfig struct {
 }
 
 // ReservationConfig dedicates a subset of a model's enclaves to the listed
-// orgs: only their traffic may use those enclaves. Shared capacity can serve
+// orgs or users: only their traffic may use those enclaves. Shared capacity can serve
 // spillover according to the caller's routing policy.
 type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
+	UserIDs  []string `yaml:"user_ids,omitempty" json:"user_ids,omitempty"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 	// A nil block inherits the model policy; a present block replaces it.
 	Overload *OverloadConfig `yaml:"overload,omitempty" json:"overload,omitempty"`
@@ -126,6 +127,7 @@ func FromBytes(data []byte) (*Config, error) {
 	}
 	for name, model := range config.Models {
 		byOrg := make(map[string]OverloadConfig)
+		byUser := make(map[string]OverloadConfig)
 		for _, reservation := range model.Reservations {
 			policy := model.Overload
 			if reservation.Overload != nil {
@@ -137,6 +139,12 @@ func FromBytes(data []byte) (*Config, error) {
 					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
 				}
 				byOrg[org] = resolved
+			}
+			for _, user := range reservation.UserIDs {
+				if previous, ok := byUser[user]; ok && previous != resolved {
+					return nil, fmt.Errorf("model %s: reservations for the same user must use the same tier policy", name)
+				}
+				byUser[user] = resolved
 			}
 		}
 	}

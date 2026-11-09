@@ -386,7 +386,7 @@ func ensureStreamingUsageOptions(body map[string]any, headers http.Header) {
 // their current health. Implemented by *manager.EnclaveManager.
 type autoRouteCatalog interface {
 	AutoRouteCatalog() []autoroute.Model
-	AutoRouteStatus(modelName, orgID string) (eligible, healthy bool)
+	AutoRouteStatus(modelName string, caller manager.Caller) (eligible, healthy bool)
 }
 
 // resolveAutoModel replaces model "auto" with a concrete model and reasoning
@@ -399,7 +399,7 @@ type autoRouteCatalog interface {
 // body using the model's own reasoning parameters, overriding any effort the
 // client sent, and body["model"] is rewritten. When nothing is healthy the
 // best-fit eligible candidate is still returned so normal serving surfaces the error.
-func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any, orgForModel func(string) (string, error)) (string, error) {
+func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string, body map[string]any, callerForModel func(string) (manager.Caller, error)) (string, error) {
 	target, err := autoroute.ParseIntelligence(header, body)
 	if err != nil {
 		var validationErr *autoroute.ValidationError
@@ -421,11 +421,11 @@ func resolveAutoModel(catalog autoRouteCatalog, header http.Header, path string,
 	var chosen autoroute.Candidate
 	eligible, healthy := false, false
 	for i, candidate := range ranked {
-		orgID, err := orgForModel(candidate.Model.Name)
+		caller, err := callerForModel(candidate.Model.Name)
 		if err != nil {
 			return "", err
 		}
-		allowed, available := catalog.AutoRouteStatus(candidate.Model.Name, orgID)
+		allowed, available := catalog.AutoRouteStatus(candidate.Model.Name, caller)
 		if !allowed {
 			continue
 		}
@@ -560,30 +560,30 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 		r = r.WithContext(billing.WithCustomerRequests(r.Context(), customerRequests))
-		var orgContext *routeContext
-		resolveOrg := func(modelName string) (string, error) {
-			if orgContext == nil {
+		var callerContext *routeContext
+		resolveCaller := func(modelName string) (manager.Caller, error) {
+			if callerContext == nil {
 				resolved, lookupErr := routeContextClient.Metadata(r.Context(), apiKey)
 				if lookupErr != nil {
 					if lookupErr.retryAfter != "" {
 						w.Header().Set("Retry-After", lookupErr.retryAfter)
 					}
-					return "", lookupErr.apiError
+					return manager.Caller{}, lookupErr.apiError
 				}
-				orgContext = &resolved
+				callerContext = &resolved
 			}
-			if orgContext.unavailable && routeContextClient != nil {
+			if callerContext.unavailable && routeContextClient != nil {
 				cached, _ := routeContextClient.cache.get(routeContextKey(apiKey, modelName))
-				return cached.OrgID, nil
+				return cached.caller(), nil
 			}
-			return orgContext.OrgID, nil
+			return callerContext.caller(), nil
 		}
 		resolveAuto := func(path string, body map[string]any) (string, error) {
-			return resolveAutoModel(em, r.Header, path, body, func(modelName string) (string, error) {
+			return resolveAutoModel(em, r.Header, path, body, func(modelName string) (manager.Caller, error) {
 				if model, ok := em.GetModel(modelName); ok && model.HasReservations() {
-					return resolveOrg(modelName)
+					return resolveCaller(modelName)
 				}
-				return "", nil
+				return manager.Caller{}, nil
 			})
 		}
 
@@ -600,22 +600,22 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				admissionErr.write(w)
 				return false
 			}
-			if resolved.OrgID == "" && resolved.RateLimit == nil {
+			if resolved.caller() == (manager.Caller{}) && resolved.RateLimit == nil {
 				if model, ok := em.GetModel(modelName); ok && model.HasReservations() {
-					orgID, err := resolveOrg(modelName)
+					caller, err := resolveCaller(modelName)
 					if err != nil {
 						writeError(w, asAPIError(err))
 						return false
 					}
-					resolved.OrgID = orgID
+					resolved.OrgID, resolved.UserID = caller.OrgID, caller.UserID
 				}
 			}
-			if orgContext != nil && !orgContext.unavailable {
-				resolved.OrgID = orgContext.OrgID
+			if callerContext != nil && !callerContext.unavailable {
+				resolved.OrgID, resolved.UserID = callerContext.OrgID, callerContext.UserID
 			}
 			admission = &resolved
 			hasConfiguredPriority = resolved.skipsQueue()
-			r = r.WithContext(manager.WithCallerOrg(r.Context(), resolved.OrgID))
+			r = r.WithContext(manager.WithCaller(r.Context(), resolved.caller()))
 			return true
 		}
 
@@ -624,11 +624,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				if _, found := em.GetModel(modelName); !found {
 					return nil, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName)
 				}
-				orgID, err := resolveOrg(modelName)
+				caller, err := resolveCaller(modelName)
 				if err != nil {
 					return nil, err
 				}
-				ctx = manager.WithCallerOrg(ctx, orgID)
+				ctx = manager.WithCaller(ctx, caller)
 				return em.DoModelRequest(ctx, modelName, path, body, headers)
 			}
 			handleInputTokens(w, r, apiKey, func(body map[string]any) (string, error) {
@@ -996,7 +996,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		// Reuse the admission context for reservation selection.
-		poolPrimary, poolSpill, overloadPolicy := model.ReservationPools(admission.OrgID)
+		poolPrimary, poolSpill, overloadPolicy := model.ReservationPools(admission.caller())
 
 		// On enforced pools, keyed requests are served in cache-aware
 		// preference order: the key's pick first, then the rest of its

@@ -281,7 +281,7 @@ func TestRouteContextCacheIsolationEvictionAndOrdering(t *testing.T) {
 	if got, _ := cache.get(first); got.OrgID != "new" {
 		t.Fatalf("late response overwrote newer context: %+v", got)
 	}
-	cache.put(third, routeContext{OrgID: strings.Repeat("x", cache.maxBytes)}, nil, 4)
+	cache.put(third, routeContext{UserID: strings.Repeat("x", cache.maxBytes)}, nil, 4)
 	if got, _ := cache.get(third); got.OrgID != org {
 		t.Fatal("oversized entry displaced cached context")
 	}

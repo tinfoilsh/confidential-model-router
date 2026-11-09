@@ -3,7 +3,25 @@
 The model's `overload` policy applies to public callers. A reservation's
 `overload` block replaces it for that reservation's callers, including on
 shared capacity. Omission inherits the model policy; `{}` disables it.
-Multiple reservations for one organization must agree on the policy.
+Multiple reservations for one organization or user must agree on the policy.
+
+Reservations accept `org_ids`, `user_ids`, or both; either list grants access
+to the entry's enclaves. IDs come from the control plane's authenticated
+route context. Personal API keys can match `user_ids` without an organization.
+A matching user reservation takes precedence over organization reservations,
+including for organization API keys. Multiple entries for the same user or
+organization contribute to its pool. Other reserved pools remain inaccessible.
+
+```yaml
+reservations:
+  - user_ids: [user_example]
+    enclaves: [dedicated.example.com]
+```
+
+Each entry needs at least one nonblank ID and one enclave from the model's
+`enclaves` list. An enclave may belong to only one entry. Deploy router and
+control plane support before publishing `user_ids`: older routers ignore
+user-only reservations and treat their enclaves as shared.
 
 | Tier | Meaning under the caller's policy |
 | --- | --- |

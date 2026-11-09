@@ -29,7 +29,7 @@ func (em *EnclaveManager) boundHTTPClientForModel(ctx context.Context, modelName
 // boundHTTPClientPreferring picks the serving enclave for an internal
 // dispatch — honoring a cache-aware host preference with overload spill (see
 // Model.SelectServing) — and builds its attested client. Reservation
-// pools apply via the caller org in ctx (see WithCallerOrg); no org means
+// pools apply via the caller in ctx (see WithCaller); no identity means
 // the shared pool. A non-nil ProbeClaim must travel with the dispatched
 // request (see ProbeClaim); claimProbes must be false for callers that
 // record no breaker outcomes.
@@ -39,7 +39,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 		return nil, nil, nil, fmt.Errorf("model %s not found", modelName)
 	}
 
-	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
+	primary, spill, policy := model.ReservationPools(CallerFromContext(ctx))
 	enclave, claim, _, _, _ := model.SelectServing(order, claimProbes, primary, spill, policy)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
@@ -147,7 +147,7 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 	}
 	salt, _ := body["cache_salt"].(string)
 	req := cacheroute.ExtractRequest(body, path, salt, settings)
-	primary, _, _ := model.ReservationPools(CallerOrgFromContext(ctx))
+	primary, _, _ := model.ReservationPools(CallerFromContext(ctx))
 	return req, settings, model.CacheRoutePoolIn(primary), true
 }
 
@@ -230,8 +230,8 @@ func (b *inflightBody) Close() error {
 }
 
 // MCPServerEndpoint resolves the attested MCP endpoint for a tool-server
-// model. Reservation pools apply via the caller org in ctx (see
-// WithCallerOrg), so a reserved caller's tool sessions use its pool.
+// model. Reservation pools apply via the caller identity in ctx (see
+// WithCaller), so a reserved caller's tool sessions use its pool.
 func (em *EnclaveManager) MCPServerEndpoint(ctx context.Context, modelName string) (string, *http.Client, error) {
 	// LOCAL_MCP_ENDPOINT_<MODEL_NAME> bypasses attested TLS pinning
 	// and connects to an arbitrary URL (typically http://127.0.0.1).

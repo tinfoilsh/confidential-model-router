@@ -81,13 +81,13 @@ func TestAutoRouteStatus(t *testing.T) {
 		"down-model": down,
 		"up-model":   newTestModel("b"),
 	})
-	if eligible, healthy := em.AutoRouteStatus("down-model", ""); !eligible || healthy {
+	if eligible, healthy := em.AutoRouteStatus("down-model", Caller{OrgID: ""}); !eligible || healthy {
 		t.Fatalf("tripped model status = (%v, %v), want eligible but unhealthy", eligible, healthy)
 	}
-	if eligible, healthy := em.AutoRouteStatus("up-model", ""); !eligible || !healthy {
+	if eligible, healthy := em.AutoRouteStatus("up-model", Caller{OrgID: ""}); !eligible || !healthy {
 		t.Fatalf("healthy model status = (%v, %v), want eligible and healthy", eligible, healthy)
 	}
-	if eligible, healthy := em.AutoRouteStatus("unknown-model", ""); eligible || healthy {
+	if eligible, healthy := em.AutoRouteStatus("unknown-model", Caller{OrgID: ""}); eligible || healthy {
 		t.Fatalf("unknown model status = (%v, %v), want ineligible and unhealthy", eligible, healthy)
 	}
 }
@@ -111,7 +111,7 @@ func TestAutoRouteStatusReservedPools(t *testing.T) {
 		{"org-other", false, false},
 		{"", false, false},
 	} {
-		if eligible, healthy := em.AutoRouteStatus(modelName, tc.orgID); eligible != tc.eligible || healthy != tc.healthy {
+		if eligible, healthy := em.AutoRouteStatus(modelName, Caller{OrgID: tc.orgID}); eligible != tc.eligible || healthy != tc.healthy {
 			t.Errorf("org %q status = (%v, %v), want (%v, %v)", tc.orgID, eligible, healthy, tc.eligible, tc.healthy)
 		}
 	}
@@ -120,7 +120,7 @@ func TestAutoRouteStatusReservedPools(t *testing.T) {
 		{OrgIDs: []string{"org-a"}, Enclaves: []string{"a"}},
 	}, []string{"a", "b"})
 	for _, orgID := range []string{"org-a", "org-other", ""} {
-		if eligible, healthy := em.AutoRouteStatus(modelName, orgID); !eligible || !healthy {
+		if eligible, healthy := em.AutoRouteStatus(modelName, Caller{OrgID: orgID}); !eligible || !healthy {
 			t.Errorf("org %q with healthy shared spill = (%v, %v), want eligible and healthy", orgID, eligible, healthy)
 		}
 	}

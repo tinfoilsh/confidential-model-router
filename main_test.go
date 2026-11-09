@@ -606,14 +606,14 @@ type fakeCatalog struct {
 }
 
 func (f fakeCatalog) AutoRouteCatalog() []autoroute.Model { return f.models }
-func (f fakeCatalog) AutoRouteStatus(name, orgID string) (eligible, healthy bool) {
+func (f fakeCatalog) AutoRouteStatus(name string, caller manager.Caller) (eligible, healthy bool) {
 	owner := f.owners[name]
-	eligible = owner == "" || owner == orgID
+	eligible = owner == "" || owner == caller.OrgID
 	return eligible, eligible && f.healthy[name]
 }
 
-func autoTestOrg(orgID string) func(string) (string, error) {
-	return func(string) (string, error) { return orgID, nil }
+func autoTestOrg(orgID string) func(string) (manager.Caller, error) {
+	return func(string) (manager.Caller, error) { return manager.Caller{OrgID: orgID}, nil }
 }
 
 func autoTestReasoning() *autoroute.Reasoning {
@@ -808,9 +808,9 @@ func TestResolveAutoModel_VisualInputRequiresMultimodal(t *testing.T) {
 	}
 
 	var lookups []string
-	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, func(name string) (string, error) {
+	resolved, err := resolveAutoModel(catalog, header, "/v1/chat/completions", body, func(name string) (manager.Caller, error) {
 		lookups = append(lookups, name)
-		return "", nil
+		return manager.Caller{}, nil
 	})
 	if err != nil {
 		t.Fatalf("resolveAutoModel: %v", err)

@@ -68,7 +68,7 @@ func (c *routeContextCache) get(key routeContextCacheKey) (routeContext, *routeC
 }
 
 func (c *routeContextCache) put(key routeContextCacheKey, resolved routeContext, err *routeContextError, sequence uint64) {
-	size := len(resolved.OrgID)
+	size := len(resolved.OrgID) + len(resolved.UserID)
 	if resolved.RateLimit != nil {
 		size += len(resolved.RateLimit.Decision) + len(resolved.RateLimit.Reason)
 	}
