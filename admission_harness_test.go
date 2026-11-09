@@ -98,6 +98,33 @@ func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org s
 	return em, &admissionHarness{newRouterHandler(em, client), client}
 }
 
+func addAdmissionBackend(t *testing.T, em *manager.EnclaveManager, modelName string, backend http.Handler) string {
+	t.Helper()
+	server := httptest.NewUnstartedServer(backend)
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{ecdsaCert(t)}}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig.RootCAs = transport.TLSClientConfig.RootCAs.Clone()
+	transport.TLSClientConfig.RootCAs.AddCert(server.Certificate())
+	http.DefaultTransport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+	fixture, err := manager.NewAdmissionManagerForTest([]byte(fmt.Sprintf("models:\n  %s: {repo: org/test}\n", modelName)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(fixture.Shutdown)
+	if err := manager.InstallFakeEnclaveForTest(fixture, modelName, server); err != nil {
+		t.Fatal(err)
+	}
+	model, _ := em.GetModel(modelName)
+	installed, _ := fixture.GetModel(modelName)
+	host := strings.TrimPrefix(server.URL, "https://")
+	model.Enclaves[host] = installed.Enclaves[host]
+	delete(installed.Enclaves, host)
+	return host
+}
+
 // ecdsaCert mirrors real enclaves, whose fingerprinting only supports EC keys.
 func ecdsaCert(t *testing.T) tls.Certificate {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -607,7 +634,7 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 		}
 		io.WriteString(w, `{"count":7}`)
 	}), admissionTestOrg, false)
-	configureUserReservations(t, em, admissionTestUser)
+	replaceWithUserReservations(t, em, admissionTestUser)
 	for _, path := range []string{chatInputTokensPath, responsesInputTokensPath} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, admissionRequest(path, `{"model":"auto","messages":[],"input":"hi"}`, "tk_test"))
@@ -647,7 +674,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		{name: "auto refreshed organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, refresh: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, refresh: true, status: http.StatusServiceUnavailable},
-		{name: "auto retries denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto retries denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantAdmissions: 1},
 		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
 		{name: "auto shared", org: "org_other", shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner shared spill", org: admissionTestOrg, shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
@@ -702,7 +729,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 				io.WriteString(w, `{}`)
 			}), reservationOrg, false)
 			if tc.userReservation {
-				configureUserReservations(t, em, admissionTestUser)
+				replaceWithUserReservations(t, em, admissionTestUser)
 			}
 			if tc.shared {
 				const reservedHost = "reserved.example.com"
@@ -748,6 +775,44 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 			}
 			if metadata.Load() != tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
 				t.Fatalf("metadata calls=%d admission calls=%d", metadata.Load(), admissions.Load())
+			}
+		})
+	}
+}
+
+func TestAdmissionHandlerUserReservationPrecedence(t *testing.T) {
+	const testKey = "tk_precedence_test"
+	for _, requestedModel := range []string{admissionTestModel, "auto"} {
+		t.Run(requestedModel, func(t *testing.T) {
+			var userCalls, orgCalls atomic.Int64
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"org_id":%q,"user_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, admissionTestOrg, admissionTestUser)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				userCalls.Add(1)
+				io.WriteString(w, `{"pool":"user"}`)
+			}), "", false)
+			model, _ := em.GetModel(admissionTestModel)
+			var userHost string
+			for host := range model.Enclaves {
+				userHost = host
+			}
+			orgHost := addAdmissionBackend(t, em, admissionTestModel, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				orgCalls.Add(1)
+				io.WriteString(w, `{"pool":"org"}`)
+			}))
+			reservations := []config.ReservationConfig{
+				{OrgIDs: []string{admissionTestOrg}, Enclaves: []string{orgHost}},
+				{UserIDs: []string{admissionTestUser}, Enclaves: []string{userHost}},
+			}
+			if err := manager.ConfigureReservationsForTest(em, admissionTestModel, reservations, []string{userHost, orgHost}); err != nil {
+				t.Fatal(err)
+			}
+			handler.warm(testKey, admissionTestModel)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, admissionRequest("/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[]}`, requestedModel), testKey))
+			handler.client.refreshes.Wait()
+			if recorder.Code != http.StatusOK || recorder.Header().Get("Tinfoil-Enclave") != userHost || recorder.Body.String() != `{"pool":"user"}` || userCalls.Load() != 1 || orgCalls.Load() != 0 {
+				t.Fatalf("HTTP=%d user calls=%d org calls=%d headers=%v body=%s", recorder.Code, userCalls.Load(), orgCalls.Load(), recorder.Header(), recorder.Body.String())
 			}
 		})
 	}
@@ -850,7 +915,7 @@ func testAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T, caller manag
 		}
 	}), admissionTestOrg, false)
 	if caller.UserID != "" {
-		configureUserReservations(t, em, caller.UserID)
+		replaceWithUserReservations(t, em, caller.UserID)
 	}
 	key := "tk_test"
 	handler.warm(key, admissionTestModel)
@@ -1327,7 +1392,7 @@ func TestAdmissionHandlerCompletionCountHeader(t *testing.T) {
 	}
 }
 
-func configureUserReservations(t *testing.T, em *manager.EnclaveManager, user string) {
+func replaceWithUserReservations(t *testing.T, em *manager.EnclaveManager, user string) {
 	t.Helper()
 	for name, model := range em.Models() {
 		hosts := make([]string, 0, len(model.Enclaves))

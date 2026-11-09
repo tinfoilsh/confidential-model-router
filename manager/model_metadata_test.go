@@ -96,23 +96,25 @@ func TestAutoRouteStatusReservedPools(t *testing.T) {
 	const modelName = "reserved-model"
 	model := newTestModel("a", "b")
 	model.applyReservations(modelName, []config.ReservationConfig{
-		{OrgIDs: []string{"org-a"}, Enclaves: []string{"a"}},
-		{OrgIDs: []string{"org-b"}, Enclaves: []string{"b"}},
+		{OrgIDs: []string{"org-a"}, UserIDs: []string{"user-a"}, Enclaves: []string{"a"}},
+		{OrgIDs: []string{"org-b"}, UserIDs: []string{"user-b"}, Enclaves: []string{"b"}},
 	}, []string{"a", "b"})
 	tripBreaker(model.Enclaves["a"])
 	em := newTestManager(map[string]*Model{modelName: model})
 	for _, tc := range []struct {
-		orgID    string
+		caller   Caller
 		eligible bool
 		healthy  bool
 	}{
-		{"org-a", true, false},
-		{"org-b", true, true},
-		{"org-other", false, false},
-		{"", false, false},
+		{Caller{OrgID: "org-a"}, true, false},
+		{Caller{OrgID: "org-b"}, true, true},
+		{Caller{OrgID: "org-other"}, false, false},
+		{Caller{}, false, false},
+		{Caller{UserID: "user-a", OrgID: "org-b"}, true, false},
+		{Caller{UserID: "user-b", OrgID: "org-a"}, true, true},
 	} {
-		if eligible, healthy := em.AutoRouteStatus(modelName, Caller{OrgID: tc.orgID}); eligible != tc.eligible || healthy != tc.healthy {
-			t.Errorf("org %q status = (%v, %v), want (%v, %v)", tc.orgID, eligible, healthy, tc.eligible, tc.healthy)
+		if eligible, healthy := em.AutoRouteStatus(modelName, tc.caller); eligible != tc.eligible || healthy != tc.healthy {
+			t.Errorf("caller %+v status = (%v, %v), want (%v, %v)", tc.caller, eligible, healthy, tc.eligible, tc.healthy)
 		}
 	}
 
