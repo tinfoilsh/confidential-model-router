@@ -126,10 +126,20 @@ func FromBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
 	}
 	for name, model := range config.Models {
+		hosts := make(map[string]bool, len(model.Hostnames))
+		for _, host := range model.Hostnames {
+			hosts[host] = true
+		}
 		byOrg := make(map[string]OverloadConfig)
 		byUser := make(map[string]OverloadConfig)
 		reservedBy := make(map[string]int)
 		for i, reservation := range model.Reservations {
+			if len(reservation.OrgIDs) == 0 && len(reservation.UserIDs) == 0 {
+				return nil, fmt.Errorf("model %q: reservation #%d: org_ids or user_ids is required", name, i+1)
+			}
+			if len(reservation.Enclaves) == 0 {
+				return nil, fmt.Errorf("model %q: reservation #%d lists no enclaves", name, i+1)
+			}
 			policy := model.Overload
 			if reservation.Overload != nil {
 				policy = reservation.Overload
@@ -154,6 +164,9 @@ func FromBytes(data []byte) (*Config, error) {
 				byUser[user] = resolved
 			}
 			for _, host := range reservation.Enclaves {
+				if !hosts[host] {
+					return nil, fmt.Errorf("model %q: reservation #%d references enclave %q, which is not in the model's enclave list", name, i+1, host)
+				}
 				if previous, exists := reservedBy[host]; exists {
 					return nil, fmt.Errorf("model %q: enclave %q is reserved by both reservation #%d and #%d", name, host, previous, i+1)
 				}

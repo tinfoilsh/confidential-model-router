@@ -260,6 +260,11 @@ func TestReservationConfigRejectsInvalidPools(t *testing.T) {
 	for _, tc := range []struct {
 		name, reservations, wantErr string
 	}{
+		{"missing owners", `[{enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"empty owners", `[{org_ids: [], user_ids: [], enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"misspelled owners", `[{users: [user_test], enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"missing enclaves", `[{user_ids: [user_test]}]`, "lists no enclaves"},
+		{"unknown enclave", `[{user_ids: [user_test], enclaves: [b.example]}]`, "not in the model's enclave list"},
 		{"blank user", `[{user_ids: [""], enclaves: [a.example]}]`, "invalid user id"},
 		{"whitespace user", `[{user_ids: ["  "], enclaves: [a.example]}]`, "invalid user id"},
 		{"padded user", `[{user_ids: [" user_test"], enclaves: [a.example]}]`, "invalid user id"},
