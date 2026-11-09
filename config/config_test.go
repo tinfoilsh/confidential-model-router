@@ -255,3 +255,25 @@ func TestOverloadRunningConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestReservationConfigRejectsInvalidPools(t *testing.T) {
+	for _, tc := range []struct {
+		name, reservations, wantErr string
+	}{
+		{"blank user", `[{user_ids: [""], enclaves: [a.example]}]`, "invalid user id"},
+		{"whitespace user", `[{user_ids: ["  "], enclaves: [a.example]}]`, "invalid user id"},
+		{"padded user", `[{user_ids: [" user_test"], enclaves: [a.example]}]`, "invalid user id"},
+		{"blank organization", `[{org_ids: [""], enclaves: [a.example]}]`, "invalid org id"},
+		{"padded organization", `[{org_ids: ["org_test "], enclaves: [a.example]}]`, "invalid org id"},
+		{"overlapping user and org", `[{user_ids: [user_test], enclaves: [a.example]}, {org_ids: [org_test], enclaves: [a.example]}]`, "reserved by both reservation #1 and #2"},
+		{"overlapping users", `[{user_ids: [user_test], enclaves: [a.example]}, {user_ids: [user_other], enclaves: [a.example]}]`, "reserved by both reservation #1 and #2"},
+		{"duplicate within entry", `[{user_ids: [user_test], enclaves: [a.example, a.example]}]`, "reserved by both reservation #1 and #1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf("models:\n  gpt-oss-120b:\n    enclaves: [a.example]\n    reservations: %s\n", tc.reservations)
+			if _, err := FromBytes([]byte(data)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("FromBytes error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}

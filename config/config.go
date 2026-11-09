@@ -128,23 +128,36 @@ func FromBytes(data []byte) (*Config, error) {
 	for name, model := range config.Models {
 		byOrg := make(map[string]OverloadConfig)
 		byUser := make(map[string]OverloadConfig)
-		for _, reservation := range model.Reservations {
+		reservedBy := make(map[string]int)
+		for i, reservation := range model.Reservations {
 			policy := model.Overload
 			if reservation.Overload != nil {
 				policy = reservation.Overload
 			}
 			resolved := policy.normalized()
 			for _, org := range reservation.OrgIDs {
+				if strings.TrimSpace(org) == "" || strings.TrimSpace(org) != org {
+					return nil, fmt.Errorf("model %q: reservation #%d: org_ids contains an invalid org id (%q)", name, i+1, org)
+				}
 				if previous, ok := byOrg[org]; ok && previous != resolved {
 					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
 				}
 				byOrg[org] = resolved
 			}
 			for _, user := range reservation.UserIDs {
+				if strings.TrimSpace(user) == "" || strings.TrimSpace(user) != user {
+					return nil, fmt.Errorf("model %q: reservation #%d: user_ids contains an invalid user id (%q)", name, i+1, user)
+				}
 				if previous, ok := byUser[user]; ok && previous != resolved {
 					return nil, fmt.Errorf("model %s: reservations for the same user must use the same tier policy", name)
 				}
 				byUser[user] = resolved
+			}
+			for _, host := range reservation.Enclaves {
+				if previous, exists := reservedBy[host]; exists {
+					return nil, fmt.Errorf("model %q: enclave %q is reserved by both reservation #%d and #%d", name, host, previous, i+1)
+				}
+				reservedBy[host] = i + 1
 			}
 		}
 	}
