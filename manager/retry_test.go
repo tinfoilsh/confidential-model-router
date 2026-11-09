@@ -191,7 +191,7 @@ func TestSelectRetryEligibility(t *testing.T) {
 			case "missing metrics":
 				alternate.metrics = nil
 			}
-			primary, spill, policy := model.ReservationPools(reservationOverloadOrg)
+			primary, spill, policy := model.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 			order := []string{"other-reserved", "warm", "sibling", "shared"}
 			selected := model.SelectRetry("warm", order, primary, spill, policy)
 			if selected == nil || selected.host != want || selected.inflight.Load() != 1 {

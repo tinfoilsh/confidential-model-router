@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,7 +26,7 @@ func TestReservationPools(t *testing.T) {
 	if m.HasReservations() {
 		t.Fatal("model without reservations must report none")
 	}
-	if primary, spill, _ := m.ReservationPools("org-any"); primary != nil || spill != nil {
+	if primary, spill, _ := m.ReservationPools(Caller{OrgID: "org-any"}); primary != nil || spill != nil {
 		t.Fatalf("pools without reservations = (%v, %v), want (nil, nil)", primary, spill)
 	}
 
@@ -35,7 +36,7 @@ func TestReservationPools(t *testing.T) {
 	}
 
 	// The reserved org gets its hosts as primary, the shared pool as spill.
-	primary, spill, _ := m.ReservationPools("org-reserved")
+	primary, spill, _ := m.ReservationPools(Caller{OrgID: "org-reserved"})
 	if len(primary) != 1 || !primary["c"] {
 		t.Fatalf("reserved primary = %v, want {c}", primary)
 	}
@@ -45,7 +46,7 @@ func TestReservationPools(t *testing.T) {
 
 	// Everyone else gets the shared pool with no spill.
 	for _, org := range []string{"", "org-other"} {
-		primary, spill, _ = m.ReservationPools(org)
+		primary, spill, _ = m.ReservationPools(Caller{OrgID: org})
 		if len(primary) != 2 || !primary["a"] || !primary["b"] {
 			t.Fatalf("shared primary for %q = %v, want {a, b}", org, primary)
 		}
@@ -55,7 +56,7 @@ func TestReservationPools(t *testing.T) {
 	}
 }
 
-// Reservations with no orgs or no enclaves are dropped.
+// Reservations with no callers or no enclaves are dropped.
 func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 	m := newTestModel("a", "b")
 	m.applyReservations("reservation-test-model",
@@ -63,6 +64,8 @@ func TestReservationPoolsIgnoreDegenerateEntries(t *testing.T) {
 			{OrgIDs: nil, Enclaves: []string{"a"}},
 			{OrgIDs: []string{""}, Enclaves: []string{"a"}},
 			{OrgIDs: []string{"org-x"}, Enclaves: nil},
+			{UserIDs: []string{""}, Enclaves: []string{"a"}},
+			{UserIDs: []string{"user-x"}, Enclaves: nil},
 		},
 		[]string{"a", "b"},
 	)
@@ -85,7 +88,7 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 		[]string{"a", "b"},
 	)
 
-	primary, spill, _ := m.ReservationPools("org-x")
+	primary, spill, _ := m.ReservationPools(Caller{OrgID: "org-x"})
 	if len(primary) != 1 || !primary["b"] {
 		t.Fatalf("primary = %v, want {b} with typo-host dropped", primary)
 	}
@@ -95,7 +98,7 @@ func TestReservationPoolsDropUnknownHosts(t *testing.T) {
 
 	// org-y's only host is unknown: it must fall back to the shared pool,
 	// not an empty primary.
-	primary, spill, _ = m.ReservationPools("org-y")
+	primary, spill, _ = m.ReservationPools(Caller{OrgID: "org-y"})
 	if len(primary) != 1 || !primary["a"] || spill != nil {
 		t.Fatalf("pools for org-y = (%v, %v), want shared ({a}, nil)", primary, spill)
 	}
@@ -113,7 +116,7 @@ func TestReservationPoolsMultiOrg(t *testing.T) {
 	)
 
 	for _, org := range []string{"org-reserved", "org-partner"} {
-		primary, spill, _ := m.ReservationPools(org)
+		primary, spill, _ := m.ReservationPools(Caller{OrgID: org})
 		if len(primary) != 2 || !primary["b"] || !primary["c"] {
 			t.Fatalf("primary for %q = %v, want {b, c}", org, primary)
 		}
@@ -122,7 +125,7 @@ func TestReservationPoolsMultiOrg(t *testing.T) {
 		}
 	}
 
-	primary, spill, _ := m.ReservationPools("org-other")
+	primary, spill, _ := m.ReservationPools(Caller{OrgID: "org-other"})
 	if len(primary) != 1 || !primary["a"] || spill != nil {
 		t.Fatalf("shared pools = (%v, %v), want ({a}, nil)", primary, spill)
 	}
@@ -175,7 +178,7 @@ func TestAffinityHonorsPoolFilter(t *testing.T) {
 // verdict when both pools are exhausted.
 func TestSelectServingReservedCaller(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill, policy := m.ReservationPools("org-reserved")
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: "org-reserved"})
 
 	// Healthy reserved host serves.
 	enclave, _, overloaded, _, _ := m.SelectServing(nil, true, primary, spill, policy)
@@ -214,7 +217,7 @@ func TestSelectServingReservedCaller(t *testing.T) {
 // of serving at a dead host.
 func TestSelectServingReservedCallerSpillsFromDeadPool(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill, policy := m.ReservationPools("org-reserved")
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: "org-reserved"})
 
 	tripBreaker(m.Enclaves["c"])
 	for range 50 {
@@ -236,7 +239,7 @@ func TestSelectServingReservedCallerSpillsFromDeadPool(t *testing.T) {
 // touching the reserved host.
 func TestSelectServingSharedCallerNeverUsesReservedHost(t *testing.T) {
 	m := newReservedTestModel()
-	primary, spill, policy := m.ReservationPools("org-other")
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: "org-other"})
 
 	makeOverloaded(m.Enclaves["a"])
 	makeOverloaded(m.Enclaves["b"])
@@ -272,7 +275,7 @@ func TestSelectServingNoReservations(t *testing.T) {
 
 func TestCacheRoutePoolIn(t *testing.T) {
 	m := newReservedTestModel()
-	primary, _, _ := m.ReservationPools("org-other")
+	primary, _, _ := m.ReservationPools(Caller{OrgID: "org-other"})
 
 	pool := m.CacheRoutePoolIn(primary)
 	if pool.Size != 2 || len(pool.Candidates) != 2 {
@@ -325,5 +328,62 @@ func TestApplyReservationsPublishesPoolSize(t *testing.T) {
 	m.applyReservations(model, nil, nil)
 	if got := gaugeState(t, ReservedPoolSize.WithLabelValues(model)); got != 0 {
 		t.Errorf("cleared pool size = %v, want 0", got)
+	}
+}
+
+func TestUserReservationPools(t *testing.T) {
+	const user = "user_reserved"
+	const org = "org_reserved"
+	const sharedHost, userHost, mixedHost, orgHost = "shared", "user", "mixed", "org"
+	hosts := []string{sharedHost, userHost, mixedHost, orgHost}
+	model := newTestModel(hosts...)
+	userPolicy := &config.OverloadConfig{MaxRequestsWaiting: reservedQueueLimit}
+	orgPolicy := &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit}
+	reservations := []config.ReservationConfig{
+		{UserIDs: []string{user}, Enclaves: []string{userHost}, Overload: userPolicy},
+		{UserIDs: []string{user, "user_partner"}, OrgIDs: []string{"org_partner"}, Enclaves: []string{mixedHost}, Overload: userPolicy},
+		{OrgIDs: []string{org}, Enclaves: []string{orgHost}, Overload: orgPolicy},
+	}
+	model.applyReservations("gpt-oss-120b", reservations, hosts)
+	for _, tc := range []struct {
+		name     string
+		caller   Caller
+		primary  map[string]bool
+		policy   *config.OverloadConfig
+		reserved bool
+	}{
+		{"personal union", Caller{UserID: user}, map[string]bool{userHost: true, mixedHost: true}, userPolicy, true},
+		{"user precedence", Caller{UserID: user, OrgID: org}, map[string]bool{userHost: true, mixedHost: true}, userPolicy, true},
+		{"organization fallback", Caller{UserID: "user_other", OrgID: org}, map[string]bool{orgHost: true}, orgPolicy, true},
+		{"mixed user", Caller{UserID: "user_partner"}, map[string]bool{mixedHost: true}, userPolicy, true},
+		{"mixed organization", Caller{OrgID: "org_partner"}, map[string]bool{mixedHost: true}, userPolicy, true},
+		{"public", Caller{UserID: "user_other"}, map[string]bool{sharedHost: true}, model.Overload, false},
+		{"anonymous", Caller{}, map[string]bool{sharedHost: true}, model.Overload, false},
+		{"separate namespaces", Caller{OrgID: user, UserID: org}, map[string]bool{sharedHost: true}, model.Overload, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary, spill, policy := model.ReservationPools(tc.caller)
+			if !maps.Equal(primary, tc.primary) || policy != tc.policy {
+				t.Fatalf("pool = %v policy = %+v, want %v %+v", primary, policy, tc.primary, tc.policy)
+			}
+			if tc.reserved && !maps.Equal(spill, map[string]bool{sharedHost: true}) || !tc.reserved && spill != nil {
+				t.Fatalf("unexpected spill pool: %v", spill)
+			}
+		})
+	}
+	if policies := model.spillPoliciesLocked(sharedHost); len(policies) == 0 {
+		t.Fatal("shared hosts lost reserved caller policies")
+	}
+	model.applyReservations("gpt-oss-120b", reservations[:1], hosts)
+	if !model.HasReservations() {
+		t.Fatal("user-only reservation was dropped")
+	}
+	if policies := model.spillPoliciesLocked(sharedHost); len(policies) != 1 || policies[0] != userPolicy {
+		t.Fatalf("shared host policies = %v, want user policy", policies)
+	}
+	model.applyReservations("gpt-oss-120b", nil, hosts)
+	primary, spill, policy := model.ReservationPools(Caller{UserID: user})
+	if model.HasReservations() || primary != nil || spill != nil || policy != model.Overload {
+		t.Fatal("removing reservations retained a user's pool or policy")
 	}
 }

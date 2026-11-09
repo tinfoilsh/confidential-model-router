@@ -54,7 +54,7 @@ type Model struct {
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
 	// Reservations is excluded from JSON: Status() feeds the public
-	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
+	// /.well-known/tinfoil-proxy endpoint, and org and user ids must not be
 	// exposed there.
 	Reservations []config.ReservationConfig `json:"-"`
 
@@ -63,17 +63,17 @@ type Model struct {
 
 	// Derived from Reservations (see applyReservations); replaced wholesale
 	// and never mutated after publish, so safe to return under RLock.
-	reservedByOrg        map[string]map[string]bool // org id -> its reserved host set
+	reservedByCaller     map[Caller]map[string]bool // org or user -> its reserved host set
 	sharedHosts          map[string]bool            // unreserved hosts; nil when no reservations
 	reservationOverloads map[string]*config.OverloadConfig
-	policiesByOrg        map[string]*config.OverloadConfig
+	policiesByCaller     map[Caller]*config.OverloadConfig
 
 	mu sync.RWMutex
 }
 
 // applyReservations rebuilds the derived reservation lookup sets. Reserved
 // hosts not present in the configured hostnames are dropped with a warning:
-// counting them would silently shrink an org's effective pool (or leave it
+// counting them would silently shrink a caller's effective pool (or leave it
 // empty, routing all its traffic to spill). The caller must hold m.mu or
 // have exclusive access (addModel, before publish).
 func (m *Model) applyReservations(name string, reservations []config.ReservationConfig, hostnames []string) {
@@ -83,31 +83,38 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 	for _, host := range hostnames {
 		known[host] = true
 	}
-	byOrg := make(map[string]map[string]bool, len(reservations))
+	byCaller := make(map[Caller]map[string]bool, len(reservations))
 	reserved := make(map[string]bool)
 	overloads := make(map[string]*config.OverloadConfig)
-	policies := make(map[string]*config.OverloadConfig)
+	policies := make(map[Caller]*config.OverloadConfig)
 	for _, res := range reservations {
-		if len(res.OrgIDs) == 0 || len(res.Enclaves) == 0 {
+		if len(res.Enclaves) == 0 {
 			continue
 		}
+		callers := make([]Caller, 0, len(res.OrgIDs)+len(res.UserIDs))
 		for _, orgID := range res.OrgIDs {
-			if orgID == "" {
+			callers = append(callers, Caller{OrgID: orgID})
+		}
+		for _, userID := range res.UserIDs {
+			callers = append(callers, Caller{UserID: userID})
+		}
+		for _, caller := range callers {
+			if caller == (Caller{}) {
 				continue
 			}
 			policy := res.Overload
 			if policy == nil {
 				policy = m.Overload
 			}
-			set := byOrg[orgID]
+			set := byCaller[caller]
 			if set == nil {
 				set = make(map[string]bool, len(res.Enclaves))
-				byOrg[orgID] = set
+				byCaller[caller] = set
 			}
 			recognized := false
 			for _, host := range res.Enclaves {
 				if !known[host] {
-					log.Warnf("reservation for org %s references unknown enclave %s, ignoring", orgID, host)
+					log.WithFields(log.Fields{"org_id": caller.OrgID, "user_id": caller.UserID}).Warnf("reservation references unknown enclave %s, ignoring", host)
 					continue
 				}
 				set[host] = true
@@ -116,19 +123,19 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 				recognized = true
 			}
 			if len(set) == 0 {
-				delete(byOrg, orgID)
+				delete(byCaller, caller)
 				continue
 			}
 			if recognized {
-				policies[orgID] = policy
+				policies[caller] = policy
 			}
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
 	m.reservationOverloads = overloads
-	m.policiesByOrg = policies
-	if len(byOrg) == 0 {
-		m.reservedByOrg = nil
+	m.policiesByCaller = policies
+	if len(byCaller) == 0 {
+		m.reservedByCaller = nil
 		m.sharedHosts = nil
 		return
 	}
@@ -139,7 +146,7 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 			shared[host] = true
 		}
 	}
-	m.reservedByOrg = byOrg
+	m.reservedByCaller = byCaller
 	m.sharedHosts = shared
 }
 
@@ -152,25 +159,26 @@ func (m *Model) overloadForHostLocked(host string) *config.OverloadConfig {
 }
 
 // HasReservations reports whether any of this model's enclaves are reserved,
-// letting the hot path skip caller-org resolution for unreserved models.
+// letting the hot path skip caller resolution for unreserved models.
 func (m *Model) HasReservations() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.reservedByOrg) > 0
+	return len(m.reservedByCaller) > 0
 }
 
 // ReservationPools snapshots the caller's pool filters and policy. Reserved
 // callers get their hosts plus shared spillover; everyone else gets shared
-// hosts only. Both filters are nil when the model has no reservations.
-func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool, policy *config.OverloadConfig) {
+// hosts only. A user reservation takes precedence over an org reservation.
+// Both filters are nil when the model has no reservations.
+func (m *Model) ReservationPools(caller Caller) (primary, spill map[string]bool, policy *config.OverloadConfig) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if len(m.reservedByOrg) == 0 {
+	if len(m.reservedByCaller) == 0 {
 		return nil, nil, m.Overload
 	}
-	if orgID != "" {
-		if hosts, ok := m.reservedByOrg[orgID]; ok {
-			return hosts, m.sharedHosts, m.policiesByOrg[orgID]
+	for _, subject := range []Caller{{UserID: caller.UserID}, {OrgID: caller.OrgID}} {
+		if hosts, ok := m.reservedByCaller[subject]; ok {
+			return hosts, m.sharedHosts, m.policiesByCaller[subject]
 		}
 	}
 	return m.sharedHosts, nil, m.Overload

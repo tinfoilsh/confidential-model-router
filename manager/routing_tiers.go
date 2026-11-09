@@ -24,7 +24,7 @@ func (m *Model) spillPoliciesLocked(host string) []*config.OverloadConfig {
 		return nil
 	}
 	var policies []*config.OverloadConfig
-	for _, policy := range m.policiesByOrg {
+	for _, policy := range m.policiesByCaller {
 		if policy.Enabled() {
 			policies = append(policies, policy)
 		}

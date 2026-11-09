@@ -108,12 +108,12 @@ func (em *EnclaveManager) AutoRouteCatalog() []autoroute.Model {
 
 // AutoRouteStatus reports whether the caller has a configured pool and whether
 // any enclave in that pool has a closed circuit breaker.
-func (em *EnclaveManager) AutoRouteStatus(modelName, orgID string) (eligible, healthy bool) {
+func (em *EnclaveManager) AutoRouteStatus(modelName string, caller Caller) (eligible, healthy bool) {
 	model, found := em.GetModel(modelName)
 	if !found {
 		return false, false
 	}
-	primary, spill, _ := model.ReservationPools(orgID)
+	primary, spill, _ := model.ReservationPools(caller)
 	if primary != nil && len(primary) == 0 && len(spill) == 0 {
 		return false, false
 	}

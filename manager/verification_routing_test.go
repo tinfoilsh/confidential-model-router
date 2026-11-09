@@ -37,7 +37,7 @@ func TestExpiredBackendsAreNeverSelected(t *testing.T) {
 		if selected != valid || claim != nil {
 			t.Fatalf("preferred selection chose expired evidence: selected=%v claim=%v", selected, claim)
 		}
-		primary, spill, policy := model.ReservationPools("test-org")
+		primary, spill, policy := model.ReservationPools(Caller{OrgID: "test-org"})
 		selected, claim, _, _, _ = model.SelectServing([]string{"expired"}, true, primary, spill, policy)
 		if selected != nil {
 			selected.ReleaseDispatch()

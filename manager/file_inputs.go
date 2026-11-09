@@ -125,8 +125,8 @@ func (em *EnclaveManager) ConvertFile(
 	// This path uses its own client and records no breaker outcomes, so it
 	// must not claim a recovery probe — a claimed probe with no recorded
 	// outcome strands the breaker half-open until restart. Reservation
-	// pools apply via the caller org in ctx.
-	primary, spill, policy := model.ReservationPools(CallerOrgFromContext(ctx))
+	// pools apply via the caller identity in ctx.
+	primary, spill, policy := model.ReservationPools(CallerFromContext(ctx))
 	enclave, _, _, _, _ := model.SelectServing(nil, false, primary, spill, policy)
 	if enclave == nil {
 		return nil, ErrModelUnavailable.WithMessage(errMsgDocumentUnavailable)

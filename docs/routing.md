@@ -3,7 +3,20 @@
 The model's `overload` policy applies to public callers. A reservation's
 `overload` block replaces it for that reservation's callers, including on
 shared capacity. Omission inherits the model policy; `{}` disables it.
-Multiple reservations for one organization must agree on the policy.
+Multiple reservations for one organization or user must agree on the policy.
+
+Reservations accept `org_ids`, `user_ids`, or both. User reservations take
+precedence over organization reservations. Entries for the same user or
+organization combine into one pool.
+
+```yaml
+reservations:
+  - user_ids: [user_example]
+    enclaves: [dedicated.example.com]
+```
+
+Deploy the router and controlplane before adding `user_ids`; older routers
+treat user-only reservations as shared capacity.
 
 | Tier | Meaning under the caller's policy |
 | --- | --- |

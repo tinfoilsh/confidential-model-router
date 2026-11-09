@@ -3,7 +3,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,7 +53,7 @@ func TestRouterRetries502AcrossReplicas(t *testing.T) {
 			for host := range model.Enclaves {
 				firstHost = host
 			}
-			second := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			secondHost := addAdmissionBackend(t, em, admissionTestModel, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if got := testutil.ToFloat64(manager.BackendInflight.WithLabelValues(admissionTestModel, firstHost)); got != 0 {
 					t.Errorf("failed replica retained inflight=%v during retry", got)
 				}
@@ -69,26 +68,6 @@ func TestRouterRetries502AcrossReplicas(t *testing.T) {
 					io.WriteString(w, `{"choices":[{"message":{"content":"recovered"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
 				}
 			}))
-			second.TLS = &tls.Config{Certificates: []tls.Certificate{ecdsaCert(t)}}
-			second.StartTLS()
-			t.Cleanup(second.Close)
-			transport := http.DefaultTransport.(*http.Transport).Clone()
-			transport.TLSClientConfig.RootCAs = transport.TLSClientConfig.RootCAs.Clone()
-			transport.TLSClientConfig.RootCAs.AddCert(second.Certificate())
-			http.DefaultTransport = transport
-			t.Cleanup(transport.CloseIdleConnections)
-			fixture, err := manager.NewAdmissionManagerForTest([]byte("models:\n  gpt-oss-120b: {repo: org/test}\n"), "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(fixture.Shutdown)
-			if err := manager.InstallFakeEnclaveForTest(fixture, admissionTestModel, second); err != nil {
-				t.Fatal(err)
-			}
-			secondModel, _ := fixture.GetModel(admissionTestModel)
-			secondHost := strings.TrimPrefix(second.URL, "https://")
-			model.Enclaves[secondHost] = secondModel.Enclaves[secondHost]
-			delete(secondModel.Enclaves, secondHost)
 			if err := manager.ConfigureReservationsForTest(em, admissionTestModel, model.Reservations, []string{firstHost, secondHost}); err != nil {
 				t.Fatal(err)
 			}

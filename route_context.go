@@ -54,11 +54,16 @@ type routeContextRequest struct {
 type routeContext struct {
 	Priority  *int            `json:"priority,omitempty"`
 	OrgID     string          `json:"org_id,omitempty"`
+	UserID    string          `json:"user_id,omitempty"`
 	RateLimit *routeRateLimit `json:"rate_limit,omitempty"`
 
-	// Failed metadata lookups must not replace a cached organization with an empty one.
+	// Failed metadata lookups must not replace a cached identity with an empty one.
 	unavailable bool
 	refreshedAt time.Time
+}
+
+func (r routeContext) caller() manager.Caller {
+	return manager.Caller{OrgID: r.OrgID, UserID: r.UserID}
 }
 
 type routeRateLimit struct {

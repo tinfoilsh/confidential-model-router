@@ -110,7 +110,7 @@ func TestTieredSelection(t *testing.T) {
 			if tc.public {
 				org = "public-org"
 			}
-			primary, spill, policy := m.ReservationPools(org)
+			primary, spill, policy := m.ReservationPools(Caller{OrgID: org})
 			order := []string{"other-reserved", "warm", "sibling", "shared"}
 			selected, claim, reject, retry, _ := m.SelectServing(order, true, primary, spill, policy)
 			if selected != nil {
@@ -133,7 +133,7 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	m.applyReservations("gpt-oss-120b", []config.ReservationConfig{{
 		OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"}, Overload: policy,
 	}}, []string{"warm", "sibling", "shared"})
-	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	for _, host := range []string{"warm", "sibling"} {
 		m.Enclaves[host].metrics.configurePolicies(policy, nil)
 		observe(m.Enclaves[host].metrics, queueLimit-1)
@@ -158,7 +158,7 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 
 func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	m := newTieredTestModel()
-	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	order := []string{"warm", "sibling"}
 	cap := 0
 	m.CacheRoute = &config.CacheRouteConfig{MaxInflightDelta: &cap}
@@ -190,7 +190,7 @@ func TestConcurrentSelectionsReserveLocalLoad(t *testing.T) {
 	m := newTieredTestModel()
 	cap := 0
 	m.CacheRoute = &config.CacheRouteConfig{MaxInflightDelta: &cap}
-	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	start := make(chan struct{})
 	results := make(chan *Enclave, requests)
 	for range requests {
@@ -231,7 +231,7 @@ func TestConcurrentSelectionsReserveLocalLoad(t *testing.T) {
 func TestTieredRecoveryProbes(t *testing.T) {
 	for _, claimProbes := range []bool{false, true} {
 		m := newTieredTestModel()
-		primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+		primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 		probe := m.Enclaves["warm"]
 		probe.cb.storeState(cbOpen)
 		probe.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
@@ -249,7 +249,7 @@ func TestTieredRecoveryProbes(t *testing.T) {
 		}
 	}
 	m := newTieredTestModel()
-	primary, spill, policy := m.ReservationPools(reservationOverloadOrg)
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
 	shared := m.Enclaves["shared"]
 	shared.cb.storeState(cbOpen)
 	shared.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())

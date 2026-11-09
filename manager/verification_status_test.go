@@ -41,7 +41,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			Repo: "tinfoilsh/example", Tag: "v1",
 			Overload:        &config.OverloadConfig{MaxRequestsWaiting: queueLimit},
 			CacheRoute:      &config.CacheRouteConfig{Mode: "shadow"},
-			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, Enclaves: []string{"backend"}}},
+			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, UserIDs: []string{"private-user"}, Enclaves: []string{"backend"}}},
 			configuredHosts: map[string]verificationAttempt{"backend": {}, "open": {}, "missing": {}, "harness": {}},
 			Enclaves: map[string]*Enclave{
 				"backend": {tlsKeyFP: "tls-key", hpkeKey: "hpke-key", cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v1")},
@@ -61,7 +61,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 		if !missingVisible || status.Hosts["missing"].LastSuccess != nil || status.Hosts["harness"].ExpiresAt != nil || status.Hosts["backend"].LastError != verificationVerify || status.Hosts["open"].CodeTag != "v2" || status.EarliestFreshnessExpiresAt == nil || !status.EarliestFreshnessExpiresAt.Equal(now.Add(time.Minute)) {
 			t.Fatalf("incorrect authenticated state or failed-attempt details: %+v", status)
 		}
-		if strings.Contains(data, "private-org") || strings.Contains(data, "reservations") || strings.Contains(data, "secret upstream error") {
+		if strings.Contains(data, "private-org") || strings.Contains(data, "private-user") || strings.Contains(data, "reservations") || strings.Contains(data, "secret upstream error") {
 			t.Fatalf("public status exposed private details: %s", data)
 		}
 		var legacy Model

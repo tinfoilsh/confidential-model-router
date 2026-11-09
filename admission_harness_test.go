@@ -32,6 +32,7 @@ import (
 )
 
 const admissionTestOrg = "org_admission_test"
+const admissionTestUser = "user_admission_test"
 
 type admissionBackendRequest struct {
 	path          string
@@ -97,6 +98,33 @@ func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org s
 	return em, &admissionHarness{newRouterHandler(em, client), client}
 }
 
+func addAdmissionBackend(t *testing.T, em *manager.EnclaveManager, modelName string, backend http.Handler) string {
+	t.Helper()
+	server := httptest.NewUnstartedServer(backend)
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{ecdsaCert(t)}}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig.RootCAs = transport.TLSClientConfig.RootCAs.Clone()
+	transport.TLSClientConfig.RootCAs.AddCert(server.Certificate())
+	http.DefaultTransport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+	fixture, err := manager.NewAdmissionManagerForTest([]byte(fmt.Sprintf("models:\n  %s: {repo: org/test}\n", modelName)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(fixture.Shutdown)
+	if err := manager.InstallFakeEnclaveForTest(fixture, modelName, server); err != nil {
+		t.Fatal(err)
+	}
+	model, _ := em.GetModel(modelName)
+	installed, _ := fixture.GetModel(modelName)
+	host := strings.TrimPrefix(server.URL, "https://")
+	model.Enclaves[host] = installed.Enclaves[host]
+	delete(installed.Enclaves, host)
+	return host
+}
+
 // ecdsaCert mirrors real enclaves, whose fingerprinting only supports EC keys.
 func ecdsaCert(t *testing.T) tls.Certificate {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -145,7 +173,7 @@ func TestAdmissionHarnessOverloadRecovery(t *testing.T) {
 			t.Fatalf("overloaded=%v: HTTP=%d backend calls=%d: %s", overloaded, rec.Code, backends.Load()-before, rec.Body.String())
 		}
 		model, _ := em.GetModel(admissionTestModel)
-		_, _, policy := model.ReservationPools("")
+		_, _, policy := model.ReservationPools(manager.Caller{OrgID: ""})
 		for host := range model.Enclaves {
 			if got := testutil.ToFloat64(manager.BackendInflight.WithLabelValues(admissionTestModel, host)); got != 0 {
 				t.Fatalf("completed or rejected request retained in-flight load: %v", got)
@@ -592,20 +620,21 @@ func TestAdmissionHandlerJWTClassificationAndMissingAuth(t *testing.T) {
 
 func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 	var calls atomic.Int64
-	_, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		if _, ok := req["model"]; ok {
 			t.Error("input tokens consumed admission")
 		}
-		fmt.Fprintf(w, `{"org_id":%q}`, admissionTestOrg)
+		fmt.Fprintf(w, `{"user_id":%q}`, admissionTestUser)
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != tokenizePath {
 			t.Errorf("unexpected backend path %s", r.URL.Path)
 		}
 		io.WriteString(w, `{"count":7}`)
 	}), admissionTestOrg, false)
+	replaceWithUserReservations(t, em, admissionTestUser)
 	for _, path := range []string{chatInputTokensPath, responsesInputTokensPath} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, admissionRequest(path, `{"model":"auto","messages":[],"input":"hi"}`, "tk_test"))
@@ -621,12 +650,19 @@ func TestAdmissionHandlerMetadataOnly(t *testing.T) {
 func TestAdmissionHandlerReservedOnly(t *testing.T) {
 	const testKey = "tk_reserved_test"
 	for _, tc := range []struct {
-		name, org, warmOrg                    string
+		name, org, warmOrg, user, warmUser    string
 		auto, shared, unreserved, jwt, outage bool
-		refresh                               bool
+		refresh, userReservation              bool
 		denial, status                        int
 		wantMetadata, wantAdmissions          int64
 	}{
+		{name: "personal user reservation", userReservation: true, user: admissionTestUser, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "other user", userReservation: true, user: "user_other", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
+		{name: "unverified JWT user", userReservation: true, jwt: true, status: http.StatusServiceUnavailable},
+		{name: "warm user outage", userReservation: true, warmUser: admissionTestUser, outage: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto user reservation", userReservation: true, user: admissionTestUser, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto refreshed user", userReservation: true, user: admissionTestUser, warmUser: "user_other", auto: true, refresh: true, status: http.StatusOK, wantAdmissions: 1},
+		{name: "auto authoritative empty user", userReservation: true, warmUser: admissionTestUser, auto: true, refresh: true, status: http.StatusServiceUnavailable},
 		{name: "cold owner", org: admissionTestOrg, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "other organization", org: "org_other", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
 		{name: "personal key", status: http.StatusServiceUnavailable, wantMetadata: 1, wantAdmissions: 1},
@@ -638,7 +674,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 		{name: "auto refreshed organization", org: admissionTestOrg, warmOrg: "org_other", auto: true, refresh: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto warm outage", org: admissionTestOrg, warmOrg: admissionTestOrg, auto: true, outage: true, status: http.StatusOK, wantAdmissions: 1},
 		{name: "auto authoritative empty organization", warmOrg: admissionTestOrg, auto: true, refresh: true, status: http.StatusServiceUnavailable},
-		{name: "auto retries denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantMetadata: 1, wantAdmissions: 1},
+		{name: "auto retries denial", warmOrg: admissionTestOrg, auto: true, refresh: true, denial: http.StatusForbidden, status: http.StatusForbidden, wantAdmissions: 1},
 		{name: "auto other organization", org: "org_other", auto: true, status: http.StatusServiceUnavailable, wantMetadata: 1},
 		{name: "auto shared", org: "org_other", shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
 		{name: "auto owner shared spill", org: admissionTestOrg, shared: true, auto: true, status: http.StatusOK, wantMetadata: 1, wantAdmissions: 1},
@@ -683,15 +719,18 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 					w.WriteHeader(http.StatusServiceUnavailable)
 					return
 				}
-				org := tc.org
+				org, user := tc.org, tc.user
 				if warming.Load() {
-					org = tc.warmOrg
+					org, user = tc.warmOrg, tc.warmUser
 				}
-				fmt.Fprintf(w, `{"org_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, org)
+				fmt.Fprintf(w, `{"org_id":%q,"user_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, org, user)
 			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				backends.Add(1)
 				io.WriteString(w, `{}`)
 			}), reservationOrg, false)
+			if tc.userReservation {
+				replaceWithUserReservations(t, em, admissionTestUser)
+			}
 			if tc.shared {
 				const reservedHost = "reserved.example.com"
 				model, _ := em.GetModel(admissionTestModel)
@@ -704,7 +743,7 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.warmOrg != "" {
+			if tc.warmOrg != "" || tc.warmUser != "" {
 				warming.Store(true)
 				handler.warm(testKey, admissionTestModel)
 				warming.Store(false)
@@ -716,14 +755,16 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 			fail.Store(tc.outage)
 			key := testKey
 			if tc.jwt {
-				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"user_test","org_id":"`+admissionTestOrg+`"}`)
+				key = accessTokenForTest(`{"alg":"EdDSA","typ":"at+jwt"}`, `{"sub":"`+admissionTestUser+`","user_id":"`+admissionTestUser+`","org_id":"`+admissionTestOrg+`"}`)
 			}
 			model := admissionTestModel
 			if tc.auto {
 				model = "auto"
 			}
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, admissionRequest("/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[]}`, model), key))
+			req := admissionRequest("/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[],"user":%q,"user_id":%q}`, model, admissionTestUser, admissionTestUser), key)
+			req.Header.Set("X-Tinfoil-User-ID", admissionTestUser)
+			handler.ServeHTTP(rec, req)
 			handler.client.refreshes.Wait()
 			wantBackends := int64(0)
 			if tc.status == http.StatusOK {
@@ -734,6 +775,44 @@ func TestAdmissionHandlerReservedOnly(t *testing.T) {
 			}
 			if metadata.Load() != tc.wantMetadata || admissions.Load() != tc.wantAdmissions {
 				t.Fatalf("metadata calls=%d admission calls=%d", metadata.Load(), admissions.Load())
+			}
+		})
+	}
+}
+
+func TestAdmissionHandlerUserReservationPrecedence(t *testing.T) {
+	const testKey = "tk_precedence_test"
+	for _, requestedModel := range []string{admissionTestModel, "auto"} {
+		t.Run(requestedModel, func(t *testing.T) {
+			var userCalls, orgCalls atomic.Int64
+			em, handler := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"org_id":%q,"user_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, admissionTestOrg, admissionTestUser)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				userCalls.Add(1)
+				io.WriteString(w, `{"pool":"user"}`)
+			}), "", false)
+			model, _ := em.GetModel(admissionTestModel)
+			var userHost string
+			for host := range model.Enclaves {
+				userHost = host
+			}
+			orgHost := addAdmissionBackend(t, em, admissionTestModel, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				orgCalls.Add(1)
+				io.WriteString(w, `{"pool":"org"}`)
+			}))
+			reservations := []config.ReservationConfig{
+				{OrgIDs: []string{admissionTestOrg}, Enclaves: []string{orgHost}},
+				{UserIDs: []string{admissionTestUser}, Enclaves: []string{userHost}},
+			}
+			if err := manager.ConfigureReservationsForTest(em, admissionTestModel, reservations, []string{userHost, orgHost}); err != nil {
+				t.Fatal(err)
+			}
+			handler.warm(testKey, admissionTestModel)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, admissionRequest("/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[]}`, requestedModel), testKey))
+			handler.client.refreshes.Wait()
+			if recorder.Code != http.StatusOK || recorder.Header().Get("Tinfoil-Enclave") != userHost || recorder.Body.String() != `{"pool":"user"}` || userCalls.Load() != 1 || orgCalls.Load() != 0 {
+				t.Fatalf("HTTP=%d user calls=%d org calls=%d headers=%v body=%s", recorder.Code, userCalls.Load(), orgCalls.Load(), recorder.Header(), recorder.Body.String())
 			}
 		})
 	}
@@ -782,6 +861,14 @@ func TestAdmissionHandlerOverloadPriority(t *testing.T) {
 }
 
 func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
+	for _, caller := range []manager.Caller{{OrgID: admissionTestOrg}, {UserID: admissionTestUser}} {
+		t.Run(caller.OrgID+caller.UserID, func(t *testing.T) {
+			testAdmissionHandlerFileAndToolDispatchCountOnce(t, caller)
+		})
+	}
+}
+
+func testAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T, caller manager.Caller) {
 	var cpCalls, conversions, modelCalls, toolCalls atomic.Int64
 	var orderMu sync.Mutex
 	var order []string
@@ -802,7 +889,7 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 		if req.Model != admissionTestModel {
 			t.Errorf("counted internal model: %q", req.Model)
 		}
-		fmt.Fprintf(w, `{"org_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, admissionTestOrg)
+		fmt.Fprintf(w, `{"org_id":%q,"user_id":%q,"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`, caller.OrgID, caller.UserID)
 	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/mcp" {
 			mcpHandler.ServeHTTP(w, r)
@@ -827,6 +914,9 @@ func TestAdmissionHandlerFileAndToolDispatchCountOnce(t *testing.T) {
 			io.WriteString(w, `{"id":"last","choices":[{"index":0,"message":{"role":"assistant","content":"final answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
 		}
 	}), admissionTestOrg, false)
+	if caller.UserID != "" {
+		replaceWithUserReservations(t, em, caller.UserID)
+	}
 	key := "tk_test"
 	handler.warm(key, admissionTestModel)
 	cpCalls.Store(0)
@@ -1299,5 +1389,18 @@ func TestAdmissionHandlerCompletionCountHeader(t *testing.T) {
 				t.Fatal("old body token cap forwarded")
 			}
 		})
+	}
+}
+
+func replaceWithUserReservations(t *testing.T, em *manager.EnclaveManager, user string) {
+	t.Helper()
+	for name, model := range em.Models() {
+		hosts := make([]string, 0, len(model.Enclaves))
+		for host := range model.Enclaves {
+			hosts = append(hosts, host)
+		}
+		if err := manager.ConfigureReservationsForTest(em, name, []config.ReservationConfig{{UserIDs: []string{user}, Enclaves: hosts}}, hosts); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

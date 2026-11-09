@@ -34,10 +34,11 @@ type CacheRouteConfig struct {
 }
 
 // ReservationConfig dedicates a subset of a model's enclaves to the listed
-// orgs: only their traffic may use those enclaves. Shared capacity can serve
+// orgs or users: only their traffic may use those enclaves. Shared capacity can serve
 // spillover according to the caller's routing policy.
 type ReservationConfig struct {
 	OrgIDs   []string `yaml:"org_ids" json:"org_ids"`
+	UserIDs  []string `yaml:"user_ids,omitempty" json:"user_ids,omitempty"`
 	Enclaves []string `yaml:"enclaves" json:"enclaves"`
 	// A nil block inherits the model policy; a present block replaces it.
 	Overload *OverloadConfig `yaml:"overload,omitempty" json:"overload,omitempty"`
@@ -125,18 +126,51 @@ func FromBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse runtime config: %w", err)
 	}
 	for name, model := range config.Models {
+		hosts := make(map[string]bool, len(model.Hostnames))
+		for _, host := range model.Hostnames {
+			hosts[host] = true
+		}
 		byOrg := make(map[string]OverloadConfig)
-		for _, reservation := range model.Reservations {
+		byUser := make(map[string]OverloadConfig)
+		reservedBy := make(map[string]int)
+		for i, reservation := range model.Reservations {
+			if len(reservation.OrgIDs) == 0 && len(reservation.UserIDs) == 0 {
+				return nil, fmt.Errorf("model %q: reservation #%d: org_ids or user_ids is required", name, i+1)
+			}
+			if len(reservation.Enclaves) == 0 {
+				return nil, fmt.Errorf("model %q: reservation #%d lists no enclaves", name, i+1)
+			}
 			policy := model.Overload
 			if reservation.Overload != nil {
 				policy = reservation.Overload
 			}
 			resolved := policy.normalized()
 			for _, org := range reservation.OrgIDs {
+				if strings.TrimSpace(org) == "" || strings.TrimSpace(org) != org {
+					return nil, fmt.Errorf("model %q: reservation #%d: org_ids contains an invalid org id (%q)", name, i+1, org)
+				}
 				if previous, ok := byOrg[org]; ok && previous != resolved {
 					return nil, fmt.Errorf("model %s: reservations for the same organization must use the same tier policy", name)
 				}
 				byOrg[org] = resolved
+			}
+			for _, user := range reservation.UserIDs {
+				if strings.TrimSpace(user) == "" || strings.TrimSpace(user) != user {
+					return nil, fmt.Errorf("model %q: reservation #%d: user_ids contains an invalid user id (%q)", name, i+1, user)
+				}
+				if previous, ok := byUser[user]; ok && previous != resolved {
+					return nil, fmt.Errorf("model %s: reservations for the same user must use the same tier policy", name)
+				}
+				byUser[user] = resolved
+			}
+			for _, host := range reservation.Enclaves {
+				if !hosts[host] {
+					return nil, fmt.Errorf("model %q: reservation #%d references enclave %q, which is not in the model's enclave list", name, i+1, host)
+				}
+				if previous, exists := reservedBy[host]; exists {
+					return nil, fmt.Errorf("model %q: enclave %q is reserved by both reservation #%d and #%d", name, host, previous, i+1)
+				}
+				reservedBy[host] = i + 1
 			}
 		}
 	}

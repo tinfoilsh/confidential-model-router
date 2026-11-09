@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v2"
@@ -10,8 +11,11 @@ import (
 func TestReservationTierPolicyConsistency(t *testing.T) {
 	for _, tc := range []struct {
 		name, first, second, third string
+		userIDs                    bool
 		wantErr                    bool
 	}{
+		{name: "user conflicting limits", userIDs: true, first: "{soft_max_requests_running: 3}", second: "{soft_max_requests_running: 6}", third: "null", wantErr: true},
+		{name: "user equivalent policies", userIDs: true, first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 2, retry_after_minutes: 1}", third: "{max_requests_waiting: 4}"},
 		{name: "same tier policy", first: "{soft_max_requests_running: 3}", second: "{soft_max_requests_running: 3}", third: "{soft_max_requests_running: 3}"},
 		{name: "inherited tier policy", first: "null", second: "{soft_max_requests_running: 6, max_requests_waiting: 12}", third: "null"},
 		{name: "equivalent defaults", first: "{max_requests_waiting: 4}", second: "{max_requests_waiting: 4, clear_requests_waiting: 2, retry_after_minutes: 1}", third: "{max_requests_waiting: 4, clear_requests_waiting: 4, retry_after_minutes: -1}"},
@@ -33,6 +37,9 @@ func TestReservationTierPolicyConsistency(t *testing.T) {
       - {org_ids: [example-org], enclaves: [b.example], overload: %s}
       - {org_ids: [example-org], enclaves: [c.example], overload: %s}
 `, tc.first, tc.second, tc.third)
+			if tc.userIDs {
+				data = strings.ReplaceAll(data, "org_ids: [example-org]", "user_ids: [user_test]")
+			}
 			if _, err := FromBytes([]byte(data)); (err != nil) != tc.wantErr {
 				t.Fatalf("err=%v, want error=%v", err, tc.wantErr)
 			}
@@ -166,6 +173,7 @@ models:
     enclaves: [a.example, b.example, c.example]
     reservations:
       - org_ids: [org_abc123, org_def456]
+        user_ids: [user_abc123, user_def456]
         enclaves: [c.example]
   plain:
     repo: org/repo
@@ -181,6 +189,9 @@ models:
 	}
 	if len(reservations[0].OrgIDs) != 2 || reservations[0].OrgIDs[0] != "org_abc123" || reservations[0].OrgIDs[1] != "org_def456" {
 		t.Fatalf("reservation orgs = %+v", reservations[0])
+	}
+	if len(reservations[0].UserIDs) != 2 || reservations[0].UserIDs[0] != "user_abc123" || reservations[0].UserIDs[1] != "user_def456" {
+		t.Fatalf("reservation users = %+v", reservations[0])
 	}
 	if len(reservations[0].Enclaves) != 1 || reservations[0].Enclaves[0] != "c.example" {
 		t.Fatalf("reservation = %+v", reservations[0])
@@ -240,6 +251,33 @@ func TestOverloadRunningConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.cfg.Enabled(); got != tc.enabled {
 				t.Fatalf("Enabled() = %v, want %v", got, tc.enabled)
+			}
+		})
+	}
+}
+
+func TestReservationConfigRejectsInvalidPools(t *testing.T) {
+	for _, tc := range []struct {
+		name, reservations, wantErr string
+	}{
+		{"missing owners", `[{enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"empty owners", `[{org_ids: [], user_ids: [], enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"misspelled owners", `[{users: [user_test], enclaves: [a.example]}]`, "org_ids or user_ids is required"},
+		{"missing enclaves", `[{user_ids: [user_test]}]`, "lists no enclaves"},
+		{"unknown enclave", `[{user_ids: [user_test], enclaves: [b.example]}]`, "not in the model's enclave list"},
+		{"blank user", `[{user_ids: [""], enclaves: [a.example]}]`, "invalid user id"},
+		{"whitespace user", `[{user_ids: ["  "], enclaves: [a.example]}]`, "invalid user id"},
+		{"padded user", `[{user_ids: [" user_test"], enclaves: [a.example]}]`, "invalid user id"},
+		{"blank organization", `[{org_ids: [""], enclaves: [a.example]}]`, "invalid org id"},
+		{"padded organization", `[{org_ids: ["org_test "], enclaves: [a.example]}]`, "invalid org id"},
+		{"overlapping user and org", `[{user_ids: [user_test], enclaves: [a.example]}, {org_ids: [org_test], enclaves: [a.example]}]`, "reserved by both reservation #1 and #2"},
+		{"overlapping users", `[{user_ids: [user_test], enclaves: [a.example]}, {user_ids: [user_other], enclaves: [a.example]}]`, "reserved by both reservation #1 and #2"},
+		{"duplicate within entry", `[{user_ids: [user_test], enclaves: [a.example, a.example]}]`, "reserved by both reservation #1 and #1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf("models:\n  gpt-oss-120b:\n    enclaves: [a.example]\n    reservations: %s\n", tc.reservations)
+			if _, err := FromBytes([]byte(data)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("FromBytes error = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
