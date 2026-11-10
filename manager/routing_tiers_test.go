@@ -214,12 +214,12 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	}
 }
 
-func TestShortReservedQueueStaysReserved(t *testing.T) {
+func TestReservedQueueBelowGuardStaysReserved(t *testing.T) {
 	const queueLimit = 10
 	type load struct{ waiting, running float64 }
 	idle, queued := load{}, load{waiting: 1, running: 1}
-	deep := load{waiting: reservedQueueTolerance + 1, running: 1}
-	full := load{waiting: 1, running: runningRequestLimit - 1}
+	belowGuard := load{waiting: 3, running: 1}
+	full := load{waiting: 1, running: runningRequestLimit}
 	for _, tc := range []struct {
 		name          string
 		warm, sibling load
@@ -227,9 +227,9 @@ func TestShortReservedQueueStaysReserved(t *testing.T) {
 		want, retry   string
 	}{
 		{name: "short queue stays reserved", warm: queued, sibling: queued, want: "warm", retry: "sibling"},
-		{name: "deep queue spills", warm: deep, sibling: deep, want: "shared", retry: "shared"},
+		{name: "queue below guard stays reserved", warm: belowGuard, sibling: belowGuard, want: "warm", retry: "sibling"},
 		{name: "reserved tier zero beats short queue", warm: queued, sibling: idle, want: "sibling", retry: "sibling"},
-		{name: "queue reaching running limit spills", warm: full, sibling: full, want: "shared", retry: "shared"},
+		{name: "running at the limit spills", warm: full, sibling: full, want: "shared", retry: "shared"},
 		{name: "local in-flight at running limit spills", warm: queued, sibling: queued, inflight: runningRequestLimit, want: "shared", retry: "shared"},
 		{name: "queue guard spills", warm: load{waiting: queueLimit}, sibling: load{waiting: queueLimit}, want: "shared", retry: "shared"},
 	} {

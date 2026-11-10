@@ -76,21 +76,15 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 	return tierBusy, counts.waiting
 }
 
-// reservedQueueTolerance bounds how deep a reserved host's queue may grow
-// before its caller spills. Observed queues were prefill churn, a few deep.
-const reservedQueueTolerance = 2
-
-// queueHeadroom reports whether running plus waiting requests stay below the
-// soft max behind a queue no deeper than reservedQueueTolerance.
-func (m *enclaveMetrics) queueHeadroom(policy *config.OverloadConfig, localInflight int64) bool {
+// belowRunningLimit reports whether sampled or local running load is below
+// the soft max. A busy host below it is queueing on admission, not capacity;
+// the queue guard already bounds how deep that queue may grow.
+func (m *enclaveMetrics) belowRunningLimit(policy *config.OverloadConfig, localInflight int64) bool {
 	if !policy.Enabled() || policy.SoftMaxRequestsRunning <= 0 {
 		return false
 	}
 	counts, _ := m.latestSample()
-	if counts.waiting > reservedQueueTolerance {
-		return false
-	}
-	return max(counts.running+counts.waiting, float64(localInflight)) < float64(policy.SoftMaxRequestsRunning)
+	return max(counts.running, float64(localInflight)) < float64(policy.SoftMaxRequestsRunning)
 }
 
 // SelectServing ranks closed backends by the request's tier, then pool, then
@@ -128,7 +122,7 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 		pools = append(pools, spill)
 	}
 	var buckets [tierCount][2][]*Enclave
-	// A short queue during long prefills does not mean the replica is full.
+	// Busy hosts below the running limit are queueing on admission, not capacity.
 	var queued []*Enclave
 	var degraded []*Enclave
 	var probes [2][]*Enclave
@@ -153,7 +147,7 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			if excludedHost != "" && tier == tierUnknown {
 				continue
 			}
-			if tier == tierBusy && pool == 0 && len(spill) > 0 && enclave.metrics.queueHeadroom(policy, enclave.inflight.Load()) {
+			if tier == tierBusy && pool == 0 && len(spill) > 0 && enclave.metrics.belowRunningLimit(policy, enclave.inflight.Load()) {
 				queued = append(queued, enclave)
 				continue
 			}

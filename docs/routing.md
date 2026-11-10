@@ -24,9 +24,10 @@ treat user-only reservations as shared capacity.
 | 1 | Not tier 0, but the queue guard has not tripped |
 | 2 | Queue reached `max_requests_waiting` and has not recovered |
 
-Reserved callers prefer **reserved 0 → reserved 1 with headroom → shared 0 →
-reserved 1 → shared 1**. Headroom requires `soft_max_requests_running`:
-running plus waiting requests stay below it with no more than two queued.
+Reserved callers prefer **reserved 0 → reserved 1 below the running limit →
+shared 0 → reserved 1 → shared 1**. The reserved host keeps its caller while
+its queue guard has not tripped and running load stays below
+`soft_max_requests_running`.
 Cache affinity wins within the selected pool and tier, subject to
 `cache_route.max_inflight_delta`. Public callers use shared hosts only.
 Without reservations, all hosts form one pool.
