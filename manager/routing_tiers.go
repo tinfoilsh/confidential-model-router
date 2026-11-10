@@ -32,13 +32,35 @@ func (m *Model) spillPoliciesLocked(host string) []*config.OverloadConfig {
 	return policies
 }
 
-func (m *enclaveMetrics) tier(policy *config.OverloadConfig) (routingTier, float64) {
+// localInflight is the caller's own dispatch count for the enclave: an
+// exact, immediately-updated signal, unlike the polled counts which are a
+// whole sample stale and blind to a burst that arrives inside one poll
+// interval. It is per router, so with N replicas the instantaneous cap is
+// N × soft_max until the global polled count corrects it.
+func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64) (routingTier, float64) {
 	m.stateMu.RLock()
 	defer m.stateMu.RUnlock()
 	if !policy.Enabled() {
 		return tierPreferred, 0
 	}
 	counts := m.latestCounts
+	if policy.SoftMaxRequestsRunning > 0 {
+		if local := float64(localInflight); local > counts.running {
+			counts.running = local
+		}
+		// An at-cap local count outranks a missing sample: without this,
+		// dead polling pins every caller to its first pool, inert to
+		// soft_max, because unknown competes with unknown on pool order.
+		// Overloaded (not busy) so unknown spill candidates win; when
+		// every usable pool is at its local cap with no samples, the
+		// usual tier-2 503 applies instead of unbounded queueing.
+		if localInflight >= int64(policy.SoftMaxRequestsRunning) {
+			if m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
+				!counts.supports(policy) {
+				return tierOverloaded, counts.waiting
+			}
+		}
+	}
 	if m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
 		!counts.supports(policy) {
 		return tierUnknown, counts.waiting
@@ -106,7 +128,7 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			}
 			tier := tierUnknown
 			if enclave.metrics != nil {
-				tier, waiting[enclave] = enclave.metrics.tier(policy)
+				tier, waiting[enclave] = enclave.metrics.tier(policy, enclave.inflight.Load())
 			}
 			if excludedHost != "" && tier == tierUnknown {
 				continue

@@ -42,11 +42,17 @@ Configured priority requests and internal dispatches serve through overload.
 
 Metrics polling has a nominal one-second interval; slow scrapes reduce it.
 Selection reserves local in-flight load atomically so simultaneous arrivals
-respect the affinity cap. Routers track this independently; sampled running
-limits are not global concurrency caps.
+respect the affinity cap. Running tiers combine the sampled count with this
+router's own in-flight dispatches, so a burst that lands inside one poll
+interval still sees the reserved host reach its running limit and spill.
+The combined signal is per router, so with N replicas the instantaneous
+cap is N × the running limit until the sampled count corrects it; sampled
+running limits are not global concurrency caps.
 Missing/incomplete samples or samples older than 15 seconds are unknown:
-known tiers 0 and 1 win first, then unknown load fails open. Expired
-attestations are excluded; circuit-breaker recovery probes and the
+known tiers 0 and 1 win first, then unknown load fails open. An at-cap
+local in-flight count still ranks busy on unknown samples, so a pool whose
+polling has died spills instead of pinning callers to its first pool.
+Expired attestations are excluded; circuit-breaker recovery probes and the
 all-breakers-open fallback retain their load-guard bypass.
 
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.

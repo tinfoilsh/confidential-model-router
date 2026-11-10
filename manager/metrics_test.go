@@ -46,7 +46,7 @@ func TestQueueRecoveryAndTelemetry(t *testing.T) {
 			{0, tierPreferred},
 		} {
 			observe(m, float64(step.waiting))
-			if tier, _ := m.tier(policy); tier != step.want {
+			if tier, _ := m.tier(policy, 0); tier != step.want {
 				t.Fatalf("clear=%d waiting=%d tier=%v, want %v", clear, step.waiting, tier, step.want)
 			}
 			wantGauge := float64(0)
@@ -84,7 +84,7 @@ func TestPolicyReloadReevaluatesSample(t *testing.T) {
 		{nil, tierPreferred},
 	} {
 		m.setPolicies(step.policy, nil)
-		if tier, _ := m.tier(step.policy); tier != step.want || pollingActive(m) != step.policy.Enabled() {
+		if tier, _ := m.tier(step.policy, 0); tier != step.want || pollingActive(m) != step.policy.Enabled() {
 			t.Fatalf("policy=%+v tier=%v polling=%v, want tier=%v", step.policy, tier, pollingActive(m), step.want)
 		}
 		if !step.policy.Enabled() && (len(m.queueOverloads) != 0 || testutil.ToFloat64(BackendOverloaded.WithLabelValues(m.model, m.host)) != 0) {
@@ -124,7 +124,7 @@ func TestScrapeQueueRecovery(t *testing.T) {
 	} {
 		depth.Store(step.waiting)
 		m.scrape(t.Context())
-		if tier, waiting := m.tier(policy); tier != step.want || waiting != float64(step.waiting) {
+		if tier, waiting := m.tier(policy, 0); tier != step.want || waiting != float64(step.waiting) {
 			t.Fatalf("tier=%v waiting=%v, want %v %d", tier, waiting, step.want, step.waiting)
 		}
 	}

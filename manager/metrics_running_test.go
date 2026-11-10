@@ -76,7 +76,7 @@ func TestScrapeRunningPreference(t *testing.T) {
 		if count >= runningRequestLimit {
 			want = tierBusy
 		}
-		if tier, _ := m.tier(m.nativePolicy); tier != want {
+		if tier, _ := m.tier(m.nativePolicy, 0); tier != want {
 			t.Fatalf("running=%d tier=%v, want %v", count, tier, want)
 		}
 	}
@@ -103,7 +103,7 @@ func TestCombinedOverloadHysteresis(t *testing.T) {
 		{1, 2, false},
 	} {
 		observeCounts(m, step.waiting, step.running)
-		if tier, _ := m.tier(m.nativePolicy); (tier == tierOverloaded) != step.reject {
+		if tier, _ := m.tier(m.nativePolicy, 0); (tier == tierOverloaded) != step.reject {
 			t.Fatalf("waiting=%v running=%v reject=%v, want %v", step.waiting, step.running, tier == tierOverloaded, step.reject)
 		}
 	}
@@ -154,11 +154,11 @@ func TestRunningScrapeFailuresPreserveLastSample(t *testing.T) {
 			if got, at := m.latestSample(); got != counts || at != collected {
 				t.Fatalf("failed scrape replaced the last sample: %+v at %v", got, at)
 			}
-			if tier, _ := m.tier(m.nativePolicy); tier != tierOverloaded {
+			if tier, _ := m.tier(m.nativePolicy, 0); tier != tierOverloaded {
 				t.Fatal("failed scrape cleared a fresh overload observation")
 			}
 			m.updateLatest(counts, time.Now().Add(-sampleStalenessLimit-time.Second))
-			if tier, _ := m.tier(m.nativePolicy); tier != tierUnknown {
+			if tier, _ := m.tier(m.nativePolicy, 0); tier != tierUnknown {
 				t.Fatal("stale running sample did not fail open")
 			}
 		})
@@ -182,7 +182,7 @@ func TestRunningPolicyReload(t *testing.T) {
 		if limit > runningRequestLimit {
 			want = tierPreferred
 		}
-		if tier, _ := m.tier(policy); tier != want {
+		if tier, _ := m.tier(policy, 0); tier != want {
 			t.Fatalf("running limit=%d tier=%v, want %v", limit, tier, want)
 		}
 	}
