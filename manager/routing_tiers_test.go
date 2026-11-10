@@ -215,9 +215,10 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 }
 
 func TestShortReservedQueueStaysReserved(t *testing.T) {
-	const queueLimit = 3
+	const queueLimit = 10
 	type load struct{ waiting, running float64 }
 	idle, queued := load{}, load{waiting: 1, running: 1}
+	deep := load{waiting: reservedQueueTolerance + 1, running: 1}
 	full := load{waiting: 1, running: runningRequestLimit - 1}
 	for _, tc := range []struct {
 		name          string
@@ -226,6 +227,7 @@ func TestShortReservedQueueStaysReserved(t *testing.T) {
 		want, retry   string
 	}{
 		{name: "short queue stays reserved", warm: queued, sibling: queued, want: "warm", retry: "sibling"},
+		{name: "deep queue spills", warm: deep, sibling: deep, want: "shared", retry: "shared"},
 		{name: "reserved tier zero beats short queue", warm: queued, sibling: idle, want: "sibling", retry: "sibling"},
 		{name: "queue reaching running limit spills", warm: full, sibling: full, want: "shared", retry: "shared"},
 		{name: "local in-flight at running limit spills", warm: queued, sibling: queued, inflight: runningRequestLimit, want: "shared", retry: "shared"},

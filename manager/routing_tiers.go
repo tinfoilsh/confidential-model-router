@@ -76,13 +76,20 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 	return tierBusy, counts.waiting
 }
 
+// reservedQueueTolerance bounds how deep a reserved host's queue may grow
+// before its caller spills. Observed queues were prefill churn, a few deep.
+const reservedQueueTolerance = 2
+
 // queueHeadroom reports whether running plus waiting requests stay below the
-// soft max.
+// soft max behind a queue no deeper than reservedQueueTolerance.
 func (m *enclaveMetrics) queueHeadroom(policy *config.OverloadConfig, localInflight int64) bool {
 	if !policy.Enabled() || policy.SoftMaxRequestsRunning <= 0 {
 		return false
 	}
 	counts, _ := m.latestSample()
+	if counts.waiting > reservedQueueTolerance {
+		return false
+	}
 	return max(counts.running+counts.waiting, float64(localInflight)) < float64(policy.SoftMaxRequestsRunning)
 }
 
