@@ -25,9 +25,67 @@ func TestTierRequiresWaitingAndRunningSamples(t *testing.T) {
 		{requestCounts{waiting: reservedQueueLimit, hasWaiting: true, hasRunning: true}, tierBusy},
 	} {
 		m.updateLatest(tc.counts, time.Now())
-		if tier, _ := m.tier(policy); tier != tc.want {
+		if tier, _ := m.tier(policy, 0); tier != tc.want {
 			t.Fatalf("counts=%+v tier=%v, want %v", tc.counts, tier, tc.want)
 		}
+	}
+}
+
+// TestLocalInflightSpillsBurstInsidePollInterval pins the bug where a burst
+// that lands within one /metrics poll interval is fully admitted to the
+// reserved pool because the polled running count has not caught up yet.
+func TestLocalInflightSpillsBurstInsidePollInterval(t *testing.T) {
+	m := newTieredTestModel()
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+	order := []string{"warm", "sibling", "shared"}
+	// Every pool reports idle through its sample; only the dispatch
+	// counts show the burst, as during one poll interval.
+	for host := range m.Enclaves {
+		observeCounts(m.Enclaves[host].metrics, 0, 0)
+	}
+	for range runningRequestLimit {
+		m.Enclaves["warm"].inflight.Add(1)
+		m.Enclaves["sibling"].inflight.Add(1)
+	}
+	if selected, _, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "shared" {
+		t.Fatal("local in-flight at the soft max did not spill to shared tier zero")
+	} else {
+		selected.ReleaseDispatch()
+	}
+	if tier, _ := m.Enclaves["warm"].metrics.tier(policy, runningRequestLimit); tier != tierBusy {
+		t.Fatalf("at-cap local in-flight with idle sample tier=%v, want %v", tier, tierBusy)
+	}
+}
+
+// TestLocalInflightKeepsSpillingWithoutSamples pins that dead /metrics
+// polling no longer pins the caller to its first pool once the local
+// dispatch count reaches the soft max.
+func TestLocalInflightKeepsSpillingWithoutSamples(t *testing.T) {
+	m := newTieredTestModel()
+	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+	order := []string{"warm", "sibling", "shared"}
+	for host := range primary {
+		m.Enclaves[host].metrics.updateLatest(requestCounts{}, time.Time{})
+	}
+	for range runningRequestLimit {
+		m.Enclaves["warm"].inflight.Add(1)
+		m.Enclaves["sibling"].inflight.Add(1)
+	}
+	if selected, _, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected.host != "shared" {
+		t.Fatal("missing samples kept the at-cap reserved pool preferred")
+	} else {
+		selected.ReleaseDispatch()
+	}
+	// With every usable pool at its local cap and no samples, the usual
+	// tier-2 overload rejection applies instead of unbounded queueing.
+	m.Enclaves["shared"].metrics.updateLatest(requestCounts{}, time.Time{})
+	for range 2 * runningRequestLimit {
+		m.Enclaves["shared"].inflight.Add(1)
+	}
+	if selected, _, reject, _, _ := m.SelectServing(order, true, primary, spill, policy); selected == nil || !reject {
+		t.Fatal("all pools at local cap with missing samples must reject as overloaded")
+	} else {
+		selected.ReleaseDispatch()
 	}
 }
 
@@ -42,10 +100,10 @@ func TestSpilloverScrapeWithoutNativeGuard(t *testing.T) {
 	m.setPolicies(nil, []*config.OverloadConfig{policy})
 	defer m.shutdown()
 	m.scrape(t.Context())
-	if tier, _ := m.tier(policy); tier != tierOverloaded {
+	if tier, _ := m.tier(policy, 0); tier != tierOverloaded {
 		t.Fatal("shared scrape did not classify load for its spillover caller")
 	}
-	if tier, _ := m.tier(nil); tier != tierPreferred {
+	if tier, _ := m.tier(nil, 0); tier != tierPreferred {
 		t.Fatal("spillover policy enabled the disabled native guard")
 	}
 }
@@ -191,6 +249,10 @@ func TestConcurrentSelectionsReserveLocalLoad(t *testing.T) {
 	cap := 0
 	m.CacheRoute = &config.CacheRouteConfig{MaxInflightDelta: &cap}
 	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+	// This test exercises affinity-balanced local load, not soft-max
+	// spillover (see TestLocalInflightSpillsBurstInsidePollInterval), so
+	// keep every tier preferred for the whole burst.
+	policy.SoftMaxRequestsRunning = requests
 	start := make(chan struct{})
 	results := make(chan *Enclave, requests)
 	for range requests {
@@ -285,7 +347,7 @@ func TestTierPoliciesKeepIndependentQueueRecovery(t *testing.T) {
 			policy *config.OverloadConfig
 			want   routingTier
 		}{{shared, step.shared}, {reserved, step.reserved}} {
-			if tier, _ := m.tier(check.policy); tier != check.want {
+			if tier, _ := m.tier(check.policy, 0); tier != check.want {
 				t.Fatalf("waiting=%v policy=%+v tier=%v, want %v", step.waiting, check.policy, tier, check.want)
 			}
 		}

@@ -166,7 +166,7 @@ func TestReservationOverloadReload(t *testing.T) {
 				if trip != tc.want[i] {
 					t.Fatalf("backend %d queue limit=%d, want %d", i, trip, tc.want[i])
 				}
-				if tier, _ := enclave.metrics.tier(policy); (tier == tierOverloaded) != (tc.want[i] == reservedQueueLimit) {
+				if tier, _ := enclave.metrics.tier(policy, 0); (tier == tierOverloaded) != (tc.want[i] == reservedQueueLimit) {
 					t.Fatalf("backend %d tier=%v after reload, queue limit=%d", i, tier, tc.want[i])
 				}
 			}
@@ -214,7 +214,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 	if *policy != *sharedPolicy {
 		t.Fatal("removing override did not restore the model policy")
 	}
-	if tier, _ := shared.metrics.tier(policy); tier != tierPreferred {
+	if tier, _ := shared.metrics.tier(policy, 0); tier != tierPreferred {
 		t.Fatal("reload did not reclassify the existing sample")
 	}
 
@@ -224,7 +224,7 @@ func TestReservationTierPolicyReload(t *testing.T) {
 		t.Fatal("shared spillover must poll even without a native guard")
 	}
 	observeCounts(shared.metrics, reservedQueueLimit, 0)
-	if tier, _ := shared.metrics.tier(reservedPolicy); tier != tierOverloaded {
+	if tier, _ := shared.metrics.tier(reservedPolicy, 0); tier != tierOverloaded {
 		t.Fatal("shared metrics did not enforce the caller's queue policy")
 	}
 	reload(reservedPolicy, cfg.Hostnames[1:])
