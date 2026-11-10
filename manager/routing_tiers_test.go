@@ -214,6 +214,59 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	}
 }
 
+func TestShortReservedQueueStaysReserved(t *testing.T) {
+	const queueLimit = 3
+	type load struct{ waiting, running float64 }
+	idle, queued := load{}, load{waiting: 1, running: 1}
+	full := load{waiting: 1, running: runningRequestLimit - 1}
+	for _, tc := range []struct {
+		name          string
+		warm, sibling load
+		inflight      int64
+		want, retry   string
+	}{
+		{name: "short queue stays reserved", warm: queued, sibling: queued, want: "warm", retry: "sibling"},
+		{name: "reserved tier zero beats short queue", warm: queued, sibling: idle, want: "sibling", retry: "sibling"},
+		{name: "queue reaching running limit spills", warm: full, sibling: full, want: "shared", retry: "shared"},
+		{name: "local in-flight at running limit spills", warm: queued, sibling: queued, inflight: runningRequestLimit, want: "shared", retry: "shared"},
+		{name: "queue guard spills", warm: load{waiting: queueLimit}, sibling: load{waiting: queueLimit}, want: "shared", retry: "shared"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTieredTestModel()
+			policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: queueLimit}
+			m.applyReservations("gpt-oss-120b", []config.ReservationConfig{{
+				OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"}, Overload: policy,
+			}}, []string{"warm", "sibling", "shared"})
+			for host, l := range map[string]load{"warm": tc.warm, "sibling": tc.sibling, "shared": idle} {
+				metrics := m.Enclaves[host].metrics
+				if host == "shared" {
+					metrics.configurePolicies(m.Overload, []*config.OverloadConfig{policy})
+				} else {
+					metrics.configurePolicies(policy, nil)
+					m.Enclaves[host].inflight.Store(tc.inflight)
+				}
+				observeCounts(metrics, l.waiting, l.running)
+			}
+			primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+			order := []string{"warm", "sibling", "shared"}
+			selected, _, reject, _, _ := m.SelectServing(order, true, primary, spill, policy)
+			if selected != nil {
+				selected.ReleaseDispatch()
+			}
+			if selected == nil || selected.host != tc.want || reject {
+				t.Fatalf("selected=%v reject=%v, want %s", selected, reject, tc.want)
+			}
+			retry := m.SelectRetry("warm", order, primary, spill, policy)
+			if retry != nil {
+				retry.ReleaseDispatch()
+			}
+			if retry == nil || retry.host != tc.retry {
+				t.Fatalf("retry=%v, want %s", retry, tc.retry)
+			}
+		})
+	}
+}
+
 func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	m := newTieredTestModel()
 	primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})

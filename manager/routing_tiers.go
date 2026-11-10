@@ -76,8 +76,19 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 	return tierBusy, counts.waiting
 }
 
+// queueHeadroom reports whether running plus waiting requests stay below the
+// soft max.
+func (m *enclaveMetrics) queueHeadroom(policy *config.OverloadConfig, localInflight int64) bool {
+	if !policy.Enabled() || policy.SoftMaxRequestsRunning <= 0 {
+		return false
+	}
+	counts, _ := m.latestSample()
+	return max(counts.running+counts.waiting, float64(localInflight)) < float64(policy.SoftMaxRequestsRunning)
+}
+
 // SelectServing ranks closed backends by the request's tier, then pool, then
-// affinity. Unknown load fails open only after known usable capacity. Due
+// affinity, except that primary hosts with queue headroom precede spill tier
+// zero. Unknown load fails open only after known usable capacity. Due
 // recovery probes and the all-breakers-open last resort retain their bypass.
 // A non-nil enclave reserves one local in-flight request until ReleaseDispatch.
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
@@ -110,6 +121,8 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 		pools = append(pools, spill)
 	}
 	var buckets [tierCount][2][]*Enclave
+	// A short queue during long prefills does not mean the replica is full.
+	var queued []*Enclave
 	var degraded []*Enclave
 	var probes [2][]*Enclave
 	waiting := make(map[*Enclave]float64)
@@ -133,6 +146,10 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			if excludedHost != "" && tier == tierUnknown {
 				continue
 			}
+			if tier == tierBusy && pool == 0 && len(spill) > 0 && enclave.metrics.queueHeadroom(policy, enclave.inflight.Load()) {
+				queued = append(queued, enclave)
+				continue
+			}
 			buckets[tier][pool] = append(buckets[tier][pool], enclave)
 		}
 	}
@@ -144,6 +161,9 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 						return enclave, claim, false, 0, 0
 					}
 				}
+			}
+			if routingTier(tier) == tierPreferred && pool == 0 && len(candidates) == 0 {
+				candidates = queued
 			}
 			if len(candidates) == 0 {
 				continue
