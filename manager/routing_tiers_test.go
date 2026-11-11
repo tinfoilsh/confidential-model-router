@@ -219,7 +219,6 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 // below its running limit keeps its caller instead of spilling to shared.
 func TestQueueBelowRunningLimitStaysReserved(t *testing.T) {
 	const queueLimit = 2
-	policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: queueLimit}
 	for _, tc := range []struct {
 		name             string
 		waiting, running float64
@@ -233,7 +232,14 @@ func TestQueueBelowRunningLimitStaysReserved(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTieredTestModel()
-			primary, spill, _ := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+			m.applyReservations("gpt-oss-120b", []config.ReservationConfig{{
+				OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"},
+				Overload: &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: queueLimit},
+			}}, []string{"warm", "sibling", "shared"})
+			primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+			for host, enclave := range m.Enclaves {
+				enclave.metrics.configurePolicies(m.overloadForHostLocked(host), m.spillPoliciesLocked(host))
+			}
 			for host := range primary {
 				m.Enclaves[host].inflight.Store(tc.inflight)
 				observeCounts(m.Enclaves[host].metrics, tc.waiting, tc.running)
