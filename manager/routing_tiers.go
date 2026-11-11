@@ -44,10 +44,10 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 		return tierPreferred, 0
 	}
 	counts := m.latestCounts
+	// Queued requests count toward the soft max: a host queueing below it
+	// is admitting work, not saturated.
+	load := max(counts.running+counts.waiting, float64(localInflight))
 	if policy.SoftMaxRequestsRunning > 0 {
-		if local := float64(localInflight); local > counts.running {
-			counts.running = local
-		}
 		// An at-cap local count outranks a missing sample: without this,
 		// dead polling pins every caller to its first pool, inert to
 		// soft_max, because unknown competes with unknown on pool order.
@@ -70,7 +70,11 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 	if trip > 0 && marks.overloaded(counts.waiting, m.queueOverloads[marks]) {
 		return tierOverloaded, counts.waiting
 	}
-	if counts.waiting == 0 && (policy.SoftMaxRequestsRunning <= 0 || counts.running < float64(policy.SoftMaxRequestsRunning)) {
+	preferred := counts.waiting == 0
+	if policy.SoftMaxRequestsRunning > 0 {
+		preferred = load < float64(policy.SoftMaxRequestsRunning)
+	}
+	if preferred {
 		return tierPreferred, counts.waiting
 	}
 	return tierBusy, counts.waiting

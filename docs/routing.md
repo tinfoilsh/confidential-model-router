@@ -20,7 +20,7 @@ treat user-only reservations as shared capacity.
 
 | Tier | Meaning under the caller's policy |
 | --- | --- |
-| 0 | No waiting requests; running below `soft_max_requests_running`, if set |
+| 0 | Running plus waiting requests below `soft_max_requests_running`; without that limit, no waiting requests |
 | 1 | Not tier 0, but the queue guard has not tripped |
 | 2 | Queue reached `max_requests_waiting` and has not recovered |
 
