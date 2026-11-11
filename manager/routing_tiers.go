@@ -44,10 +44,10 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 		return tierPreferred, 0
 	}
 	counts := m.latestCounts
+	// Queued requests count toward the soft max: a host queueing below it
+	// is admitting work, not saturated.
+	load := max(counts.running+counts.waiting, float64(localInflight))
 	if policy.SoftMaxRequestsRunning > 0 {
-		if local := float64(localInflight); local > counts.running {
-			counts.running = local
-		}
 		// An at-cap local count outranks a missing sample: without this,
 		// dead polling pins every caller to its first pool, inert to
 		// soft_max, because unknown competes with unknown on pool order.
@@ -70,26 +70,18 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 	if trip > 0 && marks.overloaded(counts.waiting, m.queueOverloads[marks]) {
 		return tierOverloaded, counts.waiting
 	}
-	if counts.waiting == 0 && (policy.SoftMaxRequestsRunning <= 0 || counts.running < float64(policy.SoftMaxRequestsRunning)) {
+	preferred := counts.waiting == 0
+	if policy.SoftMaxRequestsRunning > 0 {
+		preferred = load < float64(policy.SoftMaxRequestsRunning)
+	}
+	if preferred {
 		return tierPreferred, counts.waiting
 	}
 	return tierBusy, counts.waiting
 }
 
-// belowRunningLimit reports whether sampled or local running load is below
-// the soft max. A busy host below it is queueing on admission, not capacity;
-// the queue guard already bounds how deep that queue may grow.
-func (m *enclaveMetrics) belowRunningLimit(policy *config.OverloadConfig, localInflight int64) bool {
-	if !policy.Enabled() || policy.SoftMaxRequestsRunning <= 0 {
-		return false
-	}
-	counts, _ := m.latestSample()
-	return max(counts.running, float64(localInflight)) < float64(policy.SoftMaxRequestsRunning)
-}
-
 // SelectServing ranks closed backends by the request's tier, then pool, then
-// affinity, except that primary hosts with queue headroom precede spill tier
-// zero. Unknown load fails open only after known usable capacity. Due
+// affinity. Unknown load fails open only after known usable capacity. Due
 // recovery probes and the all-breakers-open last resort retain their bypass.
 // A non-nil enclave reserves one local in-flight request until ReleaseDispatch.
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
@@ -122,8 +114,6 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 		pools = append(pools, spill)
 	}
 	var buckets [tierCount][2][]*Enclave
-	// Busy hosts below the running limit are queueing on admission, not capacity.
-	var queued []*Enclave
 	var degraded []*Enclave
 	var probes [2][]*Enclave
 	waiting := make(map[*Enclave]float64)
@@ -147,10 +137,6 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			if excludedHost != "" && tier == tierUnknown {
 				continue
 			}
-			if tier == tierBusy && pool == 0 && len(spill) > 0 && enclave.metrics.belowRunningLimit(policy, enclave.inflight.Load()) {
-				queued = append(queued, enclave)
-				continue
-			}
 			buckets[tier][pool] = append(buckets[tier][pool], enclave)
 		}
 	}
@@ -162,9 +148,6 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 						return enclave, claim, false, 0, 0
 					}
 				}
-			}
-			if routingTier(tier) == tierPreferred && pool == 0 && len(candidates) == 0 {
-				candidates = queued
 			}
 			if len(candidates) == 0 {
 				continue

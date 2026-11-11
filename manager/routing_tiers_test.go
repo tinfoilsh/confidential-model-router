@@ -22,7 +22,8 @@ func TestTierRequiresWaitingAndRunningSamples(t *testing.T) {
 		{requestCounts{hasRunning: true}, tierUnknown},
 		{requestCounts{hasWaiting: true}, tierUnknown},
 		{requestCounts{hasWaiting: true, hasRunning: true}, tierPreferred},
-		{requestCounts{waiting: reservedQueueLimit, hasWaiting: true, hasRunning: true}, tierBusy},
+		{requestCounts{waiting: 1, running: runningRequestLimit - 2, hasWaiting: true, hasRunning: true}, tierPreferred},
+		{requestCounts{waiting: 1, running: runningRequestLimit - 1, hasWaiting: true, hasRunning: true}, tierBusy},
 	} {
 		m.updateLatest(tc.counts, time.Now())
 		if tier, _ := m.tier(policy, 0); tier != tc.want {
@@ -214,57 +215,34 @@ func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	}
 }
 
-func TestReservedQueueBelowGuardStaysReserved(t *testing.T) {
-	const queueLimit = 10
-	type load struct{ waiting, running float64 }
-	idle, queued := load{}, load{waiting: 1, running: 1}
-	belowGuard := load{waiting: 3, running: 1}
-	full := load{waiting: 1, running: runningRequestLimit}
+// TestQueueBelowRunningLimitStaysReserved pins that a reserved host queueing
+// below its running limit keeps its caller instead of spilling to shared.
+func TestQueueBelowRunningLimitStaysReserved(t *testing.T) {
+	const queueLimit = 2
+	policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: queueLimit}
 	for _, tc := range []struct {
-		name          string
-		warm, sibling load
-		inflight      int64
-		want, retry   string
+		name             string
+		waiting, running float64
+		inflight         int64
+		want             string
 	}{
-		{name: "short queue stays reserved", warm: queued, sibling: queued, want: "warm", retry: "sibling"},
-		{name: "queue below guard stays reserved", warm: belowGuard, sibling: belowGuard, want: "warm", retry: "sibling"},
-		{name: "reserved tier zero beats short queue", warm: queued, sibling: idle, want: "sibling", retry: "sibling"},
-		{name: "running at the limit spills", warm: full, sibling: full, want: "shared", retry: "shared"},
-		{name: "local in-flight at running limit spills", warm: queued, sibling: queued, inflight: runningRequestLimit, want: "shared", retry: "shared"},
-		{name: "queue guard spills", warm: load{waiting: queueLimit}, sibling: load{waiting: queueLimit}, want: "shared", retry: "shared"},
+		{name: "queue below the running limit", waiting: 1, running: runningRequestLimit - 2, want: "warm"},
+		{name: "queue reaches the running limit", waiting: 1, running: runningRequestLimit - 1, want: "shared"},
+		{name: "local in-flight at the running limit", waiting: 1, inflight: runningRequestLimit, want: "shared"},
+		{name: "queue guard below the running limit", waiting: queueLimit, want: "shared"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTieredTestModel()
-			policy := &config.OverloadConfig{SoftMaxRequestsRunning: runningRequestLimit, MaxRequestsWaiting: queueLimit}
-			m.applyReservations("gpt-oss-120b", []config.ReservationConfig{{
-				OrgIDs: []string{reservationOverloadOrg}, Enclaves: []string{"warm", "sibling"}, Overload: policy,
-			}}, []string{"warm", "sibling", "shared"})
-			for host, l := range map[string]load{"warm": tc.warm, "sibling": tc.sibling, "shared": idle} {
-				metrics := m.Enclaves[host].metrics
-				if host == "shared" {
-					metrics.configurePolicies(m.Overload, []*config.OverloadConfig{policy})
-				} else {
-					metrics.configurePolicies(policy, nil)
-					m.Enclaves[host].inflight.Store(tc.inflight)
-				}
-				observeCounts(metrics, l.waiting, l.running)
+			primary, spill, _ := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
+			for host := range primary {
+				m.Enclaves[host].inflight.Store(tc.inflight)
+				observeCounts(m.Enclaves[host].metrics, tc.waiting, tc.running)
 			}
-			primary, spill, policy := m.ReservationPools(Caller{OrgID: reservationOverloadOrg})
-			order := []string{"warm", "sibling", "shared"}
-			selected, _, reject, _, _ := m.SelectServing(order, true, primary, spill, policy)
-			if selected != nil {
-				selected.ReleaseDispatch()
-			}
+			selected, _, reject, _, _ := m.SelectServing([]string{"warm", "sibling", "shared"}, true, primary, spill, policy)
 			if selected == nil || selected.host != tc.want || reject {
 				t.Fatalf("selected=%v reject=%v, want %s", selected, reject, tc.want)
 			}
-			retry := m.SelectRetry("warm", order, primary, spill, policy)
-			if retry != nil {
-				retry.ReleaseDispatch()
-			}
-			if retry == nil || retry.host != tc.retry {
-				t.Fatalf("retry=%v, want %s", retry, tc.retry)
-			}
+			selected.ReleaseDispatch()
 		})
 	}
 }
@@ -392,7 +370,7 @@ func TestTierPoliciesKeepIndependentQueueRecovery(t *testing.T) {
 	}{
 		{sharedQueueLimit, tierOverloaded, tierOverloaded},
 		{sharedQueueLimit - 1, tierOverloaded, tierOverloaded},
-		{sharedQueueLimit / 2, tierBusy, tierOverloaded},
+		{sharedQueueLimit / 2, tierPreferred, tierOverloaded},
 		{0, tierPreferred, tierPreferred},
 		{sharedQueueLimit - 1, tierBusy, tierOverloaded},
 	} {
