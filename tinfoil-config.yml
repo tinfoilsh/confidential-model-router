@@ -30,6 +30,7 @@ networks:
 
 shim:
   upstream-port: 8089
+  drain_connections: true
   paths:
     - /
     - /health
