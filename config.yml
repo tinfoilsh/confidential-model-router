@@ -26,6 +26,9 @@ models:
   glm-5-3:
     repo: tinfoilsh/confidential-glm5-3-nvfp4
 
+  inkling-2-small:
+    repo: tinfoilsh/confidential-inkling-2-small
+
   gpt-oss-120b:
     repo: tinfoilsh/confidential-gpt-oss-120b
 
