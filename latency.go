@@ -90,9 +90,27 @@ type latencyWriter struct {
 	// dashboards that still read them.
 	observeLegacy bool
 
-	detector  *sseTokenDetector // non-nil while scanning an SSE body for the first token
-	tokenSeen bool
-	aborted   bool // ServeHTTP unwound by panic: the proxy aborted mid-stream
+	detector   *sseTokenDetector // non-nil while scanning an SSE body for the first token
+	tokenSeen  bool
+	firstToken time.Duration
+	aborted    bool // ServeHTTP unwound by panic: the proxy aborted mid-stream
+
+	promptUsage *manager.PromptUsage // nil on tool-loop streams
+}
+
+func promptClass(uncached int, known bool) string {
+	switch {
+	case !known:
+		return "unknown"
+	case uncached < 2_000:
+		return "lt_2k"
+	case uncached < 8_000:
+		return "2k_8k"
+	case uncached < 32_000:
+		return "8k_32k"
+	default:
+		return "ge_32k"
+	}
 }
 
 // noFirstTokenReasons enumerates every reason finish can record. Touching
@@ -225,16 +243,25 @@ func isEventStream(contentType string) bool {
 func (lw *latencyWriter) observeFirstToken(now time.Time) {
 	lw.tokenSeen = true
 	lw.detector = nil
+	lw.firstToken = now.Sub(lw.arrival)
 	manager.FirstTokenSeconds.WithLabelValues(lw.model, lw.enclave, lw.pool, lw.class).
-		Observe(now.Sub(lw.arrival).Seconds())
+		Observe(lw.firstToken.Seconds())
 }
 
-// finish counts a request that ended before any generated token was sent.
-// It must run deferred, not inline after ServeHTTP: a backend that dies
-// mid-stream unwinds the handler with http.ErrAbortHandler, and that
-// request must still be counted.
+// finish observes first-token latency by prompt class, or counts a request
+// that ended before any generated token was sent. It must run deferred, not
+// inline after ServeHTTP: a backend that dies mid-stream unwinds the handler
+// with http.ErrAbortHandler, and that request must still be counted.
 func (lw *latencyWriter) finish(ctx context.Context) {
 	if lw.tokenSeen {
+		// A stream cut short may hold partial usage without cached tokens.
+		uncached, known := lw.promptUsage.Uncached()
+		if ctx.Err() != nil || lw.aborted {
+			known = false
+		}
+		manager.FirstTokenByPromptSeconds.
+			WithLabelValues(lw.model, lw.pool, lw.class, promptClass(uncached, known)).
+			Observe(lw.firstToken.Seconds())
 		return
 	}
 	var reason string

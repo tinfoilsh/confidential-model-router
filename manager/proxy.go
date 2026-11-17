@@ -67,6 +67,44 @@ func WithTokenMetricLabels(ctx context.Context, pool, priority string) context.C
 	return context.WithValue(ctx, tokenLabelsKey{}, tokenLabels{pool: pool, priority: priority})
 }
 
+type promptUsageKey struct{}
+
+// PromptUsage carries a request's uncached prompt tokens from the usage
+// handler to the latency writer.
+type PromptUsage struct {
+	uncached atomic.Int64 // -1 until usage is seen
+}
+
+// WithPromptUsage attaches a PromptUsage to ctx; retried replays share it.
+func WithPromptUsage(ctx context.Context) (context.Context, *PromptUsage) {
+	p := &PromptUsage{}
+	p.uncached.Store(-1)
+	return context.WithValue(ctx, promptUsageKey{}, p), p
+}
+
+// Record ignores usage without prompt tokens and is safe on a nil receiver.
+func (p *PromptUsage) Record(usage *tokencount.Usage) {
+	if p == nil || usage.PromptTokens <= 0 {
+		return
+	}
+	cached, _ := usage.CachedPromptTokens()
+	p.uncached.Store(int64(usage.PromptTokens - cached))
+}
+
+// Uncached returns prompt minus cached tokens and whether usage was seen.
+func (p *PromptUsage) Uncached() (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	v := p.uncached.Load()
+	return int(v), v >= 0
+}
+
+func promptUsageFrom(ctx context.Context) *PromptUsage {
+	p, _ := ctx.Value(promptUsageKey{}).(*PromptUsage)
+	return p
+}
+
 func observeTokenUsage(ctx context.Context, model string, streaming bool, usage *tokencount.Usage) {
 	labels, ok := ctx.Value(tokenLabelsKey{}).(tokenLabels)
 	if !ok {
@@ -398,6 +436,8 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 					wrapper.SetUsage(usage)
 				}
 			}
+
+			promptUsageFrom(req.Context()).Record(usage)
 
 			// The websearch parent call is skipped like its billing event:
 			// the inner responder call re-enters the proxy and records its own.

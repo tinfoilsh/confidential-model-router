@@ -695,6 +695,46 @@ func TestObserveTokenUsage(t *testing.T) {
 	}
 }
 
+func TestPromptUsageRecord(t *testing.T) {
+	_, p := WithPromptUsage(context.Background())
+	if _, seen := p.Uncached(); seen {
+		t.Fatal("fresh PromptUsage reports usage seen")
+	}
+	var nilUsage *PromptUsage
+	nilUsage.Record(&tokencount.Usage{PromptTokens: 10})
+	if _, seen := nilUsage.Uncached(); seen {
+		t.Fatal("nil PromptUsage reports usage seen")
+	}
+
+	p.Record(&tokencount.Usage{CompletionTokens: 40})
+	if _, seen := p.Uncached(); seen {
+		t.Fatal("completion-only usage marked prompt usage seen")
+	}
+
+	p.Record(&tokencount.Usage{
+		PromptTokens:        12000,
+		PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 9000},
+	})
+	if got, seen := p.Uncached(); !seen || got != 3000 {
+		t.Fatalf("Uncached() = %d, %t; want 3000, true", got, seen)
+	}
+
+	responses := &tokencount.Usage{
+		InputTokens:        6000,
+		InputTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 5500},
+	}
+	responses.Normalize()
+	p.Record(responses)
+	if got, seen := p.Uncached(); !seen || got != 500 {
+		t.Fatalf("Responses usage: Uncached() = %d, %t; want 500, true", got, seen)
+	}
+
+	p.Record(&tokencount.Usage{PromptTokens: 700})
+	if got, seen := p.Uncached(); !seen || got != 700 {
+		t.Fatalf("Uncached() = %d, %t; want 700, true", got, seen)
+	}
+}
+
 // TestProxyNormalizesBackendErrorBodies pins that a non-2xx backend
 // response is rewritten into the OpenAI error envelope with its status
 // preserved, while successful and streaming responses are left alone.
