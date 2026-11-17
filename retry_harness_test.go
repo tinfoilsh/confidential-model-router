@@ -62,7 +62,7 @@ func TestRouterRetries502AcrossReplicas(t *testing.T) {
 					w.Header().Set("Content-Type", "text/event-stream")
 					io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
 					w.(http.Flusher).Flush()
-					io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\ndata: [DONE]\n\n")
+					io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5000,\"completion_tokens\":1,\"total_tokens\":5001}}\n\ndata: [DONE]\n\n")
 				} else {
 					w.Header().Set("Content-Type", "application/json")
 					io.WriteString(w, `{"choices":[{"message":{"content":"recovered"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
@@ -103,6 +103,9 @@ func TestRouterRetries502AcrossReplicas(t *testing.T) {
 				}
 				if count, _ := histogramState(t, manager.FirstTokenSeconds.WithLabelValues(admissionTestModel, firstHost, "reserved", "none")); count != 0 {
 					t.Errorf("first-token observation attributed to failed replica: %d", count)
+				}
+				if count, _ := histogramState(t, manager.FirstTokenByPromptSeconds.WithLabelValues(admissionTestModel, "spilled", "none", "2k_8k")); count != 1 {
+					t.Errorf("retry by-prompt observations=%d", count)
 				}
 			}
 		})

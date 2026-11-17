@@ -1102,7 +1102,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		// Per-request token counts surface only in the proxy's usage
 		// handler; carry the labels resolved here to it.
-		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+		usageCtx, promptUsage := manager.WithPromptUsage(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+		r = r.WithContext(usageCtx)
 
 		var lw *latencyWriter
 		serve := func(w http.ResponseWriter) {
@@ -1138,6 +1139,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		if isStreaming && latencyMetricPaths[r.URL.Path] {
 			lw = newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
+			lw.promptUsage = promptUsage
 			// finish must run via defer: a backend that dies mid-stream
 			// unwinds ServeHTTP with http.ErrAbortHandler, and that request
 			// must still be counted as failed-before-first-token. served

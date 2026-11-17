@@ -716,6 +716,95 @@ func TestFirstTokenIgnoresEmptyWrite(t *testing.T) {
 	}
 }
 
+func TestPromptClass(t *testing.T) {
+	for _, tc := range []struct {
+		uncached int
+		known    bool
+		want     string
+	}{
+		{0, false, "unknown"},
+		{50_000, false, "unknown"},
+		{0, true, "lt_2k"},
+		{1_999, true, "lt_2k"},
+		{2_000, true, "2k_8k"},
+		{7_999, true, "2k_8k"},
+		{8_000, true, "8k_32k"},
+		{31_999, true, "8k_32k"},
+		{32_000, true, "ge_32k"},
+		{1_000_000, true, "ge_32k"},
+	} {
+		if got := promptClass(tc.uncached, tc.known); got != tc.want {
+			t.Errorf("promptClass(%d, %t) = %q, want %q", tc.uncached, tc.known, got, tc.want)
+		}
+	}
+}
+
+// The prompt-class split records the first-token latency once, at finish.
+func TestFirstTokenByPromptObservedAtFinish(t *testing.T) {
+	const model = "ft-by-prompt"
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := t0
+	lw := newSSELatencyWriter(model, &now)
+	lw.WriteHeader(200)
+	now = now.Add(300 * time.Millisecond)
+	writeChunk(t, lw, "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")
+
+	unknown := manager.FirstTokenByPromptSeconds.WithLabelValues(model, "reserved", "configured", "unknown")
+	if count, _ := histogramState(t, unknown); count != 0 {
+		t.Fatalf("observed before finish: count=%d", count)
+	}
+
+	now = now.Add(5 * time.Second)
+	writeChunk(t, lw, "data: [DONE]\n\n")
+	lw.finish(context.Background())
+
+	count, sum := histogramState(t, unknown)
+	if count != 1 || sum < 0.2999 || sum > 0.3001 {
+		t.Fatalf("by-prompt observation: count=%d sum=%v, want 1/0.3", count, sum)
+	}
+
+	// Canceled or aborted streams may hold partial usage, so they stay unknown.
+	for _, tc := range []struct {
+		name    string
+		cancel  bool
+		aborted bool
+		want    string
+	}{
+		{"clean", false, false, "2k_8k"},
+		{"canceled", true, false, "unknown"},
+		{"aborted", false, true, "unknown"},
+	} {
+		m := model + "-" + tc.name
+		ctx, sink := manager.WithPromptUsage(context.Background())
+		sink.Record(&tokencount.Usage{
+			PromptTokens:        40_000,
+			PromptTokensDetails: &tokencount.PromptTokensDetails{CachedTokens: 35_000},
+		})
+		if tc.cancel {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			cancel()
+		}
+		filled := newSSELatencyWriter(m, &now)
+		filled.promptUsage = sink
+		filled.WriteHeader(200)
+		writeChunk(t, filled, "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")
+		filled.aborted = tc.aborted
+		filled.finish(ctx)
+		if count, _ := histogramState(t, manager.FirstTokenByPromptSeconds.WithLabelValues(m, "reserved", "configured", tc.want)); count != 1 {
+			t.Errorf("%s: %s observations=%d, want 1", tc.name, tc.want, count)
+		}
+	}
+
+	tokenless := newSSELatencyWriter(model+"-tokenless", &now)
+	tokenless.WriteHeader(200)
+	writeChunk(t, tokenless, "data: [DONE]\n\n")
+	tokenless.finish(context.Background())
+	if count, _ := histogramState(t, manager.FirstTokenByPromptSeconds.WithLabelValues(model+"-tokenless", "reserved", "configured", "unknown")); count != 0 {
+		t.Fatalf("tokenless stream observed: count=%d", count)
+	}
+}
+
 func TestToolLatencyWriterObservesFirstTokenOnly(t *testing.T) {
 	// Tool-runtime streams must feed the first-token metrics under the
 	// tool-runtime sentinel labels while leaving the dispatch-scoped legacy

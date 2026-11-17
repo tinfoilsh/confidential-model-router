@@ -70,6 +70,17 @@ var (
 		[]string{"model", "enclave", "pool", "priority"},
 	)
 
+	// FirstTokenByPromptSeconds is FirstTokenSeconds by uncached prompt size,
+	// observed at request end; unfinished and tool-loop streams are "unknown".
+	FirstTokenByPromptSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "router_first_token_by_prompt_seconds",
+			Help:    "Time from request arrival at the router to the first generated streamed token, by uncached prompt-token class",
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 45, 60, 120},
+		},
+		[]string{"model", "pool", "priority", "prompt_class"},
+	)
+
 	// NoFirstTokenTotal counts streaming requests that ended before a first
 	// generated token was sent. Reasons: canceled (client disconnected),
 	// timeout (request deadline expired), error (HTTP error response,
