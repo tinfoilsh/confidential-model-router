@@ -493,8 +493,12 @@ func TestAdmissionHandlerSpeechBaseUnavailable(t *testing.T) {
 	model.Enclaves = nil
 	t.Cleanup(func() { model.Enclaves = enclaves })
 
+	unavailableBefore := testutil.ToFloat64(manager.ModelUnavailableTotal.WithLabelValues("qwen3-tts-base"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, admissionRequest("/v1/audio/speech", `{"model":"qwen3-tts-base","input":"hi"}`, "tk_test"))
+	if got := testutil.ToFloat64(manager.ModelUnavailableTotal.WithLabelValues("qwen3-tts-base")) - unavailableBefore; got != 1 {
+		t.Errorf("model unavailable count = %v, want 1", got)
+	}
 	var envelope manager.ErrorEnvelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)

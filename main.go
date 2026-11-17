@@ -1022,6 +1022,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 
 		if enclave == nil {
+			manager.ModelUnavailableTotal.WithLabelValues(modelName).Inc()
 			w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
 			writeError(w, manager.ErrModelUnavailable.WithMessage(manager.ErrMsgModelUnavailable, modelName))
 			return
