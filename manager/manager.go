@@ -718,6 +718,8 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	model.setConfiguredHosts(modelConfig.Hostnames)
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
 	em.models.Store(modelName, model)
+	// Born at zero so rate() sees the first 503 after a restart.
+	ModelUnavailableTotal.WithLabelValues(modelName).Add(0)
 	cacheroute.SetMode(modelName, modelConfig.CacheRoute)
 	cacheroute.SetPoolInfo(modelName, modelConfig.Hostnames)
 }

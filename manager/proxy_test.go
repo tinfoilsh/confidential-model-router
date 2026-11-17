@@ -11,14 +11,17 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
 )
 
@@ -830,4 +833,14 @@ func TestProxyNormalizesBackendErrorBodies(t *testing.T) {
 			t.Fatalf("success body changed: %s", body)
 		}
 	})
+}
+
+func TestAddModelSeedsUnavailableCounter(t *testing.T) {
+	const model = "unavailable-seed-test"
+	before := testutil.CollectAndCount(ModelUnavailableTotal)
+	em := &EnclaveManager{models: &sync.Map{}}
+	em.addModel(model, config.Model{})
+	if got := testutil.CollectAndCount(ModelUnavailableTotal); got != before+1 {
+		t.Fatalf("series count = %d, want %d", got, before+1)
+	}
 }
