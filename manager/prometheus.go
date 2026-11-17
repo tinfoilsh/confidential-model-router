@@ -15,6 +15,16 @@ var (
 		[]string{"model"},
 	)
 
+	// ModelUnavailableTotal counts 503s sent when no replica is selectable,
+	// which the proxy counters never see.
+	ModelUnavailableTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_model_unavailable_total",
+			Help: "Total number of requests rejected because no replica of the model was available",
+		},
+		[]string{"model"},
+	)
+
 	// RetryAfterSeconds tracks the distribution of Retry-After values returned to clients
 	RetryAfterSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
