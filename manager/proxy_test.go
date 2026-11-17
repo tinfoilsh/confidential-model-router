@@ -837,6 +837,7 @@ func TestProxyNormalizesBackendErrorBodies(t *testing.T) {
 
 func TestAddModelSeedsUnavailableCounter(t *testing.T) {
 	const model = "unavailable-seed-test"
+	t.Cleanup(func() { ModelUnavailableTotal.DeleteLabelValues(model) })
 	before := testutil.CollectAndCount(ModelUnavailableTotal)
 	em := &EnclaveManager{models: &sync.Map{}}
 	em.addModel(model, config.Model{})
