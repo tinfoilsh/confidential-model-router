@@ -30,7 +30,7 @@ func TestPrivacyFilterProxyDoesNotBillTwice(t *testing.T) {
 			}))
 			defer backend.Close()
 			target, _ := url.Parse(backend.URL)
-			proxy := newProxy(target.Host, "", privacyFilterModel, collector, newCircuitBreaker(), nil)
+			proxy := newProxy(target.Host, privacyFilterModel, nil, collector, newCircuitBreaker())
 			proxy.Transport = http.DefaultTransport
 			proxy.Director = func(req *http.Request) { req.URL.Scheme, req.URL.Host = target.Scheme, target.Host }
 			req := httptest.NewRequest(http.MethodPost, "/redact", strings.NewReader(`{"text":"hello"}`))

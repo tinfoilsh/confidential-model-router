@@ -1,14 +1,13 @@
 package manager
 
 import (
-	"net/http"
+	"context"
 	"os"
-	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/verify"
 	"gopkg.in/yaml.v2"
 
 	"github.com/tinfoilsh/confidential-model-router/config"
@@ -24,22 +23,14 @@ const (
 
 func reservationOverloadManager(t *testing.T, sharedPolicy *config.OverloadConfig) (*EnclaveManager, *Model, config.Model) {
 	t.Helper()
-	keys := make(map[string]string)
-	var hosts []string
-	for range 2 {
-		server, key := renewalServer(t, http.NotFound)
-		host := strings.TrimPrefix(server.URL, "https://")
-		hosts = append(hosts, host)
-		keys[host] = key
-	}
+	hosts := []string{"reserved.example", "shared.example"}
 	em := &EnclaveManager{
 		models: &sync.Map{}, refreshInterval: renewalTestRefresh,
-		verifier: func(host, repo string) (*verify.Verification, error) {
-			key, known := keys[host]
-			if !known || repo != renewalTestRepo {
+		connect: func(_ context.Context, host, repo string) (enclaveClient, error) {
+			if !slices.Contains(hosts, host) || repo != renewalTestRepo {
 				t.Errorf("unexpected verification target: %s %s", host, repo)
 			}
-			return renewalVerification(key, time.Now().Add(time.Hour)), nil
+			return &stubClient{verified: *testAttestation(time.Now().Add(2*attestationRenewalWindow), time.Now(), "v1.0.0")}, nil
 		},
 	}
 	cfg := config.Model{
@@ -64,7 +55,7 @@ func reservationOverloadManager(t *testing.T, sharedPolicy *config.OverloadConfi
 	return em, model, cfg
 }
 
-func TestReservationPolicySurvivesReplacement(t *testing.T) {
+func TestReservationPolicyAppliesToVerifiedEnclaves(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		policy *config.OverloadConfig
@@ -73,7 +64,7 @@ func TestReservationPolicySurvivesReplacement(t *testing.T) {
 		{"shared queue policy", &config.OverloadConfig{MaxRequestsWaiting: sharedQueueLimit}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			em, model, cfg := reservationOverloadManager(t, tc.policy)
+			_, model, cfg := reservationOverloadManager(t, tc.policy)
 			reserved, shared := model.Enclaves[cfg.Hostnames[0]], model.Enclaves[cfg.Hostnames[1]]
 			for _, enclave := range []*Enclave{reserved, shared} {
 				observe(enclave.metrics, reservedQueueLimit)
@@ -91,22 +82,6 @@ func TestReservationPolicySurvivesReplacement(t *testing.T) {
 				selected.ReleaseDispatch()
 			}
 
-			model.mu.Lock()
-			reserved.tlsKeyFP = "previous-tls-key"
-			model.mu.Unlock()
-			if err := em.addEnclave(renewalTestModel, reserved.host); err != nil {
-				t.Fatal(err)
-			}
-			replacement := model.Enclaves[reserved.host]
-			if replacement == reserved || pollingActive(reserved.metrics) || !reserved.cb.Retired() {
-				t.Fatal("replacement did not retire the previous enclave")
-			}
-			observe(replacement.metrics, reservedQueueLimit)
-			if selected, _, reject, _, _ := model.SelectServing(nil, true, primary, spill, policy); selected != replacement || !reject {
-				t.Fatal("replacement lost the reserved overload policy")
-			} else {
-				selected.ReleaseDispatch()
-			}
 		})
 	}
 }

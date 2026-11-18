@@ -52,7 +52,7 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 	// reverse proxy path.
 	client := &http.Client{
 		Transport: &slowHeaderTripper{
-			base:    newAttestedTransport(enclave.tlsKeyFP, enclave.attestation),
+			base:    enclave.client,
 			timeout: responseHeaderTimeout,
 			onSlow: func() {
 				SlowHeadersTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()

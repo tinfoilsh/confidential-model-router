@@ -70,13 +70,6 @@ func newAdmissionHarnessWithConfig(t *testing.T, cp, backend http.Handler, org s
 	upstream.TLS = &tls.Config{Certificates: []tls.Certificate{ecdsaCert(t)}}
 	upstream.StartTLS()
 	t.Cleanup(upstream.Close)
-	base := http.DefaultTransport
-	transport := base.(*http.Transport).Clone()
-	pool := x509.NewCertPool()
-	pool.AddCert(upstream.Certificate())
-	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
-	http.DefaultTransport = transport
-	t.Cleanup(func() { transport.CloseIdleConnections(); http.DefaultTransport = base })
 	em, err := manager.NewAdmissionManagerForTest(cfg, control.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +97,6 @@ func addAdmissionBackend(t *testing.T, em *manager.EnclaveManager, modelName str
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{ecdsaCert(t)}}
 	server.StartTLS()
 	t.Cleanup(server.Close)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig.RootCAs = transport.TLSClientConfig.RootCAs.Clone()
-	transport.TLSClientConfig.RootCAs.AddCert(server.Certificate())
-	http.DefaultTransport = transport
-	t.Cleanup(transport.CloseIdleConnections)
 	fixture, err := manager.NewAdmissionManagerForTest([]byte(fmt.Sprintf("models:\n  %s: {repo: org/test}\n", modelName)), "")
 	if err != nil {
 		t.Fatal(err)
