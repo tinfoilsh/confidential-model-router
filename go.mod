@@ -12,7 +12,7 @@ require (
 	github.com/prometheus/common v0.67.5
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.11
+	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.12
 	github.com/tinfoilsh/usage-reporting-go v0.1.4
 	golang.org/x/sync v0.25.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -84,7 +84,7 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tinfoilsh/encrypted-http-body-protocol v0.6.0 // indirect
-	github.com/tinfoilsh/go-sev-guest v0.0.0-20260818055935-bec7bdb637fd // indirect
+	github.com/tinfoilsh/go-sev-guest v0.0.0-20261118213236-e9f4702918d3 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
