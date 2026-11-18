@@ -45,8 +45,8 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			configuredHosts: map[string]verificationAttempt{"backend": {}, "open": {}, "missing": {}, "harness": {}},
 			Enclaves:        map[string]*Enclave{"backend": {cb: newCircuitBreaker()}, "open": {cb: newCircuitBreaker()}, "harness": {}},
 		}
-		model.Enclaves["backend"].attestation.Store(&attestation{expiresAt: now.Add(time.Minute), verifiedAt: now, codeTag: "v1", predicate: sevSNPPredicate, tlsKeyFP: "tls-key", hpkeKey: "hpke-key"})
-		model.Enclaves["open"].attestation.Store(testAttestation(now.Add(time.Minute), now, "v2"))
+		model.Enclaves["backend"].client = &stubClient{verified: attestation{expiresAt: now.Add(time.Minute), verifiedAt: now, codeTag: "v1", predicate: sevSNPPredicate, tlsKeyFP: "tls-key", hpkeKey: "hpke-key"}}
+		model.Enclaves["open"].client = &stubClient{verified: *testAttestation(now.Add(time.Minute), now, "v2")}
 		model.Enclaves["open"].cb.storeState(cbOpen)
 		manager.models.Store("gpt-oss-120b", model)
 		manager.recordVerification(model, "backend", now, errors.New("first upstream error"))
@@ -128,7 +128,7 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 	now := time.Now()
 	manager := &EnclaveManager{models: &sync.Map{}}
 	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {}}}
-	model.Enclaves["backend"].attestation.Store(testAttestation(now.Add(time.Hour), now, "v1"))
+	model.Enclaves["backend"].client = &stubClient{verified: *testAttestation(now.Add(time.Hour), now, "v1")}
 	manager.models.Store("gpt-oss-120b", model)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(manager.VerificationCollector())

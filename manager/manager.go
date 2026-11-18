@@ -26,13 +26,10 @@ type Enclave struct {
 	host      string
 	modelName string
 	client    enclaveClient
-	// attestation is the client's verification as of the last refresh. The
-	// client enforces its own; this copy serves routing and status.
-	attestation atomic.Pointer[attestation]
-	proxy       *httputil.ReverseProxy
-	metrics     *enclaveMetrics
-	cb          *circuitBreaker
-	pricing     func(string) (ModelPricing, bool)
+	proxy     *httputil.ReverseProxy
+	metrics   *enclaveMetrics
+	cb        *circuitBreaker
+	pricing   func(string) (ModelPricing, bool)
 
 	// inflight counts requests selected for or served through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
@@ -310,7 +307,6 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		enclave.updateOverloadConfig(model.overloadForHostLocked(host), model.spillPoliciesLocked(host))
 		CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
 	}
-	enclave.attestation.Store(&verified)
 	return nil
 }
 
@@ -563,10 +559,7 @@ func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Enclave) MarshalJSON() ([]byte, error) {
-	verified := e.attestation.Load()
-	if verified == nil {
-		verified = &attestation{}
-	}
+	verified, _ := e.verified()
 	fields := map[string]string{
 		"predicate":  verified.predicate,
 		"tls_key_fp": verified.tlsKeyFP,
@@ -737,23 +730,26 @@ func (em *EnclaveManager) sync() error {
 // Configuration availability must not prevent renewal of the accepted host set.
 func (em *EnclaveManager) refreshEnclaves() {
 	var wg sync.WaitGroup
+	verifying := make(chan struct{}, enclaveVerifyConcurrency)
 	em.models.Range(func(key, value any) bool {
 		model := value.(*Model)
 		model.mu.RLock()
 		hosts := maps.Clone(model.configuredHosts)
 		model.mu.RUnlock()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for host := range hosts {
+		for host := range hosts {
+			wg.Add(1)
+			verifying <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-verifying }()
 				if err := em.addEnclave(key.(string), host); err != nil {
 					em.stateMu.Lock()
 					em.errors = append(em.errors, err.Error())
 					em.stateMu.Unlock()
 					log.Errorf("failed to refresh enclave %s: %v", host, err)
 				}
-			}
-		}()
+			}()
+		}
 		return true
 	})
 	wg.Wait()

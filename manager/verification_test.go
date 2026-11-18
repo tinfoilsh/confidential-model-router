@@ -65,7 +65,6 @@ func renewalManager(t *testing.T, client *stubClient) (*EnclaveManager, *Model, 
 	existing.modelName = renewalTestModel
 	existing.client = client
 	verified := client.current()
-	existing.attestation.Store(&verified)
 	t.Cleanup(existing.shutdown)
 	model := &Model{
 		Repo:            renewalTestRepo,
@@ -136,7 +135,7 @@ func TestAddEnclaveConnectsAHostOnce(t *testing.T) {
 	if connections != 1 || client.reverifies != 0 {
 		t.Fatalf("fresh host verified again: connections=%d reverifications=%d", connections, client.reverifies)
 	}
-	if enclave.client != client || enclave.attestation.Load().tlsKeyFP != "tls-key" || model.Tag != "v1.0.0" || model.SourceMeasurement != launch {
+	if enclave.client != client || enclave.client.current().tlsKeyFP != "tls-key" || model.Tag != "v1.0.0" || model.SourceMeasurement != launch {
 		t.Fatalf("verified state not published: tag=%q measurement=%v", model.Tag, model.SourceMeasurement)
 	}
 }
@@ -208,7 +207,7 @@ func TestAttestationRenewalPreservesServingState(t *testing.T) {
 	if current.inflight.Load() != 1 || current.cb.Retired() || current.cb.State() != cbHalfOpen || current.cb.ConsecutiveFailures() != cbFailureThreshold {
 		t.Fatal("renewal lost active runtime state")
 	}
-	if updated := current.attestation.Load(); client.reverifies != 1 || !updated.expiresAt.Equal(newExpiry) || updated.codeTag != "v1.0.1" || model.Tag != "v1.0.1" {
+	if updated := current.client.current(); client.reverifies != 1 || !updated.expiresAt.Equal(newExpiry) || updated.codeTag != "v1.0.1" || model.Tag != "v1.0.1" {
 		t.Fatalf("renewal did not publish verified evidence: %+v", updated)
 	}
 }
@@ -217,11 +216,11 @@ func TestAttestationRenewalFailurePreservesEvidence(t *testing.T) {
 	now := time.Now()
 	client := &stubClient{verified: *testAttestation(now.Add(attestationRenewalWindow/2), now.Add(-time.Minute), "v1.0.0"), err: errors.New("collateral unavailable")}
 	em, model, existing := renewalManager(t, client)
-	before := existing.attestation.Load()
+	before := existing.client.current()
 	if err := em.addEnclave(renewalTestModel, renewalTestHost); err == nil {
 		t.Fatal("failed renewal was accepted")
 	}
-	if model.Enclaves[renewalTestHost] != existing || existing.attestation.Load() != before || existing.cb.Retired() {
+	if model.Enclaves[renewalTestHost] != existing || existing.client.current() != before || existing.cb.Retired() {
 		t.Fatal("failed renewal replaced the enclave or its evidence")
 	}
 	if attempt := model.configuredHosts[renewalTestHost]; attempt.lastError != verificationVerify || attempt.failures != 1 {
@@ -244,7 +243,7 @@ func TestRefreshAdoptsTheClientsVerification(t *testing.T) {
 	if err := em.addEnclave(renewalTestModel, renewalTestHost); err != nil {
 		t.Fatal(err)
 	}
-	if adopted := existing.attestation.Load(); client.reverifies != 0 || adopted.tlsKeyFP != "new-tls-key" || model.Tag != "v1.0.1" || model.Enclaves[renewalTestHost] != existing {
+	if adopted := existing.client.current(); client.reverifies != 0 || adopted.tlsKeyFP != "new-tls-key" || model.Tag != "v1.0.1" || model.Enclaves[renewalTestHost] != existing {
 		t.Fatalf("refresh did not adopt the client's verification: %+v", adopted)
 	}
 	if attempt := model.configuredHosts[renewalTestHost]; !attempt.lastAttempt.IsZero() {
@@ -294,7 +293,7 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 				}
 				return
 			}
-			if client.reverifies != beforeCalls+1 || !existing.attestation.Load().expiresAt.Equal(newExpiry) {
+			if client.reverifies != beforeCalls+1 || !existing.client.current().expiresAt.Equal(newExpiry) {
 				t.Fatal("accepted backend did not renew exactly once")
 			}
 			if len(model.Enclaves) != 1 || model.Enclaves[renewalTestHost] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[renewalTestHost].failures != 1 {

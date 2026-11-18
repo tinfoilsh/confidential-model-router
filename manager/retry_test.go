@@ -181,7 +181,7 @@ func TestSelectRetryEligibility(t *testing.T) {
 			case "shared", "removed":
 				delete(model.Enclaves, alternate.host)
 			case "expired":
-				alternate.attestation.Store(testAttestation(time.Now().Add(-time.Second), time.Now(), "v1"))
+				alternate.client = &stubClient{verified: *testAttestation(time.Now().Add(-time.Second), time.Now(), "v1")}
 			case "open", "half open":
 				tripBreaker(alternate)
 				alternate.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown).UnixNano())

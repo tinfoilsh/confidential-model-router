@@ -16,6 +16,8 @@ const (
 	runtimeConfigTimeout       = 30 * time.Second
 	// enclaveVerifyTimeout bounds one background verification.
 	enclaveVerifyTimeout = 30 * time.Second
+	// enclaveVerifyConcurrency bounds the hosts one refresh verifies at once.
+	enclaveVerifyConcurrency = 16
 )
 
 // enclaveClient is the part of the SDK's enclave client that the router uses.
@@ -102,9 +104,19 @@ func attestationOf(v *verify.Verification) attestation {
 	}
 }
 
-// attestationValid reports whether requests can be sent to the enclave. An
-// enclave with no attestation is a local harness connection.
+// verified returns the verification the enclave's requests are sent under,
+// read from the client so that a verification the client made by itself shows
+// at once. It reports false for a local harness connection, which has none.
+func (e *Enclave) verified() (attestation, bool) {
+	if e.client == nil {
+		return attestation{}, false
+	}
+	verified := e.client.current()
+	return verified, !verified.expiresAt.IsZero()
+}
+
+// attestationValid reports whether requests can be sent to the enclave.
 func (e *Enclave) attestationValid(now time.Time) bool {
-	verified := e.attestation.Load()
-	return verified == nil || now.Before(verified.expiresAt)
+	verified, ok := e.verified()
+	return !ok || now.Before(verified.expiresAt)
 }

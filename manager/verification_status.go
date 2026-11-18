@@ -74,12 +74,12 @@ func (m *Model) verificationStatusLocked(now time.Time) modelVerificationStatus 
 			failures:    attempt.failures,
 		}
 		enclave := m.Enclaves[host]
-		var verified *attestation
+		var verified attestation
 		if enclave != nil {
-			verified = enclave.attestation.Load()
+			verified, _ = enclave.verified()
 		}
 		switch {
-		case verified == nil || verified.expiresAt.IsZero():
+		case verified.expiresAt.IsZero():
 			status.Unverified++
 		default:
 			backend.LastSuccess = verificationTimestamp(verified.verifiedAt)

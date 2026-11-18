@@ -267,7 +267,7 @@ func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	}
 	for _, host := range []string{"warm", "sibling"} {
 		e := m.Enclaves[host]
-		e.attestation.Store(testAttestation(time.Now().Add(-time.Second), time.Now(), "expired-release"))
+		e.client = &stubClient{verified: *testAttestation(time.Now().Add(-time.Second), time.Now(), "expired-release")}
 		e.cb.storeState(cbOpen)
 		e.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown - time.Second).UnixNano())
 	}
@@ -276,7 +276,7 @@ func TestTieredSelectionHealthAndAffinityCap(t *testing.T) {
 	} else {
 		selected.ReleaseDispatch()
 	}
-	m.Enclaves["shared"].attestation.Store(testAttestation(time.Now().Add(-time.Second), time.Now(), "expired-release"))
+	m.Enclaves["shared"].client = &stubClient{verified: *testAttestation(time.Now().Add(-time.Second), time.Now(), "expired-release")}
 	if selected, _, _, _, _ := m.SelectServing(order, true, primary, spill, policy); selected != nil {
 		t.Fatal("unavailable caller pools escaped to another organization's reservation")
 	}
