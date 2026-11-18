@@ -16,8 +16,6 @@ const (
 	runtimeConfigTimeout       = 30 * time.Second
 	// enclaveVerifyTimeout bounds one background verification.
 	enclaveVerifyTimeout = 30 * time.Second
-	// enclaveVerifyConcurrency bounds the hosts one refresh verifies at once.
-	enclaveVerifyConcurrency = 16
 )
 
 // enclaveClient is the part of the SDK's enclave client that the router uses.

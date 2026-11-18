@@ -730,7 +730,6 @@ func (em *EnclaveManager) sync() error {
 // Configuration availability must not prevent renewal of the accepted host set.
 func (em *EnclaveManager) refreshEnclaves() {
 	var wg sync.WaitGroup
-	verifying := make(chan struct{}, enclaveVerifyConcurrency)
 	em.models.Range(func(key, value any) bool {
 		model := value.(*Model)
 		model.mu.RLock()
@@ -738,10 +737,8 @@ func (em *EnclaveManager) refreshEnclaves() {
 		model.mu.RUnlock()
 		for host := range hosts {
 			wg.Add(1)
-			verifying <- struct{}{}
 			go func() {
 				defer wg.Done()
-				defer func() { <-verifying }()
 				if err := em.addEnclave(key.(string), host); err != nil {
 					em.stateMu.Lock()
 					em.errors = append(em.errors, err.Error())
