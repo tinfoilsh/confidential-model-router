@@ -22,7 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/tokencount"
-	tinfoilClient "github.com/tinfoilsh/tinfoil-go/enclave"
+	"github.com/tinfoilsh/tinfoil-go"
 )
 
 const (
@@ -133,15 +133,10 @@ func classifyProxyError(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
-	if errors.Is(err, errAttestationExpired) {
-		return "attestation_expired"
-	}
-	var attestationErr *tinfoilClient.AttestationError
-	if errors.As(err, &attestationErr) {
+	if errors.Is(err, tinfoil.ErrAttestation) {
 		return "tls_mismatch"
 	}
-	var configurationErr *tinfoilClient.ConfigurationError
-	if errors.As(err, &configurationErr) {
+	if errors.Is(err, tinfoil.ErrConfiguration) {
 		return "tls_error"
 	}
 	var netErr *net.OpError
@@ -221,35 +216,20 @@ func publishBreakerState(modelName, host string, cb *circuitBreaker) {
 	})
 }
 
-type proxyBreakerKey struct{}
-
-// proxyBreaker follows the serving attempt across request clones, including
-// transport errors that have no response from which to recover ownership.
-type proxyBreaker struct {
-	current *circuitBreaker
-}
-
-func servingBreaker(ctx context.Context, fallback *circuitBreaker) *circuitBreaker {
-	if owner, ok := ctx.Value(proxyBreakerKey{}).(*proxyBreaker); ok {
-		return owner.current
-	}
-	return fallback
-}
-
-func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Collector, cb *circuitBreaker, attestation *attestationState) *httputil.ReverseProxy {
-	recordFailure := func(cb *circuitBreaker, reason string) {
+func newProxy(host, modelName string, client http.RoundTripper, billingCollector *billing.Collector, cb *circuitBreaker) *httputil.ReverseProxy {
+	recordFailure := func(reason string) {
 		ProxyFailureTotal.WithLabelValues(modelName, host, reason).Inc()
 		cb.RecordFailure()
 		publishBreakerState(modelName, host, cb)
 	}
-	recordSuccess := func(cb *circuitBreaker) {
+	recordSuccess := func() {
 		cb.RecordSuccess()
 		ProxySuccessTotal.WithLabelValues(modelName, host).Inc()
 		publishBreakerState(modelName, host, cb)
 	}
 
 	transport := &slowHeaderTripper{
-		base:    newAttestedTransport(publicKeyFP, attestation),
+		base:    client,
 		timeout: responseHeaderTimeout,
 		onSlow: func() {
 			log.WithFields(log.Fields{
@@ -268,7 +248,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 		// cancel as non-failure so this is the only increment for this
 		// request. Consecutive-failure + success reset still apply.
 		onHang: func() {
-			recordFailure(cb, "canceled_after_slow")
+			recordFailure("canceled_after_slow")
 		},
 	}
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{
@@ -280,7 +260,6 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	proxy.Director = func(req *http.Request) {
 		defaultDirector(req)
 		req.Host = host
-		*req = *req.WithContext(context.WithValue(req.Context(), proxyBreakerKey{}, &proxyBreaker{current: cb}))
 	}
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -318,18 +297,17 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			ClientCancellationsTotal.WithLabelValues(modelName, host).Inc()
 			ProbeClaimFromContext(r.Context()).Abort()
 		} else {
-			recordFailure(servingBreaker(r.Context(), cb), reason)
+			recordFailure(reason)
 		}
 		WriteAPIError(w, &ErrUpstream)
 	}
 
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		serving := servingBreaker(resp.Request.Context(), cb)
 		if resp.StatusCode >= 500 {
-			recordFailure(serving, httpFailureReason(resp.StatusCode))
+			recordFailure(httpFailureReason(resp.StatusCode))
 		} else {
-			recordSuccess(serving)
+			recordSuccess()
 		}
 		if resp.StatusCode == http.StatusBadGateway {
 			if retry, ok := resp.Request.Context().Value(replicaRetryKey{}).(func() bool); ok && retry() {

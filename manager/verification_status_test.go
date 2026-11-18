@@ -43,16 +43,14 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			CacheRoute:      &config.CacheRouteConfig{Mode: "shadow"},
 			Reservations:    []config.ReservationConfig{{OrgIDs: []string{"private-org"}, UserIDs: []string{"private-user"}, Enclaves: []string{"backend"}}},
 			configuredHosts: map[string]verificationAttempt{"backend": {}, "open": {}, "missing": {}, "harness": {}},
-			Enclaves: map[string]*Enclave{
-				"backend": {tlsKeyFP: "tls-key", hpkeKey: "hpke-key", cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v1")},
-				"open":    {cb: newCircuitBreaker(), attestation: newAttestationState(now.Add(time.Minute), now, "v2")},
-				"harness": {},
-			},
+			Enclaves:        map[string]*Enclave{"backend": {cb: newCircuitBreaker()}, "open": {cb: newCircuitBreaker()}, "harness": {}},
 		}
+		model.Enclaves["backend"].attestation.Store(&attestation{expiresAt: now.Add(time.Minute), verifiedAt: now, codeTag: "v1", predicate: sevSNPPredicate, tlsKeyFP: "tls-key", hpkeKey: "hpke-key"})
+		model.Enclaves["open"].attestation.Store(testAttestation(now.Add(time.Minute), now, "v2"))
 		model.Enclaves["open"].cb.storeState(cbOpen)
 		manager.models.Store("gpt-oss-120b", model)
-		manager.recordVerification(model, "backend", now, verificationTLSProbe, errors.New("failed TLS probe"))
-		manager.recordVerification(model, "backend", now, verificationVerify, errors.New("secret upstream error"))
+		manager.recordVerification(model, "backend", now, errors.New("first upstream error"))
+		manager.recordVerification(model, "backend", now, errors.New("secret upstream error"))
 		status, data := readVerificationStatus(t, model)
 		if status.Configured != 4 || status.Verified != 2 || status.Healthy != 1 || status.Expired != 0 || status.Unverified != 2 || len(status.Hosts) != 4 {
 			t.Fatalf("incorrect pool counts: %+v", status)
@@ -64,11 +62,16 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 		if strings.Contains(data, "private-org") || strings.Contains(data, "private-user") || strings.Contains(data, "reservations") || strings.Contains(data, "secret upstream error") {
 			t.Fatalf("public status exposed private details: %s", data)
 		}
-		var legacy Model
+		var legacy struct {
+			Repo, Tag  string
+			Enclaves   map[string]map[string]string
+			Overload   *config.OverloadConfig
+			CacheRoute *config.CacheRouteConfig `json:"cache_route"`
+		}
 		if err := json.Unmarshal([]byte(data), &legacy); err != nil {
 			t.Fatalf("legacy decoder rejected status: %v", err)
 		}
-		if legacy.Repo != model.Repo || legacy.Tag != model.Tag || legacy.Enclaves["backend"].tlsKeyFP != "tls-key" || legacy.Enclaves["backend"].hpkeKey != "hpke-key" {
+		if backend := legacy.Enclaves["backend"]; legacy.Repo != model.Repo || legacy.Tag != model.Tag || backend["predicate"] != sevSNPPredicate || backend["tls_key_fp"] != "tls-key" || backend["hpke_key"] != "hpke-key" {
 			t.Fatalf("existing model fields changed: %s", data)
 		}
 		if legacy.Overload == nil || legacy.Overload.MaxRequestsWaiting != queueLimit || legacy.CacheRoute == nil || legacy.CacheRoute.Mode != model.CacheRoute.Mode {
@@ -86,7 +89,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 		}
 
 		time.Sleep(time.Second)
-		manager.recordVerification(model, "backend", time.Now(), verificationVerify, nil)
+		manager.recordVerification(model, "backend", time.Now(), nil)
 		status, _ = readVerificationStatus(t, model)
 		backend := status.Hosts["backend"]
 		if backend.LastError != "" || backend.LastFailure == nil || !backend.LastFailure.Equal(now) || backend.LastAttempt == nil || !backend.LastAttempt.Equal(time.Now()) {
@@ -112,7 +115,7 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			}
 		}
 		model.configuredHosts = nil
-		manager.recordVerification(model, "backend", time.Now(), verificationVerify, errors.New("late failure"))
+		manager.recordVerification(model, "backend", time.Now(), errors.New("late failure"))
 		status, _ = readVerificationStatus(t, model)
 		if status.Configured != 0 || len(status.Hosts) != 0 || len(model.configuredHosts) != 0 || strings.Contains(scrape(), "enclave=") {
 			t.Fatal("removed hosts remained visible or returned through an in-flight attempt")
@@ -124,7 +127,8 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 	const iterations = 100
 	now := time.Now()
 	manager := &EnclaveManager{models: &sync.Map{}}
-	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {attestation: newAttestationState(now.Add(time.Hour), now, "v1")}}}
+	model := &Model{configuredHosts: map[string]verificationAttempt{"backend": {}}, Enclaves: map[string]*Enclave{"backend": {}}}
+	model.Enclaves["backend"].attestation.Store(testAttestation(now.Add(time.Hour), now, "v1"))
 	manager.models.Store("gpt-oss-120b", model)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(manager.VerificationCollector())
@@ -135,7 +139,7 @@ func TestVerificationStatusConcurrentRefresh(t *testing.T) {
 			model.Enclaves["temporary"] = &Enclave{}
 			model.configuredHosts["temporary"] = verificationAttempt{}
 			model.mu.Unlock()
-			manager.recordVerification(model, "backend", now, verificationVerify, errors.New("unreachable"))
+			manager.recordVerification(model, "backend", now, errors.New("unreachable"))
 			model.mu.Lock()
 			delete(model.Enclaves, "temporary")
 			delete(model.configuredHosts, "temporary")

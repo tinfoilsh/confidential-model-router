@@ -1,99 +1,110 @@
 package manager
 
 import (
-	"errors"
-	"net"
+	"context"
 	"net/http"
-	"strings"
-	"sync/atomic"
 	"time"
 
-	"github.com/tinfoilsh/tinfoil-go/enclave"
+	"github.com/tinfoilsh/tinfoil-go"
 	"github.com/tinfoilsh/tinfoil-go/verify"
+	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
 
 const (
 	attestationRenewalWindow   = 24 * time.Hour
 	attestationRefreshInterval = time.Hour
 	runtimeConfigTimeout       = 30 * time.Second
+	// enclaveVerifyTimeout bounds one background verification.
+	enclaveVerifyTimeout = 30 * time.Second
 )
 
-func verifyEnclave(host, repo string) (*verify.Verification, error) {
-	handle, err := enclave.NewHandle(host, repo, nil)
+// enclaveClient is the part of the SDK's enclave client that the router uses.
+// The client verifies the enclave against its pin, pins every connection to
+// the attested TLS key, and verifies again by itself when the enclave rejects
+// that key or the verification expires.
+type enclaveClient interface {
+	http.RoundTripper
+	// current returns the verification that requests are sent under.
+	current() attestation
+	// reverify verifies again while the current verification is still valid.
+	reverify(ctx context.Context) (attestation, error)
+}
+
+// attestation is what the router reads from a verification.
+type attestation struct {
+	verifiedAt      time.Time
+	expiresAt       time.Time
+	codeTag         string
+	codeMeasurement measurement.Expected
+	predicate       string
+	tlsKeyFP        string
+	hpkeKey         string
+}
+
+func (a attestation) refreshDue(now time.Time, refreshInterval time.Duration) bool {
+	return !now.Add(max(attestationRenewalWindow, refreshInterval)).Before(a.expiresAt) ||
+		!now.Add(min(refreshInterval, attestationRefreshInterval)).Before(a.verifiedAt.Add(attestationRefreshInterval))
+}
+
+type sdkClient struct {
+	*tinfoil.EnclaveHTTPClient
+}
+
+// connectEnclave verifies host against repo before it returns.
+func connectEnclave(ctx context.Context, host, repo string) (enclaveClient, error) {
+	client, err := tinfoil.NewEnclaveHTTPClient(ctx, host, tinfoil.Pin{Repo: repo}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return handle.Verify()
+	return sdkClient{client}, nil
 }
 
-type verifiedAttestation struct {
-	expiresAt  time.Time
-	verifiedAt time.Time
-	codeTag    string
+func (c sdkClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	return c.Transport.RoundTrip(req)
 }
 
-// Each state belongs to one verified key pair. Renewals can update existing
-// transports, while a key change leaves old transports bound to the old state.
-type attestationState struct {
-	current atomic.Pointer[verifiedAttestation]
+func (c sdkClient) current() attestation {
+	return attestationOf(c.Current())
 }
 
-func newAttestationState(expiresAt, verifiedAt time.Time, codeTag string) *attestationState {
-	s := &attestationState{}
-	s.current.Store(&verifiedAttestation{expiresAt: expiresAt, verifiedAt: verifiedAt, codeTag: codeTag})
-	return s
-}
-
-func (s *attestationState) load() *verifiedAttestation {
-	if s == nil {
-		return nil
+func (c sdkClient) reverify(ctx context.Context) (attestation, error) {
+	verification, err := c.Reverify(ctx)
+	if err != nil {
+		return attestation{}, err
 	}
-	return s.current.Load()
+	return attestationOf(verification), nil
 }
 
+// The predicate types the status endpoint reports for each platform.
+const (
+	sevSNPPredicate = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
+	tdxPredicate    = "https://tinfoil.sh/predicate/tdx-guest/v2"
+)
+
+func attestationOf(v *verify.Verification) attestation {
+	tlsKeyFP, _ := v.TLSPublicKeyFP()
+	hpkeKey, _ := v.HPKEPublicKey()
+	var predicate string
+	switch v.EnclaveMeasurement().(type) {
+	case measurement.SEVSNP:
+		predicate = sevSNPPredicate
+	case measurement.TDX:
+		predicate = tdxPredicate
+	}
+	return attestation{
+		verifiedAt:      v.Metadata().VerifiedAt,
+		expiresAt:       v.FreshnessExpiresAt(),
+		codeTag:         v.CodeTag(),
+		codeMeasurement: v.CodeMeasurement(),
+		predicate:       predicate,
+		tlsKeyFP:        tlsKeyFP,
+		hpkeKey:         hpkeKey,
+	}
+}
+
+// attestationValid reports whether requests can be sent to the enclave. An
+// enclave with no attestation is a local harness connection.
 func (e *Enclave) attestationValid(now time.Time) bool {
-	snapshot := e.attestation.load()
-	return snapshot == nil || now.Before(snapshot.expiresAt)
-}
-
-func (e *Enclave) attestationRefreshDue(now time.Time, refreshInterval time.Duration) bool {
-	snapshot := e.attestation.load()
-	if snapshot == nil {
-		return false
-	}
-	return !now.Add(max(attestationRenewalWindow, refreshInterval)).Before(snapshot.expiresAt) ||
-		!now.Add(min(refreshInterval, attestationRefreshInterval)).Before(snapshot.verifiedAt.Add(attestationRefreshInterval))
-}
-
-var errAttestationExpired = errors.New("enclave attestation has expired")
-
-func tlsAddress(host string) string {
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	return net.JoinHostPort(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"), "443")
-}
-
-// attestedTransport rejects new requests once the authenticated witness expires,
-// including requests on pooled connections and caller-managed MCP sessions.
-type attestedTransport struct {
-	*enclave.TLSBoundRoundTripper
-	attestation *attestationState
-}
-
-func newAttestedTransport(key string, attestation *attestationState) *attestedTransport {
-	return &attestedTransport{
-		TLSBoundRoundTripper: &enclave.TLSBoundRoundTripper{ExpectedPublicKey: key},
-		attestation:          attestation,
-	}
-}
-
-func (t *attestedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if snapshot := t.attestation.load(); snapshot != nil && !time.Now().Before(snapshot.expiresAt) {
-		if req.Body != nil {
-			req.Body.Close()
-		}
-		return nil, &enclave.AttestationError{Err: errAttestationExpired}
-	}
-	return t.TLSBoundRoundTripper.RoundTrip(req)
+	verified := e.attestation.Load()
+	return verified == nil || now.Before(verified.expiresAt)
 }

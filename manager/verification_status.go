@@ -7,10 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const (
-	verificationTLSProbe = "tls_probe"
-	verificationVerify   = "verify"
-)
+const verificationVerify = "verify"
 
 type verificationAttempt struct {
 	lastAttempt time.Time
@@ -40,7 +37,7 @@ type modelVerificationStatus struct {
 	Hosts                      map[string]backendVerificationStatus `json:"hosts"`
 }
 
-func (em *EnclaveManager) recordVerification(model *Model, host string, attemptedAt time.Time, stage string, err error) {
+func (em *EnclaveManager) recordVerification(model *Model, host string, attemptedAt time.Time, err error) {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	attempt, configured := model.configuredHosts[host]
@@ -51,7 +48,7 @@ func (em *EnclaveManager) recordVerification(model *Model, host string, attempte
 	attempt.lastError = ""
 	if err != nil {
 		attempt.lastFailure = attemptedAt
-		attempt.lastError = stage
+		attempt.lastError = verificationVerify
 		attempt.failures++
 	}
 	model.configuredHosts[host] = attempt
@@ -77,9 +74,9 @@ func (m *Model) verificationStatusLocked(now time.Time) modelVerificationStatus 
 			failures:    attempt.failures,
 		}
 		enclave := m.Enclaves[host]
-		var verified *verifiedAttestation
-		if enclave != nil && enclave.attestation != nil {
-			verified = enclave.attestation.load()
+		var verified *attestation
+		if enclave != nil {
+			verified = enclave.attestation.Load()
 		}
 		switch {
 		case verified == nil || verified.expiresAt.IsZero():
@@ -132,8 +129,8 @@ func (em *EnclaveManager) VerificationCollector() prometheus.Collector {
 		backends:    prometheus.NewDesc("router_verification_backends", "Backend counts by verification state; healthy means unexpired attestation and a closed circuit breaker.", []string{"model", "state"}, nil),
 		lastSuccess: prometheus.NewDesc("router_verification_last_success_timestamp_seconds", "Unix timestamp of the last successful attestation, or zero if never verified.", []string{"model", "enclave"}, nil),
 		expiresAt:   prometheus.NewDesc("router_verification_expires_timestamp_seconds", "Authenticated attestation expiration as a Unix timestamp, or zero if never verified.", []string{"model", "enclave"}, nil),
-		lastAttempt: prometheus.NewDesc("router_verification_last_attempt_timestamp_seconds", "Unix timestamp of the last attestation attempt or failed TLS probe, or zero if never attempted.", []string{"model", "enclave"}, nil),
-		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed attestation verifications and TLS identity probes per backend.", []string{"model", "enclave"}, nil),
+		lastAttempt: prometheus.NewDesc("router_verification_last_attempt_timestamp_seconds", "Unix timestamp of the last attestation attempt, or zero if never attempted.", []string{"model", "enclave"}, nil),
+		failures:    prometheus.NewDesc("router_verification_failures_total", "Failed attestation verifications per backend.", []string{"model", "enclave"}, nil),
 	}
 }
 

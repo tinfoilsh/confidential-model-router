@@ -40,7 +40,7 @@ func EnableBillingForTest(em *EnclaveManager) func() {
 	for name, model := range em.Models() {
 		model.mu.Lock()
 		for host, enclave := range model.Enclaves {
-			enclave.proxy = newProxy(host, enclave.tlsKeyFP, name, em.billingCollector, enclave.cb, enclave.attestation)
+			enclave.proxy = newProxy(host, name, enclave.client, em.billingCollector, enclave.cb)
 		}
 		model.mu.Unlock()
 	}

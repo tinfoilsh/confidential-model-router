@@ -34,7 +34,7 @@ func setupTestProxyWithModel(t *testing.T, handler http.Handler, modelName strin
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(backendURL.Host, "", modelName, collector, newCircuitBreaker(), nil)
+	proxy := newProxy(backendURL.Host, modelName, nil, collector, newCircuitBreaker())
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = backendURL.Scheme
 		req.URL.Host = backendURL.Host
@@ -58,7 +58,7 @@ func TestProxyDirector_RewritesHostHeader(t *testing.T) {
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
 
-	proxy := newProxy(enclaveHost, "", "voxtral-tts", collector, newCircuitBreaker(), nil)
+	proxy := newProxy(enclaveHost, "voxtral-tts", nil, collector, newCircuitBreaker())
 
 	req := httptest.NewRequest("POST", "/v1/audio/speech", nil)
 	req.Host = "inference.tinfoil.sh"
@@ -324,7 +324,7 @@ func TestProxyCancellationReleasesRecoveryProbe(t *testing.T) {
 
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
-	proxy := newProxy("probe-host.test", "", "probe-model", collector, cb, nil)
+	proxy := newProxy("probe-host.test", "probe-model", nil, collector, cb)
 
 	// A cancelled request that does not own the claim must leave the
 	// in-flight probe alone.
@@ -356,7 +356,7 @@ func TestProxyOversizedBodyIsClientError(t *testing.T) {
 	cb := newCircuitBreaker()
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
-	proxy := newProxy("oversize-host.test", "", "oversize-model", collector, cb, nil)
+	proxy := newProxy("oversize-host.test", "oversize-model", nil, collector, cb)
 
 	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", nil)
 	rec := httptest.NewRecorder()
@@ -745,7 +745,7 @@ func TestProxyNormalizesBackendErrorBodies(t *testing.T) {
 	cb := newCircuitBreaker()
 	collector := billing.NewCollector("", "", "")
 	t.Cleanup(collector.Stop)
-	proxy := newProxy("err-host.test", "", "err-model", collector, cb, nil)
+	proxy := newProxy("err-host.test", "err-model", nil, collector, cb)
 
 	mkResp := func(status int, contentType, body string) *http.Response {
 		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)

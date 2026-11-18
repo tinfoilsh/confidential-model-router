@@ -16,8 +16,13 @@ const retryTestBody = `{"model":"gpt-oss-120b","messages":[{"role":"user","conte
 
 func retryTestEnclave(t *testing.T, handler http.HandlerFunc) *Enclave {
 	t.Helper()
-	server, _ := renewalServer(t, handler)
-	_, _, enclave := renewalManager(t, server, time.Now().Add(time.Hour), time.Now(), nil)
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "https://")
+	enclave := newTestEnclave(host)
+	enclave.modelName = renewalTestModel
+	enclave.proxy = newProxy(host, renewalTestModel, server.Client().Transport, nil, enclave.cb)
+	t.Cleanup(enclave.shutdown)
 	return enclave
 }
 
@@ -176,7 +181,7 @@ func TestSelectRetryEligibility(t *testing.T) {
 			case "shared", "removed":
 				delete(model.Enclaves, alternate.host)
 			case "expired":
-				alternate.attestation = newAttestationState(time.Now().Add(-time.Second), time.Now(), "v1")
+				alternate.attestation.Store(testAttestation(time.Now().Add(-time.Second), time.Now(), "v1"))
 			case "open", "half open":
 				tripBreaker(alternate)
 				alternate.cb.lastFailureNano.Store(time.Now().Add(-cbCooldown).UnixNano())

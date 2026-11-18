@@ -1,9 +1,7 @@
 package manager
 
 import (
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
@@ -12,36 +10,6 @@ func pollingActive(m *enclaveMetrics) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cancel != nil
-}
-
-// A failed fingerprint probe must not replace a registered enclave. Before
-// this was enforced, every transient probe error re-attested the host and
-// installed a fresh Enclave over the old one, leaking the old poller.
-func TestAddEnclaveProbeFailureKeepsExistingEnclave(t *testing.T) {
-	shortVerifyTimeout(t, 500*time.Millisecond)
-	addr := blackholeListener(t)
-
-	existing := newTestEnclave(addr)
-	existing.tlsKeyFP = "previous-fingerprint"
-	existing.metrics.setPolicies(&config.OverloadConfig{MaxRequestsWaiting: 8, RetryAfterMinutes: 1}, nil)
-	t.Cleanup(existing.shutdown)
-
-	model := &Model{Enclaves: map[string]*Enclave{addr: existing}}
-	em := &EnclaveManager{models: &sync.Map{}}
-	em.models.Store("test-model", model)
-
-	if err := em.addEnclave("test-model", addr); err != nil {
-		t.Fatalf("expected the existing enclave to be kept, got error: %v", err)
-	}
-	model.mu.RLock()
-	got := model.Enclaves[addr]
-	model.mu.RUnlock()
-	if got != existing {
-		t.Fatal("enclave was replaced after a failed fingerprint probe")
-	}
-	if !pollingActive(existing.metrics) {
-		t.Fatal("existing enclave's poller was stopped")
-	}
 }
 
 // Installing a replacement for a host must retire the previous enclave:
