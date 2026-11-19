@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -67,4 +68,28 @@ func TestBoundedChatImageShape(t *testing.T) {
 
 func boundedImagePart(url string) map[string]any {
 	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": url, "detail": "high"}}
+}
+
+func TestBoundedInlineImageValidatesPastSignature(t *testing.T) {
+	const prefix = "data:image/png;base64,"
+	data := make([]byte, 3073)
+	copy(data, "\x89PNG\r\n\x1a\n")
+	encoded := base64.StdEncoding.EncodeToString(data)
+	paddedChunk := base64.StdEncoding.EncodeToString(data[:3071])
+	for _, tc := range []struct {
+		name, payload string
+		want          bool
+	}{
+		{"valid multiple chunks", encoded, true},
+		{"invalid character after first chunk", encoded[:4096] + "?A==", false},
+		{"invalid padding bits after first chunk", encoded[:4096] + "AB==", false},
+		{"padding followed by another chunk", paddedChunk + "AAAA", false},
+		{"newline after first chunk", encoded[:4096] + "\n" + strings.Repeat("A", 3), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundedInlineImage(map[string]any{"url": prefix + tc.payload}); got != tc.want {
+				t.Fatalf("boundedInlineImage() = %t, want %t", got, tc.want)
+			}
+		})
+	}
 }

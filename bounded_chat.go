@@ -403,7 +403,7 @@ func boundedInlineImage(value any) bool {
 		return false
 	}
 	media, payload, ok := strings.Cut(url, ",")
-	if !ok || payload == "" || strings.ContainsAny(payload, "\r\n") {
+	if !ok || payload == "" || len(payload)%4 != 0 || strings.ContainsAny(payload, "\r\n") {
 		return false
 	}
 	var signature []byte
@@ -415,8 +415,24 @@ func boundedInlineImage(value any) bool {
 	default:
 		return false
 	}
-	data, err := base64.StdEncoding.Strict().DecodeString(payload)
-	return err == nil && bytes.HasPrefix(data, signature)
+	// Decode complete base64 quanta into fixed-size scratch space. Check
+	// the signature only once, but validate the entire payload. Padding
+	// must not terminate a nonfinal chunk.
+	const chunkSize = 4096
+	var decoded [chunkSize / 4 * 3]byte
+	encoding := base64.StdEncoding.Strict()
+	for offset := 0; offset < len(payload); offset += chunkSize {
+		end := min(offset+chunkSize, len(payload))
+		chunk := payload[offset:end]
+		if end < len(payload) && strings.Contains(chunk, "=") {
+			return false
+		}
+		n, err := encoding.Decode(decoded[:], []byte(chunk))
+		if err != nil || (offset == 0 && !bytes.HasPrefix(decoded[:n], signature)) {
+			return false
+		}
+	}
+	return true
 }
 
 func prepareBoundedChatDispatch(r *http.Request) {

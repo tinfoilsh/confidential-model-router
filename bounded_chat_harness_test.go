@@ -114,6 +114,9 @@ func TestBoundedChatBackendContract(t *testing.T) {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
+				if string(body["priority"]) == "-123456" {
+					t.Error("caller-supplied priority reached the backend")
+				}
 				if tc.cap == "" {
 					if _, present := body[maxInputTokensField]; present {
 						t.Error("private field from caller reached ordinary chat backend")
@@ -134,7 +137,7 @@ func TestBoundedChatBackendContract(t *testing.T) {
 				generations.Add(1)
 				io.WriteString(w, `{}`)
 			}), "", false)
-			body := strings.TrimSuffix(boundedBody, "}") + `,"max_input_tokens":999999,"n":3,"max_tokens":500}`
+			body := strings.TrimSuffix(boundedBody, "}") + `,"max_input_tokens":999999,"n":3,"max_tokens":500,"priority":-123456}`
 			r := admissionRequest("/v1/chat/completions", body, "tk_test")
 			if tc.cap != "" {
 				r = boundedRequest("/v1/chat/completions", body)

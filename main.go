@@ -869,6 +869,10 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 				if r.URL.Path == "/v1/chat/completions" {
 					delete(body, maxInputTokensField)
 				}
+				// Strip any user-supplied priority to prevent circumventing rate limits
+				// or jumping ahead of other users.
+				delete(body, "priority")
+
 				if boundedChat != nil {
 					if apiErr := validateBoundedChatBody(body, len(activeProfiles) != 0); apiErr != nil {
 						writeError(w, apiErr)
@@ -880,10 +884,6 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 					}
 					body[maxInputTokensField] = boundedChat.input
 				}
-
-				// Strip any user-supplied priority to prevent circumventing rate limits
-				// or jumping ahead of other users.
-				delete(body, "priority")
 
 				// Admit before any internal dispatch (file conversion, tool
 				// loop) so they all reuse this request's context and
