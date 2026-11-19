@@ -71,6 +71,15 @@ func validateBoundedChatBody(body map[string]any, hasRouterTools bool) *manager.
 	if _, present := body["best_of"]; present {
 		return invalid.WithParam("best_of").WithMessage("Single-call mode does not support best_of.")
 	}
+	if raw, present := body["modalities"]; present {
+		modalities, ok := raw.([]any)
+		if !ok || len(modalities) != 1 || modalities[0] != "text" {
+			return invalid.WithParam("modalities").WithMessage("Single-call mode only supports text output.")
+		}
+	}
+	if _, present := body["audio"]; present {
+		return invalid.WithParam("audio").WithMessage("Single-call mode only supports text output.")
+	}
 	// Exclude alternate generation, truncation, KV transfer and nontext
 	// extensions until their accounting is covered by the backend contract.
 	for _, field := range []string{"use_beam_search", "truncate_prompt_tokens", "kv_transfer_params", "prompt_embeds", "multi_modal_data"} {

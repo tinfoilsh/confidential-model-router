@@ -56,6 +56,8 @@ func TestBoundedChatRejectsBeforeAdmission(t *testing.T) {
 		{name: "search", body: `,"web_search_options":{}`, message: "server-side tools"},
 		{name: "file", body: `,"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"x.pdf","file_data":"eA=="}}]}]`, message: "text message content"},
 		{name: "image", body: `,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]`, message: "text message content"},
+		{name: "audio output modality", body: `,"modalities":["text","audio"]`, message: "text output"},
+		{name: "audio output options", body: `,"audio":{"voice":"alloy","format":"wav"}`, message: "text output"},
 		{name: "best of", body: `,"best_of":1`, message: "best_of"},
 		{name: "beam", body: `,"use_beam_search":true`, message: "use_beam_search"},
 		{name: "truncate", body: `,"truncate_prompt_tokens":5`, message: "truncate_prompt_tokens"},
@@ -81,6 +83,7 @@ func TestBoundedChatRejectsBeforeAdmission(t *testing.T) {
 			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.message) {
 				t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
 			}
+			h.client.refreshes.Wait()
 			if admissions.Load() != 0 || dispatches.Load() != 0 {
 				t.Fatal("rejected request reached admission or a backend")
 			}
