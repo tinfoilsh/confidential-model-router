@@ -85,9 +85,31 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 // recovery probes and the all-breakers-open last resort retain their bypass.
 // A non-nil enclave reserves one local in-flight request until ReleaseDispatch.
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+	return m.SelectServingMatching(order, claimProbes, primary, spill, policy, nil)
+}
+
+// HasServingMatch checks the caller's pools before quota admission without
+// claiming a probe or reserving capacity. Selection must check again.
+// match runs under the model lock and must not call methods on the model.
+func (m *Model) HasServingMatch(primary, spill map[string]bool, match func(*Enclave) bool) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	for _, enclave := range m.Enclaves {
+		if (primary == nil || primary[enclave.host] || spill[enclave.host]) && enclave.attestationValid(now) && (match == nil || match(enclave)) {
+			return true
+		}
+	}
+	return false
+}
+
+// SelectServingMatching applies the same eligibility predicate to every
+// tier, including recovery probes and degraded fallback. A nil match allows
+// all replicas. The predicate must not call methods on the model.
+func (m *Model) SelectServingMatching(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, match func(*Enclave) bool) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy, "")
+	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy, "", match)
 	if enclave != nil {
 		enclave.inflight.Add(1)
 		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
@@ -99,7 +121,7 @@ func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill m
 func (m *Model) SelectRetry(failedHost string, order []string, primary, spill map[string]bool, policy *config.OverloadConfig) *Enclave {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	enclave, _, overloaded, _, _ := m.selectServingLocked(order, false, primary, spill, policy, failedHost)
+	enclave, _, overloaded, _, _ := m.selectServingLocked(order, false, primary, spill, policy, failedHost, nil)
 	if enclave == nil || overloaded {
 		return nil
 	}
@@ -108,7 +130,7 @@ func (m *Model) SelectRetry(failedHost string, order []string, primary, spill ma
 	return enclave
 }
 
-func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, excludedHost string) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, excludedHost string, match func(*Enclave) bool) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
 	pools := []map[string]bool{primary}
 	if len(spill) > 0 {
 		pools = append(pools, spill)
@@ -119,7 +141,7 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 	waiting := make(map[*Enclave]float64)
 	for pool, allowed := range pools {
 		for _, enclave := range m.Enclaves {
-			if (excludedHost != "" && enclave.host == excludedHost) || (allowed != nil && !allowed[enclave.host]) || !enclave.attestationValid(time.Now()) {
+			if (excludedHost != "" && enclave.host == excludedHost) || (allowed != nil && !allowed[enclave.host]) || !enclave.attestationValid(time.Now()) || (match != nil && !match(enclave)) {
 				continue
 			}
 			if !enclave.breakerClosed() {
