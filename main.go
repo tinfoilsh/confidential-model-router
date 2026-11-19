@@ -517,6 +517,11 @@ func main() {
 }
 
 func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient) http.Handler {
+	// Fail closed until an enforcing backend is wired into the router.
+	return newRouterHandlerWithBoundedChat(em, routeContextClient, nil)
+}
+
+func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextClient *routeContextClient, supportsBoundedChat boundedChatBackend) http.Handler {
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
@@ -531,6 +536,12 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		requestStart := time.Now()
 
 		if !limitRequestBody(w, r) {
+			return
+		}
+
+		boundedChat, apiErr := parseBoundedChat(r)
+		if apiErr != nil {
+			writeError(w, apiErr)
 			return
 		}
 
@@ -833,6 +844,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// healthy model and reasoning effort for it before any
 				// downstream logic (tool detection, rate limiting, serving)
 				// runs.
+				if boundedChat != nil && modelName == "auto" {
+					writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call mode requires an explicit model."))
+					return
+				}
 				if modelName == "auto" {
 					resolved, resolveErr := resolveAuto(r.URL.Path, body)
 					if resolveErr != nil {
@@ -848,6 +863,22 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// profiles means no router-owned tools, so the
 				// request falls through to the plain proxy path.
 				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
+				// max_input_tokens is private to the model backend. Do not
+				// let a body-only value opt ordinary chat into input limiting.
+				if r.URL.Path == "/v1/chat/completions" {
+					delete(body, maxInputTokensField)
+				}
+				if boundedChat != nil {
+					if apiErr := validateBoundedChatBody(body, len(activeProfiles) != 0); apiErr != nil {
+						writeError(w, apiErr)
+						return
+					}
+					if supportsBoundedChat == nil {
+						writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call input limits are not supported on this model."))
+						return
+					}
+					body[maxInputTokensField] = boundedChat.input
+				}
 
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
@@ -867,7 +898,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				}
 				admission.applyPriority(body, r.URL.Path, modelName)
 
-				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
+				if boundedChat == nil && (r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions") {
 					switch r.URL.Path {
 					case "/v1/responses":
 						_, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
@@ -1029,6 +1060,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		}
 		releaseDispatch := sync.OnceFunc(enclave.ReleaseDispatch)
 		defer releaseDispatch()
+		if boundedChat != nil && !supportsBoundedChat(modelName, enclave) {
+			probeClaim.Abort()
+			writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call input limits are not supported on the selected backend."))
+			return
+		}
 
 		// Meter landing pools on reserved models; poolSpill is only
 		// non-nil for reserved callers. Models without reservations have
@@ -1108,6 +1144,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		var lw *latencyWriter
 		serve := func(w http.ResponseWriter) {
+			if boundedChat != nil {
+				prepareBoundedChatDispatch(r)
+				enclave.ServeHTTP(w, r)
+				return
+			}
 			enclave.ServeHTTPWithFailover(w, r, func(replay *http.Request) *manager.Enclave {
 				next := model.SelectRetry(enclave.String(), cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
 				if next == nil {
