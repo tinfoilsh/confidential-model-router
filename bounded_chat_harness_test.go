@@ -184,29 +184,34 @@ func TestBoundedChatDoesNotReplay502(t *testing.T) {
 	}
 }
 
-func TestBoundedChatRejectsSelectedBackend(t *testing.T) {
-	var dispatches atomic.Int64
-	em, h := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
-	}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		dispatches.Add(1)
-		io.WriteString(w, `{}`)
-	}), "", false)
-	model, _ := em.GetModel(admissionTestModel)
-	var seen bool
-	handler := newRouterHandlerWithBoundedChat(em, h.client, func(name string, selected *manager.Enclave) bool {
-		seen = true
-		for _, candidate := range model.Enclaves {
-			if candidate == selected && name == admissionTestModel {
-				return false
+func TestBoundedChatRoutesOnlyToCapableBackend(t *testing.T) {
+	for _, capable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("capable=%t", capable), func(t *testing.T) {
+			var admissions, unsupported, supported atomic.Int64
+			em, h := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				admissions.Add(1)
+				io.WriteString(w, `{"rate_limit":{"decision":"allowed","retry_after_seconds":0}}`)
+			}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				unsupported.Add(1)
+				io.WriteString(w, `{}`)
+			}), "", false)
+			host := addAdmissionBackend(t, em, admissionTestModel, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				supported.Add(1)
+				io.WriteString(w, `{}`)
+			}))
+			handler := newRouterHandlerWithBoundedChat(em, h.client, func(name string, selected *manager.Enclave) bool {
+				return capable && name == admissionTestModel && selected.String() == host
+			})
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, boundedRequest("/v1/chat/completions", boundedBody))
+			h.client.refreshes.Wait()
+			if capable {
+				if w.Code != http.StatusOK || admissions.Load() != 1 || supported.Load() != 1 || unsupported.Load() != 0 {
+					t.Fatalf("HTTP %d, admissions %d, capable dispatches %d, unsupported dispatches %d", w.Code, admissions.Load(), supported.Load(), unsupported.Load())
+				}
+			} else if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" || admissions.Load() != 0 || supported.Load() != 0 || unsupported.Load() != 0 {
+				t.Fatalf("HTTP %d, headers %v, admissions %d, dispatches %d/%d", w.Code, w.Header(), admissions.Load(), supported.Load(), unsupported.Load())
 			}
-		}
-		t.Error("capability check did not see the selected enclave")
-		return false
-	})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, boundedRequest("/v1/chat/completions", boundedBody))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "selected backend") || !seen || dispatches.Load() != 0 {
-		t.Fatalf("HTTP %d, selected check %t, dispatches %d: %s", w.Code, seen, dispatches.Load(), w.Body.String())
+		})
 	}
 }

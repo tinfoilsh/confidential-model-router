@@ -548,6 +548,7 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 		var modelName string
 		var err error
 		var speechBody map[string]any
+		var boundedBackendMatch func(*manager.Enclave) bool
 
 		// Set when the request is eligible for cache-route shadow
 		// observation.
@@ -888,10 +889,28 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 				// loop) so they all reuse this request's context and
 				// reservation pools. Unknown models must 404 without being
 				// counted against anyone's quota.
-				if _, found := em.GetModel(modelName); !found {
+				if model, found := em.GetModel(modelName); !found {
 					em.ReportUnknownModel(apiKey, modelName)
 					writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
 					return
+				} else if boundedChat != nil {
+					boundedBackendMatch = func(enclave *manager.Enclave) bool {
+						return supportsBoundedChat(modelName, enclave)
+					}
+					var caller manager.Caller
+					if model.HasReservations() {
+						caller, err = resolveCaller(modelName)
+						if err != nil {
+							writeError(w, asAPIError(err))
+							return
+						}
+					}
+					primary, spill, _ := model.ReservationPools(caller)
+					if !model.HasServingMatch(primary, spill, boundedBackendMatch) {
+						w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
+						writeError(w, manager.ErrModelUnavailable.WithMessage("No backend for model '%s' currently supports single-call input limits.", modelName))
+						return
+					}
 				}
 				if !admit() {
 					return
@@ -1046,7 +1065,7 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 			}
 		}
 
-		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServing(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
+		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServingMatching(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy, boundedBackendMatch)
 		if hasConfiguredPriority && overloaded {
 			manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
 			overloaded = false
@@ -1060,11 +1079,6 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 		}
 		releaseDispatch := sync.OnceFunc(enclave.ReleaseDispatch)
 		defer releaseDispatch()
-		if boundedChat != nil && !supportsBoundedChat(modelName, enclave) {
-			probeClaim.Abort()
-			writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call input limits are not supported on the selected backend."))
-			return
-		}
 
 		// Meter landing pools on reserved models; poolSpill is only
 		// non-nil for reserved callers. Models without reservations have
