@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -17,8 +19,9 @@ const (
 
 // boundedChatBackend is the backend capability boundary. It must only approve
 // the selected enclave when the identity used by its verified transport is
-// known to enforce the private input cap on the prompt submitted for generation.
-// A model name alone is not sufficient. No production backend is wired yet.
+// known to enforce the private input cap on the prompt submitted for generation,
+// including expanded image tokens if it serves image inputs. A model name
+// alone is not sufficient. No production backend is wired yet.
 type boundedChatBackend func(model string, selected *manager.Enclave) bool
 
 type boundedChatLimits struct {
@@ -143,11 +146,11 @@ func validateBoundedChatBody(body map[string]any, hasRouterTools bool) *manager.
 	}
 	messages, ok := body["messages"].([]any)
 	if !ok || len(messages) == 0 {
-		return invalid.WithParam("messages").WithMessage("Single-call mode requires text messages.")
+		return invalid.WithParam("messages").WithMessage("Single-call mode requires messages.")
 	}
 	for _, raw := range messages {
-		if !boundedTextMessage(raw) {
-			return invalid.WithParam("messages").WithMessage("Single-call mode only supports text message content and client function tool calls.")
+		if !boundedChatMessage(raw) {
+			return invalid.WithParam("messages").WithMessage("Single-call mode only supports text message content, inline PNG/JPEG images in user messages, and client function tool calls.")
 		}
 	}
 	return nil
@@ -306,7 +309,7 @@ func boundedResponseFormat(value any) bool {
 	}
 }
 
-func boundedTextMessage(value any) bool {
+func boundedChatMessage(value any) bool {
 	message, _ := value.(map[string]any)
 	var hasCalls bool
 	switch message["role"] {
@@ -361,7 +364,16 @@ func boundedTextMessage(value any) bool {
 	case []any:
 		for _, raw := range content {
 			part, _ := raw.(map[string]any)
-			if _, ok := part["text"].(string); !ok || part["type"] != "text" || !boundedObject(raw, "type", "text") {
+			switch part["type"] {
+			case "text":
+				if _, ok := part["text"].(string); !ok || !boundedObject(raw, "type", "text") {
+					return false
+				}
+			case "image_url":
+				if message["role"] != "user" || !boundedObject(raw, "type", "image_url") || !boundedInlineImage(part["image_url"]) {
+					return false
+				}
+			default:
 				return false
 			}
 		}
@@ -369,6 +381,42 @@ func boundedTextMessage(value any) bool {
 	default:
 		return false
 	}
+}
+
+// Accept only inline bytes in bounded mode. Remote URLs would introduce a
+// network fetch and potentially mutable input. The backend still decodes and
+// processes the image and enforces the cap on the rendered prompt.
+func boundedInlineImage(value any) bool {
+	if !boundedObject(value, "url", "detail") {
+		return false
+	}
+	image := value.(map[string]any)
+	if detail, present := image["detail"]; present {
+		switch detail {
+		case "auto", "low", "high":
+		default:
+			return false
+		}
+	}
+	url, ok := image["url"].(string)
+	if !ok {
+		return false
+	}
+	media, payload, ok := strings.Cut(url, ",")
+	if !ok || payload == "" || strings.ContainsAny(payload, "\r\n") {
+		return false
+	}
+	var signature []byte
+	switch media {
+	case "data:image/png;base64":
+		signature = []byte("\x89PNG\r\n\x1a\n")
+	case "data:image/jpeg;base64":
+		signature = []byte("\xff\xd8\xff")
+	default:
+		return false
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(payload)
+	return err == nil && bytes.HasPrefix(data, signature)
 }
 
 func prepareBoundedChatDispatch(r *http.Request) {

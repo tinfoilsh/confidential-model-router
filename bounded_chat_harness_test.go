@@ -56,7 +56,7 @@ func TestBoundedChatRejectsBeforeAdmission(t *testing.T) {
 		{name: "hop by hop cap", message: "Connection", change: func(r *http.Request) { r.Header.Add("Connection", "keep-alive, x-tinfoil-max-input-tokens") }},
 		{name: "search", body: `,"web_search_options":{}`, message: "server-side tools"},
 		{name: "file", body: `,"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"x.pdf","file_data":"eA=="}}]}]`, message: "text message content"},
-		{name: "image", body: `,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]`, message: "text message content"},
+		{name: "remote image", body: `,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]`, message: "text message content"},
 		{name: "audio output modality", body: `,"modalities":["text","audio"]`, message: "text output"},
 		{name: "audio output options", body: `,"audio":{"voice":"alloy","format":"wav"}`, message: "text output"},
 		{name: "best of", body: `,"best_of":1`, message: "best_of"},
