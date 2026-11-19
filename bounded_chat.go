@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/tinfoilsh/confidential-model-router/manager"
@@ -92,16 +94,44 @@ func validateBoundedChatBody(body map[string]any, hasRouterTools bool) *manager.
 	for field, value := range body {
 		var valid bool
 		switch field {
-		case "model", "messages", "modalities", "n", "max_completion_tokens", "user_cache_secret",
-			"stream", "temperature", "top_p", "stop", "seed", "presence_penalty", "frequency_penalty",
-			"logprobs", "top_logprobs", "logit_bias", "reasoning_effort", "parallel_tool_calls", "user":
+		case "messages", "modalities": // Validated separately below/above.
 			valid = true
+		case "model":
+			valid = boundedNonemptyString(value)
+		case "n", "max_completion_tokens": // Canonical int64 values written by the header handlers.
+			number, ok := value.(int64)
+			valid = ok && number > 0 && (field != "n" || number == 1)
+		case "user", "user_cache_secret":
+			_, valid = value.(string)
+			valid = valid || value == nil
+		case "stream", "logprobs", "parallel_tool_calls":
+			_, valid = value.(bool)
+		case "temperature":
+			valid = boundedNumber(value, 0, 2)
+		case "top_p":
+			valid = boundedNumber(value, 0, 1) && !boundedNumber(value, 0, 0)
+		case "presence_penalty", "frequency_penalty":
+			valid = boundedNumber(value, -2, 2)
+		case "seed":
+			_, valid = boundedInteger(value)
+		case "top_logprobs":
+			n, ok := boundedInteger(value)
+			valid = ok && n >= 0 && n <= 20 && (n == 0 || body["logprobs"] == true)
+		case "reasoning_effort":
+			switch value {
+			case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+				valid = true
+			}
+		case "stop":
+			valid = boundedStop(value)
+		case "logit_bias":
+			valid = boundedLogitBias(value)
 		case "tools":
 			valid = boundedFunctionTools(value)
 		case "tool_choice":
 			valid = boundedToolChoice(value)
 		case "stream_options":
-			valid = value == nil || boundedObject(value, "include_usage", "continuous_usage_stats")
+			valid = value == nil || (body["stream"] == true && boundedBoolObject(value, "include_usage", "continuous_usage_stats"))
 		case "response_format":
 			valid = boundedResponseFormat(value)
 		default:
@@ -121,6 +151,89 @@ func validateBoundedChatBody(body map[string]any, hasRouterTools bool) *manager.
 		}
 	}
 	return nil
+}
+
+// Requests are decoded with UseNumber. Preserve exact int64 values rather than
+// passing them through float64 or accepting strings and boolean coercions.
+func boundedInteger(value any) (int64, bool) {
+	n, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	result, err := n.Int64()
+	return result, err == nil
+}
+
+func boundedNumber(value any, minValue, maxValue float64) bool {
+	n, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	v, err := n.Float64()
+	return err == nil && v >= minValue && v <= maxValue
+}
+
+func boundedStop(value any) bool {
+	if value == nil || boundedNonemptyString(value) {
+		return true
+	}
+	list, ok := value.([]any)
+	if !ok || len(list) > 4 {
+		return false
+	}
+	for _, item := range list {
+		if !boundedNonemptyString(item) {
+			return false
+		}
+	}
+	return true
+}
+
+func boundedLogitBias(value any) bool {
+	if value == nil {
+		return true
+	}
+	bias, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for token, weight := range bias {
+		id, err := strconv.ParseInt(token, 10, 64)
+		if err != nil || id < 0 || !boundedNumber(weight, -100, 100) {
+			return false
+		}
+	}
+	return true
+}
+
+func boundedBoolObject(value any, fields ...string) bool {
+	if !boundedObject(value, fields...) {
+		return false
+	}
+	for _, v := range value.(map[string]any) {
+		if _, ok := v.(bool); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func boundedSchemaOptions(obj map[string]any, schemaKey string, required bool) bool {
+	if v, ok := obj["description"]; ok && v != nil {
+		if _, ok := v.(string); !ok {
+			return false
+		}
+	}
+	if v, ok := obj["strict"]; ok && v != nil {
+		if _, ok := v.(bool); !ok {
+			return false
+		}
+	}
+	if !required && obj[schemaKey] == nil {
+		return true
+	}
+	_, ok := obj[schemaKey].(map[string]any)
+	return ok
 }
 
 func boundedObject(value any, fields ...string) bool {
@@ -157,7 +270,7 @@ func boundedFunctionTools(value any) bool {
 		tool, _ := raw.(map[string]any)
 		fn, _ := tool["function"].(map[string]any)
 		if !boundedObject(raw, "type", "function") || tool["type"] != "function" ||
-			!boundedObject(tool["function"], "name", "description", "parameters", "strict") || !boundedNonemptyString(fn["name"]) {
+			!boundedObject(tool["function"], "name", "description", "parameters", "strict") || !boundedNonemptyString(fn["name"]) || !boundedSchemaOptions(fn, "parameters", false) {
 			return false
 		}
 	}
@@ -184,8 +297,10 @@ func boundedResponseFormat(value any) bool {
 	case "text", "json_object":
 		return boundedObject(value, "type")
 	case "json_schema":
+		schema, _ := format["json_schema"].(map[string]any)
 		return boundedObject(value, "type", "json_schema") &&
-			boundedObject(format["json_schema"], "name", "description", "schema", "strict")
+			boundedObject(schema, "name", "description", "schema", "strict") &&
+			boundedNonemptyString(schema["name"]) && boundedSchemaOptions(schema, "schema", true)
 	default:
 		return false
 	}

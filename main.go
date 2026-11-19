@@ -907,6 +907,7 @@ func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextCli
 					}
 					primary, spill, _ := model.ReservationPools(caller)
 					if !model.HasServingMatch(primary, spill, boundedBackendMatch) {
+						manager.ModelUnavailableTotal.WithLabelValues(modelName).Inc()
 						w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
 						writeError(w, manager.ErrModelUnavailable.WithMessage("No backend for model '%s' currently supports single-call input limits.", modelName))
 						return

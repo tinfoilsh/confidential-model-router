@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
@@ -185,8 +186,16 @@ func TestBoundedChatDoesNotReplay502(t *testing.T) {
 }
 
 func TestBoundedChatRoutesOnlyToCapableBackend(t *testing.T) {
-	for _, capable := range []bool{false, true} {
-		t.Run(fmt.Sprintf("capable=%t", capable), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		atGate, atSelection bool
+		wantAdmissions      int64
+	}{
+		{name: "no capable replica"},
+		{name: "capability lost after gate", atGate: true, wantAdmissions: 1},
+		{name: "mixed fleet", atGate: true, atSelection: true, wantAdmissions: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var admissions, unsupported, supported atomic.Int64
 			em, h := newAdmissionHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				admissions.Add(1)
@@ -199,17 +208,27 @@ func TestBoundedChatRoutesOnlyToCapableBackend(t *testing.T) {
 				supported.Add(1)
 				io.WriteString(w, `{}`)
 			}))
+			matches := 0
 			handler := newRouterHandlerWithBoundedChat(em, h.client, func(name string, selected *manager.Enclave) bool {
-				return capable && name == admissionTestModel && selected.String() == host
+				if name != admissionTestModel || selected.String() != host {
+					return false
+				}
+				matches++
+				if matches == 1 {
+					return tc.atGate
+				}
+				return tc.atSelection
 			})
+			unavailable := manager.ModelUnavailableTotal.WithLabelValues(admissionTestModel)
+			before := testutil.ToFloat64(unavailable)
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, boundedRequest("/v1/chat/completions", boundedBody))
 			h.client.refreshes.Wait()
-			if capable {
+			if tc.atSelection {
 				if w.Code != http.StatusOK || admissions.Load() != 1 || supported.Load() != 1 || unsupported.Load() != 0 {
 					t.Fatalf("HTTP %d, admissions %d, capable dispatches %d, unsupported dispatches %d", w.Code, admissions.Load(), supported.Load(), unsupported.Load())
 				}
-			} else if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" || admissions.Load() != 0 || supported.Load() != 0 || unsupported.Load() != 0 {
+			} else if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" || admissions.Load() != tc.wantAdmissions || supported.Load() != 0 || unsupported.Load() != 0 || testutil.ToFloat64(unavailable)-before != 1 {
 				t.Fatalf("HTTP %d, headers %v, admissions %d, dispatches %d/%d", w.Code, w.Header(), admissions.Load(), supported.Load(), unsupported.Load())
 			}
 		})
