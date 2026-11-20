@@ -56,5 +56,7 @@ Expired attestations are excluded; circuit-breaker recovery probes and the
 all-breakers-open fallback retain their load-guard bypass.
 
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.
+`router_reserved_enclave{model,enclave}` lists reserved hosts, so engine
+metrics, which carry only the host, can be split from public traffic.
 Backend overload gauges describe the host's own policy, not every caller's tier.
 Policies reload without a restart.
