@@ -244,6 +244,16 @@ var (
 		[]string{"model"},
 	)
 
+	// ReservedEnclave names each reserved host so engine-side series, which
+	// carry only the host, can be split into reserved and public traffic.
+	ReservedEnclave = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_reserved_enclave",
+			Help: "Constant 1 for each configured reserved enclave of a model",
+		},
+		[]string{"model", "enclave"},
+	)
+
 	// CacheSaltInjectionsTotal tracks requests injected with a derived cache_salt
 	CacheSaltInjectionsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

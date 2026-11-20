@@ -2,6 +2,7 @@ package manager
 
 import (
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -325,10 +326,48 @@ func TestApplyReservationsPublishesPoolSize(t *testing.T) {
 	if got := gaugeState(t, ReservedPoolSize.WithLabelValues(model)); got != 2 {
 		t.Errorf("reserved pool size = %v, want 2 (unknown host must not count)", got)
 	}
+	if got := reservedEnclaves(t, model); !slices.Equal(got, []string{"b", "c"}) {
+		t.Errorf("reserved enclaves = %v, want [b c]", got)
+	}
+	m.applyReservations(model,
+		[]config.ReservationConfig{{OrgIDs: []string{"org-reserved"}, Enclaves: []string{"a", "c"}}},
+		[]string{"a", "b", "c"},
+	)
+	if got := reservedEnclaves(t, model); !slices.Equal(got, []string{"a", "c"}) {
+		t.Errorf("moved reserved enclaves = %v, want [a c]", got)
+	}
 	m.applyReservations(model, nil, nil)
 	if got := gaugeState(t, ReservedPoolSize.WithLabelValues(model)); got != 0 {
 		t.Errorf("cleared pool size = %v, want 0", got)
 	}
+	if got := reservedEnclaves(t, model); len(got) != 0 {
+		t.Errorf("cleared reserved enclaves = %v, want none", got)
+	}
+}
+
+func reservedEnclaves(t *testing.T, model string) []string {
+	t.Helper()
+	ch := make(chan prometheus.Metric)
+	go func() {
+		ReservedEnclave.Collect(ch)
+		close(ch)
+	}()
+	var hosts []string
+	for metric := range ch {
+		pb := &dto.Metric{}
+		if err := metric.Write(pb); err != nil {
+			t.Fatal(err)
+		}
+		labels := map[string]string{}
+		for _, l := range pb.GetLabel() {
+			labels[l.GetName()] = l.GetValue()
+		}
+		if labels["model"] == model {
+			hosts = append(hosts, labels["enclave"])
+		}
+	}
+	slices.Sort(hosts)
+	return hosts
 }
 
 func TestUserReservationPools(t *testing.T) {
