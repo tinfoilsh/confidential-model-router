@@ -123,15 +123,15 @@ func (m *Model) applyReservations(name string, reservations []config.Reservation
 		}
 	}
 	ReservedPoolSize.WithLabelValues(name).Set(float64(len(reserved)))
-	// Delete only hosts that left the pool: a scrape between a blanket delete
-	// and the re-add would briefly count reserved hosts as public.
+	// Add before deleting, and delete only hosts that left the pool, so a
+	// scrape mid-reload may over-list reserved hosts but never miss one.
+	for host := range reserved {
+		ReservedEnclave.WithLabelValues(name, host).Set(1)
+	}
 	for host := range m.reservationOverloads {
 		if !reserved[host] {
 			ReservedEnclave.DeleteLabelValues(name, host)
 		}
-	}
-	for host := range reserved {
-		ReservedEnclave.WithLabelValues(name, host).Set(1)
 	}
 	m.reservationOverloads = overloads
 	m.policiesByCaller = policies
