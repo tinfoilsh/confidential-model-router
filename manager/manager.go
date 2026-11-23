@@ -42,6 +42,7 @@ type Model struct {
 	Repo              string                   `json:"repo"`
 	Project           string                   `json:"project,omitempty"`
 	Tag               string                   `json:"tag"`
+	Revision          string                   `json:"revision,omitempty"`
 	SourceMeasurement measurement.Expected     `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
@@ -281,7 +282,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		ctx, cancel := context.WithTimeout(context.Background(), enclaveVerifyTimeout)
 		defer cancel()
 		// The pinned workload and signed collateral freshness define accepted releases.
-		// Model tag and measurement fields below report verified state; they are not trust anchors.
+		// Model tag, revision and measurement fields below report verified state; they are not trust anchors.
 		if enclave == nil {
 			if client, err = em.connect(ctx, host, tinfoil.Pin{Repo: model.Repo, Project: model.Project}); err == nil {
 				verified = client.current()
@@ -302,6 +303,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	}
 
 	model.Tag = verified.codeTag
+	model.Revision = verified.configRevision
 	model.SourceMeasurement = verified.codeMeasurement
 
 	if enclave == nil {

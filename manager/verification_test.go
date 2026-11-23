@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/tinfoil-go"
+	"github.com/tinfoilsh/tinfoil-go/verify"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 	"gopkg.in/yaml.v2"
 
@@ -112,6 +113,16 @@ func TestAttestationRefreshSchedule(t *testing.T) {
 		if due := verified.refreshDue(now, renewalTestRefresh); due != tc.due {
 			t.Errorf("%s: refresh due = %v, want %v", tc.name, due, tc.due)
 		}
+	}
+}
+
+func TestConfigRevisionComesFromTheVerifiedConfig(t *testing.T) {
+	const revision = "v3"
+	if got := revisionOf(verify.ConfigVerification{Name: "/" + renewalTestProject + "/" + revision}); got != revision {
+		t.Errorf("config revision = %q, want %q", got, revision)
+	}
+	if got := attestationOf(&verify.Verification{}).configRevision; got != "" {
+		t.Errorf("a verification without a config has revision %q", got)
 	}
 }
 

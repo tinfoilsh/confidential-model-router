@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/tinfoil-go"
+	configendorsement "github.com/tinfoilsh/tinfoil-go/endorsement/config"
 	"github.com/tinfoilsh/tinfoil-go/verify"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 )
@@ -35,6 +36,7 @@ type attestation struct {
 	verifiedAt      time.Time
 	expiresAt       time.Time
 	codeTag         string
+	configRevision  string
 	codeMeasurement measurement.Expected
 	predicate       string
 	tlsKeyFP        string
@@ -84,6 +86,7 @@ const (
 func attestationOf(v *verify.Verification) attestation {
 	tlsKeyFP, _ := v.TLSPublicKeyFP()
 	hpkeKey, _ := v.HPKEPublicKey()
+	registryConfig, _ := v.Config()
 	var predicate string
 	switch v.EnclaveMeasurement().(type) {
 	case measurement.SEVSNP:
@@ -95,11 +98,23 @@ func attestationOf(v *verify.Verification) attestation {
 		verifiedAt:      v.Metadata().VerifiedAt,
 		expiresAt:       v.FreshnessExpiresAt(),
 		codeTag:         v.CodeTag(),
+		configRevision:  revisionOf(registryConfig),
 		codeMeasurement: v.CodeMeasurement(),
 		predicate:       predicate,
 		tlsKeyFP:        tlsKeyFP,
 		hpkeKey:         hpkeKey,
 	}
+}
+
+// revisionOf returns the revision in the name of the registry config an
+// enclave was verified against. It is empty for an enclave verified against a
+// code release, which has no config.
+func revisionOf(registryConfig verify.ConfigVerification) string {
+	_, revision, err := configendorsement.ParseName(registryConfig.Name)
+	if err != nil {
+		return ""
+	}
+	return revision
 }
 
 // verified returns the verification the enclave's requests are sent under,
