@@ -458,3 +458,11 @@ func TestNewEnclaveManagerRejectsHTTPControlPlane(t *testing.T) {
 		t.Fatalf("constructor error = %v, want HTTPS validation error", err)
 	}
 }
+
+func TestNewEnclaveManagerRequiresATrustAnchorForEveryModel(t *testing.T) {
+	const unanchored = "models:\n  embedding: {repo: org/repo}\n  gpt-oss-120b: {enclaves: [a.example]}\n"
+	_, err := NewEnclaveManager([]byte(unanchored), "https://controlplane.example", "reporter", "reporting-secret", "context-secret", "", "", time.Minute, false)
+	if err == nil || !strings.Contains(err.Error(), `model "gpt-oss-120b": repo or project is required`) {
+		t.Fatalf("constructor error = %v, want the model without a trust anchor", err)
+	}
+}

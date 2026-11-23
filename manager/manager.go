@@ -616,6 +616,9 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 	if err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidateTrustAnchors(); err != nil {
+		return nil, err
+	}
 
 	em := &EnclaveManager{
 		models:               &sync.Map{},
