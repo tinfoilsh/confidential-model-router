@@ -10,13 +10,17 @@ import (
 
 func TestLoadContextCancelsStalledResponseBody(t *testing.T) {
 	started := make(chan struct{})
+	release := make(chan struct{})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 		close(started)
-		<-r.Context().Done()
+		// Keep the body stalled even after the server sees cancellation.
+		// Ending the body here races the client read and can return clean EOF.
+		<-release
 	}))
 	defer server.Close()
+	defer close(release)
 	original := http.DefaultClient
 	http.DefaultClient = server.Client()
 	t.Cleanup(func() { http.DefaultClient = original })

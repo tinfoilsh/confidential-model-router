@@ -517,6 +517,11 @@ func main() {
 }
 
 func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient) http.Handler {
+	// Fail closed until an enforcing backend is wired into the router.
+	return newRouterHandlerWithBoundedChat(em, routeContextClient, nil)
+}
+
+func newRouterHandlerWithBoundedChat(em *manager.EnclaveManager, routeContextClient *routeContextClient, supportsBoundedChat boundedChatBackend) http.Handler {
 	// Measures what cache-aware replica selection would do, without
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
@@ -534,9 +539,16 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
+		boundedChat, apiErr := parseBoundedChat(r)
+		if apiErr != nil {
+			writeError(w, apiErr)
+			return
+		}
+
 		var modelName string
 		var err error
 		var speechBody map[string]any
+		var boundedBackendMatch func(*manager.Enclave) bool
 
 		// Set when the request is eligible for cache-route shadow
 		// observation.
@@ -833,6 +845,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// healthy model and reasoning effort for it before any
 				// downstream logic (tool detection, rate limiting, serving)
 				// runs.
+				if boundedChat != nil && modelName == "auto" {
+					writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call mode requires an explicit model."))
+					return
+				}
 				if modelName == "auto" {
 					resolved, resolveErr := resolveAuto(r.URL.Path, body)
 					if resolveErr != nil {
@@ -848,26 +864,61 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// profiles means no router-owned tools, so the
 				// request falls through to the plain proxy path.
 				activeProfiles := toolruntime.DetectProfiles(r.URL.Path, routerOpts, body)
-
+				// max_input_tokens is private to the model backend. Do not
+				// let a body-only value opt ordinary chat into input limiting.
+				if r.URL.Path == "/v1/chat/completions" {
+					delete(body, maxInputTokensField)
+				}
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
 				delete(body, "priority")
+
+				if boundedChat != nil {
+					if apiErr := validateBoundedChatBody(body, len(activeProfiles) != 0); apiErr != nil {
+						writeError(w, apiErr)
+						return
+					}
+					if supportsBoundedChat == nil {
+						writeError(w, manager.ErrInvalidRequest.WithParam("model").WithMessage("Single-call input limits are not supported on this model."))
+						return
+					}
+					body[maxInputTokensField] = boundedChat.input
+				}
 
 				// Admit before any internal dispatch (file conversion, tool
 				// loop) so they all reuse this request's context and
 				// reservation pools. Unknown models must 404 without being
 				// counted against anyone's quota.
-				if _, found := em.GetModel(modelName); !found {
+				if model, found := em.GetModel(modelName); !found {
 					em.ReportUnknownModel(apiKey, modelName)
 					writeError(w, manager.ErrModelNotFound.WithMessage(manager.ErrMsgModelNotFound, modelName))
 					return
+				} else if boundedChat != nil {
+					boundedBackendMatch = func(enclave *manager.Enclave) bool {
+						return supportsBoundedChat(modelName, enclave)
+					}
+					var caller manager.Caller
+					if model.HasReservations() {
+						caller, err = resolveCaller(modelName)
+						if err != nil {
+							writeError(w, asAPIError(err))
+							return
+						}
+					}
+					primary, spill, _ := model.ReservationPools(caller)
+					if !model.HasServingMatch(primary, spill, boundedBackendMatch) {
+						manager.ModelUnavailableTotal.WithLabelValues(modelName).Inc()
+						w.Header().Set("Retry-After", strconv.Itoa(modelUnavailableRetryAfterSeconds))
+						writeError(w, manager.ErrModelUnavailable.WithMessage("No backend for model '%s' currently supports single-call input limits.", modelName))
+						return
+					}
 				}
 				if !admit() {
 					return
 				}
 				admission.applyPriority(body, r.URL.Path, modelName)
 
-				if r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions" {
+				if boundedChat == nil && (r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/chat/completions") {
 					switch r.URL.Path {
 					case "/v1/responses":
 						_, err = rewriteResponsesBase64Files(r.Context(), body, em, r.Header.Get("Authorization"), modelName)
@@ -1015,7 +1066,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 		}
 
-		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServing(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
+		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServingMatching(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy, boundedBackendMatch)
 		if hasConfiguredPriority && overloaded {
 			manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
 			overloaded = false
@@ -1108,6 +1159,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 		var lw *latencyWriter
 		serve := func(w http.ResponseWriter) {
+			if boundedChat != nil {
+				prepareBoundedChatDispatch(r)
+				enclave.ServeHTTP(w, r)
+				return
+			}
 			enclave.ServeHTTPWithFailover(w, r, func(replay *http.Request) *manager.Enclave {
 				next := model.SelectRetry(enclave.String(), cacheRouteOrder, poolPrimary, poolSpill, overloadPolicy)
 				if next == nil {
