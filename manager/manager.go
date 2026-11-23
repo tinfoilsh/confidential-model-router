@@ -707,6 +707,13 @@ func (em *EnclaveManager) sync() error {
 				log.Errorf("repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
 				return true
 			}
+			// The project is pinned by the router release, like the repo. A
+			// runtime config may leave it out, but one that names a project
+			// the router does not pin is not applied.
+			if configModel.Project != "" && model.Project != configModel.Project {
+				log.Errorf("project changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Project, configModel.Project)
+				return true
+			}
 			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()
 			model.setConfiguredHosts(configModel.Hostnames)

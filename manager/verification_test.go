@@ -13,6 +13,7 @@ import (
 
 	"github.com/tinfoilsh/tinfoil-go"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
+	"gopkg.in/yaml.v2"
 
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
@@ -339,6 +340,60 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 			}
 			if len(model.Enclaves) != 1 || model.Enclaves[renewalTestHost] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[renewalTestHost].failures != 1 {
 				t.Fatal("renewal changed serving state or lost failure history")
+			}
+		})
+	}
+}
+
+// A model's project comes from the config the router starts from. A runtime
+// config may leave the project out, and one that names another is not applied.
+func TestRuntimeConfigCannotChangeTheProject(t *testing.T) {
+	const (
+		configMode = 0o600
+		addedHost  = "added.example"
+	)
+	for _, tc := range []struct {
+		name, pinned, runtime string
+		applied               bool
+	}{
+		{"pinned and left out", renewalTestProject, "", true},
+		{"pinned and repeated", renewalTestProject, renewalTestProject, true},
+		{"pinned and changed", renewalTestProject, "tinfoil-inference/untrusted", false},
+		{"named without a pin", "", renewalTestProject, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			verified := *testAttestation(now.Add(2*attestationRenewalWindow), now, "v1.0.0")
+			em, model, _ := renewalManager(t, &stubClient{verified: verified})
+			model.Project = tc.pinned
+			var pins []tinfoil.Pin
+			em.connect = func(_ context.Context, _ string, pin tinfoil.Pin) (enclaveClient, error) {
+				pins = append(pins, pin)
+				return &stubClient{verified: verified}, nil
+			}
+			t.Cleanup(func() { model.Enclaves[addedHost].shutdown() })
+			data, err := yaml.Marshal(config.Config{Models: map[string]config.Model{renewalTestModel: {
+				Repo: renewalTestRepo, Project: tc.runtime, Hostnames: []string{renewalTestHost, addedHost},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			em.updateConfigURL = t.TempDir() + "/config.yaml"
+			if err := os.WriteFile(em.updateConfigURL, data, configMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := em.sync(); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.applied {
+				if len(pins) != 0 || len(model.configuredHosts) != 1 || len(model.Enclaves) != 1 {
+					t.Fatalf("a runtime config naming another project was applied: verified against %+v", pins)
+				}
+				return
+			}
+			want := tinfoil.Pin{Repo: renewalTestRepo, Project: tc.pinned}
+			if len(pins) != 1 || pins[0] != want || model.Enclaves[addedHost] == nil {
+				t.Fatalf("added host verified against %+v, want %+v", pins, want)
 			}
 		})
 	}
