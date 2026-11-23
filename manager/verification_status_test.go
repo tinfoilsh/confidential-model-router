@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tinfoilsh/tinfoil-go"
 
 	"github.com/tinfoilsh/confidential-model-router/config"
 )
@@ -121,6 +123,75 @@ func TestVerificationStatusLifecycle(t *testing.T) {
 			t.Fatal("removed hosts remained visible or returned through an in-flight attempt")
 		}
 	})
+}
+
+// A model reports its project, and the tag and config revision of its latest
+// verification. Each enclave reports its own, and one launched from a
+// repository has no config revision. A model pinned to a repository alone
+// reports no project or revision at all.
+func TestStatusReportsRegistryProjectAndRevision(t *testing.T) {
+	const (
+		registryHost   = "registry.example"
+		repositoryHost = "repository.example"
+		runtimeTag     = "v0.14.19"
+		codeTag        = "v1.0.0"
+		revision       = "v3"
+	)
+	now := time.Now()
+	fromRegistry := *testAttestation(now.Add(2*attestationRenewalWindow), now, runtimeTag)
+	fromRegistry.configRevision = revision
+	fromRepository := *testAttestation(now.Add(2*attestationRenewalWindow), now, codeTag)
+	verifications := map[string]attestation{registryHost: fromRegistry, repositoryHost: fromRepository}
+	report := func(t *testing.T, anchors config.Model, hosts ...string) (modelVerificationStatus, string) {
+		t.Helper()
+		em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(_ context.Context, host string, _ tinfoil.Pin) (enclaveClient, error) {
+			return &stubClient{verified: verifications[host]}, nil
+		}}
+		anchors.Hostnames = hosts
+		em.addModel(renewalTestModel, anchors)
+		model, _ := em.GetModel(renewalTestModel)
+		for _, host := range hosts {
+			if err := em.addEnclave(renewalTestModel, host); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(model.Enclaves[host].shutdown)
+		}
+		return readVerificationStatus(t, model)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		hosts  []string
+		latest attestation
+	}{
+		{"registry enclave verified last", []string{repositoryHost, registryHost}, fromRegistry},
+		{"repository enclave verified last", []string{registryHost, repositoryHost}, fromRepository},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, data := report(t, config.Model{Repo: renewalTestRepo, Project: renewalTestProject}, tc.hosts...)
+			var model struct{ Repo, Project, Tag, Revision string }
+			if err := json.Unmarshal([]byte(data), &model); err != nil {
+				t.Fatal(err)
+			}
+			if model.Repo != renewalTestRepo || model.Project != renewalTestProject || model.Tag != tc.latest.codeTag || model.Revision != tc.latest.configRevision {
+				t.Fatalf("model reported as %+v, want the latest verification %+v", model, tc.latest)
+			}
+			registry, repository := status.Hosts[registryHost], status.Hosts[repositoryHost]
+			if registry.CodeTag != runtimeTag || registry.ConfigRevision != revision || repository.CodeTag != codeTag || repository.ConfigRevision != "" {
+				t.Fatalf("enclaves reported as %+v and %+v", registry, repository)
+			}
+			if !strings.Contains(data, fmt.Sprintf(`"project":%q`, renewalTestProject)) || !strings.Contains(data, fmt.Sprintf(`"config_revision":%q`, revision)) {
+				t.Fatalf("status lacks the project or config revision: %s", data)
+			}
+		})
+	}
+
+	_, data := report(t, config.Model{Repo: renewalTestRepo}, repositoryHost)
+	for _, field := range []string{`"project"`, `"revision"`, `"config_revision"`} {
+		if strings.Contains(data, field) {
+			t.Fatalf("status of a model pinned to a repository alone gained %s: %s", field, data)
+		}
+	}
 }
 
 func TestVerificationStatusConcurrentRefresh(t *testing.T) {

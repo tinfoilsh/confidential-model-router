@@ -14,6 +14,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/tinfoilsh/tinfoil-go"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
@@ -39,7 +40,9 @@ type Enclave struct {
 
 type Model struct {
 	Repo              string                   `json:"repo"`
+	Project           string                   `json:"project,omitempty"`
 	Tag               string                   `json:"tag"`
+	Revision          string                   `json:"revision,omitempty"`
 	SourceMeasurement measurement.Expected     `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
@@ -193,7 +196,7 @@ type EnclaveManager struct {
 	initConfigURL        string
 	updateConfigURL      string
 	controlPlaneURL      string
-	connect              func(ctx context.Context, host, repo string) (enclaveClient, error)
+	connect              func(ctx context.Context, host string, pin tinfoil.Pin) (enclaveClient, error)
 	billingCollector     *billing.Collector
 	unknownModelReporter *billing.UnknownModelReporter
 	usageContextSecret   string
@@ -279,9 +282,9 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		ctx, cancel := context.WithTimeout(context.Background(), enclaveVerifyTimeout)
 		defer cancel()
 		// The pinned workload and signed collateral freshness define accepted releases.
-		// Model tag and measurement fields below report verified state; they are not trust anchors.
+		// Model tag, revision and measurement fields below report verified state; they are not trust anchors.
 		if enclave == nil {
-			if client, err = em.connect(ctx, host, model.Repo); err == nil {
+			if client, err = em.connect(ctx, host, tinfoil.Pin{Repo: model.Repo, Project: model.Project}); err == nil {
 				verified = client.current()
 			}
 		} else {
@@ -300,6 +303,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 	}
 
 	model.Tag = verified.codeTag
+	model.Revision = verified.configRevision
 	model.SourceMeasurement = verified.codeMeasurement
 
 	if enclave == nil {
@@ -595,7 +599,7 @@ func validateControlPlaneURL(controlPlaneURL string, debug bool) error {
 	return nil
 }
 
-// NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
+// NewEnclaveManager loads model repos and projects from the local config file (not remote) into the enclave manager
 func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration, debug bool) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
@@ -612,6 +616,9 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		cfg, err = config.FromBytes(configFile)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateTrustAnchors(); err != nil {
 		return nil, err
 	}
 
@@ -641,6 +648,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	model := &Model{
 		Repo:              modelConfig.Repo,
+		Project:           modelConfig.Project,
 		Tag:               "",
 		SourceMeasurement: nil,
 		Enclaves:          make(map[string]*Enclave),
@@ -699,6 +707,13 @@ func (em *EnclaveManager) sync() error {
 			// If the repo has changed, display a warning.
 			if model.Repo != configModel.Repo {
 				log.Errorf("repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
+				return true
+			}
+			// The project is pinned by the router release, like the repo. A
+			// runtime config may leave it out, but one that names a project
+			// the router does not pin is not applied.
+			if configModel.Project != "" && model.Project != configModel.Project {
+				log.Errorf("project changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Project, configModel.Project)
 				return true
 			}
 			log.Tracef("Updating config for model %s", modelName)

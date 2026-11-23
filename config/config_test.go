@@ -84,6 +84,62 @@ models:
 	}
 }
 
+func TestModelTrustAnchors(t *testing.T) {
+	const repo, project = "org/repo", "org/project"
+	for _, tc := range []struct {
+		name, anchors string
+		repo, project string
+		valid         bool
+	}{
+		{name: "repository only", anchors: "    repo: org/repo\n", repo: repo, valid: true},
+		{name: "project only", anchors: "    project: org/project\n", project: project, valid: true},
+		{name: "both", anchors: "    repo: org/repo\n    project: org/project\n", repo: repo, project: project, valid: true},
+		{name: "neither"},
+		{name: "both empty", anchors: "    repo: \"\"\n    project: \"\"\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte("models:\n  gpt-oss-120b:\n" + tc.anchors + "    enclaves: [a.example]\n")
+			for round := range 2 {
+				cfg, err := FromBytes(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if m := cfg.Models["gpt-oss-120b"]; m.Repo != tc.repo || m.Project != tc.project {
+					t.Fatalf("round %d: anchors = (%q, %q), want (%q, %q)", round, m.Repo, m.Project, tc.repo, tc.project)
+				}
+				if err := cfg.ValidateTrustAnchors(); (err == nil) != tc.valid {
+					t.Fatalf("round %d: validation error = %v, want valid = %v", round, err, tc.valid)
+				}
+				data, err = yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.project == "" && strings.Contains(string(data), "project") {
+					t.Fatalf("round %d: a model without a project was written with one: %s", round, data)
+				}
+			}
+		})
+	}
+}
+
+func TestTrustAnchorValidationCoversEveryModel(t *testing.T) {
+	const shared = "models:\n  decision-small: {project: org/decision}\n  decision-large: {project: org/decision}\n  embedding: {repo: org/repo}\n"
+	cfg, err := FromBytes([]byte(shared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateTrustAnchors(); err != nil {
+		t.Fatalf("models sharing a project rejected: %v", err)
+	}
+	cfg, err = FromBytes([]byte(shared + "  gpt-oss-120b: {enclaves: [a.example]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateTrustAnchors(); err == nil || !strings.Contains(err.Error(), `"gpt-oss-120b"`) {
+		t.Fatalf("validation error = %v, want the model without a trust anchor", err)
+	}
+}
+
 func TestOverloadConfigMarks(t *testing.T) {
 	tests := []struct {
 		name      string

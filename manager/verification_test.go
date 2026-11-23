@@ -11,12 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/tinfoil-go"
+	"github.com/tinfoilsh/tinfoil-go/verify"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
+	"gopkg.in/yaml.v2"
+
+	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
 const (
 	renewalTestModel   = "gpt-oss-120b"
 	renewalTestRepo    = "tinfoilsh/confidential-gpt-oss-120b"
+	renewalTestProject = "tinfoil-inference/gpt-oss-120b"
 	renewalTestHost    = "backend.example"
 	renewalTestTimeout = 5 * time.Second
 	renewalTestRefresh = time.Minute
@@ -73,7 +79,7 @@ func renewalManager(t *testing.T, client *stubClient) (*EnclaveManager, *Model, 
 		expectedHosts:   1,
 		configuredHosts: map[string]verificationAttempt{renewalTestHost: {}},
 	}
-	em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(context.Context, string, string) (enclaveClient, error) {
+	em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(context.Context, string, tinfoil.Pin) (enclaveClient, error) {
 		t.Error("a host that is already served was connected again")
 		return nil, errors.New("unexpected connection")
 	}}
@@ -110,15 +116,25 @@ func TestAttestationRefreshSchedule(t *testing.T) {
 	}
 }
 
+func TestConfigRevisionComesFromTheVerifiedConfig(t *testing.T) {
+	const revision = "v3"
+	if got := revisionOf(verify.ConfigVerification{Name: "/" + renewalTestProject + "/" + revision}); got != revision {
+		t.Errorf("config revision = %q, want %q", got, revision)
+	}
+	if got := attestationOf(&verify.Verification{}).configRevision; got != "" {
+		t.Errorf("a verification without a config has revision %q", got)
+	}
+}
+
 func TestAddEnclaveConnectsAHostOnce(t *testing.T) {
 	now := time.Now()
 	launch, _ := measurement.ParseExpectedSEVSNP(strings.Repeat("ab", measurement.RegisterSize))
 	client := &stubClient{verified: attestation{expiresAt: now.Add(2 * attestationRenewalWindow), verifiedAt: now, codeTag: "v1.0.0", codeMeasurement: launch, tlsKeyFP: "tls-key"}}
 	connections := 0
 	model := &Model{Repo: renewalTestRepo, Enclaves: map[string]*Enclave{}, configuredHosts: map[string]verificationAttempt{renewalTestHost: {}}}
-	em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(_ context.Context, host, repo string) (enclaveClient, error) {
-		if host != renewalTestHost || repo != renewalTestRepo {
-			t.Errorf("incorrect verification target: host=%q repo=%q", host, repo)
+	em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(_ context.Context, host string, pin tinfoil.Pin) (enclaveClient, error) {
+		if host != renewalTestHost || pin != (tinfoil.Pin{Repo: renewalTestRepo}) {
+			t.Errorf("incorrect verification target: host=%q pin=%+v", host, pin)
 		}
 		connections++
 		return client, nil
@@ -140,13 +156,50 @@ func TestAddEnclaveConnectsAHostOnce(t *testing.T) {
 	}
 }
 
+// The pin carries the model's trust anchors as configured: an anchor that is
+// not set stays empty, and a version pin reaches the verifier unchanged.
+func TestEnclavesAreVerifiedAgainstTheConfiguredTrustAnchors(t *testing.T) {
+	const pinnedProject = renewalTestProject + "@v3"
+	for _, tc := range []struct {
+		name, anchors string
+		want          tinfoil.Pin
+	}{
+		{"repository only", "repo: " + renewalTestRepo, tinfoil.Pin{Repo: renewalTestRepo}},
+		{"project only", "project: " + renewalTestProject, tinfoil.Pin{Project: renewalTestProject}},
+		{"both", "repo: " + renewalTestRepo + "\n    project: " + renewalTestProject, tinfoil.Pin{Repo: renewalTestRepo, Project: renewalTestProject}},
+		{"project revision", "project: " + pinnedProject, tinfoil.Pin{Project: pinnedProject}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.FromBytes([]byte(fmt.Sprintf("models:\n  %s:\n    %s\n    enclaves: [%s]\n", renewalTestModel, tc.anchors, renewalTestHost)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			var pins []tinfoil.Pin
+			em := &EnclaveManager{models: &sync.Map{}, refreshInterval: renewalTestRefresh, connect: func(_ context.Context, _ string, pin tinfoil.Pin) (enclaveClient, error) {
+				pins = append(pins, pin)
+				return &stubClient{verified: *testAttestation(now.Add(2*attestationRenewalWindow), now, "v1.0.0")}, nil
+			}}
+			em.addModel(renewalTestModel, cfg.Models[renewalTestModel])
+			if err := em.addEnclave(renewalTestModel, renewalTestHost); err != nil {
+				t.Fatal(err)
+			}
+			model, _ := em.GetModel(renewalTestModel)
+			t.Cleanup(model.Enclaves[renewalTestHost].shutdown)
+			if len(pins) != 1 || pins[0] != tc.want {
+				t.Fatalf("verified against %+v, want %+v", pins, tc.want)
+			}
+		})
+	}
+}
+
 // While addEnclave is blocked on an unresponsive host, the model lock must
 // remain available to request routing.
 func TestAddEnclaveNetworkIODoesNotHoldModelLock(t *testing.T) {
 	started, blocked := make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(blocked) })
 	model := &Model{Repo: renewalTestRepo, Enclaves: map[string]*Enclave{}, configuredHosts: map[string]verificationAttempt{renewalTestHost: {}}}
-	em := &EnclaveManager{models: &sync.Map{}, connect: func(context.Context, string, string) (enclaveClient, error) {
+	em := &EnclaveManager{models: &sync.Map{}, connect: func(context.Context, string, tinfoil.Pin) (enclaveClient, error) {
 		close(started)
 		<-blocked
 		return nil, errors.New("attestation unavailable")
@@ -298,6 +351,60 @@ func TestAttestationRenewalUsesAcceptedConfiguration(t *testing.T) {
 			}
 			if len(model.Enclaves) != 1 || model.Enclaves[renewalTestHost] != existing || len(model.configuredHosts) != 1 || model.configuredHosts[renewalTestHost].failures != 1 {
 				t.Fatal("renewal changed serving state or lost failure history")
+			}
+		})
+	}
+}
+
+// A model's project comes from the config the router starts from. A runtime
+// config may leave the project out, and one that names another is not applied.
+func TestRuntimeConfigCannotChangeTheProject(t *testing.T) {
+	const (
+		configMode = 0o600
+		addedHost  = "added.example"
+	)
+	for _, tc := range []struct {
+		name, pinned, runtime string
+		applied               bool
+	}{
+		{"pinned and left out", renewalTestProject, "", true},
+		{"pinned and repeated", renewalTestProject, renewalTestProject, true},
+		{"pinned and changed", renewalTestProject, "tinfoil-inference/untrusted", false},
+		{"named without a pin", "", renewalTestProject, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			verified := *testAttestation(now.Add(2*attestationRenewalWindow), now, "v1.0.0")
+			em, model, _ := renewalManager(t, &stubClient{verified: verified})
+			model.Project = tc.pinned
+			var pins []tinfoil.Pin
+			em.connect = func(_ context.Context, _ string, pin tinfoil.Pin) (enclaveClient, error) {
+				pins = append(pins, pin)
+				return &stubClient{verified: verified}, nil
+			}
+			t.Cleanup(func() { model.Enclaves[addedHost].shutdown() })
+			data, err := yaml.Marshal(config.Config{Models: map[string]config.Model{renewalTestModel: {
+				Repo: renewalTestRepo, Project: tc.runtime, Hostnames: []string{renewalTestHost, addedHost},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			em.updateConfigURL = t.TempDir() + "/config.yaml"
+			if err := os.WriteFile(em.updateConfigURL, data, configMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := em.sync(); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.applied {
+				if len(pins) != 0 || len(model.configuredHosts) != 1 || len(model.Enclaves) != 1 {
+					t.Fatalf("a runtime config naming another project was applied: verified against %+v", pins)
+				}
+				return
+			}
+			want := tinfoil.Pin{Repo: renewalTestRepo, Project: tc.pinned}
+			if len(pins) != 1 || pins[0] != want || model.Enclaves[addedHost] == nil {
+				t.Fatalf("added host verified against %+v, want %+v", pins, want)
 			}
 		})
 	}

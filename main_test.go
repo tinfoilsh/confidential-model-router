@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/tinfoilsh/confidential-model-router/autoroute"
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/toolruntime"
 )
@@ -1028,5 +1029,20 @@ func TestFilterModelsToServed(t *testing.T) {
 func TestFilterModelsToServedRejectsMalformed(t *testing.T) {
 	if _, err := filterModelsToServed([]byte(`{bad json`), map[string]*manager.Model{}); err == nil {
 		t.Error("expected an error for a malformed payload so the caller can surface it")
+	}
+}
+
+// A release starts from the embedded config, and does not start if a model in
+// it names no trust anchor.
+func TestEmbeddedConfigNamesATrustAnchorForEveryModel(t *testing.T) {
+	cfg, err := config.FromBytes(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Models) == 0 {
+		t.Fatal("embedded config lists no models")
+	}
+	if err := cfg.ValidateTrustAnchors(); err != nil {
+		t.Fatal(err)
 	}
 }

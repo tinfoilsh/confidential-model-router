@@ -48,7 +48,11 @@ type ReservationConfig struct {
 // owned by the control plane; a `rate_limit` key in runtime YAML is ignored
 // like any other unknown key.
 type Model struct {
+	// Repo is a GitHub repository and Project a config registry project,
+	// written org/project. They are separate trust anchors: an enclave
+	// launched from either one is accepted.
 	Repo         string              `yaml:"repo"`
+	Project      string              `yaml:"project,omitempty"`
 	Hostnames    []string            `yaml:"enclaves"`
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
@@ -233,6 +237,19 @@ func LoadContext(ctx context.Context, url string, sha256_required bool) (*Config
 	}
 
 	return FromBytes(data)
+}
+
+// ValidateTrustAnchors reports a model that names neither a repository nor a
+// registry project, which leaves nothing to verify its enclaves against. It
+// is for the config the router starts from: a runtime config supplies no
+// trust anchors and is not held to it.
+func (c *Config) ValidateTrustAnchors() error {
+	for name, model := range c.Models {
+		if model.Repo == "" && model.Project == "" {
+			return fmt.Errorf("model %q: repo or project is required", name)
+		}
+	}
+	return nil
 }
 
 // parseURLWithSHA extracts an optional sha256 hash provided via fragment:
