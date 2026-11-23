@@ -14,6 +14,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/tinfoilsh/tinfoil-go"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 
 	"github.com/tinfoilsh/confidential-model-router/billing"
@@ -39,6 +40,7 @@ type Enclave struct {
 
 type Model struct {
 	Repo              string                   `json:"repo"`
+	Project           string                   `json:"project,omitempty"`
 	Tag               string                   `json:"tag"`
 	SourceMeasurement measurement.Expected     `json:"measurement"`
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
@@ -193,7 +195,7 @@ type EnclaveManager struct {
 	initConfigURL        string
 	updateConfigURL      string
 	controlPlaneURL      string
-	connect              func(ctx context.Context, host, repo string) (enclaveClient, error)
+	connect              func(ctx context.Context, host string, pin tinfoil.Pin) (enclaveClient, error)
 	billingCollector     *billing.Collector
 	unknownModelReporter *billing.UnknownModelReporter
 	usageContextSecret   string
@@ -281,7 +283,7 @@ func (em *EnclaveManager) addEnclave(modelName, host string) (err error) {
 		// The pinned workload and signed collateral freshness define accepted releases.
 		// Model tag and measurement fields below report verified state; they are not trust anchors.
 		if enclave == nil {
-			if client, err = em.connect(ctx, host, model.Repo); err == nil {
+			if client, err = em.connect(ctx, host, tinfoil.Pin{Repo: model.Repo, Project: model.Project}); err == nil {
 				verified = client.current()
 			}
 		} else {
@@ -595,7 +597,7 @@ func validateControlPlaneURL(controlPlaneURL string, debug bool) error {
 	return nil
 }
 
-// NewEnclaveManager loads model repos from the local config file (not remote) into the enclave manager
+// NewEnclaveManager loads model repos and projects from the local config file (not remote) into the enclave manager
 func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterID string, usageReporterSecret string, usageContextSecret string, initConfigURL string, updateConfigURL string, refreshInterval time.Duration, debug bool) (*EnclaveManager, error) {
 	if refreshInterval <= 0 {
 		return nil, fmt.Errorf("refresh interval must be positive, got %v", refreshInterval)
@@ -641,6 +643,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 	model := &Model{
 		Repo:              modelConfig.Repo,
+		Project:           modelConfig.Project,
 		Tag:               "",
 		SourceMeasurement: nil,
 		Enclaves:          make(map[string]*Enclave),

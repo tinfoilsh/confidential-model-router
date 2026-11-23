@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/tinfoil-go"
 	"gopkg.in/yaml.v2"
 
 	"github.com/tinfoilsh/confidential-model-router/config"
@@ -26,9 +27,9 @@ func reservationOverloadManager(t *testing.T, sharedPolicy *config.OverloadConfi
 	hosts := []string{"reserved.example", "shared.example"}
 	em := &EnclaveManager{
 		models: &sync.Map{}, refreshInterval: renewalTestRefresh,
-		connect: func(_ context.Context, host, repo string) (enclaveClient, error) {
-			if !slices.Contains(hosts, host) || repo != renewalTestRepo {
-				t.Errorf("unexpected verification target: %s %s", host, repo)
+		connect: func(_ context.Context, host string, pin tinfoil.Pin) (enclaveClient, error) {
+			if !slices.Contains(hosts, host) || pin != (tinfoil.Pin{Repo: renewalTestRepo}) {
+				t.Errorf("unexpected verification target: %s %+v", host, pin)
 			}
 			return &stubClient{verified: *testAttestation(time.Now().Add(2*attestationRenewalWindow), time.Now(), "v1.0.0")}, nil
 		},

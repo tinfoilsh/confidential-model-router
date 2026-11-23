@@ -50,9 +50,9 @@ type sdkClient struct {
 	*tinfoil.EnclaveHTTPClient
 }
 
-// connectEnclave verifies host against repo before it returns.
-func connectEnclave(ctx context.Context, host, repo string) (enclaveClient, error) {
-	client, err := tinfoil.NewEnclaveHTTPClient(ctx, host, tinfoil.Pin{Repo: repo}, nil)
+// connectEnclave verifies host against pin before it returns.
+func connectEnclave(ctx context.Context, host string, pin tinfoil.Pin) (enclaveClient, error) {
+	client, err := tinfoil.NewEnclaveHTTPClient(ctx, host, pin, nil)
 	if err != nil {
 		return nil, err
 	}
